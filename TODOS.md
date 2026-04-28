@@ -5,6 +5,28 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## v0.5 — Repo org move (`avinashjoshi/canopy` → org)
+
+**What:** Move canopy out of Avi's personal GitHub into either **cravd** or **oncactus** org. Bulk-update `go install` URLs in README + docs, the module path in `go.mod`, every internal `import` line, and any `gh` URLs in CLAUDE.md.
+
+**Why:** Canopy crossed the "this is real and useful" threshold with the v0.5 ancient-hornet ship. Personal repo was fine for early dogfood; org repo is the right home before any external users show up. Avi: "its time for sure!!"
+
+**Pros:** Cleaner story for OSS release. Brand association with whichever org wins (likely oncactus per below). No more "wait, why is this a personal repo?" friction at install time.
+
+**Cons:** Mass file edits across the repo + module path change requires every consumer to update. Not destructive but visible. Ancient-hornet had to land first because the diff was big enough that doing org-move and global-TUI in the same change would've been brutal to rebase.
+
+**Context:**
+- The structural analogy: cravd inc ≈ 37signals (legal entity, marketplace origin), cactus/oncactus ≈ basecamp (flagship that grows to eclipse the parent in mindshare).
+- 37signals puts their dev tooling under `basecamp/*` (kamal, trix, etc.), not `37signals/*` — flagship-product brand has the public mindshare, not the corporate entity.
+- **If canopy goes public OSS with brand association: `oncactus/canopy`** (mirrors `basecamp/kamal`).
+- **If canopy stays internal-only: `cravd/canopy`** is fine.
+- Current README signals (Mac/Windows install instructions, "License TBD before public release" line) tilt toward public release → recommendation is **oncactus**.
+- Loose end: the `Co-Authored-By` Claude attribution lines in commit history reference avinashjoshi commits — those stay as historical record, no rewrite needed.
+
+**Depends on / blocked by:** v0.5 ancient-hornet — landed 2026-04-28. Unblocked.
+
+---
+
 ## v0.5 — multi-project support — PARTIAL (2026-04-28)
 
 **Shipped on `ancient-hornet`:**
@@ -147,6 +169,46 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## v0.6 — Agent lifecycle wrapper
+
+**What:** Wrap every agent session with canopy-assembled workspace context so any coding agent (Claude, Codex, OpenCode, aider) starts knowing the workspace name, branch, port, and the canopy lifecycle conventions (rename when scoped, rm when shipped). Three pieces:
+
+1. `scripts.agent` field in `canopy.json` — user-supplied launcher script for the agent pane (replaces today's hardcoded `claude --continue || claude`).
+2. `agent_briefing` field in `canopy.json` — optional free-text project briefing.
+3. canopy writes `<workspace>/.canopy/AGENT.md` at create time with workspace context + universal lifecycle reminders + the project's `agent_briefing`. The launcher script feeds this file into the agent's system-prompt surface.
+
+Plus the `canopy rename <new-branch>` verb to support the lifecycle's "rename branch once feature is scoped" step (separate entry below).
+
+**Why:** Today canopy hardcodes Claude. As coding-agent CLIs proliferate (Codex, OpenCode, aider, ...) we need a single agent-agnostic injection point. CLAUDE.md sprinkles per repo would drift; baking the conventions into canopy keeps them universal. User stated direction: "Wrap everything together as a 'system prompt kinda' before we start the agent session."
+
+**Pros:** Pure composition — canopy writes context, user-supplied script feeds it. No agent SDK dependency. Backwards compatible (empty `scripts.agent` falls back to today's behavior). Lifecycle conventions become ambient — every agent in every canopy workspace knows them without per-repo config.
+
+**Cons:** Surface area: two new schema fields, one template file canopy must keep current, one new subcommand (`canopy rename`). Default scripts.agent templates per agent (claude / opencode / codex / aider) need to ship with `canopy init --with-scripts --agent <name>` and stay in sync with each agent's evolving CLI.
+
+**Context:** Full design at `docs/design/v0.6-agent-lifecycle.md`. Builds on the v0.5 Multi-AI-tool entry below (which covers the launch-command-config foundation). The lifecycle's "auto-cleanup after PR merges" trigger is deferred to v1 — v0.6 keeps `canopy rm` explicit (Claude/agent calls it after seeing `/ship` succeed).
+
+**Depends on / blocked by:** v0.5 multi-AI-tool foundation. `canopy rename` is independent and can ship before this.
+
+---
+
+## v0.5 — `canopy rename <new-branch>` verb
+
+**What:** A small subcommand to rename a workspace's git branch atomically. `canopy rename feat/oauth` renames the worktree's current branch (e.g. from the auto-generated `bold-falcon` to `feat/oauth`) and updates the state row's `Branch` field in the same lock window.
+
+**Why:** Workspaces start with random adjective-noun names (the namegen pattern). Once the user knows what the feature is, the branch should reflect that — `bold-falcon` → `open-canopy-anywhere`. Today this requires `git branch -m old new` + manual hand-edit of state.json or a brittle re-discovery dance via `canopy reconcile`. One verb closes the loop.
+
+Pairs with the v0.6 agent lifecycle wrapper (above): the AGENT.md briefing tells Claude/Codex to call `canopy rename` once the feature is scoped, so the rename happens automatically as the conversation crystallizes.
+
+**Pros:** ~50 LOC + tests. The data model (Workspace.Name = dir = tmux session, Workspace.Branch = renameable) already supports this — Name and Branch are separate fields and Name is what tmux/dir use. Atomic via state.WithLock.
+
+**Cons:** Tmux session name and worktree dir name stay frozen at the workspace's generated name (renaming those mid-flight breaks tmux attach + invalidates `CANOPY_WORKSPACE_PATH` for any cached env). A user who expected "rename = rename everything" might be surprised. Doc the boundary clearly: rename is git-branch-only.
+
+**Context:** Implementation: `cmd/canopy/rename.go`. Calls `git -C cfg.ProjectRoot branch -m current new` (current discovered via `git -C ws.Path rev-parse --abbrev-ref HEAD` so we tolerate prior manual renames). Updates `state.Workspaces[i].Branch`. Validates new name with `git check-ref-format --branch`. Idempotent: rename to current name = no-op + friendly message. Pairs with the existing v0.5 entry "Branch-rename tolerance in `canopy rm`" — both should land together so rename + rm form a coherent loop.
+
+**Depends on / blocked by:** none. Can ship before the agent lifecycle wrapper.
+
+---
+
 ## v0.5 — Multi-AI-tool support (via layout-as-config)
 
 **What:** Make the AI pane configurable in `canopy.json` so users can choose claude / codex / opencode / aider / etc. per project. Both the launch command AND the resume command go in config.
@@ -156,6 +218,8 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 **Pros:** Aligns canopy with the layout-as-config v0.5 milestone (one feature, two wins). Future-proofs for AI-tool churn (the AI CLI landscape is moving fast). Lets one repo use claude while another uses codex without canopy caring.
 
 **Cons:** Surfaces a quality variance: AI tools that lack per-directory storage or a non-interactive resume flag will work in canopy but lose the resurrection magic. Documenting the "what works fully vs partially" matrix is a small README chore.
+
+**See also:** `docs/design/v0.6-agent-lifecycle.md` — the Agent lifecycle wrapper (above) supersedes this entry's surface area with a more flexible shape (`scripts.agent` script + canopy-assembled briefing file). Implement the lifecycle wrapper instead of this entry; this stays as the historical record of the simpler "just make the launch command configurable" version.
 
 **Context:** v0 design includes a `mode` parameter in pane-creation (`fresh` vs `resume`). For v0.5, replace the hardcoded `claude` / `claude --continue` strings with config-loaded `panes[i].cmd` / `panes[i].resume_cmd`. The architecture nudge in v0 is to put those two strings in a tiny `internal/ai/defaults.go` constants file, not inline in `internal/workspace/` or `internal/ui/` — makes the v0.5 swap trivial. Compatibility matrix to seed in README:
 
@@ -386,6 +450,24 @@ not the stale original.
 **Context:** Likely shape: `canopy init` becomes the entry point for the wizard when run interactively (TTY detected), keeps current behavior (just write canopy.json) when piped or `--non-interactive`. Wizard steps: (a) detect project type from cwd, (b) confirm/override, (c) scaffold scripts under `bin/canopy-*` with shebang + `set -euo pipefail` + project-aware defaults, (d) optionally run a smoke-test `canopy new --name onboarding-test` and tear it down, (e) print "you're ready: try `canopy new` or just `canopy`". Lives in `cmd/canopy/init.go` + a new `internal/onboarding/` package for templates. Pairs naturally with the future global splash screen (which would route first-launch users into this flow).
 
 **Depends on / blocked by:** v0. No blockers.
+
+---
+
+## v1 — Auto-cleanup workspaces after PR merges
+
+**What:** Detect when a workspace's branch has been merged + deleted upstream, and offer (or auto-execute) `canopy rm <workspace>` so the user doesn't have to remember the cleanup step. Pairs with the v0.6 agent lifecycle wrapper (which makes the rm step explicit) by closing the loop without an agent in the room.
+
+**Why:** v0.6's agent-driven lifecycle requires Claude/Codex to remember to call `canopy rm` after `/ship` lands. That works while the agent is engaged. But shipped workspaces with no further agent attention will accumulate as zombies. An out-of-band watcher closes that gap.
+
+**Pros:** Closes the "did the workspace get cleaned up?" question without manual bookkeeping. Pairs naturally with `canopy reconcile` — orphan detection there could surface "branch is gone upstream, want to rm?" prompts.
+
+**Cons:** Detecting "merged" is fuzzy. Branch deleted on origin doesn't strictly mean merged (could be force-deleted, abandoned, renamed, ...). Need a real signal: `git for-each-ref` + `git log <branch>..origin/main` to confirm every commit is reachable from main. Even then, false positives possible. Auto-rm without confirmation is too aggressive — surface as a prompt in `canopy reconcile` and the TUI's broken-row remediation flow.
+
+**Context:** Likely shape: extend `canopy reconcile` with a "stale-branch" detector. For each workspace, fetch origin (best-effort), check if the branch's HEAD is reachable from origin/<default-branch>, and if so AND origin no longer carries the branch, mark the row with a new `reachable_merged` hint. The TUI's broken/orphaned remediation flow shows the hint and offers `d` (delete) with a friendlier confirmation copy ("This branch appears merged + deleted upstream. Remove the workspace?"). Auto-execution gated behind `--auto-cleanup` flag on reconcile, never default.
+
+Could also pair with the in-session overlay (below) — the overlay's status segment shows a small "✓ shipped, ready to remove" badge when the watcher fires.
+
+**Depends on / blocked by:** v0.6 `canopy rename` (so the branch name in state.json matches the upstream branch) + v0.5 reconcile entry below. Auto-cleanup behind a flag is the safe v1 shape; default-on is a v2 question once we have telemetry on false-positive rate.
 
 ---
 
