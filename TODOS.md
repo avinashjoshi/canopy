@@ -285,3 +285,45 @@ not the stale original.
 **Context:** Likely shape: a new modal that lists candidate files (the script itself, recently-modified files in the project, `~/.canopy/log/canopy.log`) and on selection opens `$EDITOR` via `tea.ExecProcess`. After the editor exits, the modal asks "Retry now? (y/N)". Could be gated behind the auto-detect hint registry: only files mentioned in the hint show up as candidates.
 
 **Depends on / blocked by:** v0 retry verb. Best paired with auto-detect (above) so the candidate list isn't a dump of every file in the repo.
+
+---
+
+## v0.5 — Canopy onboarding
+
+**What:** A guided first-run experience for users who've just installed canopy. Replaces the bare `canopy init` with an interactive walkthrough that explains the canopy.json schema, scaffolds `scripts.setup`/`scripts.run`/`scripts.archive` with project-aware defaults (Rails? Node? Go?), checks tmux/git versions, runs a smoke-test workspace creation, and points the user at `canopy ls` + the TUI.
+
+**Why:** Today the path from `brew install canopy` to "first attached workspace" is `canopy init` → read `docs/canopy-json.md` → write three scripts by hand → `canopy new`. Every step is documented but none are guided. For a tool whose value is a high-friction-removed daily loop, the onboarding loop should be near-zero friction itself.
+
+**Pros:** Removes the "I have to read three docs before I get value" cliff. Project-type detection (Gemfile present → Rails template, package.json → Node template) makes the scaffolded scripts immediately useful instead of TODO-stub. Becomes the demo path — "watch me onboard canopy in 90 seconds" is a real marketing artifact.
+
+**Cons:** Real new surface area (a dedicated TUI flow, project-type detection, a registry of language-specific script templates). Risk of over-engineering — many users will outgrow the templates fast. Templates need to stay current as ecosystems shift (Rails 7 → 8, npm → pnpm/bun).
+
+**Context:** Likely shape: `canopy init` becomes the entry point for the wizard when run interactively (TTY detected), keeps current behavior (just write canopy.json) when piped or `--non-interactive`. Wizard steps: (a) detect project type from cwd, (b) confirm/override, (c) scaffold scripts under `bin/canopy-*` with shebang + `set -euo pipefail` + project-aware defaults, (d) optionally run a smoke-test `canopy new --name onboarding-test` and tear it down, (e) print "you're ready: try `canopy new` or just `canopy`". Lives in `cmd/canopy/init.go` + a new `internal/onboarding/` package for templates. Pairs naturally with the future global splash screen (which would route first-launch users into this flow).
+
+**Depends on / blocked by:** v0. No blockers.
+
+---
+
+## v1 — In-session canopy overlay (TurboC++ style)
+
+**What:** A persistent canopy presence inside an attached workspace tmux session — a status bar at the bottom (or a popup-on-hotkey) that shows the workspace name, port, status, and a row of F-key / single-letter shortcuts. One shortcut pops the full canopy splash/list as a `tmux display-popup` overlay so the user can switch workspaces without detaching the current session. Same overlay also shows quick-reference cheatsheet for canopy + tmux keybinds.
+
+**Why:** Today switching between workspaces means: tmux prefix-d to detach → wait for canopy TUI to re-render → enter to attach to a different one. The detach round-trip is friction every time. A persistent overlay turns "switch workspace" into one keypress without leaving the current session's pane focus. Bonus: the cheatsheet solves the "I forgot what tmux prefix-d does" muscle-memory gap that bites every Conductor refugee.
+
+**Why now (vs v2):** Lifts canopy from "a TUI you launch" to "ambient infrastructure", which is the Conductor north-star positioning. Avi already has the global splash screen in flight (parallel canopy session as of 2026-04-28), so the overlay's render target is being built independently — this entry is the "wire it into a tmux popup + status line" half.
+
+**Pros:** Single-keystroke workspace switch. No more "wait, am I in cravd or canopy right now?" — the status bar always shows it. The cheatsheet eliminates the largest tmux-onboarding friction without editing the user's `.tmux.conf`. Pairs with global splash so the overlay can do "switch project AND workspace" in one popup.
+
+**Cons:** Big design surface. Two distinct UI affordances bundled (status line + popup) and they probably ship in different orders. Keybinding choice is a minefield: every shortcut must NOT collide with shell readline keybinds (no `C-a`, `C-e`, `C-r`, `C-w`, `C-u`, `C-k`, etc.) AND must NOT collide with whatever tmux prefix the user has bound (Avi has changed his — needs to be checked at install). Status line takes vertical real estate in an already 3-pane layout. Implementation requires writing tmux config snippets canopy ships, plus an opt-in path for users who don't want their tmux line touched.
+
+**Context:** Two layers:
+
+1. **Status bar:** canopy ships a tmux config snippet (sourced via `source-file` from `~/.canopy/tmux.conf` written at `canopy init`) that adds a right-aligned status segment showing `<workspace> :<port> [<status>]`. Polled via `tmux refresh-client -S` every few seconds, populated from `canopy ls --tmux-status` (a new flag that emits a single line ready for tmux's `#()` interpolation). Opt-in only — `canopy init --with-status-bar` and prompted in onboarding.
+
+2. **Popup launcher:** a tmux key binding (default `prefix-c` for "canopy"; user-overridable) runs `tmux display-popup -E -w 80% -h 80% canopy --popup`. The `--popup` flag tells canopy's TUI it's running in a transient popup, so quitting drops the popup instead of returning to a host shell. The popup's TUI is the existing list, but with a "switch and dismiss popup" verb (enter) and a "switch by detaching popup THEN attaching" path (handled via `tmux switch-client` from inside the popup process, which works because tmux popups inherit the client).
+
+3. **Cheatsheet pane:** an alternate popup (default `prefix-?`) that shows a static panel of canopy + tmux keybinds. Lives in `docs/cheatsheet.md` rendered via lipgloss. Doesn't need the canopy state machine — pure render.
+
+Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go behind the user's existing tmux prefix (`<prefix>-c`, `<prefix>-?`, `<prefix>-s` for switch, etc.). Onboarding asks: "Your tmux prefix is `C-b`/`C-a`/other?" and writes the snippet accordingly. Never overwrite an existing user-bound key — detect via `tmux list-keys` parse and skip with a warning.
+
+**Depends on / blocked by:** v0 (TUI exists). Pairs strongly with the global splash screen (in flight in a parallel canopy session as of 2026-04-28) — the popup's first-launch render = the splash; subsequent renders = the workspace list.
