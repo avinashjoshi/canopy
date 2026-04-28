@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -158,10 +159,21 @@ func TestDetectShipped_NotMerged(t *testing.T) {
 	}
 }
 
-// TestDetectShipped_Merged: simulate a merge by fast-forwarding
-// origin/main to include the worktree's commits. After that, HEAD is
-// reachable from origin/main → shipped hint fires.
-func TestDetectShipped_Merged(t *testing.T) {
+// TestDetectShipped_MergedViaMergeCommit: simulate a real `git merge
+// --no-ff feature` style merge — main advances past the feature branch
+// via a merge commit whose second parent is the feature tip.
+//
+// Real-world shape:
+//
+//	          main
+//	   o────o────M
+//	    \      /
+//	     o────o   feature
+//
+// After this, HEAD (= feature tip) is reachable from origin/main (via
+// the merge commit's second parent), AND origin/main has commits past
+// HEAD (the merge commit itself). Both conditions satisfied → shipped.
+func TestDetectShipped_MergedViaMergeCommit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
@@ -173,18 +185,43 @@ func TestDetectShipped_Merged(t *testing.T) {
 		"commit", "--allow-empty", "-m", "feature").CombinedOutput(); err != nil {
 		t.Fatalf("feature commit: %v\n%s", err, out)
 	}
-	// Get HEAD's SHA.
-	sha, err := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
+	featureSha, err := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
 	if err != nil {
-		t.Fatalf("rev-parse: %v", err)
+		t.Fatalf("rev-parse feature: %v", err)
 	}
-	// Fast-forward origin/main to that SHA via update-ref — simulates
-	// the merge landing on the upstream default branch. update-ref
-	// works on remote-tracking refs (refs/remotes/origin/main) without
-	// needing a real remote.
+
+	// Simulate the merge commit: a new commit on origin/main with TWO
+	// parents — the prior origin/main tip and the feature tip. Use
+	// `git commit-tree` to forge it without a working merge operation.
+	prevMain, err := exec.Command("git", "-C", source, "rev-parse",
+		"refs/remotes/origin/main").Output()
+	if err != nil {
+		t.Fatalf("rev-parse origin/main: %v", err)
+	}
+	tree, err := exec.Command("git", "-C", source, "rev-parse", "HEAD^{tree}").Output()
+	if err != nil {
+		t.Fatalf("rev-parse tree: %v", err)
+	}
+	// Note: env vars set author + committer so commit-tree doesn't
+	// complain about missing identity.
+	mergeCmd := exec.Command("git", "-C", source, "commit-tree",
+		strings.TrimSpace(string(tree)),
+		"-p", strings.TrimSpace(string(prevMain)),
+		"-p", strings.TrimSpace(string(featureSha)),
+		"-m", "Merge feature into main")
+	mergeCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e")
+	mergeShaOut, err := mergeCmd.Output()
+	if err != nil {
+		t.Fatalf("commit-tree (merge): %v", err)
+	}
+	mergeSha := strings.TrimSpace(string(mergeShaOut))
+
+	// Move origin/main to the merge commit.
 	if out, err := exec.Command("git", "-C", source, "update-ref",
-		"refs/remotes/origin/main", strings.TrimSpace(string(sha))).CombinedOutput(); err != nil {
-		t.Fatalf("ff origin/main: %v\n%s", err, out)
+		"refs/remotes/origin/main", mergeSha).CombinedOutput(); err != nil {
+		t.Fatalf("update-ref origin/main: %v\n%s", err, out)
 	}
 
 	ws := makeWorkspace("merged-feature", "merged-feature", wt, source)
@@ -197,6 +234,26 @@ func TestDetectShipped_Merged(t *testing.T) {
 	}
 	if !strings.Contains(got.Action, "canopy rm merged-feature") {
 		t.Errorf("Action missing rm command: %q", got.Action)
+	}
+}
+
+// TestDetectShipped_FreshWorkspace: regression test for the v0.6 false-
+// positive — a brand-new workspace with no commits past main MUST NOT
+// fire shipped. Before the fix, is-ancestor returned true vacuously
+// because HEAD == origin/main, and shipped fired immediately on every
+// fresh workspace creation.
+func TestDetectShipped_FreshWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "brand-new")
+
+	// No commits, no work, no merge. Just a fresh workspace.
+	ws := makeWorkspace("brand-new", "brand-new", wt, source)
+	got := detectShipped(context.Background(), ws)
+	if got != nil {
+		t.Errorf("fresh workspace must NOT fire shipped; got %+v", got)
 	}
 }
 

@@ -301,10 +301,22 @@ func (m Model) renderTable() string {
 		badge := badgeFor(r.Alive)
 		statusCell := statusStyleFor(r.Status).Render(fmt.Sprintf("%-*s", colStatus, r.Status))
 		// Two-space indent under the project header so rows visually nest.
-		line := fmt.Sprintf("    %s  %-*s  %-*s  %s  %*s",
+		// Branch is emphasized (the renamed-intent name) when it differs
+		// from the workspace name. When they match (fresh workspace,
+		// branch hasn't been renamed yet), the branch column dims so
+		// the duplicate doesn't visually shout. Subtle distinction —
+		// the user sees at a glance which workspaces have been "named"
+		// vs which still wear their auto-generated label.
+		branchDisplay := fmt.Sprintf("%-*s", colBranch, r.Branch)
+		if r.Branch == r.Name {
+			branchDisplay = subtleHelper().Render(branchDisplay)
+		} else if r.Branch != "" && r.Branch != "—" {
+			branchDisplay = renamedBranchStyle().Render(branchDisplay)
+		}
+		line := fmt.Sprintf("    %s  %-*s  %s  %s  %*s",
 			badge,
 			colName, r.Name,
-			colBranch, r.Branch,
+			branchDisplay,
 			statusCell,
 			colPort, port,
 		)
@@ -448,6 +460,15 @@ func hasShippedHint(hints []state.Hint) bool {
 // not destructive."
 func hintRenameStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+}
+
+// renamedBranchStyle: subtle white/bold — emphasizes the branch when
+// it differs from the workspace name (i.e., the agent or user has
+// renamed it to reflect feature intent). Visible at a glance which
+// workspaces have been "named" vs which still wear their auto-generated
+// namegen label.
+func renamedBranchStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("253")).Bold(true)
 }
 
 // hintShippedStyle: green — "this is good, ready to close out."

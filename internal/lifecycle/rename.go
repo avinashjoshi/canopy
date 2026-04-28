@@ -119,6 +119,36 @@ func gitCommitsPastDefault(ctx context.Context, path string) int {
 	return count
 }
 
+// gitCommitsMainAheadOfHead returns the number of commits on
+// origin/<default> that are NOT reachable from HEAD. The "is main
+// ahead of us" count.
+//
+// Used by the shipped detector to filter out the fresh-workspace case
+// (where HEAD == origin/<default> and the count is 0). On any real
+// merge (commit OR squash), main has at least one commit (the merge
+// or squash commit) not on the branch, so the count is > 0.
+//
+// Returns 0 on git failure (treated as "can't tell" / "not advanced")
+// or when origin/<default> doesn't exist (no remote / fresh clone).
+func gitCommitsMainAheadOfHead(ctx context.Context, path, defaultBranch string) int {
+	if defaultBranch == "" {
+		return 0
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-list",
+		"--count", "HEAD..origin/"+defaultBranch)
+	out, err := cmd.Output()
+	if err != nil {
+		log.Debug("lifecycle.shipped.main-ahead-failed",
+			"path", path, "branch", defaultBranch, "err", err)
+		return 0
+	}
+	count := 0
+	if _, scanErr := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &count); scanErr != nil {
+		return 0
+	}
+	return count
+}
+
 // gitDefaultBranch returns the source repo's default branch name (e.g.,
 // "main"). Resolved via `git symbolic-ref refs/remotes/origin/HEAD`,
 // which is set when the worktree's source repo was cloned. Returns ""

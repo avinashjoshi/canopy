@@ -79,17 +79,28 @@ func buildFullBriefing(ws state.Workspace, cfg *config.Config, hints []state.Hin
 	// Section 2: lifecycle conventions. Universal text — same for every
 	// canopy workspace. This is what teaches a brand-new agent (any
 	// coding-agent CLI) about canopy's lifecycle expectations.
-	b.WriteString("## Workspace lifecycle (canopy conventions)\n\n")
-	b.WriteString("1. **Scope.** Once you understand the feature's intent, rename the git ")
-	b.WriteString("branch to reflect it: `git branch -m <intent-name>` (e.g., ")
-	b.WriteString("`git branch -m open-canopy-anywhere`). Run from outside this tmux session — ")
-	b.WriteString("canopy refuses to run from inside its own sessions.\n\n")
+	//
+	// The "Scope" item is intentionally directive ("rename autonomously
+	// after the user has clearly stated intent") rather than passive
+	// ("you may rename"). Without this nudge, agents read the convention
+	// and wait for the user to ask — defeating the purpose. The "without
+	// asking" framing matters: users have explicitly said they want this
+	// to happen automatically, not be a multi-message permission dance.
+	b.WriteString("## Workspace lifecycle (canopy conventions — drive these autonomously)\n\n")
+	b.WriteString("1. **Scope (rename the branch).** Within your first 1-3 user-messages, ")
+	b.WriteString("once the user has clearly described what feature/fix this workspace is for, ")
+	b.WriteString("rename the branch to reflect intent. Run this command IMMEDIATELY — don't ")
+	b.WriteString("ask permission, don't propose options, just do it:\n\n")
+	b.WriteString("    git branch -m <intent-slug>\n\n")
+	b.WriteString("Examples: `git branch -m open-canopy-anywhere`, `git branch -m fix-oauth-redirect`, ")
+	b.WriteString("`git branch -m add-pr-detector`. Use kebab-case, lowercase, ~3-6 words. If you're ")
+	b.WriteString("unsure of intent after 2 messages, ask one targeted question; don't loop.\n\n")
 	b.WriteString("2. **Develop.** Work normally. Don't run `canopy <subcommand>` from inside ")
 	b.WriteString("this tmux session.\n\n")
-	b.WriteString("3. **Ship.** Use the project's usual ship workflow.\n\n")
+	b.WriteString("3. **Ship.** Use the project's usual ship workflow (`/ship` for gstack users).\n\n")
 	b.WriteString("4. **Close out.** After the PR merges into main, run `canopy rm <name>` ")
-	b.WriteString("from the outer terminal. Canopy may also auto-detect via the `shipped` ")
-	b.WriteString("detector and prompt; with `auto_close_shipped` enabled in ")
+	b.WriteString("from the outer terminal — or tell the user to. The shipped detector will ")
+	b.WriteString("surface a hint in the TUI; with `auto_close_shipped` enabled in ")
 	b.WriteString("`~/.canopy/config.json`, the rm runs automatically.\n\n")
 
 	// Section 3: active hints, if any. On a fresh launch this is usually

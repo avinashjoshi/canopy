@@ -46,7 +46,7 @@ func TestBuildBriefing_FreshFull(t *testing.T) {
 	wantSections := []string{
 		"# Canopy workspace context",
 		"## This workspace",
-		"## Workspace lifecycle (canopy conventions)",
+		"## Workspace lifecycle (canopy conventions",
 		"## Active hints right now",
 		"## Source context",
 	}
