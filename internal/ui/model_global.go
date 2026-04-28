@@ -75,29 +75,10 @@ func NewGlobal(store *state.Store, tc *tmux.Client) *GlobalModel {
 	}
 	gm.list = projectlist.New(projectlist.Options{
 		OnActivate:    gm.activate,
-		OnCloseOut:    gm.closeOut,
 		OnGoToProject: gm.goToProject,
 		OnRefresh:     gm.refreshCmd,
 	})
 	return gm
-}
-
-// closeOut is the OnCloseOut callback wired into projectlist. Fires
-// when the user presses enter on a row whose hints include kind="shipped".
-//
-// v0.6 close-out behavior: surface a confirm prompt as a status-line
-// hint with the canonical command. We don't auto-run canopy rm here
-// because canopy refuses to run from inside its own tmux sessions
-// (the v0.5 nesting guard); the user runs it from the outer terminal.
-//
-// When step 8 lands (auto_close_shipped flag in ~/.canopy/config.json),
-// this callback gains an auto-rm path with a 5-second cancel window.
-// For now, this is a hint-only flow.
-func (m *GlobalModel) closeOut(row state.GlobalRow) tea.Cmd {
-	hint := fmt.Errorf(
-		"workspace %q is shipped — close it from the outer terminal: `canopy rm %s`",
-		row.Name, row.Name)
-	return func() tea.Msg { return globalErrMsg{err: hint} }
 }
 
 // RunGlobal is the public entry point used by cmd/canopy/route.go when
@@ -126,19 +107,20 @@ type globalRowsLoadedMsg struct {
 }
 
 // refreshCmd builds the tea.Cmd that re-reads state.json, re-probes
-// tmux liveness, and runs the cheap v0.6 detectors (rename + shipped)
+// tmux liveness, and runs all v0.6 detectors (rename, shipped, pr_status)
 // per workspace row. Used by Init and as the OnRefresh callback for
 // the embedded projectlist.
 //
-// pr_status is intentionally NOT run here — it shells to gh and would
-// blow up the API budget when called on every TUI refresh. Users get
-// pr_status updates on canopy reconcile + manual `r` (which routes
-// through this cmd, so the cheap detectors come along for free).
+// pr_status caches its gh call 10min per (project, branch), so calling
+// it on every refresh is cheap in steady state. The first refresh after
+// startup pays the gh latency once per workspace; subsequent refreshes
+// hit the cache instantly.
 //
 // Detector calls run sequentially per row (lifecycle.RunFast already
-// parallelizes the two cheap detectors internally). For 10 workspaces
-// × ~10ms each = ~100ms total — invisible to the user. If this ever
-// gets felt, switch to per-row tea.Cmds with merged hintLoadedMsg.
+// parallelizes the three detectors internally). For 10 workspaces × ~10ms
+// each = ~100ms total in the cache-hit case — invisible to the user.
+// If this ever gets felt, switch to per-row tea.Cmds with merged
+// hintLoadedMsg.
 func (m *GlobalModel) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
 		st, err := m.store.Load()

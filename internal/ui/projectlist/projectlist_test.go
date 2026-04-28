@@ -282,80 +282,104 @@ func TestRender_NoHintBadges(t *testing.T) {
 	}
 }
 
-// TestEnter_RoutesShippedToCloseOut: enter on a row with kind="shipped"
-// invokes OnCloseOut, NOT OnActivate.
-func TestEnter_RoutesShippedToCloseOut(t *testing.T) {
-	var activated, closedOut state.GlobalRow
-	m := New(Options{
-		OnActivate: func(r state.GlobalRow) tea.Cmd {
-			activated = r
-			return nil
-		},
-		OnCloseOut: func(r state.GlobalRow) tea.Cmd {
-			closedOut = r
-			return nil
-		},
-	})
-	m.SetRows([]state.GlobalRow{{
-		Project: "canopy", Name: "shipped",
-		Status: state.StatusReady,
-		Hints:  []state.Hint{{Kind: "shipped"}},
-	}})
-	m, _ = m.Update(key("enter"))
-
-	if activated.Name != "" {
-		t.Errorf("OnActivate fired on a shipped row; should have routed to OnCloseOut")
+// TestEnter_AlwaysRoutesToActivate: enter on every row — including
+// shipped/PR-merged ones — fires OnActivate. Lifecycle hints decorate
+// the row visually but never change enter's destination; close-out is
+// a manual `canopy rm` step the user runs explicitly.
+func TestEnter_AlwaysRoutesToActivate(t *testing.T) {
+	cases := []struct {
+		name  string
+		hints []state.Hint
+	}{
+		{"no hints", nil},
+		{"rename only", []state.Hint{{Kind: "rename_suggested"}}},
+		{"shipped local", []state.Hint{{Kind: "shipped"}}},
+		{"PR merged", []state.Hint{{Kind: "pr_status", Message: "PR #42 merged; ready to close workspace"}}},
+		{"shipped + PR", []state.Hint{{Kind: "shipped"}, {Kind: "pr_status", Message: "PR #42 merged; ready to close workspace"}}},
 	}
-	if closedOut.Name != "shipped" {
-		t.Errorf("OnCloseOut not invoked; got %q", closedOut.Name)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var activated state.GlobalRow
+			m := New(Options{
+				OnActivate: func(r state.GlobalRow) tea.Cmd {
+					activated = r
+					return nil
+				},
+			})
+			m.SetRows([]state.GlobalRow{{
+				Project: "canopy", Name: "soft-fox",
+				Status: state.StatusReady,
+				Hints:  tc.hints,
+			}})
+			m, _ = m.Update(key("enter"))
+			if activated.Name != "soft-fox" {
+				t.Errorf("OnActivate didn't fire (%s); got %q", tc.name, activated.Name)
+			}
+		})
 	}
 }
 
-// TestEnter_NoCloseOutFallsBackToActivate: when the parent doesn't wire
-// OnCloseOut, enter on a shipped row routes to OnActivate (preserves
-// v0.5 attach behavior for parents that haven't adopted close-out).
-func TestEnter_NoCloseOutFallsBackToActivate(t *testing.T) {
-	var activated state.GlobalRow
-	m := New(Options{
-		OnActivate: func(r state.GlobalRow) tea.Cmd {
-			activated = r
-			return nil
-		},
-		// OnCloseOut intentionally nil
-	})
+// TestRender_PRStatusSupersedesShipped: when a row has both shipped and
+// pr_status hints, the badge column shows ONLY the PR-state badge —
+// the local "shipped" fallback is suppressed because the PR is the
+// authoritative signal.
+func TestRender_PRStatusSupersedesShipped(t *testing.T) {
+	m := New(Options{})
 	m.SetRows([]state.GlobalRow{{
-		Project: "canopy", Name: "shipped",
+		Project: "canopy", Name: "soft-fox",
+		Hints: []state.Hint{
+			{Kind: "shipped"},
+			{Kind: "pr_status", Message: "PR #42 merged; ready to close workspace"},
+		},
+	}})
+	out := m.View()
+
+	if !strings.Contains(out, "PR merged") {
+		t.Errorf("PR merged badge missing:\n%s", out)
+	}
+	if strings.Contains(out, "✓ shipped (local)") {
+		t.Errorf("local shipped badge should be hidden when PR is present:\n%s", out)
+	}
+}
+
+// TestRender_PRStatusStateBadges: each PR state maps to a distinct
+// human-readable badge. Renders the message-keyword decoder.
+func TestRender_PRStatusStateBadges(t *testing.T) {
+	cases := []struct {
+		message  string
+		wantText string
+	}{
+		{"PR #42 open; awaiting reviews", "PR open"},
+		{"PR #42 open, approved; awaiting merge", "PR approved"},
+		{"PR #42 open; changes requested", "PR changes"},
+		{"PR #42 merged; ready to close workspace", "PR merged"},
+		{"PR #42 closed without merging", "PR closed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wantText, func(t *testing.T) {
+			m := New(Options{})
+			m.SetRows([]state.GlobalRow{{
+				Project: "canopy", Name: "soft-fox",
+				Hints: []state.Hint{{Kind: "pr_status", Message: tc.message}},
+			}})
+			if !strings.Contains(m.View(), tc.wantText) {
+				t.Errorf("badge missing %q for message %q:\n%s", tc.wantText, tc.message, m.View())
+			}
+		})
+	}
+}
+
+// TestRender_ShippedFallbackWhenNoPR: a row with only the local "shipped"
+// hint (no pr_status) shows the "✓ shipped (local)" fallback badge.
+// Critical for purely-local-repo workflows where there's no GitHub PR.
+func TestRender_ShippedFallbackWhenNoPR(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{
+		Project: "canopy", Name: "soft-fox",
 		Hints: []state.Hint{{Kind: "shipped"}},
 	}})
-	m, _ = m.Update(key("enter"))
-
-	if activated.Name != "shipped" {
-		t.Errorf("OnActivate didn't fire when OnCloseOut is nil; got %q", activated.Name)
-	}
-}
-
-// TestEnter_NonShippedRowGoesToActivate: rows without a shipped hint
-// route enter through OnActivate as before.
-func TestEnter_NonShippedRowGoesToActivate(t *testing.T) {
-	var activated state.GlobalRow
-	m := New(Options{
-		OnActivate: func(r state.GlobalRow) tea.Cmd {
-			activated = r
-			return nil
-		},
-		OnCloseOut: func(r state.GlobalRow) tea.Cmd {
-			t.Errorf("OnCloseOut fired on non-shipped row")
-			return nil
-		},
-	})
-	m.SetRows([]state.GlobalRow{{
-		Project: "canopy", Name: "in-flight",
-		Hints: []state.Hint{{Kind: "rename_suggested"}},
-	}})
-	m, _ = m.Update(key("enter"))
-
-	if activated.Name != "in-flight" {
-		t.Errorf("OnActivate didn't fire on rename_suggested row")
+	if !strings.Contains(m.View(), "✓ shipped (local)") {
+		t.Errorf("shipped fallback badge missing:\n%s", m.View())
 	}
 }
 

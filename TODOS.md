@@ -181,6 +181,12 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 - Config schema additions: `agent.{type, briefing, briefing_file}`. `scripts.agent` retained as power-user override.
 - O1 (claude --continue + --append-system-prompt) verified empirically.
 
+**Refined after first dogfood (2026-04-28):**
+- Removed the OnCloseOut routing entirely. Enter on a shipped/PR-merged row attaches normally; deletion stays a manual `canopy rm` step. The `auto_close_shipped` config flag was reverted — destructive auto-rm was the wrong shape.
+- `pr_status` moved into the cheap-tick set (RunFast). With the 10min cache, the API budget concern was overstated; running it on every refresh means PR state shows immediately rather than only on `r`.
+- Badge precedence: PR state wins when present. The local "shipped" detector now renders as `✓ shipped (local)` and is hidden when a `pr_status` hint is also active for the same workspace. PR badges decode the message into open/approved/changes/merged/closed colored variants.
+- `detectShipped` now falls back to local `<default>` when there's no remote, so purely-local repos surface a "shipped" signal without needing a GitHub remote.
+
 **Deferred to v0.6 follow-up:**
 - `canopy new --pr <num>` / `--issue <num>` / `--branch <name>` / `--allow-local` flags. The plumbing for SourceKind variants exists in the briefing assembler; the CLI flags + gh integration are pending.
 - `auto_close_shipped` flag in `~/.canopy/config.json` for the auto-close-on-merge UX with 5s cancel window. v0.6 currently surfaces a hint (`canopy rm <name>`) instead of auto-running.

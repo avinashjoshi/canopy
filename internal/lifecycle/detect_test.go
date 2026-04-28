@@ -257,6 +257,64 @@ func TestDetectShipped_FreshWorkspace(t *testing.T) {
 	}
 }
 
+// TestDetectShipped_LocalRepoFallback: a workspace whose source repo
+// has NO remote (no origin/main, no origin/HEAD) — purely local —
+// should still detect "shipped" against local main when the feature
+// branch's commits are merged into it.
+//
+// This covers the "I'm just hacking locally, no GitHub involved"
+// workflow. Without the fallback, detectShipped would return nil for
+// every commit on every local-only repo, which is wrong.
+func TestDetectShipped_LocalRepoFallback(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	// Build a local-only repo: NO origin remote, NO refs/remotes/origin/*.
+	source := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "--initial-branch=main", source},
+		{"-C", source, "config", "user.email", "t@e"},
+		{"-C", source, "config", "user.name", "t"},
+		{"-C", source, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// Create a feature worktree with a commit.
+	wt := filepath.Join(t.TempDir(), "wt")
+	if out, err := exec.Command("git", "-C", source, "worktree", "add",
+		"-b", "local-feature", wt).CombinedOutput(); err != nil {
+		t.Fatalf("worktree add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", wt,
+		"commit", "--allow-empty", "-m", "feat").CombinedOutput(); err != nil {
+		t.Fatalf("feat commit: %v\n%s", err, out)
+	}
+
+	// Merge feature into local main with --no-ff (real merge commit).
+	// This is the "I just merged my branch locally" workflow.
+	if out, err := exec.Command("git", "-C", source, "merge",
+		"--no-ff", "local-feature", "-m", "merged locally").CombinedOutput(); err != nil {
+		t.Fatalf("merge: %v\n%s", err, out)
+	}
+
+	ws := makeWorkspace("local-feature", "local-feature", wt, source)
+	got := detectShipped(context.Background(), ws)
+	if got == nil {
+		t.Fatal("expected shipped hint for locally-merged branch; got nil")
+	}
+	if got.Kind != "shipped" {
+		t.Errorf("Kind = %q; want shipped", got.Kind)
+	}
+	// Locality qualifier should reflect the local fallback so consumers
+	// (badge renderer) can disambiguate.
+	if !strings.Contains(got.Message, "local") {
+		t.Errorf("message should indicate local fallback: %q", got.Message)
+	}
+}
+
 // TestRunFast_Parallelism: RunFast dispatches both detectors in
 // parallel. Ensures no panic when both fire on the same workspace.
 func TestRunFast_Parallelism(t *testing.T) {

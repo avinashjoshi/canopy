@@ -39,21 +39,15 @@ import (
 // Options is the parent's wiring for a projectlist Model. All callbacks
 // are optional; supplying nil makes the corresponding key a no-op.
 type Options struct {
-	// OnActivate fires when the user presses enter on a row WITHOUT an
-	// active "shipped" hint. The parent returns a tea.Cmd (typically
-	// tea.ExecProcess for a tmux attach, or a status-line update for a
-	// non-attachable row). nil is allowed.
+	// OnActivate fires when the user presses enter on a row. The parent
+	// returns a tea.Cmd (typically tea.ExecProcess for a tmux attach, or
+	// a status-line update for a non-attachable row). nil is allowed.
 	//
-	// Special case: when the row's hints include kind="shipped", enter
-	// fires OnCloseOut instead (the v0.6 close-out flow). OnActivate
-	// is reserved for "this is in flight, attach" semantics.
+	// Hints (rename / shipped / pr_status) decorate the row visually
+	// but do NOT change enter's dispatch — attach is always the
+	// behavior. Close-out is left as a manual `canopy rm` step so the
+	// user retains full control over destructive actions.
 	OnActivate func(state.GlobalRow) tea.Cmd
-
-	// OnCloseOut fires when the user presses enter on a row whose hints
-	// include kind="shipped". The parent typically prompts confirm-close
-	// and runs `canopy rm <name>` on yes. nil is allowed; falls back to
-	// OnActivate (which usually attaches — same as v0.5 behavior).
-	OnCloseOut func(state.GlobalRow) tea.Cmd
 
 	// OnGoToProject fires when the user presses 'o' (for "open project").
 	// The parent typically tea.ExecProcess's `canopy` with cwd set to the
@@ -90,7 +84,6 @@ type Model struct {
 	err error
 
 	onActivate    func(state.GlobalRow) tea.Cmd
-	onCloseOut    func(state.GlobalRow) tea.Cmd
 	onGoToProject func(state.GlobalRow) tea.Cmd
 	onRefresh     func() tea.Cmd
 }
@@ -100,7 +93,6 @@ type Model struct {
 func New(opts Options) Model {
 	return Model{
 		onActivate:    opts.OnActivate,
-		onCloseOut:    opts.OnCloseOut,
 		onGoToProject: opts.OnGoToProject,
 		onRefresh:     opts.OnRefresh,
 	}
@@ -142,24 +134,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 
 		case "enter":
-			if len(m.rows) == 0 {
+			if len(m.rows) == 0 || m.onActivate == nil {
 				return m, nil
 			}
-			row := m.rows[m.cursor]
-			// v0.6 close-out flow: a row with an active "shipped" hint
-			// (the branch is reachable from origin/main) routes enter
-			// through OnCloseOut instead of OnActivate. The parent
-			// prompts "Close out '<branch>'? [y/N]" and runs canopy rm
-			// on yes. Falls back to OnActivate when OnCloseOut isn't
-			// wired (preserves v0.5 attach behavior for parents that
-			// haven't adopted the close-out flow yet).
-			if hasShippedHint(row.Hints) && m.onCloseOut != nil {
-				return m, m.onCloseOut(row)
-			}
-			if m.onActivate == nil {
-				return m, nil
-			}
-			return m, m.onActivate(row)
+			return m, m.onActivate(m.rows[m.cursor])
 
 		case "o":
 			// "Open project" — let the parent cd into the project's repo
@@ -338,43 +316,89 @@ func (m Model) renderTable() string {
 }
 
 // renderHintBadges produces the short-form badge text appended to a row
-// when v0.6 detector hints are active. Returns "" when no hints — the
-// caller appends nothing in that case, keeping rows visually identical
-// to v0.5 for workspaces without active lifecycle signals.
+// when detector hints are active. Returns "" when no hints — the caller
+// appends nothing in that case, keeping rows visually identical to v0.5
+// for workspaces without active lifecycle signals.
+//
+// Badge precedence: PR status wins over the local "shipped" detector
+// when both fire for the same workspace. The local-shipped signal only
+// proves "branch is in main" — for repos with PRs that's "merged",
+// which is one step before "shipped." PR state is the authoritative
+// signal; the shipped badge serves as the local-only fallback for
+// purely-local workflows where no PR exists.
 //
 // Badge mapping (kept short to fit on a single row):
 //
 //	rename_suggested  →  ↻ rename
-//	shipped           →  ✓ shipped
-//	pr_status         →  PR (or PR ✓ when the message indicates merged)
+//	pr_status (open)             →  PR open
+//	pr_status (approved)         →  PR approved
+//	pr_status (changes-requested)→  PR changes
+//	pr_status (merged)           →  ✓ PR merged
+//	pr_status (closed)           →  PR closed
+//	shipped (no PR)              →  ✓ shipped (local)
 //
-// Multiple hints surface as space-separated badges. Order matches the
-// hints slice order (whatever the detector framework returned).
+// Multiple hints surface as space-separated badges; order is rename →
+// pr_status / shipped so the "what next action" badge stays rightmost.
 func renderHintBadges(hints []state.Hint) string {
 	if len(hints) == 0 {
 		return ""
 	}
+	hasPR := false
+	for _, h := range hints {
+		if h.Kind == "pr_status" {
+			hasPR = true
+			break
+		}
+	}
 	parts := make([]string, 0, len(hints))
+	// Render rename first so it sits left of the lifecycle-state badge.
+	for _, h := range hints {
+		if h.Kind == "rename_suggested" {
+			parts = append(parts, hintRenameStyle().Render("↻ rename"))
+		}
+	}
+	// Then the lifecycle-state badge: PR if present, shipped fallback
+	// otherwise.
 	for _, h := range hints {
 		switch h.Kind {
-		case "rename_suggested":
-			parts = append(parts, hintRenameStyle().Render("↻ rename"))
-		case "shipped":
-			parts = append(parts, hintShippedStyle().Render("✓ shipped"))
 		case "pr_status":
-			// Disambiguate by message keywords. Merged PRs render
-			// distinctly from open PRs.
-			label := "PR"
-			if strings.Contains(h.Message, "merged") {
-				label = "✓ PR"
+			parts = append(parts, prBadge(h.Message))
+		case "shipped":
+			if hasPR {
+				continue // PR state wins; suppress the local fallback
 			}
-			parts = append(parts, hintPRStyle().Render(label))
-		default:
-			// Unknown hint kind (forward-compat): render the kind name.
-			parts = append(parts, subtleHelper().Render(h.Kind))
+			parts = append(parts, hintShippedStyle().Render("✓ shipped (local)"))
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// prBadge formats the pr_status hint into a short, color-coded label.
+// State is parsed from the hint's message (the detector controls both
+// the format and the renderer, so keyword matching is a closed system).
+//
+// Colors:
+//   - merged       → green bold (the "done" state)
+//   - approved     → cyan       (positive but not yet merged)
+//   - open         → cyan       (informational, no action implied)
+//   - changes      → orange     (attention needed)
+//   - closed       → gray       (PR didn't ship)
+func prBadge(message string) string {
+	switch {
+	case strings.Contains(message, "merged"):
+		return hintShippedStyle().Render("✓ PR merged")
+	case strings.Contains(message, "approved"):
+		return hintPRStyle().Render("PR approved")
+	case strings.Contains(message, "changes requested"):
+		return hintRenameStyle().Render("PR changes")
+	case strings.Contains(message, "closed"):
+		return subtleHelper().Render("PR closed")
+	case strings.Contains(message, "open"):
+		return hintPRStyle().Render("PR open")
+	}
+	// Unknown state (forward-compat for new gh review states):
+	// fall back to a generic badge.
+	return hintPRStyle().Render("PR")
 }
 
 // emptyState is the table-area copy when there are no rows. Parents
@@ -431,10 +455,6 @@ func maxInt(a, b int) int {
 // parent (which would create a cycle since internal/ui imports
 // projectlist).
 
-func headerStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-}
-
 // projectHeaderStyle is the project-name banner above each group. Bold +
 // pale-violet so the name stands out as a section header without competing
 // with the alive/dead badges below it.
@@ -442,18 +462,6 @@ func projectHeaderStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("99")).
 		Bold(true)
-}
-
-// hasShippedHint returns true when the hint slice contains a
-// kind="shipped" entry. Used by the enter-key dispatch to route close-
-// out actions instead of attach.
-func hasShippedHint(hints []state.Hint) bool {
-	for _, h := range hints {
-		if h.Kind == "shipped" {
-			return true
-		}
-	}
-	return false
 }
 
 // hintRenameStyle: amber/orange — "your attention is wanted but it's

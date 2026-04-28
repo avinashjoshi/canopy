@@ -119,44 +119,21 @@ func gitCommitsPastDefault(ctx context.Context, path string) int {
 	return count
 }
 
-// gitCommitsMainAheadOfHead returns the number of commits on
-// origin/<default> that are NOT reachable from HEAD. The "is main
-// ahead of us" count.
-//
-// Used by the shipped detector to filter out the fresh-workspace case
-// (where HEAD == origin/<default> and the count is 0). On any real
-// merge (commit OR squash), main has at least one commit (the merge
-// or squash commit) not on the branch, so the count is > 0.
-//
-// Returns 0 on git failure (treated as "can't tell" / "not advanced")
-// or when origin/<default> doesn't exist (no remote / fresh clone).
-func gitCommitsMainAheadOfHead(ctx context.Context, path, defaultBranch string) int {
-	if defaultBranch == "" {
-		return 0
-	}
-	cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-list",
-		"--count", "HEAD..origin/"+defaultBranch)
-	out, err := cmd.Output()
-	if err != nil {
-		log.Debug("lifecycle.shipped.main-ahead-failed",
-			"path", path, "branch", defaultBranch, "err", err)
-		return 0
-	}
-	count := 0
-	if _, scanErr := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &count); scanErr != nil {
-		return 0
-	}
-	return count
-}
-
 // gitDefaultBranch returns the source repo's default branch name (e.g.,
 // "main"). Resolved via `git symbolic-ref refs/remotes/origin/HEAD`,
 // which is set when the worktree's source repo was cloned. Returns ""
-// when the symbolic-ref isn't set (rare; only happens for repos cloned
-// without a default branch hint or repos with no remote).
+// only when nothing matches — rare; only happens for repos with no
+// main, no master, and no symbolic-ref.
 //
-// Falls back to "main" → "master" sequence if the symbolic-ref lookup
-// fails — covers the common cases without forcing a network call.
+// Probe order:
+//
+//  1. refs/remotes/origin/HEAD (the canonical "what does origin think
+//     the default is" pointer; set on clone)
+//  2. origin/main → origin/master (remote-tracked candidates if 1 isn't set)
+//  3. local main → local master (purely-local repos with no remote)
+//
+// Each probe is a cheap local ref lookup (rev-parse). The 3rd tier is
+// what makes the local-only "shipped" detection work without a remote.
 func gitDefaultBranch(ctx context.Context, path string) string {
 	cmd := exec.CommandContext(ctx, "git", "-C", path, "symbolic-ref",
 		"--short", "refs/remotes/origin/HEAD")
@@ -169,11 +146,18 @@ func gitDefaultBranch(ctx context.Context, path string) string {
 		}
 		return ref
 	}
-	// Fallback: probe origin/main, origin/master in order. Cheap; both
-	// are local refs.
+	// Probe remote-tracked candidates first.
 	for _, candidate := range []string{"main", "master"} {
 		probe := exec.CommandContext(ctx, "git", "-C", path, "rev-parse",
 			"--verify", "origin/"+candidate)
+		if err := probe.Run(); err == nil {
+			return candidate
+		}
+	}
+	// Fall back to local branches for purely-local repos.
+	for _, candidate := range []string{"main", "master"} {
+		probe := exec.CommandContext(ctx, "git", "-C", path, "rev-parse",
+			"--verify", "refs/heads/"+candidate)
 		if err := probe.Run(); err == nil {
 			return candidate
 		}
