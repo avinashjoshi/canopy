@@ -187,8 +187,8 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 - Badge precedence: PR state wins when present. The local "shipped" detector now renders as `✓ shipped (local)` and is hidden when a `pr_status` hint is also active for the same workspace. PR badges decode the message into open/approved/changes/merged/closed colored variants.
 - `detectShipped` now falls back to local `<default>` when there's no remote, so purely-local repos surface a "shipped" signal without needing a GitHub remote.
 
-**Deferred to v0.6 follow-up:**
-- `canopy new --pr <num>` / `--issue <num>` / `--branch <name>` / `--allow-local` flags. The plumbing for SourceKind variants exists in the briefing assembler; the CLI flags + gh integration are pending.
+**Shipped in agent-lifecycle follow-ups:**
+- `canopy new --pr <num>` / `--issue <num>` / `--branch <name>` / `--allow-local` flags. PR flow handles same-repo PRs (checkout origin/<head>) and cross-repo / fork PRs (fetch via `refs/pull/<n>/head:canopy/pr-<n>`). Issue flow seeds the briefing with the issue body. --branch checks out an existing branch, requiring origin/<name> unless --allow-local. SourceContext (PR/issue body) flows through state.Workspace into the briefing wrapped in a `<<<CANOPY_SOURCE_DATA>>>` data fence.
 - `auto_close_shipped` flag in `~/.canopy/config.json` for the auto-close-on-merge UX with 5s cancel window. v0.6 currently surfaces a hint (`canopy rm <name>`) instead of auto-running.
 
 201 tests across 14 packages. Smoke verified: build clean, all tests green including `-tags=e2e`.

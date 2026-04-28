@@ -176,12 +176,58 @@ func canopyHome() (string, error) {
 	return filepath.Join(home, ".canopy"), nil
 }
 
+// CreateOptions configures Manager.Create's source variant. Zero-value
+// means "fresh" — random name, branch off origin/<default>, no source
+// metadata. The opts struct lets canopy new --pr / --issue / --branch
+// thread custom branches and source-context briefings through Create
+// without a separate per-variant API.
+//
+// Mutual exclusion: at most one of SourceKind ("pr", "issue", "branch")
+// should be set. The CLI gates this; Create itself doesn't enforce
+// because internal callers may legitimately compose options that don't
+// fit a single SourceKind.
+type CreateOptions struct {
+	// SourceKind ends up on the persisted Workspace row and drives
+	// the briefing variant. Empty/"fresh" → ordinary new-workspace
+	// flow. "pr"/"issue"/"branch" — see SourceContext below for the
+	// corresponding briefing data.
+	SourceKind string
+
+	// SourceContext is the body text rendered into the agent
+	// briefing's "Source context" section, wrapped in data-not-
+	// instructions delimiters. For PRs/issues this is the upstream
+	// body; for branch this is empty and the agent falls back to the
+	// "read git log" instruction in sourceKindBlock.
+	SourceContext string
+
+	// Branch overrides the workspace's local branch name. When empty,
+	// Create defaults to the workspace name (legacy v0 behavior).
+	// Set this for canopy new --pr (use the PR's headRefName) or
+	// canopy new --branch (use the supplied branch).
+	Branch string
+
+	// StartPoint overrides the git ref that the new worktree branches
+	// from. When empty, Create defaults to origin/<default> (current
+	// behavior). Set to a specific ref ("origin/feature/oauth",
+	// "canopy/pr-42") to base the worktree on existing work.
+	StartPoint string
+
+	// CreateBranch controls whether `git worktree add` should create
+	// a new branch (-b) or check out an existing one. true = create
+	// new (-b Branch StartPoint); false = check out existing
+	// (StartPoint must already be a branch ref). Defaults to true to
+	// preserve legacy behavior for callers that don't set it.
+	CreateBranch bool
+}
+
 // Create runs the full workspace setup lifecycle. name may be empty to
-// have the manager generate a random name via namegen.
+// have the manager generate a random name via namegen. opts customizes
+// source variant + branch routing; zero-value opts gives the ordinary
+// "fresh workspace off origin/<default>" flow.
 //
 // Output from scripts.setup streams to stdout/stderr live so the caller
 // (CLI or TUI) can show progress.
-func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Writer) (*state.Workspace, error) {
+func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, stdout, stderr io.Writer) (*state.Workspace, error) {
 	if stdout == nil || stderr == nil {
 		return nil, fmt.Errorf("workspace.Create: stdout and stderr writers required")
 	}
@@ -257,20 +303,41 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		// matches typical git/repo conventions) but tmux.SafeName for the
 		// tmux session name (must NOT contain dots or colons, which are
 		// tmux's target-syntax separators).
-		safeBranch := git.Sanitize(name)
-		wsPath := filepath.Join(m.workspacesDir(), safeBranch)
-		session := tmux.SafeName(m.Cfg.Project) + "-" + tmux.SafeName(safeBranch)
+		// Branch defaults to the workspace name (the v0 "branch ==
+		// name" rule). canopy new --pr / --branch override this so the
+		// local branch matches the PR head or the user-supplied name.
+		branch := name
+		if opts.Branch != "" {
+			branch = opts.Branch
+		}
+		safeName := git.Sanitize(name)
+		wsPath := filepath.Join(m.workspacesDir(), safeName)
+		// Tmux session keys off the workspace NAME (canonical canopy
+		// identifier), not the branch — same workspace dir maps to one
+		// tmux session even if the branch is renamed later.
+		session := tmux.SafeName(m.Cfg.Project) + "-" + tmux.SafeName(safeName)
+
+		// Default SourceKind to "fresh" so v0.6+ rows always carry an
+		// explicit kind (older "fresh" was implicit). SourceContext
+		// stays whatever the caller passed; empty for fresh/branch,
+		// non-empty for pr/issue.
+		sourceKind := opts.SourceKind
+		if sourceKind == "" {
+			sourceKind = "fresh"
+		}
 
 		ws = state.Workspace{
-			Project:     m.Cfg.Project,     // legacy basename, still written for backward compat
-			ProjectRoot: m.Cfg.ProjectRoot, // v2 authoritative key
-			Name:        name,
-			Branch:      name,
-			Path:        wsPath,
-			TmuxSession: session,
-			Port:        p,
-			Status:      state.StatusSettingUp,
-			CreatedAt:   time.Now().UTC(),
+			Project:       m.Cfg.Project,     // legacy basename, still written for backward compat
+			ProjectRoot:   m.Cfg.ProjectRoot, // v2 authoritative key
+			Name:          name,
+			Branch:        branch,
+			Path:          wsPath,
+			TmuxSession:   session,
+			Port:          p,
+			Status:        state.StatusSettingUp,
+			CreatedAt:     time.Now().UTC(),
+			SourceKind:    sourceKind,
+			SourceContext: opts.SourceContext,
 		}
 		return s.Add(ws)
 	})
@@ -288,7 +355,7 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 	// the buffer feeds the auto-hint registry.
 	var capturedStderr bytes.Buffer
 	teedStderr := io.MultiWriter(stderr, &capturedStderr)
-	setupErr := m.runSetup(ctx, &ws, stdout, teedStderr)
+	setupErr := m.runSetup(ctx, &ws, opts, stdout, teedStderr)
 	if setupErr != nil {
 		_ = m.markBroken(&ws, setupErr, capturedStderr.Bytes())
 		return &ws, setupErr
@@ -320,7 +387,13 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 // runSetup executes the slow lifecycle steps: git worktree add,
 // scripts.setup, and the 4-pane tmux session build. Any failure propagates
 // up to Create which marks the workspace broken.
-func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, stderr io.Writer) error {
+//
+// opts threads source-variant routing into the worktree creation:
+// when opts.StartPoint is set we use that ref instead of origin/<default>,
+// and when opts.CreateBranch is false we check out the existing branch
+// (no -b) so callers can resurrect a remote branch into a workspace
+// without forking a new local branch off it.
+func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, opts CreateOptions, stdout, stderr io.Writer) error {
 	// Ensure parent dir exists. git worktree add creates the leaf dir
 	// itself but won't mkdir intermediate parents.
 	parent := filepath.Dir(ws.Path)
@@ -328,26 +401,52 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 		return fmt.Errorf("workspace.runSetup: mkdir %s: %w", parent, err)
 	}
 
-	// 1. git worktree add. We base the new branch on origin/<default> so
-	// new workspaces start from the latest pushed code, not a stale local
-	// HEAD. Best-effort fetch first; both fetch and default-branch
-	// detection failures fall through to using local HEAD as the start
-	// point (preserving the old behavior for repos with no remote).
-	startPoint := ""
-	if defaultBranch, err := git.DetectDefaultBranch(ctx, m.Cfg.ProjectRoot); err == nil {
-		if ferr := git.Fetch(ctx, m.Cfg.ProjectRoot, "origin"); ferr != nil {
-			// Fetch failed (offline, auth, etc.). The remote ref might still
-			// exist locally from an earlier fetch; use it anyway.
-			log.Warn("workspace.create.fetch-failed", "err", ferr)
-			fmt.Fprintf(stderr, "warning: git fetch origin failed: %v\n", ferr)
-			fmt.Fprintf(stderr, "  proceeding with the local copy of origin/%s\n", defaultBranch)
+	// 1. git worktree add. Two cases:
+	//
+	//   - Fresh workspace (opts.StartPoint == ""): branch off
+	//     origin/<default> so new workspaces start from the latest
+	//     pushed code. Fetch first (best-effort); fall through to
+	//     local HEAD if both fetch and default-branch detection fail.
+	//   - Source-flag workspace (opts.StartPoint != ""): use the
+	//     caller-supplied ref. canopy new --pr passes "canopy/pr-<num>"
+	//     (a local fetched ref); --branch passes "origin/<name>" or the
+	//     local branch name.
+	startPoint := opts.StartPoint
+	createNewBranch := opts.CreateBranch
+	if startPoint == "" {
+		// Fresh path. Default to origin/<default>; fall through on miss.
+		if defaultBranch, err := git.DetectDefaultBranch(ctx, m.Cfg.ProjectRoot); err == nil {
+			if ferr := git.Fetch(ctx, m.Cfg.ProjectRoot, "origin"); ferr != nil {
+				log.Warn("workspace.create.fetch-failed", "err", ferr)
+				fmt.Fprintf(stderr, "warning: git fetch origin failed: %v\n", ferr)
+				fmt.Fprintf(stderr, "  proceeding with the local copy of origin/%s\n", defaultBranch)
+			}
+			startPoint = "origin/" + defaultBranch
 		}
-		startPoint = "origin/" + defaultBranch
+		// Fresh workspaces always create a new branch (the workspace
+		// name == branch name); zero-value opts.CreateBranch was false
+		// historically, but that's the wrong default for the legacy
+		// path. Force true here.
+		createNewBranch = true
+		if startPoint != "" {
+			fmt.Fprintf(stdout, "Basing %s on %s\n", ws.Branch, startPoint)
+		}
+	} else {
 		fmt.Fprintf(stdout, "Basing %s on %s\n", ws.Branch, startPoint)
 	}
 
-	if err := git.Add(ctx, m.Cfg.ProjectRoot, ws.Branch, ws.Path, startPoint); err != nil {
-		return fmt.Errorf("workspace.runSetup: git: %w", err)
+	if createNewBranch {
+		if err := git.Add(ctx, m.Cfg.ProjectRoot, ws.Branch, ws.Path, startPoint); err != nil {
+			return fmt.Errorf("workspace.runSetup: git: %w", err)
+		}
+	} else {
+		// Check out an existing branch into the worktree (no -b).
+		// startPoint here is already a branch ref (origin/<name> or a
+		// local branch); git.AddExisting wraps `git worktree add <path>
+		// <branch>`.
+		if err := git.AddExisting(ctx, m.Cfg.ProjectRoot, startPoint, ws.Path); err != nil {
+			return fmt.Errorf("workspace.runSetup: git: %w", err)
+		}
 	}
 
 	// 2 + 3: setup script + tmux session. Extracted so RetrySetup can

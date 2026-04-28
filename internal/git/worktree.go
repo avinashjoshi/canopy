@@ -91,6 +91,73 @@ func Add(ctx context.Context, repoRoot, branch, path, startPoint string) error {
 	return nil
 }
 
+// AddExisting checks an EXISTING branch into a new worktree at path.
+// Used by canopy new --branch and --pr where the branch already
+// exists (locally or as a remote-tracking ref) and should be reused
+// rather than re-created.
+//
+// branchOrRef may be a local branch name ("feature/oauth"), a
+// remote-tracking ref ("origin/feature/oauth"), or a fetched PR
+// head ("canopy/pr-42"). git's `worktree add <path> <branch>` does
+// the right thing for all three: if it's a local branch, it's
+// checked out; if it's a remote-tracking ref, git auto-creates a
+// matching local branch tracking the remote.
+//
+// Returns ErrPathExists if path is already populated.
+func AddExisting(ctx context.Context, repoRoot, branchOrRef, path string) error {
+	log.Info("git.add-existing", "repo", repoRoot, "ref", branchOrRef, "path", path)
+
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("git.AddExisting(%s): %w", path, ErrPathExists)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("git.AddExisting(%s): pre-flight path check: %w", path, err)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "add", path, branchOrRef)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git.AddExisting(%s -> %s): %w (stderr: %s)", branchOrRef, path, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// FetchRefspec runs `git fetch <remote> <refspec>` to pull a specific
+// ref into a local branch or ref. Used by canopy new --pr to fetch
+// PR heads (which aren't ordinary branches on origin) via the
+// `refs/pull/<num>/head:<localref>` refspec syntax that GitHub
+// exposes for every PR, including ones from forks.
+//
+// Example: FetchRefspec(ctx, root, "origin",
+//
+//	"refs/pull/42/head:canopy/pr-42")
+//
+// fetches PR #42's head and stores it locally as canopy/pr-42, ready
+// to be checked out with AddExisting.
+func FetchRefspec(ctx context.Context, repoRoot, remote, refspec string) error {
+	log.Info("git.fetch-refspec", "repo", repoRoot, "remote", remote, "refspec", refspec)
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "fetch", remote, refspec, "--quiet")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git.FetchRefspec(%s %s): %w (stderr: %s)", remote, refspec, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// RefExists reports whether ref resolves to a commit in the repo.
+// Wraps `git rev-parse --verify --quiet <ref>^{commit}`. Used to
+// validate user-supplied --branch values (does the branch actually
+// exist?) before kicking off a worktree creation that's going to
+// fail anyway.
+func RefExists(ctx context.Context, repoRoot, ref string) bool {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse",
+		"--verify", "--quiet", ref+"^{commit}")
+	return cmd.Run() == nil
+}
+
 // Fetch runs `git fetch <remote>` from repoRoot. Quiet on success;
 // errors include the captured stderr so network/auth failures are
 // readable in logs and surfaced to the caller.

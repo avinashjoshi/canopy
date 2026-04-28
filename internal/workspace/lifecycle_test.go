@@ -125,7 +125,7 @@ func TestCreate_HappyPath(t *testing.T) {
 	mgr, _ := fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	ws, err := mgr.Create(context.Background(), "feature-x", &stdout, &stderr)
+	ws, err := mgr.Create(context.Background(), "feature-x", workspace.CreateOptions{}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Create: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
@@ -161,7 +161,7 @@ func TestCreate_GeneratesNameWhenEmpty(t *testing.T) {
 	mgr, _ := fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	ws, err := mgr.Create(context.Background(), "", &stdout, &stderr)
+	ws, err := mgr.Create(context.Background(), "", workspace.CreateOptions{}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Create: %v\nstderr: %s", err, stderr.String())
 	}
@@ -181,10 +181,10 @@ func TestCreate_AlreadyExists(t *testing.T) {
 	mgr, _ := fixture(t)
 
 	var b1, b2, b3, b4 bytes.Buffer
-	if _, err := mgr.Create(context.Background(), "feature-x", &b1, &b2); err != nil {
+	if _, err := mgr.Create(context.Background(), "feature-x", workspace.CreateOptions{}, &b1, &b2); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
-	_, err := mgr.Create(context.Background(), "feature-x", &b3, &b4)
+	_, err := mgr.Create(context.Background(), "feature-x", workspace.CreateOptions{}, &b3, &b4)
 	if !errors.Is(err, workspace.ErrWorkspaceExists) {
 		t.Errorf("second Create: got %v; want errors.Is(... ErrWorkspaceExists)", err)
 	}
@@ -197,7 +197,7 @@ func TestRemove_HappyPath(t *testing.T) {
 	mgr, _ := fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	ws, err := mgr.Create(context.Background(), "to-remove", &stdout, &stderr)
+	ws, err := mgr.Create(context.Background(), "to-remove", workspace.CreateOptions{}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestList(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	for _, n := range []string{"feature-a", "feature-b"} {
-		if _, err := mgr.Create(context.Background(), n, &stdout, &stderr); err != nil {
+		if _, err := mgr.Create(context.Background(), n, workspace.CreateOptions{}, &stdout, &stderr); err != nil {
 			t.Fatalf("Create(%s): %v", n, err)
 		}
 	}
@@ -341,7 +341,7 @@ func TestRetry_HappyPath(t *testing.T) {
 	ctx := context.Background()
 
 	// First attempt fails.
-	ws, err := mgr.Create(ctx, "fix-me", &stdout, &stderr)
+	ws, err := mgr.Create(ctx, "fix-me", workspace.CreateOptions{}, &stdout, &stderr)
 	if !errors.Is(err, workspace.ErrSetupFailed) {
 		t.Fatalf("expected ErrSetupFailed on initial create; got %v", err)
 	}
@@ -381,7 +381,7 @@ func TestRetry_StillFailing(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	ctx := context.Background()
-	if _, err := mgr.Create(ctx, "still-broken", &stdout, &stderr); !errors.Is(err, workspace.ErrSetupFailed) {
+	if _, err := mgr.Create(ctx, "still-broken", workspace.CreateOptions{}, &stdout, &stderr); !errors.Is(err, workspace.ErrSetupFailed) {
 		t.Fatalf("expected ErrSetupFailed; got %v", err)
 	}
 
@@ -403,7 +403,7 @@ func TestRetry_WrongStatus(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	ctx := context.Background()
-	if _, err := mgr.Create(ctx, "ready-ws", &stdout, &stderr); err != nil {
+	if _, err := mgr.Create(ctx, "ready-ws", workspace.CreateOptions{}, &stdout, &stderr); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -441,7 +441,7 @@ func TestCreate_DiagnoseHintCaptured(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	ws, err := mgr.Create(context.Background(), "diagnose-me", &stdout, &stderr)
+	ws, err := mgr.Create(context.Background(), "diagnose-me", workspace.CreateOptions{}, &stdout, &stderr)
 	if !errors.Is(err, workspace.ErrSetupFailed) {
 		t.Fatalf("expected ErrSetupFailed; got %v", err)
 	}
@@ -468,7 +468,7 @@ func TestResurrect_HappyPath(t *testing.T) {
 	mgr, _ := fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	ws, err := mgr.Create(context.Background(), "resurrect-me", &stdout, &stderr)
+	ws, err := mgr.Create(context.Background(), "resurrect-me", workspace.CreateOptions{}, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

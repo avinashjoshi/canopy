@@ -156,6 +156,53 @@ func TestRemove_PathNotFound(t *testing.T) {
 	}
 }
 
+// TestAddExisting_CheckoutExistingBranch verifies that AddExisting can
+// place an existing branch into a new worktree without re-creating it.
+// canopy new --branch / --pr rely on this path so they can pick up
+// upstream branches as workspaces.
+func TestAddExisting_CheckoutExistingBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping integration test")
+	}
+
+	repo := newScratchRepo(t)
+	// Create a branch in the source repo.
+	if out, err := exec.Command("git", "-C", repo, "branch", "feature/oauth").CombinedOutput(); err != nil {
+		t.Fatalf("create branch: %v\n%s", err, out)
+	}
+
+	// Now add it to a worktree via AddExisting (no -b).
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := canopygit.AddExisting(context.Background(), repo, "feature/oauth", wt); err != nil {
+		t.Fatalf("AddExisting: %v", err)
+	}
+	// The worktree should be on the right branch.
+	out, err := exec.Command("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "feature/oauth" {
+		t.Errorf("worktree HEAD = %q; want feature/oauth", got)
+	}
+}
+
+// TestRefExists covers the rev-parse-based ref probe used by canopy
+// new --branch to validate user-supplied branches before kicking off
+// a worktree.
+func TestRefExists(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping integration test")
+	}
+	repo := newScratchRepo(t)
+	// main was created at init.
+	if !canopygit.RefExists(context.Background(), repo, "main") {
+		t.Errorf("RefExists(main) = false; want true")
+	}
+	if canopygit.RefExists(context.Background(), repo, "no-such-branch") {
+		t.Errorf("RefExists(no-such-branch) = true; want false")
+	}
+}
+
 // newScratchRepo creates a brand-new git repo in a temp dir with one empty
 // initial commit (worktree-add requires at least one commit to know what
 // HEAD points at). Returns the absolute path. Cleanup is automatic via t.TempDir.

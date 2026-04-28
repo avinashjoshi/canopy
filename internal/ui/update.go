@@ -519,7 +519,7 @@ func removeCmd(mgr *workspace.Manager, name string) tea.Cmd {
 func createCmd(mgr *workspace.Manager, name string) tea.Cmd {
 	return func() tea.Msg {
 		var buf bytes.Buffer
-		ws, err := mgr.Create(context.Background(), name, &buf, &buf)
+		ws, err := mgr.Create(context.Background(), name, workspace.CreateOptions{}, &buf, &buf)
 		msg := createDoneMsg{output: buf.String(), err: err}
 		if err == nil && ws != nil {
 			msg.tmuxSession = ws.TmuxSession

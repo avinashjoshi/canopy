@@ -162,6 +162,17 @@ type Workspace struct {
 	// without a schema migration; readers tolerant of unknown values
 	// fall back to "fresh"-style briefing).
 	SourceKind string `json:"source_kind,omitempty"`
+
+	// SourceContext is free-form text fetched at canopy-new time and
+	// passed into the agent briefing's "Source context" section. For
+	// canopy new --pr / --issue, this is the PR/issue body wrapped with
+	// data-not-instructions delimiters as basic prompt-injection
+	// mitigation. Empty for SourceKind="fresh" or "branch".
+	//
+	// Stored once at creation and never updated; if the upstream PR/issue
+	// body changes, the agent learns about it through the conversation,
+	// not through a re-fetched briefing.
+	SourceContext string `json:"source_context,omitempty"`
 }
 
 // ProjectMeta tracks per-project metadata that lives outside any single
