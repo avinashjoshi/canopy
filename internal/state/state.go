@@ -99,6 +99,34 @@ type Workspace struct {
 	// network blip, db already exists, etc.). Empty when no pattern
 	// matched — the caller falls back to the raw error chain.
 	LastErrorHint string `json:"last_error_hint,omitempty"`
+
+	// AgentLaunchCount tracks how many times canopy has spawned the
+	// agent process for this workspace. Incremented on every successful
+	// workspace.Create completion + workspace.Resurrect completion.
+	// Used by the v0.6 hybrid briefing strategy: count==0 means fresh
+	// launch (full briefing); count>0 means resume launch (hints-only
+	// delta, or skip --append-system-prompt entirely if no hints).
+	//
+	// Why a counter and not a bool: we want to know "first launch" but
+	// also leave the door open for future heuristics (e.g., "agent
+	// re-launched 5 times in a day → maybe it's stuck"). Cheap to
+	// store; same shape as Port.
+	AgentLaunchCount int `json:"agent_launch_count,omitempty"`
+
+	// SourceKind is set once at workspace creation and never changes.
+	// Drives which AGENT.md briefing variant gets assembled and the
+	// agent's framing for the work. Values:
+	//   - ""        legacy / pre-v0.6 row (treat as "fresh")
+	//   - "fresh"   canopy new with no source flags
+	//   - "pr"      canopy new --pr <num>: review-mode briefing
+	//   - "issue"   canopy new --issue <num>: implementation-mode briefing
+	//   - "branch"  canopy new --branch <name>: pickup-mode briefing
+	//
+	// Stored as a string rather than an enum to keep the JSON
+	// human-readable and forward-compatible (new SourceKinds can land
+	// without a schema migration; readers tolerant of unknown values
+	// fall back to "fresh"-style briefing).
+	SourceKind string `json:"source_kind,omitempty"`
 }
 
 // ProjectMeta tracks per-project metadata that lives outside any single
