@@ -46,6 +46,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyOutput = msg.output
 		return m, nil
 
+	case removeDoneMsg:
+		// Workspace removal finished. Same shape as createDoneMsg —
+		// dismiss flips back to listMode and refreshes.
+		m.busyDone = true
+		m.busyErr = msg.err
+		m.busyOutput = msg.output
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -77,6 +85,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case newMode:
 		return m.handleNewModeKey(msg)
+	case confirmDeleteMode:
+		return m.handleConfirmDeleteKey(msg)
 	case busyMode:
 		return m.handleBusyModeKey(msg)
 	}
@@ -101,6 +111,23 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.nameInput.Reset()
 		m.nameInput.Focus()
 		return m, textinputBlink()
+
+	case "d":
+		// Open the confirm-delete modal for the selected row. Refuses
+		// to delete the synthetic main row (canopy main is ephemeral —
+		// kill the tmux session externally if you want it gone).
+		if len(m.rows) == 0 {
+			return m, nil
+		}
+		row := m.rows[m.cursor]
+		if row.IsMain {
+			m.err = fmt.Errorf("can't delete the main session via canopy rm — use `tmux kill-session -t %s` if you want it gone",
+				row.TmuxSession)
+			return m, nil
+		}
+		m.mode = confirmDeleteMode
+		m.deleteTarget = row.Name
+		return m, nil
 
 	case "enter":
 		// Attach to the selected workspace. Resurrects first if the
@@ -287,11 +314,53 @@ func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, refreshCmd(m.mgr, m.tc)
 }
 
+// handleConfirmDeleteKey is the keymap while the y/N delete prompt is
+// up. y or Y kicks off the removal; anything else (n, N, Esc, Enter,
+// stray keys) cancels back to the list. Cancel-by-default is the safe
+// posture for a destructive operation.
+func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		name := m.deleteTarget
+		m.mode = busyMode
+		m.busyTitle = fmt.Sprintf("Removing workspace %q...", name)
+		m.busyDone = false
+		m.busyOutput = ""
+		m.busyErr = nil
+		m.deleteTarget = ""
+		return m, removeCmd(m.mgr, name)
+	default:
+		// Anything else cancels.
+		m.mode = listMode
+		m.deleteTarget = ""
+		return m, nil
+	}
+}
+
 // createDoneMsg carries the result of a Manager.Create call back to
 // Update. Output is whatever Create wrote to its stdout/stderr writers.
 type createDoneMsg struct {
 	output string
 	err    error
+}
+
+// removeDoneMsg is the Remove counterpart to createDoneMsg. Same shape;
+// kept distinct so future Update logic can branch (e.g. don't try to
+// attach to a workspace that was just removed).
+type removeDoneMsg struct {
+	output string
+	err    error
+}
+
+// removeCmd kicks off Manager.Remove asynchronously. Captures the
+// archive script's stdout/stderr to a buffer; sends removeDoneMsg back
+// to Update when finished.
+func removeCmd(mgr *workspace.Manager, name string) tea.Cmd {
+	return func() tea.Msg {
+		var buf bytes.Buffer
+		err := mgr.Remove(context.Background(), name, &buf, &buf)
+		return removeDoneMsg{output: buf.String(), err: err}
+	}
 }
 
 // createCmd kicks off Manager.Create asynchronously. Captures the

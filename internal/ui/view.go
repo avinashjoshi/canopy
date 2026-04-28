@@ -57,6 +57,8 @@ func (m *Model) View() string {
 	switch m.mode {
 	case newMode:
 		return m.renderNewModal()
+	case confirmDeleteMode:
+		return m.renderConfirmDelete()
 	case busyMode:
 		return m.renderBusyView()
 	}
@@ -142,6 +144,7 @@ func (m *Model) renderHelpLine() string {
 		"↑/↓ navigate",
 		"enter attach",
 		"n new",
+		"d delete",
 		"r refresh",
 		"? help",
 		"q quit",
@@ -163,10 +166,28 @@ func (m *Model) renderNewModal() string {
 	return b.String()
 }
 
-// renderBusyView is shown while a Create is in progress and immediately
-// after it completes (so the user can see the captured setup output).
-// While busy, it's a simple "creating..." line; once done, it shows the
-// success/error summary plus the captured output buffer.
+// renderConfirmDelete is the y/N prompt shown before tearing down a
+// workspace. Spells out what the operation does so the user knows what
+// they're agreeing to (this isn't a "press y to retry, idk lol" prompt).
+func (m *Model) renderConfirmDelete() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy rm"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  Remove workspace %q?\n\n", m.deleteTarget))
+	b.WriteString(subtleStyle.Render("  This runs scripts.archive, kills the tmux session, removes the\n"))
+	b.WriteString(subtleStyle.Render("  git worktree, deletes the underlying branch, and drops the row\n"))
+	b.WriteString(subtleStyle.Render("  from state.json. Uncommitted work is lost — push first if needed.\n"))
+	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to remove  ·  any other key to cancel")
+	return b.String()
+}
+
+// renderBusyView is shown while a Create or Remove is in progress and
+// immediately after it completes (so the user can see the captured
+// output). While busy, it's a simple "working..." line; once done, it
+// shows the success/error summary plus the captured output buffer.
 func (m *Model) renderBusyView() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(m.busyTitle))
@@ -208,7 +229,7 @@ func (m *Model) renderHelp() string {
 		"",
 		"  enter          attach to selected workspace",
 		"  n              new workspace",
-		"  d              delete selected          (coming step 6d)",
+		"  d              delete selected (with confirmation)",
 		"  r              refresh state",
 		"",
 		"  ?              this help",

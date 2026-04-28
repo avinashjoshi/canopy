@@ -43,13 +43,16 @@ type Row struct {
 }
 
 // viewMode tracks which screen the TUI is showing. listMode is the
-// default table; newMode is the new-workspace text input; busyMode is
-// the wait/output screen during workspace creation.
+// default table; newMode is the new-workspace text input;
+// confirmDeleteMode is the y/N prompt before tearing down a workspace;
+// busyMode is the wait/output screen during a long-running create or
+// remove.
 type viewMode int
 
 const (
 	listMode viewMode = iota
 	newMode
+	confirmDeleteMode
 	busyMode
 )
 
@@ -73,11 +76,15 @@ type Model struct {
 	// New-workspace modal (mode == newMode).
 	nameInput textinput.Model
 
-	// Creation in progress (mode == busyMode).
-	busyTitle  string // e.g. "Creating workspace 'bold-falcon'..."
-	busyOutput string // captured stdout/stderr after Create returns
-	busyDone   bool   // true once the Create goroutine completes
-	busyErr    error  // the Create error if any (separate from m.err to keep busy view focused)
+	// Confirm-delete modal (mode == confirmDeleteMode).
+	deleteTarget string // workspace name pending removal
+
+	// Long-running operation in progress (mode == busyMode). Reused by
+	// both Create and Remove flows.
+	busyTitle  string // e.g. "Creating workspace 'bold-falcon'..." or "Removing 'bold-falcon'..."
+	busyOutput string // captured stdout/stderr after the goroutine returns
+	busyDone   bool   // true once the goroutine completes
+	busyErr    error  // the goroutine's error if any (separate from m.err to keep busy view focused)
 
 	// Loaded once at startup, used in title rendering.
 	projectName string
