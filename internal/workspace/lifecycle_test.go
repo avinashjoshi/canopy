@@ -13,6 +13,7 @@ import (
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/settings"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/workspace"
@@ -97,8 +98,16 @@ func fixture(t *testing.T) (*workspace.Manager, func()) {
 		Store:      store,
 		Tmux:       tmuxClient,
 		CanopyHome: stateDir, // workspaces dir is derived from this
-		PortMin:    39000,    // safe range, well above typical dev servers
-		PortMax:    39100,
+		// Test-friendly port plan: well above typical dev-server ranges,
+		// 100 ports per project (so 10 workspaces per project at stride 10
+		// before any wrap), big project stride to keep tests readable.
+		Settings: settings.Settings{
+			Ports: settings.PortPlan{
+				Base:            39000,
+				ProjectStride:   100,
+				WorkspaceStride: 10,
+			},
+		},
 	}
 
 	cleanup := func() {

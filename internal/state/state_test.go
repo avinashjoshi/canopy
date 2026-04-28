@@ -104,6 +104,56 @@ func TestSave_AtomicRename(t *testing.T) {
 	}
 }
 
+// TestEnsureProjectBase covers first-come-first-served base assignment.
+// Three projects in succession should get bases at firstBase, firstBase+stride,
+// firstBase+2*stride. Re-asking for an existing project returns the same base
+// without allocating a new one.
+func TestEnsureProjectBase(t *testing.T) {
+	t.Parallel()
+	st := &state.State{SchemaVersion: state.SchemaVersion}
+
+	// First project gets the first base, isNew=true.
+	base1, isNew1, err := st.EnsureProjectBase("cravd", 3000, 1000, 100)
+	if err != nil || !isNew1 || base1 != 3000 {
+		t.Errorf("first call: got base=%d isNew=%v err=%v; want 3000, true, nil", base1, isNew1, err)
+	}
+
+	// Second project gets the next base.
+	base2, isNew2, _ := st.EnsureProjectBase("brain", 3000, 1000, 100)
+	if base2 != 4000 || !isNew2 {
+		t.Errorf("second call: got base=%d isNew=%v; want 4000, true", base2, isNew2)
+	}
+
+	// Re-ask for the first project — same base, isNew=false.
+	rebase1, isNew1Again, _ := st.EnsureProjectBase("cravd", 3000, 1000, 100)
+	if rebase1 != 3000 || isNew1Again {
+		t.Errorf("re-ask cravd: got base=%d isNew=%v; want 3000, false", rebase1, isNew1Again)
+	}
+
+	// Third project after another -> 5000.
+	base3, _, _ := st.EnsureProjectBase("hey-cli", 3000, 1000, 100)
+	if base3 != 5000 {
+		t.Errorf("third project: got base=%d; want 5000", base3)
+	}
+}
+
+// TestEnsureProjectBase_Exhaustion: maxProjects guard kicks in.
+func TestEnsureProjectBase_Exhaustion(t *testing.T) {
+	t.Parallel()
+	st := &state.State{SchemaVersion: state.SchemaVersion}
+	for i := 0; i < 3; i++ {
+		_, _, err := st.EnsureProjectBase(string(rune('a'+i)), 3000, 1000, 3)
+		if err != nil {
+			t.Fatalf("project #%d: %v", i, err)
+		}
+	}
+	// 4th project should hit the cap.
+	_, _, err := st.EnsureProjectBase("d", 3000, 1000, 3)
+	if err == nil {
+		t.Error("4th project with max=3: want error; got nil")
+	}
+}
+
 // TestState_AddFindRemove covers the in-memory CRUD on the State struct.
 func TestState_AddFindRemove(t *testing.T) {
 	t.Parallel()

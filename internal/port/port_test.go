@@ -32,7 +32,7 @@ const (
 // return it.
 func TestAllocate_HappyPath(t *testing.T) {
 	t.Parallel()
-	got, err := port.Allocate(rangeMin, rangeMax, nil)
+	got, err := port.Allocate(rangeMin, rangeMax, 1, nil)
 	if err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestAllocate_HappyPath(t *testing.T) {
 func TestAllocate_SkipsUsed(t *testing.T) {
 	t.Parallel()
 	used := []int{rangeMin, rangeMin + 1, rangeMin + 2}
-	got, err := port.Allocate(rangeMin, rangeMax, used)
+	got, err := port.Allocate(rangeMin, rangeMax, 1, used)
 	if err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestAllocate_SkipsExternallyHeld(t *testing.T) {
 	_, p, _ := net.SplitHostPort(ln.Addr().String())
 	heldPort, _ := strconv.Atoi(p)
 
-	got, err := port.Allocate(heldPort, heldPort+5, nil)
+	got, err := port.Allocate(heldPort, heldPort+5, 1, nil)
 	if err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -90,16 +90,32 @@ func TestAllocate_Exhaustion(t *testing.T) {
 	for p := rangeMin; p <= rangeMax; p++ {
 		used = append(used, p)
 	}
-	_, err := port.Allocate(rangeMin, rangeMax, used)
+	_, err := port.Allocate(rangeMin, rangeMax, 1, used)
 	if !errors.Is(err, port.ErrNoPortsAvailable) {
 		t.Errorf("Allocate(all-used): got %v; want errors.Is(... ErrNoPortsAvailable)", err)
+	}
+}
+
+// TestAllocate_Stride: stride > 1 visits only multiples of stride from min.
+// With stride=10 starting at 39000, we'd see 39000, 39010, 39020, ...
+// — used ports of 39000 and 39010 must push the allocator to 39020.
+func TestAllocate_Stride(t *testing.T) {
+	t.Parallel()
+	const min, max = 39200, 39300
+	used := []int{min, min + 10}
+	got, err := port.Allocate(min, max, 10, used)
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	if got != min+20 {
+		t.Errorf("Allocate stride=10 used=[%d,%d] = %d; want %d", min, min+10, got, min+20)
 	}
 }
 
 // TestAllocate_InvalidRange: min > max must error cleanly, not loop.
 func TestAllocate_InvalidRange(t *testing.T) {
 	t.Parallel()
-	_, err := port.Allocate(rangeMax, rangeMin, nil)
+	_, err := port.Allocate(rangeMax, rangeMin, 1, nil)
 	if err == nil {
 		t.Errorf("Allocate(min>max): want error; got nil")
 	}
@@ -147,7 +163,7 @@ func TestAllocate_ConcurrentDistinctPorts(t *testing.T) {
 				// concurrent goroutines would all see used==[] for ~1ms.
 				time.Sleep(1 * time.Millisecond)
 
-				p, err := port.Allocate(rangeMin, rangeMax, used)
+				p, err := port.Allocate(rangeMin, rangeMax, 1, used)
 				if err != nil {
 					return err
 				}

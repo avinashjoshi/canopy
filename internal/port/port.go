@@ -32,16 +32,23 @@ import (
 var ErrNoPortsAvailable = errors.New("port: no ports available in range")
 
 // Allocate returns the first port in [min, max] that is neither in `used`
-// nor bound by an external process.
+// nor bound by an external process. stride controls the increment between
+// candidates: stride=1 visits every port, stride=10 visits min, min+10,
+// min+20, ... — useful when the port plan reserves blocks of N adjacent
+// ports per workspace (Rails on 3000 + Sidekiq on 3001 + Redis on 3002,
+// next workspace at 3010).
 //
 // Probing via net.Listen briefly opens and immediately closes a listener.
 // On Linux the kernel marks the freed port TIME_WAIT for ~60s, but TCP's
 // SO_REUSEADDR-by-default behavior on the listener side means a follow-up
 // dev server should bind without trouble. In practice the probe-then-bind
 // gap is microseconds.
-func Allocate(min, max int, used []int) (int, error) {
+func Allocate(min, max, stride int, used []int) (int, error) {
 	if min > max {
 		return 0, fmt.Errorf("port.Allocate: invalid range [%d,%d]", min, max)
+	}
+	if stride <= 0 {
+		stride = 1
 	}
 
 	usedSet := make(map[int]struct{}, len(used))
@@ -49,7 +56,7 @@ func Allocate(min, max int, used []int) (int, error) {
 		usedSet[p] = struct{}{}
 	}
 
-	for p := min; p <= max; p++ {
+	for p := min; p <= max; p += stride {
 		if _, claimed := usedSet[p]; claimed {
 			continue
 		}
@@ -58,7 +65,8 @@ func Allocate(min, max int, used []int) (int, error) {
 		}
 		return p, nil
 	}
-	return 0, fmt.Errorf("port.Allocate(range %d-%d, %d used): %w", min, max, len(used), ErrNoPortsAvailable)
+	return 0, fmt.Errorf("port.Allocate(range %d-%d stride %d, %d used): %w",
+		min, max, stride, len(used), ErrNoPortsAvailable)
 }
 
 // isFree returns true if the port can be bound by net.Listen on localhost.

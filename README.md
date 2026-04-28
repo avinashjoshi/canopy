@@ -55,6 +55,30 @@ canopy reconcile            # update workspace statuses to match disk + tmux rea
 
 Each workspace gets a 3-pane tmux session: nvim top-left, claude top-right (with `--continue` on resurrect so prior conversation history resumes), shell full-width on the bottom. `scripts.run` from `canopy.json` is reserved for a future on-demand `canopy run` invocation; v0 doesn't auto-start it.
 
+### Port allocation
+
+Every workspace gets a unique TCP port via `CANOPY_PORT`, allocated through a Conductor-style block plan:
+
+- Each project's first workspace lands on `base_port` (default 3000).
+- Subsequent workspaces in the same project step up by `workspace_stride` (default 10): 3000, 3010, 3020, ...
+- A new project's first workspace lands `project_stride` higher than the previous project (default 1000): cravd → 3000, brain → 4000, hey-cli → 5000.
+
+Project-to-base assignments are first-come-first-served and persisted in `state.json`, so a workspace's port is stable across reboots.
+
+Defaults are tweakable via `~/.canopy/config.json` (optional file):
+
+```json
+{
+  "ports": {
+    "base": 3000,
+    "project_stride": 1000,
+    "workspace_stride": 10
+  }
+}
+```
+
+Partial overrides are fine — any field you skip stays at the default.
+
 Plus operational glue:
 
 - `canopy init` — onboard a project (creates `canopy.json` + stub `bin/canopy-*` scripts; detects existing `conductor.json` and mirrors its schema)

@@ -36,18 +36,18 @@ import (
 	"github.com/avinashjoshi/canopy/internal/hooks"
 	"github.com/avinashjoshi/canopy/internal/namegen"
 	"github.com/avinashjoshi/canopy/internal/port"
+	"github.com/avinashjoshi/canopy/internal/settings"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 )
 
 var log = clog.Pkg("workspace")
 
-// Default port range for new workspaces. Configurable on Manager so
-// tests and future config can override.
-const (
-	DefaultPortMin = 3000
-	DefaultPortMax = 3999
-)
+// MaxProjects is the cap on how many distinct projects canopy can track
+// concurrently before EnsureProjectBase runs out of base slots. With
+// the default 1000 project_stride, 100 projects cover ports 3000-103000
+// — far more than any real workflow needs.
+const MaxProjects = 100
 
 // Sentinel errors. Tests use errors.Is.
 var (
@@ -81,14 +81,16 @@ type Manager struct {
 	// repo with a worktrees/ directory.
 	CanopyHome string
 
-	// PortMin and PortMax bound the port allocator. Defaults to
-	// DefaultPortMin/Max; tests and future config override.
-	PortMin int
-	PortMax int
+	// Settings controls port allocation strategy (base, project stride,
+	// workspace stride). Loaded from ~/.canopy/config.json by New() with
+	// sensible defaults when the file is absent. Tests override directly.
+	Settings settings.Settings
 }
 
 // New constructs a Manager from a loaded config. It creates the canopy
-// home (~/.canopy) and its state directory if missing.
+// home (~/.canopy) and its state directory if missing, and loads the
+// per-machine settings (~/.canopy/config.json) — Default()s apply when
+// no config file exists.
 func New(cfg *config.Config) (*Manager, error) {
 	home, err := canopyHome()
 	if err != nil {
@@ -98,13 +100,16 @@ func New(cfg *config.Config) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	st, err := settings.Load(home)
+	if err != nil {
+		return nil, fmt.Errorf("workspace.New: settings: %w", err)
+	}
 	return &Manager{
 		Cfg:        cfg,
 		Store:      store,
 		Tmux:       tmux.New(),
 		CanopyHome: home,
-		PortMin:    DefaultPortMin,
-		PortMax:    DefaultPortMax,
+		Settings:   st,
 	}, nil
 }
 
@@ -160,13 +165,37 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 			return fmt.Errorf("workspace.Create(%s): %w", name, ErrWorkspaceExists)
 		}
 
-		// Port allocation: scan in-use ports across the WHOLE state (not
-		// just this project) so multi-project users don't double-bind.
+		// Port allocation strategy: each project gets its own block. The
+		// project base is the same forever (assigned first time canopy
+		// sees the project, persisted in state.Projects). Workspaces
+		// within the project pick the smallest free slot at offset
+		// project_base + N×workspace_stride — typically a stride of 10
+		// so adjacent ports per workspace are reserved for sidecars
+		// (Rails + Sidekiq + Redis, etc.).
+		ports := m.Settings.Ports
+		projectBase, isNew, err := s.EnsureProjectBase(
+			m.Cfg.Project, ports.Base, ports.ProjectStride, MaxProjects)
+		if err != nil {
+			return fmt.Errorf("workspace.Create(%s): %w", name, err)
+		}
+		if isNew {
+			log.Info("workspace.create.project-registered",
+				"project", m.Cfg.Project, "port_base", projectBase)
+		}
+		// Used ports across the WHOLE state — workspaces in other projects
+		// shouldn't collide either, even though stride math makes that rare.
 		used := make([]int, 0, len(s.Workspaces))
 		for _, w := range s.Workspaces {
 			used = append(used, w.Port)
 		}
-		p, err := port.Allocate(m.PortMin, m.PortMax, used)
+		// Search just this project's block, stepping by workspace_stride.
+		// Last slot before the next project's range is project_base + project_stride - 1.
+		p, err := port.Allocate(
+			projectBase,
+			projectBase+ports.ProjectStride-1,
+			ports.WorkspaceStride,
+			used,
+		)
 		if err != nil {
 			return fmt.Errorf("workspace.Create(%s): %w", name, err)
 		}

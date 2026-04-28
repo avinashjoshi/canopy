@@ -67,11 +67,24 @@ type Workspace struct {
 	LastError   string    `json:"last_error,omitempty"`
 }
 
+// ProjectMeta tracks per-project metadata that lives outside any single
+// workspace row. Today it holds the project's allocated port base —
+// canopy's port plan assigns each project a deterministic block (default
+// 1000 ports wide) so workspaces in the same project cluster together.
+//
+// First-come-first-served at canopy's first sight of a project. Stable
+// across reboots and `canopy rm`s; only nuking ~/.canopy/state.json
+// would re-shuffle the assignments.
+type ProjectMeta struct {
+	PortBase int `json:"port_base"`
+}
+
 // State is the root document. We always write at least an empty workspaces
 // array (never null) so external tools doing `jq '.workspaces[]'` don't trip.
 type State struct {
-	SchemaVersion int         `json:"schema_version"`
-	Workspaces    []Workspace `json:"workspaces"`
+	SchemaVersion int                    `json:"schema_version"`
+	Projects      map[string]ProjectMeta `json:"projects,omitempty"`
+	Workspaces    []Workspace            `json:"workspaces"`
 }
 
 // Sentinel errors. Tests use errors.Is.
@@ -105,6 +118,39 @@ func (s *State) Add(w Workspace) error {
 	}
 	s.Workspaces = append(s.Workspaces, w)
 	return nil
+}
+
+// EnsureProjectBase returns the port base assigned to project. If the
+// project hasn't been seen before, allocates the next free base
+// (firstBase, firstBase+stride, firstBase+2×stride, ...) and persists
+// it in s.Projects. Caller must be holding the state lock — this
+// mutates s in place.
+//
+// Returns the base + a boolean indicating whether a new assignment was
+// made (callers may want to log the first-time event).
+//
+// Errors only when the search exceeds maxProjects iterations, which
+// would mean canopy is being asked to track more concurrent projects
+// than the port plan accommodates (default 1000 / 1000 = 1).
+func (s *State) EnsureProjectBase(project string, firstBase, stride, maxProjects int) (int, bool, error) {
+	if s.Projects == nil {
+		s.Projects = map[string]ProjectMeta{}
+	}
+	if meta, ok := s.Projects[project]; ok {
+		return meta.PortBase, false, nil
+	}
+	used := make(map[int]struct{}, len(s.Projects))
+	for _, m := range s.Projects {
+		used[m.PortBase] = struct{}{}
+	}
+	for i := 0; i < maxProjects; i++ {
+		candidate := firstBase + i*stride
+		if _, taken := used[candidate]; !taken {
+			s.Projects[project] = ProjectMeta{PortBase: candidate}
+			return candidate, true, nil
+		}
+	}
+	return 0, false, fmt.Errorf("state.EnsureProjectBase: ran out of project slots after %d", maxProjects)
 }
 
 // Remove deletes the workspace with the given (project, name) from the
