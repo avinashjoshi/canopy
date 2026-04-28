@@ -351,7 +351,7 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 // ending drops the pane to a shell instead of closing it.
 func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	env := hooks.WorkspaceEnv(ws.Path, m.Cfg.ProjectRoot, ws.Port)
-	if err := m.Tmux.Create(ctx, ws.TmuxSession, ws.Path, keepAlive("nvim"), env...); err != nil {
+	if err := m.Tmux.Create(ctx, ws.TmuxSession, ws.Path, keepAlive("nvim ."), env...); err != nil {
 		return err
 	}
 	// Shell, ~15% of window height, full-width bottom strip.
@@ -494,7 +494,7 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	// the user sees a confusing "no conversation found to continue"
 	// before the keep-alive drops them to a shell.
 	env := hooks.WorkspaceEnv(wsCopy.Path, m.Cfg.ProjectRoot, wsCopy.Port)
-	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim"), env...); err != nil {
+	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim ."), env...); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
 	}
 	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {

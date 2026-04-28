@@ -137,7 +137,7 @@ func mainPort(project string) (int, error) {
 // level so commands typed in the shell pane (notably `bin/dev`) can read
 // the project's main port.
 func buildMainSession(ctx context.Context, tc *tmux.Client, session, projectRoot string, env []string) error {
-	if err := tc.Create(ctx, session, projectRoot, `nvim; exec "$SHELL"`, env...); err != nil {
+	if err := tc.Create(ctx, session, projectRoot, `nvim .; exec "$SHELL"`, env...); err != nil {
 		return err
 	}
 	if err := tc.SplitPane(ctx, session, projectRoot, "", tmux.SplitVertical, 15); err != nil {

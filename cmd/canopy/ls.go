@@ -87,6 +87,31 @@ func liveBadge(ctx context.Context, tc *tmux.Client, sessionName string) string 
 	return "●"
 }
 
+// mainSessionRow returns a synthetic display row for the project's
+// `canopy main` tmux session (`<project>-main`) IF it's currently alive.
+// canopy main doesn't write a state.json workspace row — the session is
+// ephemeral by design — so without this special-case query, `canopy ls`
+// would hide a perfectly running main session and confuse users who
+// just ran `canopy main`. Returns ok=false when the session isn't alive.
+func mainSessionRow(ctx context.Context, tc *tmux.Client, project string) (mainRow, bool) {
+	session := tmux.SafeName(project) + "-main"
+	alive, err := tc.HasSession(ctx, session)
+	if err != nil || !alive {
+		return mainRow{}, false
+	}
+	return mainRow{Project: project, Session: session}, true
+}
+
+// mainRow is the data shape we render for a `canopy main` session. The
+// fields we actually have are the project name, the tmux session name,
+// and "alive" (always true since we only construct this row when alive).
+// Status is shown as the literal string "main" to set it apart from the
+// 5-state workspace statuses.
+type mainRow struct {
+	Project string
+	Session string
+}
+
 // lsProject prints the workspaces for a single project — the canonical
 // view from inside a project directory.
 func lsProject(ctx context.Context, out io.Writer, project string) error {
@@ -107,14 +132,22 @@ func lsProject(ctx context.Context, out io.Writer, project string) error {
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
-	if len(rows) == 0 {
+	tc := tmux.New()
+	main, mainAlive := mainSessionRow(ctx, tc, project)
+
+	if len(rows) == 0 && !mainAlive {
 		fmt.Fprintf(out, "No workspaces in project %q. Run `canopy new` to create one.\n", project)
 		return nil
 	}
 
-	tc := tmux.New()
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TMUX\tNAME\tBRANCH\tSTATUS\tPORT\tSESSION")
+	// Prepend the canopy main row if its tmux session is currently alive.
+	// Use "—" for fields that don't apply (no branch field, no port field
+	// in the workspace sense; the project's base port is implicit).
+	if mainAlive {
+		fmt.Fprintf(tw, "●\t(main)\t—\tmain\t—\t%s\n", main.Session)
+	}
 	for _, w := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
 			liveBadge(ctx, tc, w.TmuxSession),
@@ -125,6 +158,13 @@ func lsProject(ctx context.Context, out io.Writer, project string) error {
 
 // lsGlobal prints every workspace canopy knows about, grouped by project.
 // Used when --all is set or when no canopy.json is discoverable from cwd.
+//
+// The project list is the union of:
+//   - every project that owns at least one workspace in state.Workspaces
+//   - every project recorded in state.Projects (which includes projects
+//     that have only been touched via `canopy main`, no workspaces yet)
+//
+// For each project, we show its main session (if alive) and its workspaces.
 func lsGlobal(ctx context.Context, out io.Writer) error {
 	store, err := openStateReadOnly()
 	if err != nil {
@@ -134,27 +174,57 @@ func lsGlobal(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(st.Workspaces) == 0 {
-		fmt.Fprintln(out, "No workspaces. Run `canopy new` from a canopy-initialized project to create one.")
+
+	// Collect the union of projects from workspaces + state.Projects.
+	projectSet := map[string]struct{}{}
+	for _, w := range st.Workspaces {
+		projectSet[w.Project] = struct{}{}
+	}
+	for p := range st.Projects {
+		projectSet[p] = struct{}{}
+	}
+	if len(projectSet) == 0 {
+		fmt.Fprintln(out, "No projects. Run `canopy init` + `canopy new` from a project to create one.")
 		return nil
 	}
 
-	// Group + stable-sort by project, then by name within each project.
-	rows := append([]state.Workspace{}, st.Workspaces...)
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Project != rows[j].Project {
-			return rows[i].Project < rows[j].Project
-		}
-		return rows[i].Name < rows[j].Name
-	})
+	projects := make([]string, 0, len(projectSet))
+	for p := range projectSet {
+		projects = append(projects, p)
+	}
+	sort.Strings(projects)
+
+	// Workspaces grouped by project for fast lookup.
+	byProject := map[string][]state.Workspace{}
+	for _, w := range st.Workspaces {
+		byProject[w.Project] = append(byProject[w.Project], w)
+	}
+	for p := range byProject {
+		ws := byProject[p]
+		sort.Slice(ws, func(i, j int) bool { return ws[i].Name < ws[j].Name })
+		byProject[p] = ws
+	}
 
 	tc := tmux.New()
+	anyShown := false
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TMUX\tPROJECT\tNAME\tBRANCH\tSTATUS\tPORT\tSESSION")
-	for _, w := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
-			liveBadge(ctx, tc, w.TmuxSession),
-			w.Project, w.Name, w.Branch, w.Status, w.Port, w.TmuxSession)
+	for _, p := range projects {
+		main, mainAlive := mainSessionRow(ctx, tc, p)
+		if mainAlive {
+			fmt.Fprintf(tw, "●\t%s\t(main)\t—\tmain\t—\t%s\n", p, main.Session)
+			anyShown = true
+		}
+		for _, w := range byProject[p] {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+				liveBadge(ctx, tc, w.TmuxSession),
+				w.Project, w.Name, w.Branch, w.Status, w.Port, w.TmuxSession)
+			anyShown = true
+		}
+	}
+	if !anyShown {
+		fmt.Fprintln(out, "No workspaces or main sessions. Run `canopy new` or `canopy main` from a project.")
+		return nil
 	}
 	return tw.Flush()
 }
