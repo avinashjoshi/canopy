@@ -227,6 +227,138 @@ func TestGoToProject_NoCallback(t *testing.T) {
 	}
 }
 
+// TestRender_HintBadges: rows with active hints show appropriate badges.
+func TestRender_HintBadges(t *testing.T) {
+	rows := []state.GlobalRow{
+		{
+			Project: "canopy", ProjectRoot: "/a/canopy",
+			Name: "ancient-hornet", Branch: "ancient-hornet",
+			Status: state.StatusReady, Port: 40010,
+			Hints: []state.Hint{
+				{Kind: "rename_suggested", Message: "rename me"},
+			},
+		},
+		{
+			Project: "cravd", ProjectRoot: "/a/cravd",
+			Name: "shipped-feat", Branch: "feat/oauth",
+			Status: state.StatusReady, Port: 41010,
+			Hints: []state.Hint{
+				{Kind: "shipped", Message: "ready to close"},
+			},
+		},
+		{
+			Project: "brain", ProjectRoot: "/a/brain",
+			Name: "in-flight", Branch: "feat/x",
+			Status: state.StatusReady, Port: 42010,
+			Hints: []state.Hint{
+				{Kind: "pr_status", Message: "PR #42 merged"},
+			},
+		},
+	}
+	m := New(Options{})
+	m.SetRows(rows)
+	out := m.View()
+
+	// Each badge text should appear exactly once for its row. Badges
+	// are styled via lipgloss but the literal text is preserved.
+	for _, want := range []string{"↻ rename", "✓ shipped", "✓ PR"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered output missing badge %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+// TestRender_NoHintBadges: rows without hints render exactly as before
+// (no badge column, no extra whitespace at the row's tail).
+func TestRender_NoHintBadges(t *testing.T) {
+	m := New(Options{})
+	m.SetRows(sampleRows()) // sampleRows have no Hints set
+	out := m.View()
+
+	for _, badge := range []string{"↻ rename", "✓ shipped", "PR"} {
+		if strings.Contains(out, badge) {
+			t.Errorf("unexpected badge %q in row without hints:\n%s", badge, out)
+		}
+	}
+}
+
+// TestEnter_RoutesShippedToCloseOut: enter on a row with kind="shipped"
+// invokes OnCloseOut, NOT OnActivate.
+func TestEnter_RoutesShippedToCloseOut(t *testing.T) {
+	var activated, closedOut state.GlobalRow
+	m := New(Options{
+		OnActivate: func(r state.GlobalRow) tea.Cmd {
+			activated = r
+			return nil
+		},
+		OnCloseOut: func(r state.GlobalRow) tea.Cmd {
+			closedOut = r
+			return nil
+		},
+	})
+	m.SetRows([]state.GlobalRow{{
+		Project: "canopy", Name: "shipped",
+		Status: state.StatusReady,
+		Hints:  []state.Hint{{Kind: "shipped"}},
+	}})
+	m, _ = m.Update(key("enter"))
+
+	if activated.Name != "" {
+		t.Errorf("OnActivate fired on a shipped row; should have routed to OnCloseOut")
+	}
+	if closedOut.Name != "shipped" {
+		t.Errorf("OnCloseOut not invoked; got %q", closedOut.Name)
+	}
+}
+
+// TestEnter_NoCloseOutFallsBackToActivate: when the parent doesn't wire
+// OnCloseOut, enter on a shipped row routes to OnActivate (preserves
+// v0.5 attach behavior for parents that haven't adopted close-out).
+func TestEnter_NoCloseOutFallsBackToActivate(t *testing.T) {
+	var activated state.GlobalRow
+	m := New(Options{
+		OnActivate: func(r state.GlobalRow) tea.Cmd {
+			activated = r
+			return nil
+		},
+		// OnCloseOut intentionally nil
+	})
+	m.SetRows([]state.GlobalRow{{
+		Project: "canopy", Name: "shipped",
+		Hints: []state.Hint{{Kind: "shipped"}},
+	}})
+	m, _ = m.Update(key("enter"))
+
+	if activated.Name != "shipped" {
+		t.Errorf("OnActivate didn't fire when OnCloseOut is nil; got %q", activated.Name)
+	}
+}
+
+// TestEnter_NonShippedRowGoesToActivate: rows without a shipped hint
+// route enter through OnActivate as before.
+func TestEnter_NonShippedRowGoesToActivate(t *testing.T) {
+	var activated state.GlobalRow
+	m := New(Options{
+		OnActivate: func(r state.GlobalRow) tea.Cmd {
+			activated = r
+			return nil
+		},
+		OnCloseOut: func(r state.GlobalRow) tea.Cmd {
+			t.Errorf("OnCloseOut fired on non-shipped row")
+			return nil
+		},
+	})
+	m.SetRows([]state.GlobalRow{{
+		Project: "canopy", Name: "in-flight",
+		Hints: []state.Hint{{Kind: "rename_suggested"}},
+	}})
+	m, _ = m.Update(key("enter"))
+
+	if activated.Name != "in-flight" {
+		t.Errorf("OnActivate didn't fire on rename_suggested row")
+	}
+}
+
 // TestRender_GroupsByProject: consecutive rows with the same Project share
 // one header line; a project change emits a new header. Verifies the
 // grouped layout doesn't repeat project names per row.

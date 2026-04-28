@@ -25,6 +25,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/git"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
@@ -74,10 +75,29 @@ func NewGlobal(store *state.Store, tc *tmux.Client) *GlobalModel {
 	}
 	gm.list = projectlist.New(projectlist.Options{
 		OnActivate:    gm.activate,
+		OnCloseOut:    gm.closeOut,
 		OnGoToProject: gm.goToProject,
 		OnRefresh:     gm.refreshCmd,
 	})
 	return gm
+}
+
+// closeOut is the OnCloseOut callback wired into projectlist. Fires
+// when the user presses enter on a row whose hints include kind="shipped".
+//
+// v0.6 close-out behavior: surface a confirm prompt as a status-line
+// hint with the canonical command. We don't auto-run canopy rm here
+// because canopy refuses to run from inside its own tmux sessions
+// (the v0.5 nesting guard); the user runs it from the outer terminal.
+//
+// When step 8 lands (auto_close_shipped flag in ~/.canopy/config.json),
+// this callback gains an auto-rm path with a 5-second cancel window.
+// For now, this is a hint-only flow.
+func (m *GlobalModel) closeOut(row state.GlobalRow) tea.Cmd {
+	hint := fmt.Errorf(
+		"workspace %q is shipped — close it from the outer terminal: `canopy rm %s`",
+		row.Name, row.Name)
+	return func() tea.Msg { return globalErrMsg{err: hint} }
 }
 
 // RunGlobal is the public entry point used by cmd/canopy/route.go when
@@ -105,16 +125,46 @@ type globalRowsLoadedMsg struct {
 	err  error
 }
 
-// refreshCmd builds the tea.Cmd that re-reads state.json + re-probes
-// tmux liveness. Used by Init and as the OnRefresh callback for the
-// embedded projectlist.
+// refreshCmd builds the tea.Cmd that re-reads state.json, re-probes
+// tmux liveness, and runs the cheap v0.6 detectors (rename + shipped)
+// per workspace row. Used by Init and as the OnRefresh callback for
+// the embedded projectlist.
+//
+// pr_status is intentionally NOT run here — it shells to gh and would
+// blow up the API budget when called on every TUI refresh. Users get
+// pr_status updates on canopy reconcile + manual `r` (which routes
+// through this cmd, so the cheap detectors come along for free).
+//
+// Detector calls run sequentially per row (lifecycle.RunFast already
+// parallelizes the two cheap detectors internally). For 10 workspaces
+// × ~10ms each = ~100ms total — invisible to the user. If this ever
+// gets felt, switch to per-row tea.Cmds with merged hintLoadedMsg.
 func (m *GlobalModel) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
 		st, err := m.store.Load()
 		if err != nil {
 			return globalRowsLoadedMsg{err: err}
 		}
-		rows := st.BuildGlobalRows(context.Background(), m.tc)
+		ctx := context.Background()
+		rows := st.BuildGlobalRows(ctx, m.tc)
+
+		// Decorate with detector hints. Skip main rows (no Path = no
+		// worktree to detect against). Skip rows with empty Path
+		// (legacy / orphan defensive; detectors rely on a real
+		// worktree).
+		for i := range rows {
+			if rows[i].IsMain || rows[i].Path == "" {
+				continue
+			}
+			ws := state.Workspace{
+				Name:        rows[i].Name,
+				Branch:      rows[i].Branch,
+				Path:        rows[i].Path,
+				ProjectRoot: rows[i].ProjectRoot,
+				Status:      rows[i].Status,
+			}
+			rows[i].Hints = lifecycle.RunFast(ctx, ws)
+		}
 		return globalRowsLoadedMsg{rows: rows}
 	}
 }

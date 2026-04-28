@@ -39,10 +39,21 @@ import (
 // Options is the parent's wiring for a projectlist Model. All callbacks
 // are optional; supplying nil makes the corresponding key a no-op.
 type Options struct {
-	// OnActivate fires when the user presses enter on a row. The parent
-	// returns a tea.Cmd (typically tea.ExecProcess for a tmux attach,
-	// or a status-line update for a non-attachable row). nil is allowed.
+	// OnActivate fires when the user presses enter on a row WITHOUT an
+	// active "shipped" hint. The parent returns a tea.Cmd (typically
+	// tea.ExecProcess for a tmux attach, or a status-line update for a
+	// non-attachable row). nil is allowed.
+	//
+	// Special case: when the row's hints include kind="shipped", enter
+	// fires OnCloseOut instead (the v0.6 close-out flow). OnActivate
+	// is reserved for "this is in flight, attach" semantics.
 	OnActivate func(state.GlobalRow) tea.Cmd
+
+	// OnCloseOut fires when the user presses enter on a row whose hints
+	// include kind="shipped". The parent typically prompts confirm-close
+	// and runs `canopy rm <name>` on yes. nil is allowed; falls back to
+	// OnActivate (which usually attaches — same as v0.5 behavior).
+	OnCloseOut func(state.GlobalRow) tea.Cmd
 
 	// OnGoToProject fires when the user presses 'o' (for "open project").
 	// The parent typically tea.ExecProcess's `canopy` with cwd set to the
@@ -79,6 +90,7 @@ type Model struct {
 	err error
 
 	onActivate    func(state.GlobalRow) tea.Cmd
+	onCloseOut    func(state.GlobalRow) tea.Cmd
 	onGoToProject func(state.GlobalRow) tea.Cmd
 	onRefresh     func() tea.Cmd
 }
@@ -88,6 +100,7 @@ type Model struct {
 func New(opts Options) Model {
 	return Model{
 		onActivate:    opts.OnActivate,
+		onCloseOut:    opts.OnCloseOut,
 		onGoToProject: opts.OnGoToProject,
 		onRefresh:     opts.OnRefresh,
 	}
@@ -129,10 +142,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 
 		case "enter":
-			if len(m.rows) == 0 || m.onActivate == nil {
+			if len(m.rows) == 0 {
 				return m, nil
 			}
-			return m, m.onActivate(m.rows[m.cursor])
+			row := m.rows[m.cursor]
+			// v0.6 close-out flow: a row with an active "shipped" hint
+			// (the branch is reachable from origin/main) routes enter
+			// through OnCloseOut instead of OnActivate. The parent
+			// prompts "Close out '<branch>'? [y/N]" and runs canopy rm
+			// on yes. Falls back to OnActivate when OnCloseOut isn't
+			// wired (preserves v0.5 attach behavior for parents that
+			// haven't adopted the close-out flow yet).
+			if hasShippedHint(row.Hints) && m.onCloseOut != nil {
+				return m, m.onCloseOut(row)
+			}
+			if m.onActivate == nil {
+				return m, nil
+			}
+			return m, m.onActivate(row)
 
 		case "o":
 			// "Open project" — let the parent cd into the project's repo
@@ -281,6 +308,14 @@ func (m Model) renderTable() string {
 			statusCell,
 			colPort, port,
 		)
+		// Append v0.6 hint badges (rename / shipped / pr_status) to the
+		// right of the row. Subtle styling so they decorate without
+		// stealing focus from the workspace's primary fields. Badges
+		// only appear when the corresponding detector fired; rows with
+		// no active hints render exactly as before.
+		if hintBadges := renderHintBadges(r.Hints); hintBadges != "" {
+			line += "  " + hintBadges
+		}
 		if i == m.cursor {
 			line = selectionStyle().Render(line)
 		}
@@ -288,6 +323,46 @@ func (m Model) renderTable() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// renderHintBadges produces the short-form badge text appended to a row
+// when v0.6 detector hints are active. Returns "" when no hints — the
+// caller appends nothing in that case, keeping rows visually identical
+// to v0.5 for workspaces without active lifecycle signals.
+//
+// Badge mapping (kept short to fit on a single row):
+//
+//	rename_suggested  →  ↻ rename
+//	shipped           →  ✓ shipped
+//	pr_status         →  PR (or PR ✓ when the message indicates merged)
+//
+// Multiple hints surface as space-separated badges. Order matches the
+// hints slice order (whatever the detector framework returned).
+func renderHintBadges(hints []state.Hint) string {
+	if len(hints) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(hints))
+	for _, h := range hints {
+		switch h.Kind {
+		case "rename_suggested":
+			parts = append(parts, hintRenameStyle().Render("↻ rename"))
+		case "shipped":
+			parts = append(parts, hintShippedStyle().Render("✓ shipped"))
+		case "pr_status":
+			// Disambiguate by message keywords. Merged PRs render
+			// distinctly from open PRs.
+			label := "PR"
+			if strings.Contains(h.Message, "merged") {
+				label = "✓ PR"
+			}
+			parts = append(parts, hintPRStyle().Render(label))
+		default:
+			// Unknown hint kind (forward-compat): render the kind name.
+			parts = append(parts, subtleHelper().Render(h.Kind))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // emptyState is the table-area copy when there are no rows. Parents
@@ -355,6 +430,34 @@ func projectHeaderStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("99")).
 		Bold(true)
+}
+
+// hasShippedHint returns true when the hint slice contains a
+// kind="shipped" entry. Used by the enter-key dispatch to route close-
+// out actions instead of attach.
+func hasShippedHint(hints []state.Hint) bool {
+	for _, h := range hints {
+		if h.Kind == "shipped" {
+			return true
+		}
+	}
+	return false
+}
+
+// hintRenameStyle: amber/orange — "your attention is wanted but it's
+// not destructive."
+func hintRenameStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+}
+
+// hintShippedStyle: green — "this is good, ready to close out."
+func hintShippedStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
+}
+
+// hintPRStyle: cyan — informational, not urgent.
+func hintPRStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 }
 
 func subtleHelper() lipgloss.Style {

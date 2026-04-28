@@ -52,6 +52,16 @@ type GlobalRow struct {
 	Path        string // worktree dir on disk (workspace rows); empty for main rows
 	TmuxSession string
 	Alive       bool
+
+	// Hints are v0.6 lifecycle detector results for this row, populated
+	// when the caller wants the row decorated with badges (the global
+	// TUI). Empty when the caller skips detection (e.g., canopy ls --all
+	// from the CLI prints rows without hints to keep the tabwriter
+	// output narrow).
+	//
+	// Populated by BuildGlobalRowsWithHints; the older BuildGlobalRows
+	// leaves this empty for callers that don't need detector decoration.
+	Hints []Hint
 }
 
 // BuildGlobalRows is the single source of truth for the cross-project
