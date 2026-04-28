@@ -93,23 +93,41 @@ func liveBadge(ctx context.Context, tc *tmux.Client, sessionName string) string 
 // ephemeral by design — so without this special-case query, `canopy ls`
 // would hide a perfectly running main session and confuse users who
 // just ran `canopy main`. Returns ok=false when the session isn't alive.
-func mainSessionRow(ctx context.Context, tc *tmux.Client, project string) (mainRow, bool) {
+//
+// Takes the loaded state so we can look up the project's reserved port
+// base (canopy main runs with CANOPY_PORT=base) and surface it in the
+// PORT column.
+func mainSessionRow(ctx context.Context, tc *tmux.Client, st *state.State, project string) (mainRow, bool) {
 	session := tmux.SafeName(project) + "-main"
 	alive, err := tc.HasSession(ctx, session)
 	if err != nil || !alive {
 		return mainRow{}, false
 	}
-	return mainRow{Project: project, Session: session}, true
+	row := mainRow{Project: project, Session: session}
+	if meta, ok := st.Projects[project]; ok {
+		row.Port = meta.PortBase
+	}
+	return row, true
 }
 
-// mainRow is the data shape we render for a `canopy main` session. The
-// fields we actually have are the project name, the tmux session name,
-// and "alive" (always true since we only construct this row when alive).
-// Status is shown as the literal string "main" to set it apart from the
-// 5-state workspace statuses.
+// mainRow is the data shape we render for a `canopy main` session. Port
+// comes from state.Projects[project].PortBase — the project's reserved
+// base port that canopy main exports as CANOPY_PORT.
 type mainRow struct {
 	Project string
 	Session string
+	Port    int // 0 if state has no Projects entry for this project
+}
+
+// portCell renders the port column for a main row: the actual port
+// number when state knows about the project, or "—" when it doesn't
+// (rare; only happens for tmux sessions left behind from a state.json
+// migration or a hand-deletion).
+func (m mainRow) portCell() string {
+	if m.Port == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%d", m.Port)
 }
 
 // lsProject prints the workspaces for a single project — the canonical
@@ -133,7 +151,7 @@ func lsProject(ctx context.Context, out io.Writer, project string) error {
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
 	tc := tmux.New()
-	main, mainAlive := mainSessionRow(ctx, tc, project)
+	main, mainAlive := mainSessionRow(ctx, tc, st, project)
 
 	if len(rows) == 0 && !mainAlive {
 		fmt.Fprintf(out, "No workspaces in project %q. Run `canopy new` to create one.\n", project)
@@ -143,10 +161,10 @@ func lsProject(ctx context.Context, out io.Writer, project string) error {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TMUX\tNAME\tBRANCH\tSTATUS\tPORT\tSESSION")
 	// Prepend the canopy main row if its tmux session is currently alive.
-	// Use "—" for fields that don't apply (no branch field, no port field
-	// in the workspace sense; the project's base port is implicit).
+	// Branch column shows "—" because main doesn't have a single canopy-
+	// owned branch; PORT shows the project's reserved base.
 	if mainAlive {
-		fmt.Fprintf(tw, "●\t(main)\t—\tmain\t—\t%s\n", main.Session)
+		fmt.Fprintf(tw, "●\t(main)\t—\tmain\t%s\t%s\n", main.portCell(), main.Session)
 	}
 	for _, w := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
@@ -210,9 +228,9 @@ func lsGlobal(ctx context.Context, out io.Writer) error {
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TMUX\tPROJECT\tNAME\tBRANCH\tSTATUS\tPORT\tSESSION")
 	for _, p := range projects {
-		main, mainAlive := mainSessionRow(ctx, tc, p)
+		main, mainAlive := mainSessionRow(ctx, tc, st, p)
 		if mainAlive {
-			fmt.Fprintf(tw, "●\t%s\t(main)\t—\tmain\t—\t%s\n", p, main.Session)
+			fmt.Fprintf(tw, "●\t%s\t(main)\t—\tmain\t%s\t%s\n", p, main.portCell(), main.Session)
 			anyShown = true
 		}
 		for _, w := range byProject[p] {
