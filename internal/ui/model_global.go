@@ -340,8 +340,11 @@ func (m *GlobalModel) goToProject(row state.GlobalRow) tea.Cmd {
 	cmd.Dir = root
 	// Inherit env. Notably, we do NOT set TMUX or CANOPY_WORKSPACE_PATH;
 	// the inner canopy treats this as a normal invocation from the project
-	// root and routes to the project TUI.
-	cmd.Env = os.Environ()
+	// root and routes to the project TUI. We DO set CANOPY_FROM_GLOBAL=1
+	// so the inner TUI knows it was launched from the global view and can
+	// expose a `b`/`esc` "back" key that just quits — returning control
+	// here, where ExecProcess's onExit refresh re-renders the global list.
+	cmd.Env = append(os.Environ(), "CANOPY_FROM_GLOBAL=1")
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
 			return globalErrMsg{err: fmt.Errorf("open project at %s: %w", root, err)}

@@ -117,9 +117,11 @@ func (m *Model) renderHelpLine() string {
 		"d delete",
 		"R retry",
 		"r refresh",
-		"? help",
-		"q quit",
 	}
+	if m.fromGlobal {
+		keys = append(keys, "b back")
+	}
+	keys = append(keys, "? help", "q quit")
 	return subtleStyle.Render(strings.Join(keys, "  ·  "))
 }
 
@@ -192,7 +194,7 @@ func (m *Model) renderBusyView() string {
 // renderHelp draws the full keybind reference (toggled with ?). Any key
 // dismisses it back to the main view.
 func (m *Model) renderHelp() string {
-	body := strings.Join([]string{
+	lines := []string{
 		titleStyle.Render("canopy — keybindings"),
 		"",
 		"  ↑/↓, j/k       move selection",
@@ -206,11 +208,16 @@ func (m *Model) renderHelp() string {
 		"  r              refresh state",
 		"",
 		"  ?              this help",
+	}
+	if m.fromGlobal {
+		lines = append(lines, "  b, esc         back to canopy global")
+	}
+	lines = append(lines,
 		"  q, ctrl-c      quit",
 		"",
 		subtleStyle.Render("Press any key to dismiss."),
-	}, "\n")
-	return helpBodyStyle.Render(body)
+	)
+	return helpBodyStyle.Render(strings.Join(lines, "\n"))
 }
 
 // selectedHint returns the auto-diagnosis hint for the row currently

@@ -38,12 +38,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, attachCmd(m.mgr, msg.session)
 
 	case createDoneMsg:
-		// Workspace creation finished (success or error). Stash the
-		// output + result for the busy view to render. The user dismisses
-		// the busy view with any keypress, which fires a refresh.
+		// Workspace creation finished. On success we auto-attach to the
+		// new workspace's tmux session — that's what the user pressed `n`
+		// to do, and dropping them at the workspace beats one extra
+		// "press any key" gate. On error we stay in busyMode so the
+		// captured setup output is visible for diagnosis; any key
+		// dismisses back to the list (handleBusyModeKey).
 		m.busyDone = true
 		m.busyErr = msg.err
 		m.busyOutput = msg.output
+		if msg.err == nil && msg.tmuxSession != "" {
+			m.mode = listMode
+			m.busyOp = busyOpNone
+			m.busyTitle = ""
+			m.busyOutput = ""
+			m.busyDone = false
+			return m, attachCmd(m.mgr, msg.tmuxSession)
+		}
 		return m, nil
 
 	case removeDoneMsg:
@@ -103,6 +114,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+
+	case "b", "esc":
+		// Back to the global TUI. Only meaningful when this project TUI
+		// was launched from the global view (the env-var handshake in
+		// model_global.go's goToProject). Outside that flow `b` and `esc`
+		// would be surprising — `b` could be a future shortcut, and esc
+		// historically belongs to modals — so we no-op for the standalone
+		// `canopy` invocation.
+		if m.fromGlobal {
+			return m, tea.Quit
+		}
+		return m, nil
 
 	case "?":
 		m.showHelp = true
@@ -377,9 +400,13 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // createDoneMsg carries the result of a Manager.Create call back to
 // Update. Output is whatever Create wrote to its stdout/stderr writers.
+// tmuxSession is the new workspace's session name on success — Update
+// uses it to dispatch an immediate attachCmd so the user lands in the
+// running session right after `n` instead of bouncing back to the list.
 type createDoneMsg struct {
-	output string
-	err    error
+	output      string
+	tmuxSession string
+	err         error
 }
 
 // removeDoneMsg is the Remove counterpart to createDoneMsg. Same shape;
@@ -429,8 +456,12 @@ func removeCmd(mgr *workspace.Manager, name string) tea.Cmd {
 func createCmd(mgr *workspace.Manager, name string) tea.Cmd {
 	return func() tea.Msg {
 		var buf bytes.Buffer
-		_, err := mgr.Create(context.Background(), name, &buf, &buf)
-		return createDoneMsg{output: buf.String(), err: err}
+		ws, err := mgr.Create(context.Background(), name, &buf, &buf)
+		msg := createDoneMsg{output: buf.String(), err: err}
+		if err == nil && ws != nil {
+			msg.tmuxSession = ws.TmuxSession
+		}
+		return msg
 	}
 }
 
