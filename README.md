@@ -144,10 +144,20 @@ Three script paths. Each script gets the same env vars when canopy invokes it:
 
 ## Documentation
 
-- `docs/design/v0-canopy.md` — full design: architecture, premises, state machine, idempotency, error conventions
-- `docs/reviews/v0-test-plan.md` — test coverage plan and critical concurrency tests
-- `TODOS.md` — work deferred to v0.5 / v1
-- `CLAUDE.md` — project context for Claude Code
+User-facing guides:
+
+- [`docs/getting-started.md`](docs/getting-started.md) — 5-minute tour: install, init, first workspace
+- [`docs/canopy-json.md`](docs/canopy-json.md) — schema reference + `~/.canopy/config.json` settings
+- [`docs/migrate-from-conductor.md`](docs/migrate-from-conductor.md) — step-by-step for projects with `conductor.json`
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — common problems and fixes
+
+For contributors / future-you:
+
+- [`docs/architecture.md`](docs/architecture.md) — codebase layout, dependency direction, where to add things
+- [`docs/design/v0-canopy.md`](docs/design/v0-canopy.md) — design doc with premises, state machine, error conventions
+- [`docs/reviews/v0-test-plan.md`](docs/reviews/v0-test-plan.md) — test coverage plan and critical concurrency tests
+- [`TODOS.md`](TODOS.md) — deferred work, organized by milestone
+- [`CLAUDE.md`](CLAUDE.md) — project context for Claude Code
 
 ## License
 
