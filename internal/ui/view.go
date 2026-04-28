@@ -3,50 +3,11 @@ package ui
 import (
 	"fmt"
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
-// Visual style is intentionally calm — single accent color, clear
-// typography hierarchy, no gratuitous color use. lipgloss does the
-// heavy lifting for terminal-aware styling.
-
-var (
-	// titleStyle is the canopy header at the top of the TUI.
-	titleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("99")). // pale violet
-			Bold(true).
-			Padding(0, 1)
-
-	// subtleStyle dims chrome that isn't the main content (column headers,
-	// help line, project label).
-	subtleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-
-	// selectedStyle highlights the row the cursor is on. Background highlight
-	// + bold cell so it pops without going garish.
-	selectedStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("237")).
-			Foreground(lipgloss.Color("230")).
-			Bold(true)
-
-	// status colors keyed by the state.Status enum. Picked for legibility
-	// on both light and dark terminals.
-	readyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))   // green
-	stoppedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))  // amber
-	brokenStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))  // red
-	orphanedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208"))  // orange
-	settingUpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))   // blue
-	mainStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("99"))   // violet (matches title)
-
-	aliveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // green ●
-	deadStyle  = subtleStyle                                          // dim ○
-
-	helpBodyStyle = lipgloss.NewStyle().Padding(1, 2)
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196")).
-			Padding(0, 1)
-)
+// Styles + helpers live in render.go (shared with the new GlobalModel and
+// projectlist sub-component). This file holds only the project-mode
+// View() implementation.
 
 // View implements tea.Model. Renders the current Model into a string.
 // Sections: title, table, status/help line, optional error banner.
@@ -282,32 +243,5 @@ func busySuccessMessage(op busyOpKind) string {
 	return "Done."
 }
 
-// statusStyle picks the lipgloss color for a given status string. Falls
-// back to subtleStyle for the synthetic "main" status and any unknown
-// values so the table still renders cleanly.
-func statusStyle(s interface{}) lipgloss.Style {
-	switch fmt.Sprintf("%v", s) {
-	case "ready":
-		return readyStyle
-	case "stopped":
-		return stoppedStyle
-	case "broken":
-		return brokenStyle
-	case "orphaned":
-		return orphanedStyle
-	case "setting_up":
-		return settingUpStyle
-	case "main":
-		return mainStatusStyle
-	}
-	return subtleStyle
-}
-
-// maxInt is the same shape as max0 but for general comparison. Avoids
-// pulling in Go 1.21's built-in max for the same toolchain reasons.
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
+// statusStyle, statusCell, liveBadge, portCell, maxInt all live in
+// render.go now (shared with the global TUI + projectlist sub-component).

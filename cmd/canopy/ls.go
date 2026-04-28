@@ -66,7 +66,7 @@ func lsCmd() *cobra.Command {
 			if global {
 				return lsGlobal(cmd.Context(), cmd.OutOrStdout())
 			}
-			return lsProject(cmd.Context(), cmd.OutOrStdout(), cfg.Project)
+			return lsProject(cmd.Context(), cmd.OutOrStdout(), cfg.ProjectRoot, cfg.Project)
 		},
 	}
 	cmd.Flags().BoolVar(&lsFlags.all, "all", false,
@@ -88,24 +88,33 @@ func liveBadge(ctx context.Context, tc *tmux.Client, sessionName string) string 
 }
 
 // mainSessionRow returns a synthetic display row for the project's
-// `canopy main` tmux session (`<project>-main`) IF it's currently alive.
+// `canopy main` tmux session (`<basename>-main`) IF it's currently alive.
 // canopy main doesn't write a state.json workspace row — the session is
 // ephemeral by design — so without this special-case query, `canopy ls`
 // would hide a perfectly running main session and confuse users who
 // just ran `canopy main`. Returns ok=false when the session isn't alive.
 //
-// Takes the loaded state so we can look up the project's reserved port
-// base (canopy main runs with CANOPY_PORT=base) and surface it in the
-// PORT column.
-func mainSessionRow(ctx context.Context, tc *tmux.Client, st *state.State, project string) (mainRow, bool) {
-	session := tmux.SafeName(project) + "-main"
+// In v2 state, st.Projects is keyed by canonical root path. The PortBase
+// lookup walks the map looking for any entry whose Root has the matching
+// basename — needed for the lsGlobal path where we only have the basename
+// at hand. lsProject (which has both) gets the same code path for free
+// since basename → root linkage in canonicalRoot is unambiguous when the
+// uniqueness invariant holds.
+func mainSessionRow(ctx context.Context, tc *tmux.Client, st *state.State, basename string) (mainRow, bool) {
+	session := tmux.SafeName(basename) + "-main"
 	alive, err := tc.HasSession(ctx, session)
 	if err != nil || !alive {
 		return mainRow{}, false
 	}
-	row := mainRow{Project: project, Session: session}
-	if meta, ok := st.Projects[project]; ok {
-		row.Port = meta.PortBase
+	row := mainRow{Project: basename, Session: session}
+	// v2 lookup: scan Projects for the entry whose key (canonical root)
+	// has this basename. Falls back to v1 basename-keyed lookup for
+	// pre-migration entries.
+	for root, meta := range st.Projects {
+		if filepath.Base(root) == basename {
+			row.Port = meta.PortBase
+			break
+		}
 	}
 	return row, true
 }
@@ -131,8 +140,11 @@ func (m mainRow) portCell() string {
 }
 
 // lsProject prints the workspaces for a single project — the canonical
-// view from inside a project directory.
-func lsProject(ctx context.Context, out io.Writer, project string) error {
+// view from inside a project directory. Matches by canonical root path
+// (v2) but falls back to basename for legacy v1 rows that haven't been
+// migrated yet (e.g. user runs `canopy ls` before running any project-
+// scoped command that triggers migration).
+func lsProject(ctx context.Context, out io.Writer, projectRoot, projectBasename string) error {
 	store, err := openStateReadOnly()
 	if err != nil {
 		return err
@@ -144,17 +156,24 @@ func lsProject(ctx context.Context, out io.Writer, project string) error {
 
 	rows := []state.Workspace{}
 	for _, w := range st.Workspaces {
-		if w.Project == project {
+		// v2 row: match by canonical root path.
+		if w.ProjectRoot == projectRoot {
+			rows = append(rows, w)
+			continue
+		}
+		// v1 row (no ProjectRoot yet): fall back to basename match. Once
+		// migration runs (in workspace.New), this branch becomes dead.
+		if w.ProjectRoot == "" && w.Project == projectBasename {
 			rows = append(rows, w)
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
 	tc := tmux.New()
-	main, mainAlive := mainSessionRow(ctx, tc, st, project)
+	main, mainAlive := mainSessionRow(ctx, tc, st, projectBasename)
 
 	if len(rows) == 0 && !mainAlive {
-		fmt.Fprintf(out, "No workspaces in project %q. Run `canopy new` to create one.\n", project)
+		fmt.Fprintf(out, "No workspaces in project %q. Run `canopy new` to create one.\n", projectBasename)
 		return nil
 	}
 
@@ -177,12 +196,9 @@ func lsProject(ctx context.Context, out io.Writer, project string) error {
 // lsGlobal prints every workspace canopy knows about, grouped by project.
 // Used when --all is set or when no canopy.json is discoverable from cwd.
 //
-// The project list is the union of:
-//   - every project that owns at least one workspace in state.Workspaces
-//   - every project recorded in state.Projects (which includes projects
-//     that have only been touched via `canopy main`, no workspaces yet)
-//
-// For each project, we show its main session (if alive) and its workspaces.
+// Delegates row assembly to state.BuildGlobalRows so the TUI's GlobalModel
+// renders from the same source of truth. CLI output is tabwriter-formatted
+// here; the TUI uses lipgloss but consumes identical row data.
 func lsGlobal(ctx context.Context, out io.Writer) error {
 	store, err := openStateReadOnly()
 	if err != nil {
@@ -193,56 +209,33 @@ func lsGlobal(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
-	// Collect the union of projects from workspaces + state.Projects.
-	projectSet := map[string]struct{}{}
-	for _, w := range st.Workspaces {
-		projectSet[w.Project] = struct{}{}
-	}
-	for p := range st.Projects {
-		projectSet[p] = struct{}{}
-	}
-	if len(projectSet) == 0 {
-		fmt.Fprintln(out, "No projects. Run `canopy init` + `canopy new` from a project to create one.")
+	tc := tmux.New()
+	rows := st.BuildGlobalRows(ctx, tc)
+	if len(rows) == 0 {
+		// Distinguish the two empty cases for the user. If state has no
+		// projects at all, suggest init. If state has projects but every
+		// session is dead and there are no workspaces, suggest canopy new.
+		if len(st.Projects) == 0 && len(st.Workspaces) == 0 {
+			fmt.Fprintln(out, "No projects. Run `canopy init` + `canopy new` from a project to create one.")
+		} else {
+			fmt.Fprintln(out, "No workspaces or main sessions. Run `canopy new` or `canopy main` from a project.")
+		}
 		return nil
 	}
 
-	projects := make([]string, 0, len(projectSet))
-	for p := range projectSet {
-		projects = append(projects, p)
-	}
-	sort.Strings(projects)
-
-	// Workspaces grouped by project for fast lookup.
-	byProject := map[string][]state.Workspace{}
-	for _, w := range st.Workspaces {
-		byProject[w.Project] = append(byProject[w.Project], w)
-	}
-	for p := range byProject {
-		ws := byProject[p]
-		sort.Slice(ws, func(i, j int) bool { return ws[i].Name < ws[j].Name })
-		byProject[p] = ws
-	}
-
-	tc := tmux.New()
-	anyShown := false
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TMUX\tPROJECT\tNAME\tBRANCH\tSTATUS\tPORT\tSESSION")
-	for _, p := range projects {
-		main, mainAlive := mainSessionRow(ctx, tc, st, p)
-		if mainAlive {
-			fmt.Fprintf(tw, "●\t%s\t(main)\t—\tmain\t%s\t%s\n", p, main.portCell(), main.Session)
-			anyShown = true
+	for _, r := range rows {
+		badge := "○"
+		if r.Alive {
+			badge = "●"
 		}
-		for _, w := range byProject[p] {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
-				liveBadge(ctx, tc, w.TmuxSession),
-				w.Project, w.Name, w.Branch, w.Status, w.Port, w.TmuxSession)
-			anyShown = true
+		port := "—"
+		if r.Port > 0 {
+			port = fmt.Sprintf("%d", r.Port)
 		}
-	}
-	if !anyShown {
-		fmt.Fprintln(out, "No workspaces or main sessions. Run `canopy new` or `canopy main` from a project.")
-		return nil
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			badge, r.Project, r.Name, r.Branch, r.Status, port, r.TmuxSession)
 	}
 	return tw.Flush()
 }

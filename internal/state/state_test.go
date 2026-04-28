@@ -155,11 +155,20 @@ func TestEnsureProjectBase_Exhaustion(t *testing.T) {
 }
 
 // TestState_AddFindRemove covers the in-memory CRUD on the State struct.
+// In v2, the (projectRoot, name) tuple is the key — ProjectRoot is the
+// canonical absolute path. Project (basename) is preserved on rows for
+// backward compat but isn't used for lookup.
 func TestState_AddFindRemove(t *testing.T) {
 	t.Parallel()
 	st := &state.State{SchemaVersion: state.SchemaVersion}
 
-	w := state.Workspace{Project: "cravd", Name: "bold-falcon", Status: state.StatusReady}
+	const root = "/home/avi/Work/cravd"
+	w := state.Workspace{
+		Project:     "cravd",
+		ProjectRoot: root,
+		Name:        "bold-falcon",
+		Status:      state.StatusReady,
+	}
 	if err := st.Add(w); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -169,8 +178,8 @@ func TestState_AddFindRemove(t *testing.T) {
 		t.Fatalf("duplicate Add: got %v; want errors.Is(... ErrAlreadyExists)", err)
 	}
 
-	// Find by (project, name).
-	found, err := st.Find("cravd", "bold-falcon")
+	// Find by (projectRoot, name).
+	found, err := st.Find(root, "bold-falcon")
 	if err != nil {
 		t.Fatalf("Find: %v", err)
 	}
@@ -179,19 +188,24 @@ func TestState_AddFindRemove(t *testing.T) {
 	}
 
 	// Find returns ErrNotFound for unknown.
-	_, err = st.Find("cravd", "missing")
+	_, err = st.Find(root, "missing")
 	if !errors.Is(err, state.ErrNotFound) {
 		t.Errorf("Find(missing): got %v; want errors.Is(... ErrNotFound)", err)
 	}
 
+	// Find by basename does NOT match in v2 (ProjectRoot is the key).
+	if _, err := st.Find("cravd", "bold-falcon"); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("Find by basename should return ErrNotFound in v2; got %v", err)
+	}
+
 	// Remove and verify.
-	if err := st.Remove("cravd", "bold-falcon"); err != nil {
+	if err := st.Remove(root, "bold-falcon"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	if len(st.Workspaces) != 0 {
 		t.Errorf("after Remove, len = %d; want 0", len(st.Workspaces))
 	}
-	if err := st.Remove("cravd", "bold-falcon"); !errors.Is(err, state.ErrNotFound) {
+	if err := st.Remove(root, "bold-falcon"); !errors.Is(err, state.ErrNotFound) {
 		t.Errorf("Remove(missing): got %v; want errors.Is(... ErrNotFound)", err)
 	}
 }

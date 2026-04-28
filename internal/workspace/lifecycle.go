@@ -111,13 +111,51 @@ func New(cfg *config.Config) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("workspace.New: settings: %w", err)
 	}
-	return &Manager{
+	m := &Manager{
 		Cfg:        cfg,
 		Store:      store,
 		Tmux:       tmux.New(),
 		CanopyHome: home,
 		Settings:   st,
-	}, nil
+	}
+	// Run the v1→v2 migration + basename-uniqueness gate up front so every
+	// subsequent operation sees a v2-shaped state. If the user's state has
+	// a basename collision (rare; would only happen if they manually edited
+	// state.json), refuse to construct the Manager — it's safer to surface
+	// "two projects share a name" once at startup than to silently corrupt
+	// data on the next workspace mutation.
+	if err := m.migrateAndGuard(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// ErrBasenameCollision is returned when state already has a different
+// project registered with the same basename as cfg.ProjectRoot. The user
+// must rename one of the directories (or hand-edit state.json) before
+// canopy will operate on either project.
+var ErrBasenameCollision = errors.New("workspace: project basename collides with another registered project")
+
+// migrateAndGuard runs the v1→v2 schema migration for this project under
+// the state lock, then checks for basename collisions. Idempotent — safe
+// to call on every Manager.New, including when state is already v2.
+//
+// On collision, returns ErrBasenameCollision wrapped with both colliding
+// root paths in the error message. On success, state.json on disk is
+// guaranteed to have a v2-shaped entry for this project (with Root field
+// populated and a PortBase that may or may not be allocated yet — port
+// allocation still happens lazily in Create's first phase).
+func (m *Manager) migrateAndGuard() error {
+	return m.Store.WithLock(func(s *state.State) error {
+		s.MigrateLegacyProject(m.Cfg.Project, m.Cfg.ProjectRoot)
+		if other := s.FindBasenameCollision(m.Cfg.ProjectRoot); other != "" {
+			return fmt.Errorf(
+				"%w: %q (basename %q) collides with already-registered project at %q. "+
+					"Rename one of the directories so basenames are unique, then retry.",
+				ErrBasenameCollision, m.Cfg.ProjectRoot, m.Cfg.Project, other)
+		}
+		return nil
+	})
 }
 
 // workspacesDir returns <CanopyHome>/workspaces/<project>. Created on
@@ -156,7 +194,7 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		if name == "" {
 			used := make([]string, 0, len(s.Workspaces))
 			for _, w := range s.Workspaces {
-				if w.Project == m.Cfg.Project {
+				if w.ProjectRoot == m.Cfg.ProjectRoot {
 					used = append(used, w.Name)
 				}
 			}
@@ -168,26 +206,26 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		}
 
 		// Idempotency check: existing row -> ErrWorkspaceExists.
-		if _, err := s.Find(m.Cfg.Project, name); err == nil {
+		if _, err := s.Find(m.Cfg.ProjectRoot, name); err == nil {
 			return fmt.Errorf("workspace.Create(%s): %w", name, ErrWorkspaceExists)
 		}
 
 		// Port allocation strategy: each project gets its own block. The
 		// project base is the same forever (assigned first time canopy
-		// sees the project, persisted in state.Projects). Workspaces
-		// within the project pick the smallest free slot at offset
-		// project_base + N×workspace_stride — typically a stride of 10
-		// so adjacent ports per workspace are reserved for sidecars
-		// (Rails + Sidekiq + Redis, etc.).
+		// sees the project, persisted in state.Projects keyed by canonical
+		// root path). Workspaces within the project pick the smallest free
+		// slot at offset project_base + N×workspace_stride — typically a
+		// stride of 10 so adjacent ports per workspace are reserved for
+		// sidecars (Rails + Sidekiq + Redis, etc.).
 		ports := m.Settings.Ports
 		projectBase, isNew, err := s.EnsureProjectBase(
-			m.Cfg.Project, ports.Base, ports.ProjectStride, MaxProjects)
+			m.Cfg.ProjectRoot, ports.Base, ports.ProjectStride, MaxProjects)
 		if err != nil {
 			return fmt.Errorf("workspace.Create(%s): %w", name, err)
 		}
 		if isNew {
 			log.Info("workspace.create.project-registered",
-				"project", m.Cfg.Project, "port_base", projectBase)
+				"project", m.Cfg.Project, "root", m.Cfg.ProjectRoot, "port_base", projectBase)
 		}
 		// Used ports across the WHOLE state — workspaces in other projects
 		// shouldn't collide either, even though stride math makes that rare.
@@ -222,7 +260,8 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		session := tmux.SafeName(m.Cfg.Project) + "-" + tmux.SafeName(safeBranch)
 
 		ws = state.Workspace{
-			Project:     m.Cfg.Project,
+			Project:     m.Cfg.Project,     // legacy basename, still written for backward compat
+			ProjectRoot: m.Cfg.ProjectRoot, // v2 authoritative key
 			Name:        name,
 			Branch:      name,
 			Path:        wsPath,
@@ -255,7 +294,7 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 
 	// Phase 3: flip to ready under the lock.
 	err = m.Store.WithLock(func(s *state.State) error {
-		row, err := s.Find(ws.Project, ws.Name)
+		row, err := s.Find(ws.ProjectRoot, ws.Name)
 		if err != nil {
 			return err
 		}
@@ -371,7 +410,7 @@ func (m *Manager) RetrySetup(ctx context.Context, name string, stdout, stderr io
 	// retry on the same name fast-fails.
 	var ws state.Workspace
 	err := m.Store.WithLock(func(s *state.State) error {
-		row, err := s.Find(m.Cfg.Project, name)
+		row, err := s.Find(m.Cfg.ProjectRoot, name)
 		if err != nil {
 			return fmt.Errorf("workspace.RetrySetup(%s): %w", name, ErrWorkspaceNotFound)
 		}
@@ -412,7 +451,7 @@ func (m *Manager) RetrySetup(ctx context.Context, name string, stdout, stderr io
 
 	// Phase 3: flip to ready under the lock.
 	err = m.Store.WithLock(func(s *state.State) error {
-		row, err := s.Find(ws.Project, ws.Name)
+		row, err := s.Find(ws.ProjectRoot, ws.Name)
 		if err != nil {
 			return err
 		}
@@ -454,11 +493,11 @@ func (m *Manager) RetrySetup(ctx context.Context, name string, stdout, stderr io
 //
 // Layout sequence (all splits use -d so the active pane stays on the
 // initial nvim pane and subsequent splits target it):
-//   1. new-session: pane 0 = nvim, full window.
-//   2. split-v with -l 15%: pane 1 = shell, 15% of window height at the
-//      bottom. nvim becomes the top 85%, full-width.
-//   3. split-h with -l 30%: pane 2 = claude, 30% of nvim's width on the
-//      right. nvim becomes top-left ~70%.
+//  1. new-session: pane 0 = nvim, full window.
+//  2. split-v with -l 15%: pane 1 = shell, 15% of window height at the
+//     bottom. nvim becomes the top 85%, full-width.
+//  3. split-h with -l 30%: pane 2 = claude, 30% of nvim's width on the
+//     right. nvim becomes top-left ~70%.
 //
 // nvim and claude are wrapped in keepAlive so :q from nvim or claude
 // ending drops the pane to a shell instead of closing it.
@@ -509,7 +548,7 @@ func keepAlive(cmd string) string {
 func (m *Manager) markBroken(ws *state.Workspace, cause error, capturedStderr []byte) error {
 	hint := Diagnose(capturedStderr)
 	return m.Store.WithLock(func(s *state.State) error {
-		row, err := s.Find(ws.Project, ws.Name)
+		row, err := s.Find(ws.ProjectRoot, ws.Name)
 		if err != nil {
 			return err
 		}
@@ -537,7 +576,7 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 	if err != nil {
 		return fmt.Errorf("workspace.Remove: load: %w", err)
 	}
-	ws, err := st.Find(m.Cfg.Project, name)
+	ws, err := st.Find(m.Cfg.ProjectRoot, name)
 	if err != nil {
 		return fmt.Errorf("workspace.Remove(%s): %w", name, ErrWorkspaceNotFound)
 	}
@@ -583,7 +622,7 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 
 	// 5. Drop the state row.
 	return m.Store.WithLock(func(s *state.State) error {
-		return s.Remove(m.Cfg.Project, name)
+		return s.Remove(m.Cfg.ProjectRoot, name)
 	})
 }
 
@@ -597,7 +636,7 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	if err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: load: %w", err)
 	}
-	ws, err := st.Find(m.Cfg.Project, name)
+	ws, err := st.Find(m.Cfg.ProjectRoot, name)
 	if err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect(%s): %w", name, ErrWorkspaceNotFound)
 	}
@@ -628,7 +667,7 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 
 	// Flip status to ready.
 	err = m.Store.WithLock(func(s *state.State) error {
-		row, err := s.Find(m.Cfg.Project, name)
+		row, err := s.Find(m.Cfg.ProjectRoot, name)
 		if err != nil {
 			return err
 		}
@@ -652,7 +691,7 @@ func (m *Manager) List(ctx context.Context) ([]state.Workspace, error) {
 	}
 	out := []state.Workspace{}
 	for _, w := range st.Workspaces {
-		if w.Project == m.Cfg.Project {
+		if w.ProjectRoot == m.Cfg.ProjectRoot {
 			out = append(out, w)
 		}
 	}
@@ -665,7 +704,7 @@ func (m *Manager) Find(ctx context.Context, name string) (*state.Workspace, erro
 	if err != nil {
 		return nil, err
 	}
-	w, err := st.Find(m.Cfg.Project, name)
+	w, err := st.Find(m.Cfg.ProjectRoot, name)
 	if err != nil {
 		return nil, fmt.Errorf("workspace.Find(%s): %w", name, ErrWorkspaceNotFound)
 	}
@@ -698,7 +737,7 @@ func (m *Manager) DiscoverOrphans(ctx context.Context) ([]OrphanDir, error) {
 	}
 	knownNames := map[string]struct{}{}
 	for _, w := range st.Workspaces {
-		if w.Project == m.Cfg.Project {
+		if w.ProjectRoot == m.Cfg.ProjectRoot {
 			knownNames[filepath.Base(w.Path)] = struct{}{}
 		}
 	}
@@ -754,7 +793,7 @@ func (m *Manager) Reconcile(ctx context.Context) ([]ReconcileChange, error) {
 	err := m.Store.WithLock(func(s *state.State) error {
 		for i := range s.Workspaces {
 			w := &s.Workspaces[i]
-			if w.Project != m.Cfg.Project {
+			if w.ProjectRoot != m.Cfg.ProjectRoot {
 				continue
 			}
 			newStatus, err := m.observeStatus(ctx, w)

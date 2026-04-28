@@ -5,19 +5,81 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
-## v0.5 — multi-project support
+## v0.5 — multi-project support — PARTIAL (2026-04-28)
 
-**What:** Replace single-project-via-cwd-walkup with cross-project workspace listing. Project picker modal in TUI. `-p <project>` flag on subcommands. Project sidebar UX.
+**Shipped on `ancient-hornet`:**
+- Read-only global TUI: `canopy` from outside any project lists every workspace + every alive `<project>-main` session canopy knows about. Enter on `ready`/`main` rows attaches via tmux.
+- Init splash: `canopy` in a fresh git repo (no canopy.json) shows an init prompt; pressing `i` runs `canopy init` synchronously after the splash exits.
+- Project ID = canonical absolute root path. State.Projects map keyed by it. Workspace.ProjectRoot field is the v2 authoritative key. Lazy v1→v2 migration runs once at workspace.New time.
+- Basename uniqueness invariant: `canopy init` and `workspace.New` refuse to register a project whose basename collides with another already-registered project. State on disk is left untouched on refusal.
+- Reusable `internal/ui/projectlist/` Bubbletea sub-component: GlobalModel wraps it; the future v1 in-session overlay (below) embeds the same component instead of re-rendering the table.
+- `state.BuildGlobalRows` is the single source of truth for the project-grouped row list; both `canopy ls --all` (tabwriter) and the TUI consume it.
 
-**Why:** Avi has multiple projects in `~/Work/` (cravd, brain, hey-cli, dotfiles, tries). v0 only handles whichever repo you're cd'd into. Once cravd is dogfood-stable, switching across projects in one TUI session is the next big UX unlock.
+**Still deferred to v0.6 (see entries below):** create/remove from global mode, project picker modal, `-p <project>` flag.
 
-**Pros:** Matches the original spec. Removes the "cd to canopy a different project" friction. Sets up a project-aggregator pattern that scales to many repos.
+---
 
-**Cons:** Adds project-picker modal (~3 hours Bubbletea), `-p` flag plumbing, and a registry of "known projects" (probably `~/.canopy/projects.json` — list of repo paths that have a `canopy.json`). Real scope.
+## v0.6 — global mode lifecycle (create / remove from anywhere)
 
-**Context:** v0 design discovers project via cwd walk-up. State already keys workspaces by `(project, name)` tuple, so the data model supports multi-project from day 1 — only the UX and discovery layer need work. Good entry points: `internal/config/discover.go` (add `DiscoverAll() []Project`), `internal/ui/` (add project sidebar), `cmd/canopy/new.go` (add `-p` flag).
+**What:** Make `canopy` in global mode able to create + remove workspaces without cd'ing into the project. New project picker modal: 'n' in global mode → list of registered projects → name input → create. 'd' on a global-mode row → confirm → remove (without needing the project's canopy.json on hand).
 
-**Depends on / blocked by:** v0 must ship first. No technical blockers.
+**Why:** v0.5 ships read-only global mode. The friction is "see workspaces from anywhere, but to create one you still cd in." Once we've felt that friction in real use, we'll know whether the project picker is worth the UX complexity (two modals deep) or whether attaching is good enough.
+
+**Pros:** Closes the "open canopy anywhere, do everything from there" loop. Project basenames are already unique in v0.5 (uniqueness invariant), so the picker can use basenames as display labels with no disambig logic.
+
+**Cons:** Two modals deep (pick project, then name). The TUI's viewMode enum grows. Resurrecting a stopped workspace from global mode requires loading the source canopy.json — possible via `git -C <worktree-path> rev-parse --git-common-dir` to find the source repo without needing a registry, but adds a code path that can fail (deleted source repo, etc.).
+
+**Context:** v0.5 wired the data layer correctly (state.Projects keyed by canonical root, basename uniqueness enforced). The picker would just iterate `state.Projects` and let the user pick a root. From there `canopy.json` lookup is `<root>/canopy.json` and the existing workspace.New flow runs unchanged. Resurrect-from-global is the only new code path that needs invented; everything else is UI plumbing.
+
+**Depends on / blocked by:** v0.5 ancient-hornet branch landed.
+
+---
+
+## v0.6 — `canopy reconcile --remove-project <root>`
+
+**What:** A CLI surface for removing a project entry from `state.Projects` (and any of its workspaces) without hand-editing state.json. Triggers the basename-collision-refusal escape hatch when the colliding project is gone from disk.
+
+**Why:** v0.5 refuses to init a basename-colliding project, with the workaround being "hand-edit state.json." That's fine for power users but not for the "I deleted ~/Work/cravd and now ~/Code/cravd init refuses" case. We need a clean way to evict a stale project entry.
+
+**Pros:** Closes the only remaining hand-edit-state.json case in v0.5. ~30 LOC.
+
+**Cons:** Subcommand surface area. Needs careful UX (don't accidentally evict a real project's data because basenames matched).
+
+**Context:** Implementation: extend `cmd/canopy/reconcile.go` with a `--remove-project <canonical-root>` flag. Under state.WithLock: assert `s.Projects[root]` exists, refuse if any Workspaces still reference that root (force flag to override), then `delete(s.Projects, root)`. Print a confirmation summary.
+
+**Depends on / blocked by:** v0.5.
+
+---
+
+## v0.6 — drop legacy `Workspace.Project` field
+
+**What:** v0.5 keeps Workspace.Project (basename) as a legacy-read-only field for back-compat with v1 state files. Once everyone has migrated (one release of v0.5+ in the wild), drop the field entirely.
+
+**Why:** Single source of truth. As long as Project (basename) is alongside ProjectRoot (canonical path), there's a temptation to use the wrong one and we keep paying the back-compat cost on every state.json read.
+
+**Pros:** Simpler schema. ~20 LOC of cleanup across state.go, lifecycle.go, listing.go.
+
+**Cons:** Anyone running v0.5+ that hasn't yet run a project-scoped command (which would trigger migration) would have un-migrated v1 rows still in their state.json when they upgrade to v0.6. Mitigation: add a one-shot `state.MigrateLegacyAll()` in v0.6 that walks every entry and migrates them by basename → root lookup; for orphans (basename in state, no project found at any known root), error and require manual reconcile.
+
+**Context:** Mechanism: stop emitting `omitempty` legacy field in v0.5+, then drop the field entirely in v0.6. Bump SchemaVersion to 3.
+
+**Depends on / blocked by:** v0.5 has shipped + been in use for at least one cycle.
+
+---
+
+## v0.6 — global mode E2E tests
+
+**What:** Three Go tests under `-tags=e2e`: canopy-from-home (global TUI launches with rows from prior project-scoped activity), canopy-from-fresh-repo (init splash launches and `i` produces a canopy.json), canopy-from-project (today's project TUI, regression).
+
+**Why:** The three top-level routing flows currently have unit tests for the routing decision and TUI-layer smoke tests, but no end-to-end test that wires `canopy` through to the actual screen. Manual smoke checklist works for solo dev; E2E is the safety net once multi-agent CI starts running.
+
+**Pros:** Real regression coverage for the entire user-facing flow.
+
+**Cons:** ~2-3h of test plumbing — vt100/expect-style harness for Bubbletea programs, plus tmux socket isolation for the project flow. Tests would be slow (2-5s each) so probably gated behind `-tags=e2e` like the existing workspace tests.
+
+**Context:** Bubbletea has [teatest](https://github.com/charmbracelet/x/tree/main/exp/teatest) for golden-file Model testing. Use that for the splash + global flows. Project flow already has E2E coverage via the existing `internal/workspace/lifecycle_test.go`.
+
+**Depends on / blocked by:** v0.5 ancient-hornet shipped.
 
 ---
 

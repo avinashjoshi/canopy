@@ -35,7 +35,20 @@ var log = clog.Pkg("state")
 
 // SchemaVersion is the version of the on-disk JSON schema. Bumping it
 // signals that future canopy versions need to migrate the file.
-const SchemaVersion = 1
+//
+//	v1 (canopy <= v0.4): Projects map keyed by project basename; Workspace
+//	  rows use Project (basename) as the project key.
+//	v2 (canopy >= v0.5): Projects map keyed by canonical absolute project
+//	  root path; Workspace rows have ProjectRoot (canonical path) as the
+//	  authoritative key. Workspace.Project is kept as a legacy-read field
+//	  for one release so v0.5 can still parse v1 files; never written by
+//	  v0.5+.
+//
+// State files are migrated lazily on the first project-scoped command via
+// State.MigrateLegacyProject — there's no big-bang migration script and a
+// v1 file Loads cleanly into v2 structs (legacy fields populate, new
+// fields stay zero until migration runs).
+const SchemaVersion = 2
 
 // Status enumerates the five workspace states from the design doc.
 //
@@ -55,8 +68,23 @@ const (
 
 // Workspace is one row in state.json. Field tags match the design doc's
 // JSON schema exactly so the on-disk file stays human-readable.
+//
+// Project IDs migrated in v2: ProjectRoot (canonical absolute path) is the
+// authoritative key. Project (basename) is kept for one release as a
+// legacy-read field so v0.5 can parse v1 state.json files; v0.5+ writes
+// both for backward compat. v0.6 will drop the legacy Project field.
 type Workspace struct {
-	Project     string    `json:"project"`
+	// Project is the legacy basename-keyed project name. v1 state files
+	// only have this. v2+ also writes it for backward compat with tools
+	// that grep state.json. Lookups should prefer ProjectRoot.
+	Project string `json:"project,omitempty"`
+
+	// ProjectRoot is the canonical absolute path to the project's repo
+	// root (the directory containing canopy.json), as resolved by
+	// filepath.EvalSymlinks. Authoritative key in v2+; empty in v1 rows
+	// until MigrateLegacyProject runs.
+	ProjectRoot string `json:"project_root,omitempty"`
+
 	Name        string    `json:"name"`
 	Branch      string    `json:"branch"`
 	Path        string    `json:"path"`
@@ -74,14 +102,23 @@ type Workspace struct {
 }
 
 // ProjectMeta tracks per-project metadata that lives outside any single
-// workspace row. Today it holds the project's allocated port base —
-// canopy's port plan assigns each project a deterministic block (default
-// 1000 ports wide) so workspaces in the same project cluster together.
+// workspace row. Holds the project's allocated port base (deterministic
+// per-project block, default 1000 wide) plus the canonical root path.
 //
-// First-come-first-served at canopy's first sight of a project. Stable
-// across reboots and `canopy rm`s; only nuking ~/.canopy/state.json
+// PortBase is first-come-first-served at canopy's first sight of a project.
+// Stable across reboots and `canopy rm`s; only nuking ~/.canopy/state.json
 // would re-shuffle the assignments.
+//
+// Root mirrors the State.Projects map key for self-describing meta — when
+// you look up s.Projects["/home/avi/Work/canopy"], the meta value's Root
+// field is also "/home/avi/Work/canopy". Redundant on purpose: it lets
+// tooling read meta without also tracking which key it came from.
 type ProjectMeta struct {
+	// Root is the canonical absolute path to the project's repo root
+	// (the directory containing canopy.json). Same value as the map key.
+	// Empty in v1 entries until MigrateLegacyProject runs.
+	Root string `json:"root,omitempty"`
+
 	PortBase int `json:"port_base"`
 }
 
@@ -103,13 +140,20 @@ var (
 	ErrAlreadyExists = errors.New("state: workspace already exists")
 )
 
-// Find returns a pointer to the workspace with the given (project, name)
-// tuple, or nil + ErrNotFound. The returned pointer is into the caller's
-// State slice; mutations are visible after Save.
-func (s *State) Find(project, name string) (*Workspace, error) {
+// Find returns a pointer to the workspace with the given (projectRoot, name)
+// tuple, or nil + ErrNotFound. projectRoot is the canonical absolute path
+// to the project's repo root (the v2 authoritative key); callers typically
+// pass m.Cfg.ProjectRoot.
+//
+// The returned pointer is into the caller's State slice; mutations are
+// visible after Save. After MigrateLegacyProject has run on the relevant
+// project, every Workspace row has ProjectRoot populated; rows that haven't
+// been migrated yet are invisible to Find — that's a feature, not a bug,
+// because the lifecycle code that calls Find always runs migration first.
+func (s *State) Find(projectRoot, name string) (*Workspace, error) {
 	for i := range s.Workspaces {
 		w := &s.Workspaces[i]
-		if w.Project == project && w.Name == name {
+		if w.ProjectRoot == projectRoot && w.Name == name {
 			return w, nil
 		}
 	}
@@ -117,20 +161,21 @@ func (s *State) Find(project, name string) (*Workspace, error) {
 }
 
 // Add appends w to State.Workspaces if no row already exists for the same
-// (project, name). Returns ErrAlreadyExists otherwise.
+// (ProjectRoot, Name). Returns ErrAlreadyExists otherwise. Callers must
+// populate w.ProjectRoot — Add does not infer it from cfg.
 func (s *State) Add(w Workspace) error {
-	if _, err := s.Find(w.Project, w.Name); err == nil {
-		return fmt.Errorf("state.Add(%s/%s): %w", w.Project, w.Name, ErrAlreadyExists)
+	if _, err := s.Find(w.ProjectRoot, w.Name); err == nil {
+		return fmt.Errorf("state.Add(%s/%s): %w", w.ProjectRoot, w.Name, ErrAlreadyExists)
 	}
 	s.Workspaces = append(s.Workspaces, w)
 	return nil
 }
 
-// EnsureProjectBase returns the port base assigned to project. If the
-// project hasn't been seen before, allocates the next free base
-// (firstBase, firstBase+stride, firstBase+2×stride, ...) and persists
-// it in s.Projects. Caller must be holding the state lock — this
-// mutates s in place.
+// EnsureProjectBase returns the port base assigned to a project, identified
+// by its canonical absolute root path. If the project hasn't been seen
+// before, allocates the next free base (firstBase, firstBase+stride,
+// firstBase+2×stride, ...) and persists it in s.Projects. Caller must be
+// holding the state lock — this mutates s in place.
 //
 // Returns the base + a boolean indicating whether a new assignment was
 // made (callers may want to log the first-time event).
@@ -138,11 +183,17 @@ func (s *State) Add(w Workspace) error {
 // Errors only when the search exceeds maxProjects iterations, which
 // would mean canopy is being asked to track more concurrent projects
 // than the port plan accommodates (default 1000 / 1000 = 1).
-func (s *State) EnsureProjectBase(project string, firstBase, stride, maxProjects int) (int, bool, error) {
+func (s *State) EnsureProjectBase(projectRoot string, firstBase, stride, maxProjects int) (int, bool, error) {
 	if s.Projects == nil {
 		s.Projects = map[string]ProjectMeta{}
 	}
-	if meta, ok := s.Projects[project]; ok {
+	if meta, ok := s.Projects[projectRoot]; ok {
+		// Self-heal: an old v1 entry that got migrated may have left the
+		// Root field empty. Backfill on next access.
+		if meta.Root == "" {
+			meta.Root = projectRoot
+			s.Projects[projectRoot] = meta
+		}
 		return meta.PortBase, false, nil
 	}
 	used := make(map[int]struct{}, len(s.Projects))
@@ -152,24 +203,25 @@ func (s *State) EnsureProjectBase(project string, firstBase, stride, maxProjects
 	for i := 0; i < maxProjects; i++ {
 		candidate := firstBase + i*stride
 		if _, taken := used[candidate]; !taken {
-			s.Projects[project] = ProjectMeta{PortBase: candidate}
+			s.Projects[projectRoot] = ProjectMeta{Root: projectRoot, PortBase: candidate}
 			return candidate, true, nil
 		}
 	}
 	return 0, false, fmt.Errorf("state.EnsureProjectBase: ran out of project slots after %d", maxProjects)
 }
 
-// Remove deletes the workspace with the given (project, name) from the
-// slice. Returns ErrNotFound if no match.
-func (s *State) Remove(project, name string) error {
+// Remove deletes the workspace with the given (projectRoot, name) from the
+// slice. Returns ErrNotFound if no match. projectRoot is the canonical
+// absolute path to the project's repo root (the v2 authoritative key).
+func (s *State) Remove(projectRoot, name string) error {
 	for i := range s.Workspaces {
 		w := s.Workspaces[i]
-		if w.Project == project && w.Name == name {
+		if w.ProjectRoot == projectRoot && w.Name == name {
 			s.Workspaces = append(s.Workspaces[:i], s.Workspaces[i+1:]...)
 			return nil
 		}
 	}
-	return fmt.Errorf("state.Remove(%s/%s): %w", project, name, ErrNotFound)
+	return fmt.Errorf("state.Remove(%s/%s): %w", projectRoot, name, ErrNotFound)
 }
 
 // Store is the on-disk handle for state.json. The zero value is invalid;

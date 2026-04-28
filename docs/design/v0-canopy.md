@@ -309,6 +309,43 @@ canopy switch <name>            # attach (ready) / resurrect (stopped) / show er
 
 `canopy` resolves the active project by walking up from cwd to find `canopy.json`. If none: error with "no canopy.json found in cwd or any parent directory."
 
+### `canopy` (no subcommand) is context-sensitive (v0.5+)
+
+The no-args invocation routes to one of three Bubbletea surfaces based on cwd state. Routing lives in `cmd/canopy/route.go:routeRoot`.
+
+```
++-----------------------------+
+|  canopy (no subcommand)     |
++--------------+--------------+
+               v
+   config.DiscoverAndLoad(cwd)
+               |
+       +-------+-------+
+       |               |
+   canopy.json    ErrNotFound
+       |               |
+       v               v
+  project TUI     git.IsRepo(cwd)?
+  (today's flow)   |        |
+                  yes      no
+                   v        v
+              init splash  global TUI
+              (press 'i'   (read-only
+              to init)    project list)
+```
+
+- **Project TUI (today's flow):** unchanged — workspace.Manager + project Model.
+- **Init splash:** `internal/ui/model_splash.go`. Single screen, `i` opts into init. On opt-in, the splash exits Bubbletea cleanly and main.go calls `runInit` synchronously so output prints to a normal terminal post-altscreen.
+- **Global TUI:** `internal/ui/model_global.go` wraps the reusable `internal/ui/projectlist.Model` (the listing component shared with `canopy ls --all` via `state.BuildGlobalRows` and with the future v1 in-session overlay). Read-only in v0.5: enter on `ready`/`main` rows attaches via tmux; `stopped`/`broken`/`orphaned` rows show a status hint pointing the user to cd into the project. Create/remove from global mode is deferred to v0.6 (see TODOS.md).
+
+### Project ID (v0.5+)
+
+Project identity is the **canonical absolute root path** to the directory containing `canopy.json` (resolved via `filepath.EvalSymlinks` once at `config.Load` time). State.Projects is keyed by this path; Workspace.ProjectRoot is the v2 authoritative key.
+
+Basename uniqueness is invariant: `canopy init` and `workspace.New` refuse to register a project whose basename collides with another already-registered project. This keeps tmux session names unambiguous (no `<basename>-<workspace>` collisions) and means display labels never need disambiguation logic.
+
+State files migrate lazily v1→v2 in `workspace.New` via `state.MigrateLegacyProject(basename, canonicalRoot)` — idempotent, port-preserving, no big-bang script. v1 files Load cleanly into v2 structs; the legacy `Workspace.Project` field is preserved as read-only for one release.
+
 ### Random workspace names
 
 Names follow a `<adjective>-<noun>` pattern: lowercase, hyphen-separated. Examples: `bold-falcon`, `silent-otter`, `quiet-pine`, `swift-comet`. Implementation lives in `internal/namegen/` with two embedded string slices (~60 adjectives × ~60 nouns = 3600 combinations). Collision check: if the generated name exists in state.json, regenerate.

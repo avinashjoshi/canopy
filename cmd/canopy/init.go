@@ -4,12 +4,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"github.com/avinashjoshi/canopy/internal/state"
 )
+
+// initOptions are the user-facing flags that govern runInit's behavior.
+// Decoupled from cobra so the splash screen flow (which exits Bubbletea
+// then calls runInit synchronously) doesn't have to construct cobra args.
+type initOptions struct {
+	Force       bool
+	WithScripts bool
+}
 
 // initFlags holds the parsed flag values for `canopy init`.
 var initFlags struct {
@@ -57,91 +68,244 @@ func initCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("init: getwd: %w", err)
 			}
-
-			canopyJSON := filepath.Join(cwd, "canopy.json")
-			if _, err := os.Stat(canopyJSON); err == nil && !initFlags.force {
-				// Friendly path: this project is already initialized. Print a
-				// helpful message, exit 0 — `canopy init` is idempotent in
-				// spirit. --force is documented inline so the user doesn't
-				// have to read --help.
-				fmt.Fprintf(cmd.OutOrStdout(),
-					"%s already exists. This project is already initialized.\n",
-					canopyJSON)
-				fmt.Fprintln(cmd.OutOrStdout(), "")
-				fmt.Fprintln(cmd.OutOrStdout(), "  - Run `canopy new` to create a workspace.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  - Run `canopy init --force` to regenerate canopy.json.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  - Run `canopy init --with-scripts --force` to also write bin/canopy-* stubs.")
-				return nil
-			}
-
-			// If a conductor.json sits next to us, mirror its scripts. The
-			// presence of a conductor.json takes precedence over --with-scripts:
-			// the user already has working scripts and we shouldn't generate
-			// stubs that would shadow them.
-			scripts, source := readConductor(cwd)
-			generatedStubs := false
-			if scripts != nil {
-				// Conductor mode — use conductor.json's script paths verbatim.
-			} else if initFlags.withScripts {
-				// Fresh project + opted in to scaffolding.
-				scripts = stubScripts()
-				generatedStubs = true
-			} else {
-				// Fresh project, default mode: empty scripts. canopy will
-				// create workspaces with no hooks until the user fills them in.
-				scripts = &canopyScripts{}
-			}
-
-			if err := writeCanopyJSON(canopyJSON, scripts); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", canopyJSON)
-			if source != "" {
-				fmt.Fprintf(cmd.OutOrStdout(),
-					"  (mirrored scripts from %s — canopy uses the same schema)\n", source)
-			}
-
-			if generatedStubs {
-				written, err := writeStubScripts(cwd, scripts)
-				if err != nil {
-					return err
-				}
-				for _, p := range written {
-					fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", p)
-				}
-			}
-
-			fmt.Fprintln(cmd.OutOrStdout(), "")
-			fmt.Fprintln(cmd.OutOrStdout(), "Next steps:")
-			switch {
-			case source != "":
-				fmt.Fprintln(cmd.OutOrStdout(), "  1. Review canopy.json and confirm the script paths look right.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  2. Commit canopy.json.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  3. Run `canopy new` to verify.")
-				fmt.Fprintln(cmd.OutOrStdout(), "")
-				fmt.Fprintln(cmd.OutOrStdout(), "  Your existing bin/conductor-* scripts and any config files reading")
-				fmt.Fprintln(cmd.OutOrStdout(), "  CONDUCTOR_* env vars will keep working — canopy exports the CONDUCTOR_*")
-				fmt.Fprintln(cmd.OutOrStdout(), "  aliases alongside CANOPY_* for migration compatibility.")
-			case generatedStubs:
-				fmt.Fprintln(cmd.OutOrStdout(), "  1. Edit bin/canopy-setup to install deps and prepare the workspace.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  2. Edit bin/canopy-run with your dev-server command (or delete it if not needed).")
-				fmt.Fprintln(cmd.OutOrStdout(), "  3. Edit bin/canopy-archive to drop databases / kill processes (or delete it if not needed).")
-				fmt.Fprintln(cmd.OutOrStdout(), "  4. Commit canopy.json and bin/canopy-*.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  5. Run `canopy new` to create your first workspace.")
-			default:
-				fmt.Fprintln(cmd.OutOrStdout(), "  Run `canopy new` to create your first workspace — canopy will spin up")
-				fmt.Fprintln(cmd.OutOrStdout(), "  a worktree + tmux session with no setup hook.")
-				fmt.Fprintln(cmd.OutOrStdout(), "")
-				fmt.Fprintln(cmd.OutOrStdout(), "  Want hooks? Re-run `canopy init --with-scripts --force` to scaffold")
-				fmt.Fprintln(cmd.OutOrStdout(), "  bin/canopy-{setup,run,archive} stubs you can fill in.")
-			}
-			return nil
+			return runInit(cwd, initOptions{
+				Force:       initFlags.force,
+				WithScripts: initFlags.withScripts,
+			}, cmd.OutOrStdout())
 		},
 	}
 	cmd.Flags().BoolVar(&initFlags.force, "force", false, "overwrite an existing canopy.json")
 	cmd.Flags().BoolVar(&initFlags.withScripts, "with-scripts", false,
 		"also write stub bin/canopy-{setup,run,archive} scripts (ignored when a conductor.json is detected)")
 	return cmd
+}
+
+// runInit is the extracted body of `canopy init`'s RunE. The cobra command
+// is a thin wrapper; the splash screen flow (init splash → tea.Quit → main
+// calls runInit) calls this directly so the same code path runs whether
+// the user typed `canopy init` or pressed `i` in the splash.
+//
+// runInit's contract:
+//
+//  1. If canopy.json exists and !Force: print friendly "already initialized"
+//     and return nil. Idempotent in spirit; the caller doesn't have to check.
+//  2. Resolve cwd to its canonical absolute path (EvalSymlinks). Check
+//     state.json for a basename collision with any OTHER registered project.
+//     If collision: refuse with a clear error pointing at both paths,
+//     leaving disk untouched.
+//  3. Write canopy.json (with conductor.json mirror if present, or stub
+//     scripts if WithScripts).
+//  4. Register the project in state.Projects so canopy ls (global mode)
+//     and the TUI know about it before the first canopy new. PortBase is
+//     left zero — port allocation still happens lazily on first workspace
+//     creation, same as before v0.5.
+//  5. Print the next-steps block.
+//
+// Errors at any step are returned wrapped with %w. Steps 3 and 4 happen
+// in that order so a state-write failure doesn't leave the user with a
+// canopy.json the system doesn't know about — actually wait, that's the
+// risk we accept: writing canopy.json first means a partial init can
+// leave a canopy.json without a state entry. Mitigation: workspace.New
+// will create the state entry lazily on first use anyway, so the worst
+// case is a benign state-not-yet-written window between init and new.
+func runInit(cwd string, opts initOptions, stdout io.Writer) error {
+	canopyJSON := filepath.Join(cwd, "canopy.json")
+	if _, err := os.Stat(canopyJSON); err == nil && !opts.Force {
+		// Already initialized — friendly path, exit 0.
+		fmt.Fprintf(stdout,
+			"%s already exists. This project is already initialized.\n",
+			canopyJSON)
+		fmt.Fprintln(stdout, "")
+		fmt.Fprintln(stdout, "  - Run `canopy new` to create a workspace.")
+		fmt.Fprintln(stdout, "  - Run `canopy init --force` to regenerate canopy.json.")
+		fmt.Fprintln(stdout, "  - Run `canopy init --with-scripts --force` to also write bin/canopy-* stubs.")
+		return nil
+	}
+
+	// Canonicalize cwd the same way config.Load does (EvalSymlinks → abs).
+	// This is the key we'll register in state.Projects, so it has to match
+	// what subsequent canopy.json discovery will produce.
+	canonicalRoot, err := canonicalize(cwd)
+	if err != nil {
+		return fmt.Errorf("init: canonicalize cwd: %w", err)
+	}
+	basename := filepath.Base(canonicalRoot)
+
+	// Basename uniqueness gate. Open state.json (read-only at this point)
+	// and check for collisions BEFORE writing anything to disk. If a
+	// collision exists, we refuse — the user must rename one of the
+	// directories or hand-edit state.json. Pre-write check means a refused
+	// init leaves disk untouched.
+	if err := guardBasenameCollision(canonicalRoot, basename); err != nil {
+		return err
+	}
+
+	// If a conductor.json sits next to us, mirror its scripts. The
+	// presence of a conductor.json takes precedence over --with-scripts:
+	// the user already has working scripts and we shouldn't generate
+	// stubs that would shadow them.
+	scripts, source := readConductor(cwd)
+	generatedStubs := false
+	if scripts != nil {
+		// Conductor mode — use conductor.json's script paths verbatim.
+	} else if opts.WithScripts {
+		// Fresh project + opted in to scaffolding.
+		scripts = stubScripts()
+		generatedStubs = true
+	} else {
+		// Fresh project, default mode: empty scripts. canopy will
+		// create workspaces with no hooks until the user fills them in.
+		scripts = &canopyScripts{}
+	}
+
+	if err := writeCanopyJSON(canopyJSON, scripts); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Wrote %s\n", canopyJSON)
+	if source != "" {
+		fmt.Fprintf(stdout,
+			"  (mirrored scripts from %s — canopy uses the same schema)\n", source)
+	}
+
+	if generatedStubs {
+		written, err := writeStubScripts(cwd, scripts)
+		if err != nil {
+			return err
+		}
+		for _, p := range written {
+			fmt.Fprintf(stdout, "Wrote %s\n", p)
+		}
+	}
+
+	// Register the project in state.Projects under the canonical root key.
+	// PortBase stays zero until first workspace creation. Best-effort: a
+	// failure here doesn't roll back the canopy.json write (workspace.New
+	// will reconcile on first use), but we still surface the error so the
+	// user knows.
+	if err := registerProject(canonicalRoot, basename); err != nil {
+		fmt.Fprintf(stdout,
+			"warning: registered canopy.json but couldn't update state.json: %v\n", err)
+		fmt.Fprintln(stdout, "  Project will be registered automatically on first `canopy new`.")
+	}
+
+	fmt.Fprintln(stdout, "")
+	fmt.Fprintln(stdout, "Next steps:")
+	switch {
+	case source != "":
+		fmt.Fprintln(stdout, "  1. Review canopy.json and confirm the script paths look right.")
+		fmt.Fprintln(stdout, "  2. Commit canopy.json.")
+		fmt.Fprintln(stdout, "  3. Run `canopy new` to verify.")
+		fmt.Fprintln(stdout, "")
+		fmt.Fprintln(stdout, "  Your existing bin/conductor-* scripts and any config files reading")
+		fmt.Fprintln(stdout, "  CONDUCTOR_* env vars will keep working — canopy exports the CONDUCTOR_*")
+		fmt.Fprintln(stdout, "  aliases alongside CANOPY_* for migration compatibility.")
+	case generatedStubs:
+		fmt.Fprintln(stdout, "  1. Edit bin/canopy-setup to install deps and prepare the workspace.")
+		fmt.Fprintln(stdout, "  2. Edit bin/canopy-run with your dev-server command (or delete it if not needed).")
+		fmt.Fprintln(stdout, "  3. Edit bin/canopy-archive to drop databases / kill processes (or delete it if not needed).")
+		fmt.Fprintln(stdout, "  4. Commit canopy.json and bin/canopy-*.")
+		fmt.Fprintln(stdout, "  5. Run `canopy new` to create your first workspace.")
+	default:
+		fmt.Fprintln(stdout, "  Run `canopy new` to create your first workspace — canopy will spin up")
+		fmt.Fprintln(stdout, "  a worktree + tmux session with no setup hook.")
+		fmt.Fprintln(stdout, "")
+		fmt.Fprintln(stdout, "  Want hooks? Re-run `canopy init --with-scripts --force` to scaffold")
+		fmt.Fprintln(stdout, "  bin/canopy-{setup,run,archive} stubs you can fill in.")
+	}
+	return nil
+}
+
+// canonicalize returns the canonical absolute path for dir, with symlinks
+// resolved. Mirrors config.Load's logic so init's basename-uniqueness
+// check uses the same key the rest of canopy will see for this project.
+func canonicalize(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	return abs, nil
+}
+
+// guardBasenameCollision opens state.json read-only and refuses if any
+// other project shares the basename. No-op if state.json doesn't exist
+// (first-ever init). Returns a user-readable error pointing at both paths
+// so the user can fix things by hand.
+//
+// Used as the early gate (before writing canopy.json) so a refused init
+// leaves the user's disk fully untouched. registerProject re-checks under
+// the state lock to close the TOCTOU window.
+func guardBasenameCollision(canonicalRoot, basename string) error {
+	store, err := openStateForInit()
+	if err != nil {
+		return err
+	}
+	st, err := store.Load()
+	if err != nil {
+		return fmt.Errorf("init: load state.json: %w", err)
+	}
+	if other := st.FindBasenameCollision(canonicalRoot); other != "" {
+		return collisionError(basename, other, canonicalRoot)
+	}
+	return nil
+}
+
+// collisionError formats the user-facing message for a refused init. Used
+// by both the early gate and the inside-lock recheck so the wording stays
+// consistent.
+func collisionError(basename, otherRoot, thisRoot string) error {
+	return fmt.Errorf(
+		"canopy init: project basename %q is already registered for %q.\n"+
+			"  This canopy.json would create a second project also named %q at %q.\n"+
+			"  canopy doesn't yet support same-named projects. Options:\n"+
+			"    - Rename one of the directories.\n"+
+			"    - Hand-edit ~/.canopy/state.json to remove the stale entry if that project is gone.",
+		basename, otherRoot, basename, thisRoot)
+}
+
+// registerProject creates an entry in state.Projects for canonicalRoot if
+// one doesn't already exist. PortBase stays zero — lazy port allocation
+// in workspace.Create assigns one on first use.
+//
+// Holds the state lock for the full check + write window so a concurrent
+// canopy init in a different terminal can't sneak a colliding registration
+// in between guardBasenameCollision and this call.
+//
+// Idempotent: if the entry already exists (re-running init --force on a
+// known project), this is a no-op.
+func registerProject(canonicalRoot, basename string) error {
+	store, err := openStateForInit()
+	if err != nil {
+		return err
+	}
+	return store.WithLock(func(s *state.State) error {
+		// Re-check inside the lock — closes the TOCTOU between the early
+		// guard and the registration write.
+		if other := s.FindBasenameCollision(canonicalRoot); other != "" {
+			return collisionError(basename, other, canonicalRoot)
+		}
+		if s.Projects == nil {
+			s.Projects = map[string]state.ProjectMeta{}
+		}
+		if _, ok := s.Projects[canonicalRoot]; ok {
+			return nil // already registered, nothing to do
+		}
+		s.Projects[canonicalRoot] = state.ProjectMeta{Root: canonicalRoot}
+		return nil
+	})
+}
+
+// openStateForInit returns a state.Store rooted at ~/.canopy. Same as the
+// one in ls.go's openStateReadOnly but kept locally to avoid threading a
+// dependency between unrelated subcommands.
+func openStateForInit() (*state.Store, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("init: home dir: %w", err)
+	}
+	return state.NewStore(filepath.Join(home, ".canopy"))
 }
 
 // readConductor returns the scripts block from a conductor.json sibling

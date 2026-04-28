@@ -123,10 +123,21 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config.Load(%s): %w", path, err)
 	}
 
+	// Canonicalize the project root: absolute path with symlinks resolved.
+	// This is the key used in state.json's Projects map (v2+), so it must
+	// be stable across runs regardless of how the user cd'd in. Without
+	// EvalSymlinks, a user with `~/code -> /home/avi/code` would register
+	// the project differently depending on which path they used.
 	root, err := filepath.Abs(filepath.Dir(path))
 	if err != nil {
 		return nil, fmt.Errorf("config.Load: abs root: %w", err)
 	}
+	if resolved, lerr := filepath.EvalSymlinks(root); lerr == nil {
+		root = resolved
+	}
+	// Else: EvalSymlinks failed (rare — usually means a missing dir, but
+	// the dir HAS to exist since canopy.json is in it). Fall through with
+	// the abs path; it's still a valid stable identifier on this machine.
 	c.ProjectRoot = root
 	c.Project = filepath.Base(root)
 
