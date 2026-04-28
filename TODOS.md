@@ -169,25 +169,29 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
-## v0.6 — Agent lifecycle wrapper
+## v0.6 — Agent lifecycle wrapper + detectors
 
-**What:** Wrap every agent session with canopy-assembled workspace context so any coding agent (Claude, Codex, OpenCode, aider) starts knowing the workspace name, branch, port, and the canopy lifecycle conventions (rename when scoped, rm when shipped). Three pieces:
+**What:** Wrap every agent session with canopy-assembled workspace context + active lifecycle detector hints so any coding agent (Claude, Codex, OpenCode, aider) boots knowing where it is in the feature lifecycle. Seven accepted scope items:
 
-1. `scripts.agent` field in `canopy.json` — user-supplied launcher script for the agent pane (replaces today's hardcoded `claude --continue || claude`).
-2. `agent_briefing` field in `canopy.json` — optional free-text project briefing.
-3. canopy writes `<workspace>/.canopy/AGENT.md` at create time with workspace context + universal lifecycle reminders + the project's `agent_briefing`. The launcher script feeds this file into the agent's system-prompt surface.
+1. `agent.{type, briefing, briefing_file}` block in `canopy.json` — agent-agnostic config (default `type: claude`). `scripts.agent` stays as a power-user override.
+2. Built-in launcher map in `internal/agent/launchers.go` keyed by `agent.type` (claude/codex/opencode/aider). Adding a new agent = one PR adding a map entry.
+3. Briefing assembled in-memory and passed inline (no persistent `.canopy/AGENT.md` file). Hybrid strategy: full briefing on fresh launch (AgentLaunchCount==0), hints-only delta on resume; skipped entirely if no hints active on resume.
+4. Detector framework at `internal/lifecycle/`: rename_suggested, shipped, pr_status. Run as parallel tea.Cmd goroutines. pr_status caches 10min in-memory; runs only on canopy reconcile + manual `r`. Hints recomputed on demand, NOT persisted in state.json.
+5. `canopy new` extended with `--pr <num>` / `--issue <num>` / `--branch <name>` / `--allow-local` flags. Each gets a dedicated AGENT.md briefing variant. PR/issue body wrapped with delimiter framing as basic prompt-injection mitigation.
+6. `canopy rm` smart pre-flight safety: refuses on uncommitted/unpushed/open PR; `--force` bypass; orphan workspaces (worktree dir gone) get a warning + proceed.
+7. `auto_close_shipped` flag in `~/.canopy/config.json` (default false). When true: shipped detector firing + safety check passing → 5s cancel window in TUI / immediate run in headless reconcile.
 
-Plus the `canopy rename <new-branch>` verb to support the lifecycle's "rename branch once feature is scoped" step (separate entry below).
+State schema: `Workspace.AgentLaunchCount int` + `Workspace.SourceKind string` (one-time set: fresh/pr/issue/branch).
 
-**Why:** Today canopy hardcodes Claude. As coding-agent CLIs proliferate (Codex, OpenCode, aider, ...) we need a single agent-agnostic injection point. CLAUDE.md sprinkles per repo would drift; baking the conventions into canopy keeps them universal. User stated direction: "Wrap everything together as a 'system prompt kinda' before we start the agent session."
+**Why:** Two user-stated outcomes: branch reflects feature intent within minutes of scoping; visible "are we done?" close-out moment at ship time. Today both are forgettable — workspaces accumulate as zombies, branch names stay random. Detectors surface state in the TUI; the briefing teaches the agent how to drive the lifecycle. Agent-agnostic so canopy doesn't lock to Claude as the agent ecosystem evolves.
 
-**Pros:** Pure composition — canopy writes context, user-supplied script feeds it. No agent SDK dependency. Backwards compatible (empty `scripts.agent` falls back to today's behavior). Lifecycle conventions become ambient — every agent in every canopy workspace knows them without per-repo config.
+**Pros:** Conductor's "card with status + archive" pattern, made agent-driven and terminal-native. Single agent-agnostic injection point. No persistent file in worktree (rebuilt fresh per launch). Detector framework extensible — adding stuck/conflict detectors later is one file each. Backwards compatible (empty `agent` block defaults to claude).
 
-**Cons:** Surface area: two new schema fields, one template file canopy must keep current, one new subcommand (`canopy rename`). Default scripts.agent templates per agent (claude / opencode / codex / aider) need to ship with `canopy init --with-scripts --agent <name>` and stay in sync with each agent's evolving CLI.
+**Cons:** Surface area: 12 files touched across new packages (internal/agent, internal/lifecycle) + extensions to 6 existing files. ~700-900 LOC + tests. `agent.type` value coverage matters — adding a new agent requires a launcher map entry that must stay in sync with the agent CLI's evolving flags. Hint badge UX in TUI is real design work (recommend /plan-design-review before shipping).
 
-**Context:** Full design at `docs/design/v0.6-agent-lifecycle.md`. Builds on the v0.5 Multi-AI-tool entry below (which covers the launch-command-config foundation). The lifecycle's "auto-cleanup after PR merges" trigger is deferred to v1 — v0.6 keeps `canopy rm` explicit (Claude/agent calls it after seeing `/ship` succeed).
+**Context:** Full design at `docs/design/v0.6-agent-lifecycle.md` (rewritten 2026-04-28 to match CEO + Eng review decisions). CEO plan with full decision history at `~/.gstack/projects/canopy/ceo-plans/2026-04-28-agent-lifecycle-wrapper.md`. O1 (claude --continue + --append-system-prompt re-injection) verified empirically — works as designed. Implementation order locked; ready to cut a fresh branch off main.
 
-**Depends on / blocked by:** v0.5 multi-AI-tool foundation. `canopy rename` is independent and can ship before this.
+**Depends on / blocked by:** v0.5 ancient-hornet (landed). v0.5 Multi-AI-tool entry below is superseded by this design. `canopy rename` verb still independently useful but not v0.6 critical path.
 
 ---
 
@@ -471,6 +475,72 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 
 ---
 
+## v0.7 — `scripts.shipped` lifecycle hook
+
+**What:** A new optional script in `canopy.json`'s `scripts` block that fires when the v0.6 `shipped` detector triggers for a workspace. User can wire post-merge automation (Slack message, Linear status update, deploy ping, etc.).
+
+**Why:** Power-user wiring. Canopy already has setup/run/archive hooks; shipped is the natural fourth lifecycle moment. Cheap to add once the shipped detector exists. Pairs especially well with `auto_close_shipped: true` in config — the shipped script fires before the auto-rm.
+
+**Pros:** ~30 LOC. Re-uses the existing scripts runner machinery (internal/hooks/runner.go). Same env vars as setup/archive. No schema migration.
+
+**Cons:** Without it, users wire post-merge automation in their CI/PR workflows instead — which is arguably the right place for it. A scripts.shipped hook in canopy duplicates work most teams already do elsewhere.
+
+**Context:** Implementation: extend canopy.json `Scripts` struct with `Shipped string` field. Run from `internal/lifecycle/shipped.go` after the detector confirms shipped state, before the auto-close-on-shipped flag triggers `canopy rm`. Env: standard CANOPY_* + a new CANOPY_SHIPPED_AT timestamp.
+
+**Depends on / blocked by:** v0.6 shipped detector lands.
+
+---
+
+## v0.7 — Stuck workspace detector
+
+**What:** Detector that flags workspaces with no commits and no agent activity in N days (default 7). Surfaces as an amber `stuck (Nd)` hint in the TUI; AGENT.md briefing on next attach starts with: "this workspace has been quiet for N days. Pick up where you left off, or close it?"
+
+**Why:** Workspaces accumulate when an idea didn't pan out. Without explicit prompting, they stay in state.json forever. The shipped detector catches the "worked, ready to close" case; stuck catches the "didn't work, ready to abandon" case.
+
+**Pros:** ~50 LOC. Same shape as rename_suggested / shipped — pure git read (last commit timestamp), no network. Cheap to add once the v0.6 detector framework exists.
+
+**Cons:** Threshold is arbitrary; some users might be intentionally parking work. Configurable via `~/.canopy/config.json` `stuck_days_threshold` (default 7). False positives are mild — just a hint, not destructive.
+
+**Context:** Implementation: `internal/lifecycle/stuck.go` reads `git log -1 --format=%ct` for the workspace's branch, compares to time.Now(). Hint kind: `stuck`. AGENT.md briefing variant on resume: prepended sentence acknowledging the gap.
+
+**Depends on / blocked by:** v0.6 detector framework lands.
+
+---
+
+## v0.7 — Conflict detector
+
+**What:** Detector that flags workspaces whose branch can't merge cleanly into the default branch. Surfaces as a red `conflict` hint; AGENT.md briefing on attach: "rebase onto origin/main first."
+
+**Why:** Long-lived workspaces drift from main. By the time the user comes back, conflicts have accumulated. Surfacing this early saves the "tried to ship, hit conflicts, lost an hour" cycle.
+
+**Pros:** ~60 LOC. Implementation: `git merge-tree` (3-way merge dry-run) returns conflicts as exit code or stderr signal. No external state needed.
+
+**Cons:** Edge case for most users (branches usually merge cleanly). Adds noise if it fires for stale branches that the user is about to abandon anyway.
+
+**Context:** `internal/lifecycle/conflict.go`. Run only on canopy reconcile (not every TUI refresh) — `git merge-tree` can be slow on large repos. Cache result for 10 min per workspace.
+
+**Depends on / blocked by:** v0.6 detector framework lands.
+
+---
+
+## v1 — `canopy event` bus (REJECTED in v0.6, conditional revisit)
+
+**What:** A `canopy event <kind> [args]` CLI verb the agent emits to communicate semantic lifecycle events to canopy (e.g., `canopy event scoped open-canopy-anywhere`, `canopy event committed "auth refactor done"`). Events persist in `~/.canopy/log/<project>/<workspace>/lifecycle.jsonl`. Detectors and downstream features (scripts.shipped hook, dashboards) can subscribe.
+
+**Why considered:** During the v0.6 CEO review (2026-04-28), the agent-side equivalent of canopy detectors was proposed: instead of canopy reading git/gh state, the agent emits events and canopy stores them. Cross-tool integration becomes uniform (every consumer reads the event log).
+
+**Why rejected:** User pushback during review: "agent has access to git/gh, do we really need events? Seems like overkill." Detectors reading git/gh state directly cover the use cases without a new contract.
+
+**Conditional revisit trigger:** Add this only if a real use case shows up that detectors can't satisfy. Concrete example: the v0.7 `scripts.shipped` hook needs a precise "merged at <timestamp>" event that git can't tell us (only that the branch is reachable). If/when scripts.shipped grows that requirement, revisit the event bus.
+
+**Pros (if revisited):** Agent-canopy contract is explicit. Decouples detector cadence (slow) from agent cadence (fast). Foundation for dashboards / Slack notifications / future automation.
+
+**Cons (why we said no for now):** New API surface (verb + storage format + schema). Premature abstraction — solving a problem that doesn't yet exist. canopy stays focused on git+tmux orchestration, not message-bus-as-a-service.
+
+**Depends on / blocked by:** A real, named use case. Not until then.
+
+---
+
 ## v1 — In-session canopy overlay (TurboC++ style)
 
 **What:** A persistent canopy presence inside an attached workspace tmux session — a status bar at the bottom (or a popup-on-hotkey) that shows the workspace name, port, status, and a row of F-key / single-letter shortcuts. One shortcut pops the full canopy splash/list as a `tmux display-popup` overlay so the user can switch workspaces without detaching the current session. Same overlay also shows quick-reference cheatsheet for canopy + tmux keybinds.
@@ -485,7 +555,7 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 
 **Context:** Two layers:
 
-1. **Status bar:** canopy ships a tmux config snippet (sourced via `source-file` from `~/.canopy/tmux.conf` written at `canopy init`) that adds a right-aligned status segment showing `<workspace> :<port> [<status>]`. Polled via `tmux refresh-client -S` every few seconds, populated from `canopy ls --tmux-status` (a new flag that emits a single line ready for tmux's `#()` interpolation). Opt-in only — `canopy init --with-status-bar` and prompted in onboarding.
+1. **Status bar:** canopy ships a tmux config snippet (sourced via `source-file` from `~/.canopy/tmux.conf` written at `canopy init`) that adds a right-aligned status segment showing `<workspace> :<port> [<status>] [hints]`. The `[hints]` segment surfaces v0.6 detector hints inline (`✓ shipped`, `↻ rename`, `PR #N`) so the user sees lifecycle state from inside an attached session without detaching to the global TUI. Polled via `tmux refresh-client -S` every few seconds, populated from `canopy ls --tmux-status` (a new flag that emits a single line ready for tmux's `#()` interpolation). Opt-in only — `canopy init --with-status-bar` and prompted in onboarding.
 
 2. **Popup launcher:** a tmux key binding (default `prefix-c` for "canopy"; user-overridable) runs `tmux display-popup -E -w 80% -h 80% canopy --popup`. The `--popup` flag tells canopy's TUI it's running in a transient popup, so quitting drops the popup instead of returning to a host shell. The popup's TUI is the existing list, but with a "switch and dismiss popup" verb (enter) and a "switch by detaching popup THEN attaching" path (handled via `tmux switch-client` from inside the popup process, which works because tmux popups inherit the client).
 
@@ -493,4 +563,4 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 
 Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go behind the user's existing tmux prefix (`<prefix>-c`, `<prefix>-?`, `<prefix>-s` for switch, etc.). Onboarding asks: "Your tmux prefix is `C-b`/`C-a`/other?" and writes the snippet accordingly. Never overwrite an existing user-bound key — detect via `tmux list-keys` parse and skip with a warning.
 
-**Depends on / blocked by:** v0 (TUI exists). Pairs strongly with the global splash screen (in flight in a parallel canopy session as of 2026-04-28) — the popup's first-launch render = the splash; subsequent renders = the workspace list.
+**Depends on / blocked by:** v0 (TUI exists, landed). v0.5 global splash + project listing (landed in ancient-hornet 2026-04-28). v0.6 detector framework (in flight) for the status segment's `[hints]` portion. The popup's first-launch render = the v0.5 splash; subsequent renders = the v0.5 global TUI's project list.
