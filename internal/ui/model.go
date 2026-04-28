@@ -40,6 +40,11 @@ type Row struct {
 	Port        int          // 0 means "no port to show" -> renders as "—"
 	TmuxSession string
 	Alive       bool // tmux session liveness, queried at refresh time
+	// LastErrorHint is the auto-detected diagnosis from
+	// workspace.Diagnose, populated only when Status==broken AND
+	// canopy recognized the failure signature. Rendered as a
+	// "hint:" line under the table when the cursor sits on this row.
+	LastErrorHint string
 }
 
 // viewMode tracks which screen the TUI is showing. listMode is the
@@ -191,13 +196,14 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client) tea.Cmd {
 		for _, w := range workspaces {
 			alive, _ := tc.HasSession(ctx, w.TmuxSession)
 			rows = append(rows, Row{
-				IsMain:      false,
-				Name:        w.Name,
-				Branch:      w.Branch,
-				Status:      w.Status,
-				Port:        w.Port,
-				TmuxSession: w.TmuxSession,
-				Alive:       alive,
+				IsMain:        false,
+				Name:          w.Name,
+				Branch:        w.Branch,
+				Status:        w.Status,
+				Port:          w.Port,
+				TmuxSession:   w.TmuxSession,
+				Alive:         alive,
+				LastErrorHint: w.LastErrorHint,
 			})
 		}
 		return rowsLoadedMsg{rows: rows}

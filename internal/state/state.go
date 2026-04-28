@@ -65,6 +65,12 @@ type Workspace struct {
 	Status      Status    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 	LastError   string    `json:"last_error,omitempty"`
+	// LastErrorHint is a one-line user-facing diagnosis of LastError.
+	// Populated by workspace.Diagnose() when scripts.setup fails with
+	// a stderr signature canopy recognizes (missing Rails master key,
+	// network blip, db already exists, etc.). Empty when no pattern
+	// matched — the caller falls back to the raw error chain.
+	LastErrorHint string `json:"last_error_hint,omitempty"`
 }
 
 // ProjectMeta tracks per-project metadata that lives outside any single

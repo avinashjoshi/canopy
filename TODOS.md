@@ -256,6 +256,29 @@ not the stale original.
 
 ---
 
+## v0.5 — Per-project + per-workspace logs
+
+**What:** Replace the single global `~/.canopy/log/canopy.log` with a project-aware tree:
+
+```
+~/.canopy/log/canopy.log              # global events: state-store, project discovery
+~/.canopy/log/<project>/canopy.log    # everything tied to a project
+~/.canopy/log/<project>/<workspace>/setup.log    # raw stdout/stderr of scripts.setup, per attempt
+~/.canopy/log/<project>/<workspace>/archive.log  # raw stdout/stderr of scripts.archive
+```
+
+**Why:** Today every project's lifecycle events interleave in one file, so debugging a cravd setup failure requires grepping through brain's setup chatter. Per-workspace setup logs also let the auto-detect hint flow (entry below) link directly to a small file ("see full output: `~/.canopy/log/cravd/bold-falcon/setup.log`") instead of pointing at the firehose.
+
+**Pros:** Greppability. Cleaner `tail -f` for the workspace you care about. Pairs with retry — each retry attempt rotates the setup log (`setup.log.1`, `setup.log.2`, ...) so you can compare what changed. The auto-detect hint becomes a one-line teaser that links to the full file. Easy to tar up a single project's logs to share when reporting a bug.
+
+**Cons:** Slog handler swap is straightforward; the per-workspace setup-log capture is a tee on the `stdout`/`stderr` writers passed into `runSetupHooksOnly`. Migration: existing single log file stays in place, new logs go to the new tree — no destructive rename. Disk usage: ~40 KB per setup attempt × workspaces × retries; cap at 5 rotated files per workspace.
+
+**Context:** clog package today takes a single path; refactor `clog.Init` to accept a default project hint (cwd-walk-up) so a Manager constructed via `loadManager()` automatically routes its logs into the right subdir. Per-workspace setup logs live in `internal/workspace/lifecycle.go` — wrap the stdout/stderr writers passed into `runSetupHooksOnly` with `io.MultiWriter(originalWriter, fileWriter)` where the file is opened at `<project>/<workspace>/setup.log` with O_TRUNC each time so retries always see a fresh file (rotated copy of the previous attempt kept as `setup.log.1`).
+
+**Depends on / blocked by:** v0. No blockers.
+
+---
+
 ## v0.5 — Auto-detect fixable setup failures
 
 **What:** When `scripts.setup` fails, scan its stderr for known signatures (`master.key not found`, `bundle: command not found`, network errors) and surface a one-line "what to fix" hint in the TUI before the user has to dig through `~/.canopy/log/canopy.log`.

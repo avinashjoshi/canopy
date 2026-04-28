@@ -78,6 +78,15 @@ func (m *Model) View() string {
 	} else {
 		b.WriteString(m.renderTable())
 		b.WriteString("\n")
+		if hint := m.selectedHint(); hint != "" {
+			b.WriteString("  ")
+			b.WriteString(brokenStyle.Render("hint:"))
+			b.WriteString(" ")
+			b.WriteString(hint)
+			b.WriteString("\n  ")
+			b.WriteString(subtleStyle.Render("press R to retry scripts.setup against the existing worktree"))
+			b.WriteString("\n\n")
+		}
 	}
 
 	b.WriteString(m.renderHelpLine())
@@ -241,6 +250,21 @@ func (m *Model) renderHelp() string {
 		subtleStyle.Render("Press any key to dismiss."),
 	}, "\n")
 	return helpBodyStyle.Render(body)
+}
+
+// selectedHint returns the auto-diagnosis hint for the row currently
+// under the cursor, but only when it's a broken row that has a hint
+// captured. Empty otherwise so the caller can skip the whole hint
+// line. Defensive against an empty rows slice.
+func (m *Model) selectedHint() string {
+	if len(m.rows) == 0 {
+		return ""
+	}
+	r := m.rows[m.cursor]
+	if r.IsMain || r.Status != "broken" || r.LastErrorHint == "" {
+		return ""
+	}
+	return r.LastErrorHint
 }
 
 // busySuccessMessage maps a completed busy-mode op to the right success

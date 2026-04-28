@@ -425,6 +425,41 @@ func TestRetry_NotFound(t *testing.T) {
 	}
 }
 
+// TestCreate_DiagnoseHintCaptured: when scripts.setup fails with a
+// stderr signature canopy recognizes, the resulting broken row carries
+// a non-empty LastErrorHint. End-to-end check that the stderr-tee +
+// Diagnose() wiring in Create -> markBroken actually reaches state.
+func TestCreate_DiagnoseHintCaptured(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, setupPath := retryFixture(t)
+
+	// Rewrite the script to fail with a recognized signature on stderr.
+	// "bundle: command not found" is one of the registry's patterns.
+	failBody := "#!/usr/bin/env bash\necho 'bundle: command not found' >&2\nexit 1\n"
+	if err := os.WriteFile(setupPath, []byte(failBody), 0o755); err != nil {
+		t.Fatalf("rewrite setup: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(context.Background(), "diagnose-me", &stdout, &stderr)
+	if !errors.Is(err, workspace.ErrSetupFailed) {
+		t.Fatalf("expected ErrSetupFailed; got %v", err)
+	}
+	if ws == nil {
+		t.Fatal("expected workspace pointer even on failure")
+	}
+	if ws.Status != state.StatusBroken {
+		t.Errorf("status = %q; want broken", ws.Status)
+	}
+	if ws.LastErrorHint == "" {
+		t.Errorf("LastErrorHint empty; want bundle/PATH hint. stderr was: %s",
+			stderr.String())
+	}
+	if !strings.Contains(ws.LastErrorHint, "bundle") {
+		t.Errorf("LastErrorHint = %q; want substring %q", ws.LastErrorHint, "bundle")
+	}
+}
+
 // TestResurrect_HappyPath: Create -> Kill tmux -> Resurrect -> tmux alive
 // again with 4 panes. Per-dir claude history isn't testable here (no
 // claude conversation in scratch), but the structural rebuild is.

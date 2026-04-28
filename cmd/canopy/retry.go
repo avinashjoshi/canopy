@@ -42,8 +42,14 @@ func retryCmd() *cobra.Command {
 			if err != nil {
 				if ws != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(),
-						"\nworkspace %q is in status %q.\nSee ~/.canopy/log/canopy.log for details.\n",
+						"\nworkspace %q is in status %q.\n",
 						ws.Name, ws.Status)
+					if ws.LastErrorHint != "" {
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"hint: %s\n", ws.LastErrorHint)
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(),
+						"See ~/.canopy/log/canopy.log for full details.\n")
 				}
 				return err
 			}

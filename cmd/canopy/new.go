@@ -40,8 +40,18 @@ func newCmd() *cobra.Command {
 				// so the user knows where to find logs / what to clean up.
 				if ws != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(),
-						"\nworkspace %q is in status %q.\nSee ~/.canopy/log/canopy.log for details.\nRun `canopy rm %s` to clean up.\n",
-						ws.Name, ws.Status, ws.Name)
+						"\nworkspace %q is in status %q.\n",
+						ws.Name, ws.Status)
+					if ws.LastErrorHint != "" {
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"hint: %s\n", ws.LastErrorHint)
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(),
+						"See ~/.canopy/log/canopy.log for full details.\n"+
+							"Once you've fixed the issue, `canopy retry %s` re-runs scripts.setup\n"+
+							"against the existing worktree (preserves branch, port, claude history).\n"+
+							"Or `canopy rm %s` to drop it entirely.\n",
+						ws.Name, ws.Name)
 				}
 				return err
 			}

@@ -22,6 +22,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -241,9 +242,14 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 
 	// Phase 2: slow operations outside the lock. If any of these fail,
 	// the workspace transitions to status=broken via the helper below.
-	setupErr := m.runSetup(ctx, &ws, stdout, stderr)
+	// Tee stderr through a buffer so we can run Diagnose() against it
+	// when scripts.setup fails — the user still sees stderr live, AND
+	// the buffer feeds the auto-hint registry.
+	var capturedStderr bytes.Buffer
+	teedStderr := io.MultiWriter(stderr, &capturedStderr)
+	setupErr := m.runSetup(ctx, &ws, stdout, teedStderr)
 	if setupErr != nil {
-		_ = m.markBroken(&ws, setupErr)
+		_ = m.markBroken(&ws, setupErr, capturedStderr.Bytes())
 		return &ws, setupErr
 	}
 
@@ -392,10 +398,13 @@ func (m *Manager) RetrySetup(ctx context.Context, name string, stdout, stderr io
 		"project", ws.Project, "name", ws.Name, "path", ws.Path, "port", ws.Port)
 	start := time.Now()
 
-	// Phase 2: re-run hooks + tmux build (slow, no lock held).
-	hookErr := m.runSetupHooksOnly(ctx, &ws, stdout, stderr)
+	// Phase 2: re-run hooks + tmux build (slow, no lock held). Same
+	// stderr-tee trick as Create so Diagnose() gets fed if hooks fail.
+	var capturedStderr bytes.Buffer
+	teedStderr := io.MultiWriter(stderr, &capturedStderr)
+	hookErr := m.runSetupHooksOnly(ctx, &ws, stdout, teedStderr)
 	if hookErr != nil {
-		_ = m.markBroken(&ws, hookErr)
+		_ = m.markBroken(&ws, hookErr, capturedStderr.Bytes())
 		log.Info("workspace.retry.failure",
 			"name", ws.Name, "err", hookErr.Error(), "duration_ms", time.Since(start).Milliseconds())
 		return &ws, hookErr
@@ -491,7 +500,14 @@ func keepAlive(cmd string) string {
 // markBroken flips a workspace's status to broken and persists the error
 // chain. Best-effort: if state.WithLock itself fails, the in-memory
 // workspace is still left in the broken state for the caller's report.
-func (m *Manager) markBroken(ws *state.Workspace, cause error) error {
+//
+// capturedStderr is the (potentially empty) bytes captured from
+// scripts.setup's stderr. It's fed to Diagnose() to attach a one-line
+// user-facing hint to the row when canopy recognizes the failure
+// signature. Pass nil/empty if no stderr was captured — Diagnose
+// short-circuits to "" and the row's LastErrorHint stays empty.
+func (m *Manager) markBroken(ws *state.Workspace, cause error, capturedStderr []byte) error {
+	hint := Diagnose(capturedStderr)
 	return m.Store.WithLock(func(s *state.State) error {
 		row, err := s.Find(ws.Project, ws.Name)
 		if err != nil {
@@ -499,8 +515,10 @@ func (m *Manager) markBroken(ws *state.Workspace, cause error) error {
 		}
 		row.Status = state.StatusBroken
 		row.LastError = cause.Error()
+		row.LastErrorHint = hint
 		ws.Status = state.StatusBroken
 		ws.LastError = cause.Error()
+		ws.LastErrorHint = hint
 		return nil
 	})
 }

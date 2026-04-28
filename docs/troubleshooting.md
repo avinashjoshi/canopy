@@ -31,6 +31,8 @@ Run `canopy ls`. If the workspace is in state.json with `status: ready` or `stop
 
 In the TUI the same choice is `R` (retry) vs `d` (delete) on the selected broken row.
 
+When canopy recognizes the failure signature in `scripts.setup`'s stderr, it surfaces a one-line `hint:` under the table (and on `canopy new` / `canopy retry` failure output) telling you what to fix. Today's registry covers missing Rails master keys, "database already exists" from a partial setup, missing `bundle`, network/DNS errors, permission-denied on the script, and a generic `command not found` catch-all. The hint is heuristic — a wrong hint is rare but possible, in which case `~/.canopy/log/canopy.log` has the full stderr.
+
 If there's no row but git says the branch exists, the branch lingered from a previous workspace whose state.json got nuked. Clean up the branch manually:
 
 ```bash
