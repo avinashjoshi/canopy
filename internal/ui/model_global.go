@@ -21,11 +21,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
+	"github.com/avinashjoshi/canopy/internal/settings"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
@@ -52,11 +54,23 @@ var _ tea.Model = (*GlobalModel)(nil)
 // minimal cross-project surface now and grow into the project picker
 // flow once they've felt the friction.
 type GlobalModel struct {
-	store *state.Store
-	tc    *tmux.Client
+	store    *state.Store
+	tc       *tmux.Client
+	settings settings.Settings
 
 	list     projectlist.Model
 	showHelp bool
+
+	// Auto-close-shipped countdown state. Active when remaining > 0 OR
+	// closing == true (subprocess in flight). The View renders a status
+	// line under the title while either is set; any key during countdown
+	// cancels via cancelCloseOut. closeOutErr surfaces any error from
+	// the subprocess so the user knows when an auto-rm failed.
+	closeOutTarget    string
+	closeOutProject   string // resolved canonical root, used as cmd.Dir
+	closeOutRemaining int    // seconds left in countdown
+	closeOutClosing   bool   // true once subprocess kicked off
+	closeOutErr       error  // last failure, cleared on next refresh / next close-out
 
 	width, height int
 }
@@ -68,10 +82,11 @@ type GlobalModel struct {
 //   - enter: dispatch attach via tea.ExecProcess for ready/main rows;
 //     for non-ready rows, surface a status-line hint via SetError.
 //   - r: kick off a refresh that re-reads state and pushes new rows back.
-func NewGlobal(store *state.Store, tc *tmux.Client) *GlobalModel {
+func NewGlobal(store *state.Store, tc *tmux.Client, s settings.Settings) *GlobalModel {
 	gm := &GlobalModel{
-		store: store,
-		tc:    tc,
+		store:    store,
+		tc:       tc,
+		settings: s,
 	}
 	gm.list = projectlist.New(projectlist.Options{
 		OnActivate:    gm.activate,
@@ -85,27 +100,111 @@ func NewGlobal(store *state.Store, tc *tmux.Client) *GlobalModel {
 // closeOut is the OnCloseOut callback wired into projectlist. Fires
 // when the user presses enter on a row whose hints include kind="shipped".
 //
-// v0.6 close-out behavior: surface a confirm prompt as a status-line
-// hint with the canonical command. We don't auto-run canopy rm here
-// because canopy refuses to run from inside its own tmux sessions
-// (the v0.5 nesting guard); the user runs it from the outer terminal.
+// Two modes, gated by lifecycle.auto_close_shipped:
 //
-// When step 8 lands (auto_close_shipped flag in ~/.canopy/config.json),
-// this callback gains an auto-rm path with a 5-second cancel window.
-// For now, this is a hint-only flow.
+//   - Default (off): surface a hint pointing at `canopy rm <name>` so the
+//     user runs it themselves. Safe and explicit; matches v0.5 boundary.
+//   - Opt-in (on): kick off a 5-second countdown. On expiry, exec
+//     `canopy rm <name> --yes --force` against the project root. Any
+//     keypress during the countdown cancels. Errors surface as a status
+//     line; the rm is not retried.
+//
+// We exec the canopy binary as a subprocess (rather than calling
+// workspace.Manager.Remove inline) because GlobalModel is project-
+// agnostic — it doesn't load any canopy.json — and shelling out gives
+// us the same code path as the user's manual `canopy rm`.
 func (m *GlobalModel) closeOut(row state.GlobalRow) tea.Cmd {
-	hint := fmt.Errorf(
-		"workspace %q is shipped — close it from the outer terminal: `canopy rm %s`",
-		row.Name, row.Name)
-	return func() tea.Msg { return globalErrMsg{err: hint} }
+	if !m.settings.Lifecycle.AutoCloseShipped {
+		hint := fmt.Errorf(
+			"workspace %q is shipped — close it from the outer terminal: `canopy rm %s`",
+			row.Name, row.Name)
+		return func() tea.Msg { return globalErrMsg{err: hint} }
+	}
+
+	// Resolve the project root before starting the countdown so we fail
+	// early on unmigrated rows that we can't address. Same helper used
+	// by goToProject — keeps the failure mode consistent.
+	root, err := resolveProjectRoot(row, m.list.Rows())
+	if err != nil {
+		return func() tea.Msg { return globalErrMsg{err: err} }
+	}
+
+	m.closeOutTarget = row.Name
+	m.closeOutProject = root
+	m.closeOutRemaining = closeOutCountdownSeconds
+	m.closeOutClosing = false
+	m.closeOutErr = nil
+	return closeOutTickCmd()
+}
+
+// closeOutCountdownSeconds is the cancellable window before auto-rm
+// fires. 5s mirrors the spec from the v0.6 design doc — long enough
+// for "wait, no!" reflex, short enough not to feel obnoxious.
+const closeOutCountdownSeconds = 5
+
+// closeOutTickMsg fires every second during the countdown. Update
+// decrements remaining and either schedules the next tick or kicks off
+// the rm subprocess once the counter hits zero.
+type closeOutTickMsg struct{}
+
+// closeOutDoneMsg surfaces the result of the rm subprocess. err is nil
+// on success; the captured combined output is included so we can echo
+// any failure context back to the user without rerunning the command.
+type closeOutDoneMsg struct {
+	target string
+	err    error
+	output string
+}
+
+// closeOutTickCmd schedules a one-second tea.Tick that emits
+// closeOutTickMsg. Called recursively from Update to keep the countdown
+// going until cancellation or expiry.
+func closeOutTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return closeOutTickMsg{}
+	})
+}
+
+// runCloseOutCmd builds the tea.Cmd that execs `canopy rm <name> --yes
+// --force` against projectRoot. cwd is set to projectRoot so the inner
+// canopy discovers the right canopy.json. Combined output is captured
+// and returned via closeOutDoneMsg; never blocks the UI.
+//
+// We use --force here because the shipped detector already requires
+// origin/<branch> to be merged or absent — uncommitted/unpushed local
+// edits would make the detector skip the row. The remaining failure
+// modes are non-data (orphan worktree, tmux gone) and --force handles
+// them gracefully.
+func runCloseOutCmd(target, projectRoot string) tea.Cmd {
+	return func() tea.Msg {
+		exe, err := os.Executable()
+		if err != nil {
+			return closeOutDoneMsg{target: target, err: fmt.Errorf("locate canopy binary: %w", err)}
+		}
+		cmd := exec.Command(exe, "rm", target, "--yes", "--force")
+		cmd.Dir = projectRoot
+		out, err := cmd.CombinedOutput()
+		return closeOutDoneMsg{target: target, err: err, output: string(out)}
+	}
+}
+
+// cancelCloseOut clears the countdown state without running rm. Called
+// from the key handler when the user presses any key during the
+// countdown phase. No-op if there's nothing to cancel; safe to call
+// unconditionally.
+func (m *GlobalModel) cancelCloseOut() {
+	m.closeOutTarget = ""
+	m.closeOutProject = ""
+	m.closeOutRemaining = 0
+	m.closeOutClosing = false
 }
 
 // RunGlobal is the public entry point used by cmd/canopy/route.go when
 // `canopy` is invoked from a directory that has no canopy.json and isn't
 // inside a fresh git repo (the init-splash case is handled separately
 // in InitSplashModel).
-func RunGlobal(store *state.Store, tc *tmux.Client) error {
-	gm := NewGlobal(store, tc)
+func RunGlobal(store *state.Store, tc *tmux.Client, s settings.Settings) error {
+	gm := NewGlobal(store, tc, s)
 	p := tea.NewProgram(gm, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
@@ -196,10 +295,51 @@ func (m *GlobalModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list.SetError(msg.err)
 		return m, nil
 
+	case closeOutTickMsg:
+		// Stale tick from a cancelled or already-closing countdown —
+		// drop it. Without this guard a fast cancel-then-re-trigger
+		// could double-fire the rm subprocess.
+		if m.closeOutTarget == "" || m.closeOutClosing {
+			return m, nil
+		}
+		m.closeOutRemaining--
+		if m.closeOutRemaining > 0 {
+			return m, closeOutTickCmd()
+		}
+		// Counter hit zero: kick off the rm subprocess. Keep
+		// closeOutTarget populated so the View can show "Closing..."
+		// while we wait; clear remaining so the countdown line
+		// switches to the in-flight message.
+		m.closeOutClosing = true
+		return m, runCloseOutCmd(m.closeOutTarget, m.closeOutProject)
+
+	case closeOutDoneMsg:
+		target := m.closeOutTarget
+		m.cancelCloseOut() // reuse the clear logic
+		if msg.err != nil {
+			// Capture the failure for the View; refresh anyway in case
+			// partial removal still mutated state on disk.
+			detail := strings.TrimSpace(msg.output)
+			if detail == "" {
+				m.closeOutErr = fmt.Errorf("auto-close %q: %w", target, msg.err)
+			} else {
+				m.closeOutErr = fmt.Errorf("auto-close %q: %w\n%s", target, msg.err, detail)
+			}
+		}
+		return m, m.refreshCmd()
+
 	case tea.KeyMsg:
 		// Help overlay swallows all keys (any key dismisses it).
 		if m.showHelp {
 			m.showHelp = false
+			return m, nil
+		}
+		// Active countdown intercepts every key as "cancel". Once the
+		// rm subprocess is in flight (closeOutClosing) we can't
+		// rewind, so keys fall through normally instead.
+		if m.closeOutTarget != "" && !m.closeOutClosing {
+			m.cancelCloseOut()
+			m.list.SetError(fmt.Errorf("auto-close cancelled"))
 			return m, nil
 		}
 		switch msg.String() {
@@ -233,10 +373,41 @@ func (m *GlobalModel) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("canopy") + " " + subtleStyle.Render("global"))
 	b.WriteString("\n\n")
+	if banner := m.renderCloseOutBanner(); banner != "" {
+		b.WriteString(banner)
+		b.WriteString("\n\n")
+	}
 	b.WriteString(m.list.View())
 	b.WriteString("\n")
 	b.WriteString(m.renderHelpLine())
 	return b.String()
+}
+
+// renderCloseOutBanner is the status line shown above the table while
+// the auto-close-shipped countdown or subprocess is active. Empty
+// string when neither is in flight; the caller skips rendering then.
+//
+// Three render variants:
+//
+//   - countdown ticking → "Closing 'foo' in Ns... press any key to cancel"
+//   - rm subprocess running → "Closing 'foo'..." (no cancel hint; can't)
+//   - last attempt errored → red banner with the captured message; this
+//     persists until the next close-out (success clears it via cancelCloseOut)
+//     or refresh that returns no rows-load error
+func (m *GlobalModel) renderCloseOutBanner() string {
+	if m.closeOutErr != nil && m.closeOutTarget == "" {
+		return errorStyle.Render(fmt.Sprintf("error: %v", m.closeOutErr))
+	}
+	if m.closeOutTarget == "" {
+		return ""
+	}
+	if m.closeOutClosing {
+		return brokenStyle.Render(fmt.Sprintf("Closing %q...", m.closeOutTarget))
+	}
+	return brokenStyle.Render(fmt.Sprintf(
+		"Closing %q in %ds — press any key to cancel",
+		m.closeOutTarget, m.closeOutRemaining,
+	))
 }
 
 func (m *GlobalModel) renderHelpLine() string {
@@ -252,7 +423,7 @@ func (m *GlobalModel) renderHelpLine() string {
 }
 
 func (m *GlobalModel) renderHelp() string {
-	body := strings.Join([]string{
+	lines := []string{
 		titleStyle.Render("canopy global — keybindings"),
 		"",
 		"  ↑/↓, j/k       move selection",
@@ -268,10 +439,16 @@ func (m *GlobalModel) renderHelp() string {
 		"",
 		subtleStyle.Render("Tip: press o on any row to land in that project's TUI,"),
 		subtleStyle.Render("where you can create/remove/retry/resurrect workspaces."),
-		"",
-		subtleStyle.Render("Press any key to dismiss."),
-	}, "\n")
-	return helpBodyStyle.Render(body)
+	}
+	if m.settings.Lifecycle.AutoCloseShipped {
+		lines = append(lines,
+			"",
+			subtleStyle.Render("Auto-close: enter on a ✓ shipped row starts a 5s timer,"),
+			subtleStyle.Render("then runs `canopy rm` automatically. Any key cancels."),
+		)
+	}
+	lines = append(lines, "", subtleStyle.Render("Press any key to dismiss."))
+	return helpBodyStyle.Render(strings.Join(lines, "\n"))
 }
 
 // activate is the OnActivate callback wired into projectlist. Decides

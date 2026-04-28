@@ -30,6 +30,7 @@ import (
 
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/git"
+	"github.com/avinashjoshi/canopy/internal/settings"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/ui"
@@ -97,15 +98,23 @@ func runInitSplashFlow(cwd string, stdout io.Writer) error {
 }
 
 // runGlobalFlow opens GlobalModel against state.json. No canopy.json,
-// no Manager — global mode reads state directly.
+// no Manager — global mode reads state directly. Loads ~/.canopy/config.json
+// so the auto_close_shipped lifecycle toggle reaches the model. A missing
+// or partial settings file is fine: settings.Load returns Default() with
+// nil error in that case, so RunGlobal always gets sane defaults.
 func runGlobalFlow() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("global: home dir: %w", err)
 	}
-	store, err := state.NewStore(filepath.Join(home, ".canopy"))
+	canopyHome := filepath.Join(home, ".canopy")
+	store, err := state.NewStore(canopyHome)
 	if err != nil {
 		return err
 	}
-	return ui.RunGlobal(store, tmux.New())
+	s, err := settings.Load(canopyHome)
+	if err != nil {
+		return fmt.Errorf("global: load settings: %w", err)
+	}
+	return ui.RunGlobal(store, tmux.New(), s)
 }

@@ -90,6 +90,49 @@ func TestLoad_Invalid_OutOfRange(t *testing.T) {
 	}
 }
 
+// TestLoad_Lifecycle_DefaultsToOff: a config with no lifecycle block
+// keeps AutoCloseShipped=false. v0.6 ships the auto-rm path opt-in;
+// existing user configs from v0.5 must not silently start auto-removing
+// workspaces just because they upgraded canopy.
+func TestLoad_Lifecycle_DefaultsToOff(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	body := `{"ports": {"base": 4000}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s, err := settings.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.Lifecycle.AutoCloseShipped {
+		t.Errorf("AutoCloseShipped should default to false; got true")
+	}
+}
+
+// TestLoad_Lifecycle_OptIn: explicit `auto_close_shipped: true` is
+// honored. Smoke check that the field actually unmarshals into the
+// nested struct under the expected JSON key.
+func TestLoad_Lifecycle_OptIn(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	body := `{"lifecycle": {"auto_close_shipped": true}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s, err := settings.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !s.Lifecycle.AutoCloseShipped {
+		t.Errorf("AutoCloseShipped should be true; got false")
+	}
+	// Other defaults should still apply.
+	if s.Ports.Base != 40000 {
+		t.Errorf("Ports.Base = %d; want default 40000", s.Ports.Base)
+	}
+}
+
 // TestLoad_Invalid_StrideExceedsProject: workspace_stride > project_stride
 // is nonsensical (a workspace would land in another project's range).
 func TestLoad_Invalid_StrideExceedsProject(t *testing.T) {
