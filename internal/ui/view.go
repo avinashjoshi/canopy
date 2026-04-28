@@ -134,6 +134,7 @@ func (m *Model) renderTable() string {
 func (m *Model) renderHelpLine() string {
 	keys := []string{
 		"↑/↓ navigate",
+		"enter attach",
 		"r refresh",
 		"? help",
 		"q quit",
@@ -151,7 +152,7 @@ func (m *Model) renderHelp() string {
 		"  g, home        first row",
 		"  G, end         last row",
 		"",
-		"  enter          attach to selected workspace (coming step 6b)",
+		"  enter          attach to selected workspace",
 		"  n              new workspace            (coming step 6c)",
 		"  d              delete selected          (coming step 6d)",
 		"  r              refresh state",

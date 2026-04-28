@@ -276,9 +276,9 @@ func (c *Client) Kill(ctx context.Context, name string) error {
 // they end up back at their original shell, not in canopy.
 //
 // This is the right shape for CLI subcommands (`canopy switch`,
-// `canopy new` after setup completes). The Bubbletea TUI in step 6b
-// will use tea.ExecProcess instead, which gives control back to canopy
-// after detach so the TUI can be re-rendered.
+// `canopy new` after setup completes). The Bubbletea TUI uses
+// AttachCmd instead, which returns the prepared exec.Cmd so
+// tea.ExecProcess can hand off + return control after detach.
 //
 // On failure (session doesn't exist, tmux missing), Attach returns an
 // error and does NOT exec — the canopy process stays alive and can
@@ -286,9 +286,6 @@ func (c *Client) Kill(ctx context.Context, name string) error {
 func (c *Client) Attach(ctx context.Context, name string) error {
 	log.Info("tmux.attach", "name", name)
 
-	// Pre-flight: the session must exist. If we exec into `tmux attach`
-	// for a missing session, tmux exits non-zero and the user sees a
-	// raw error — better to surface it cleanly here.
 	exists, err := c.HasSession(ctx, name)
 	if err != nil {
 		return fmt.Errorf("tmux.Attach(%s): %w", name, err)
@@ -304,8 +301,27 @@ func (c *Client) Attach(ctx context.Context, name string) error {
 
 	args := []string{"tmux"}
 	args = append(args, c.args("attach", "-t", name)...)
-	// syscall.Exec replaces the current process image. Returns only on error.
 	return syscall.Exec(tmuxPath, args, os.Environ())
+}
+
+// AttachCmd returns a prepared exec.Cmd for `tmux attach -t <name>`
+// without running it. The Bubbletea TUI passes this to tea.ExecProcess
+// to hand the terminal to tmux temporarily; when the user detaches
+// (prefix-d), tmux exits cleanly and Bubbletea reclaims the terminal
+// to redraw the TUI.
+//
+// Pre-flight: returns ErrSessionNotFound if the session doesn't exist
+// at call time. Caller should still handle exec errors from running
+// the returned Cmd (terminal reset issues, tmux server crashed mid-attach).
+func (c *Client) AttachCmd(ctx context.Context, name string) (*exec.Cmd, error) {
+	exists, err := c.HasSession(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("tmux.AttachCmd(%s): %w", name, err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("tmux.AttachCmd(%s): %w", name, ErrSessionNotFound)
+	}
+	return exec.CommandContext(ctx, "tmux", c.args("attach", "-t", name)...), nil
 }
 
 // KillServer shuts down the tmux server bound to this client's socket.
