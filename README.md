@@ -45,7 +45,8 @@ The wedge feature is live. From inside any project that has a `canopy.json`:
 ```bash
 canopy new                  # creates a workspace with a random name (e.g. bold-falcon)
 canopy new --name fix-bug   # explicit name
-canopy ls                   # list workspaces for the current project
+canopy ls                   # workspaces in the current project
+canopy ls --all             # workspaces across every project (also implicit when run outside any project)
 canopy switch <name>        # attach (resurrect first if stopped)
 canopy rm <name>            # tear down (archive script + tmux + git + branch)
 ```

@@ -138,6 +138,39 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## v0.5 — Branch-rename tolerance in `canopy rm`
+
+**What:** When the user has renamed a branch after canopy created it
+(`git branch -m bold-falcon feat/oauth`), `canopy rm bold-falcon`
+should still work cleanly — including deleting the renamed branch
+rather than warning about the missing original.
+
+**Why:** Branch renames are a normal part of the workspace lifecycle
+(canopy creates a random name, the user develops on it, eventually
+renames the branch to something descriptive before pushing). Today
+canopy rm calls `git branch -D <original-name>`, fails silently
+with a warning, and leaves the renamed branch on disk. Minor wart
+but accumulates over time.
+
+**Pros:** Cleaner removal flow. Less manual cleanup. Users feel free
+to rename branches knowing canopy keeps up.
+
+**Cons:** Need to discover the workspace's CURRENT branch (via `git
+worktree list --porcelain`) before deleting. ~15 LOC + a test.
+
+**Context:** v0 stores `branch` in state.json at creation time and
+treats it as immutable. Fix: in `workspace.Remove`, before calling
+`git.DeleteBranch`, look up the current branch by querying
+`git worktree list --porcelain` for the workspace path and reading
+the `branch refs/heads/<name>` line. Pass that to DeleteBranch
+instead of the stored `wsCopy.Branch`. Update state.json's branch
+field too on Reconcile so canopy ls shows the current branch name,
+not the stale original.
+
+**Depends on / blocked by:** none — can land any time post-v0.
+
+---
+
 ## v0.5 — Worktree adopt
 
 **What:** `canopy adopt <branch>` — register an existing git worktree (created via `git worktree add` outside canopy) into state.json without re-running `scripts.setup`.
