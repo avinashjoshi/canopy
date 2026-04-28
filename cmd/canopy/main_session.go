@@ -85,7 +85,12 @@ func buildMainSession(ctx context.Context, tc *tmux.Client, session, projectRoot
 	if err := tc.SplitPane(ctx, session, projectRoot, "", tmux.SplitVertical, 15); err != nil {
 		return err
 	}
-	if err := tc.SplitPane(ctx, session, projectRoot, `claude --continue; exec "$SHELL"`, tmux.SplitHorizontal, 30); err != nil {
+	// `claude --continue || claude` falls back to a fresh session when
+	// there's no prior conversation for this dir — without the ||
+	// fallback, claude prints "no conversation found to continue" and
+	// the keep-alive wrapper silently drops the user to a shell. The
+	// fallback gives them a usable claude either way.
+	if err := tc.SplitPane(ctx, session, projectRoot, `claude --continue || claude; exec "$SHELL"`, tmux.SplitHorizontal, 30); err != nil {
 		return err
 	}
 	return nil

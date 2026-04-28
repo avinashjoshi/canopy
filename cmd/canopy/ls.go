@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/tmux"
 )
 
 var lsFlags struct {
@@ -62,9 +64,9 @@ func lsCmd() *cobra.Command {
 			// gracefully falls back to global.
 			global := lsFlags.all || cfg == nil
 			if global {
-				return lsGlobal(cmd.OutOrStdout())
+				return lsGlobal(cmd.Context(), cmd.OutOrStdout())
 			}
-			return lsProject(cmd.OutOrStdout(), cfg.Project)
+			return lsProject(cmd.Context(), cmd.OutOrStdout(), cfg.Project)
 		},
 	}
 	cmd.Flags().BoolVar(&lsFlags.all, "all", false,
@@ -72,9 +74,22 @@ func lsCmd() *cobra.Command {
 	return cmd
 }
 
+// liveBadge returns a single-character indicator for whether the named
+// tmux session is alive RIGHT NOW. Cheap call (one `tmux has-session`
+// per row) — total cost for `canopy ls` with N workspaces is O(N) tmux
+// queries, each <1ms. The output renders the same width whether alive
+// or not so the column stays aligned.
+func liveBadge(ctx context.Context, tc *tmux.Client, sessionName string) string {
+	alive, err := tc.HasSession(ctx, sessionName)
+	if err != nil || !alive {
+		return "○"
+	}
+	return "●"
+}
+
 // lsProject prints the workspaces for a single project — the canonical
 // view from inside a project directory.
-func lsProject(out io.Writer, project string) error {
+func lsProject(ctx context.Context, out io.Writer, project string) error {
 	store, err := openStateReadOnly()
 	if err != nil {
 		return err
@@ -97,17 +112,20 @@ func lsProject(out io.Writer, project string) error {
 		return nil
 	}
 
+	tc := tmux.New()
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tBRANCH\tSTATUS\tPORT\tTMUX_SESSION")
+	fmt.Fprintln(tw, "TMUX\tNAME\tBRANCH\tSTATUS\tPORT\tSESSION")
 	for _, w := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n", w.Name, w.Branch, w.Status, w.Port, w.TmuxSession)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
+			liveBadge(ctx, tc, w.TmuxSession),
+			w.Name, w.Branch, w.Status, w.Port, w.TmuxSession)
 	}
 	return tw.Flush()
 }
 
 // lsGlobal prints every workspace canopy knows about, grouped by project.
 // Used when --all is set or when no canopy.json is discoverable from cwd.
-func lsGlobal(out io.Writer) error {
+func lsGlobal(ctx context.Context, out io.Writer) error {
 	store, err := openStateReadOnly()
 	if err != nil {
 		return err
@@ -130,10 +148,12 @@ func lsGlobal(out io.Writer) error {
 		return rows[i].Name < rows[j].Name
 	})
 
+	tc := tmux.New()
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "PROJECT\tNAME\tBRANCH\tSTATUS\tPORT\tTMUX_SESSION")
+	fmt.Fprintln(tw, "TMUX\tPROJECT\tNAME\tBRANCH\tSTATUS\tPORT\tSESSION")
 	for _, w := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+			liveBadge(ctx, tc, w.TmuxSession),
 			w.Project, w.Name, w.Branch, w.Status, w.Port, w.TmuxSession)
 	}
 	return tw.Flush()

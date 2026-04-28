@@ -451,15 +451,18 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	}
 
 	// Rebuild the same tdl-style 3-pane layout as buildSession. Claude
-	// pane uses --continue so the prior conversation history is restored;
-	// nvim and shell are unchanged.
+	// pane uses `claude --continue || claude` so the prior conversation
+	// resumes when one exists; otherwise (no conversation yet for this
+	// dir) we silently fall back to a fresh claude. Without the fallback
+	// the user sees a confusing "no conversation found to continue"
+	// before the keep-alive drops them to a shell.
 	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim")); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
 	}
 	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {
 		return nil, err
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("claude --continue"), tmux.SplitHorizontal, 30); err != nil {
+	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("claude --continue || claude"), tmux.SplitHorizontal, 30); err != nil {
 		return nil, err
 	}
 
