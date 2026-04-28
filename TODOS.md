@@ -169,7 +169,27 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
-## v0.6 — Agent lifecycle wrapper + detectors
+## v0.6 — Agent lifecycle wrapper + detectors — PARTIAL (2026-04-28)
+
+**Shipped on `agent-lifecycle` branch:**
+- Agent launcher map (`internal/agent/launchers.go`) for claude/codex/opencode/aider, picked via `agent.type` in canopy.json. Backwards compat: empty agent block defaults to claude.
+- Briefing assembly (`internal/agent/briefing.go`) with the hybrid fresh-vs-resume strategy. Full briefing on `AgentLaunchCount==0`; hints-only delta on resume; empty (no `--append-system-prompt` flag) on resume + no active hints. Briefing rebuilt fresh on every agent launch via in-memory assembly + temp file at `~/.canopy/tmp/`. SourceKind variants (fresh/pr/issue/branch) with prompt-injection delimiter framing.
+- Detector framework (`internal/lifecycle/`) with three detectors: rename_suggested (cheap, runs every TUI tick), shipped (cheap, every tick), pr_status (10min cache, runs only on canopy reconcile + manual `r`). All run in parallel via tea.Cmd goroutines.
+- Hint badges in the global TUI: `↻ rename` (amber), `✓ shipped` (green bold), `PR` / `✓ PR` (cyan). Pressing enter on a row with `shipped` hint routes through `OnCloseOut` instead of attaching.
+- `canopy rm` smart safety pre-flight: refuses on uncommitted / unpushed / open-PR unless `--force`. Orphan workspaces (worktree dir gone) get a graceful pass-through, NOT a block.
+- State schema additions: `Workspace.AgentLaunchCount` (incremented on Create + Resurrect), `Workspace.SourceKind` (immutable). Both omitempty.
+- Config schema additions: `agent.{type, briefing, briefing_file}`. `scripts.agent` retained as power-user override.
+- O1 (claude --continue + --append-system-prompt) verified empirically.
+
+**Deferred to v0.6 follow-up:**
+- `canopy new --pr <num>` / `--issue <num>` / `--branch <name>` / `--allow-local` flags. The plumbing for SourceKind variants exists in the briefing assembler; the CLI flags + gh integration are pending.
+- `auto_close_shipped` flag in `~/.canopy/config.json` for the auto-close-on-merge UX with 5s cancel window. v0.6 currently surfaces a hint (`canopy rm <name>`) instead of auto-running.
+
+201 tests across 14 packages. Smoke verified: build clean, all tests green including `-tags=e2e`.
+
+---
+
+## v0.6 — Agent lifecycle wrapper + detectors (original entry, kept for context)
 
 **What:** Wrap every agent session with canopy-assembled workspace context + active lifecycle detector hints so any coding agent (Claude, Codex, OpenCode, aider) boots knowing where it is in the feature lifecycle. Seven accepted scope items:
 
