@@ -551,6 +551,62 @@ func (m *Manager) Find(ctx context.Context, name string) (*state.Workspace, erro
 	return &wCopy, nil
 }
 
+// OrphanDir is a workspace-shaped directory found under
+// ~/.canopy/workspaces/<project>/ that has no matching row in state.json.
+// Reconcile reports these via DiscoverOrphans so the user can decide
+// whether to adopt them (future feature) or rm them manually.
+type OrphanDir struct {
+	Project string
+	Name    string
+	Path    string
+}
+
+// DiscoverOrphans walks ~/.canopy/workspaces/<project>/* for the current
+// project and returns any directory entry that has no corresponding
+// state.json row. Read-only — does not mutate state. The CLI surface
+// (canopy reconcile) prints the result so users can take action.
+//
+// The scan is per-project (current project only) by default. Cross-
+// project scanning lives in DiscoverOrphansAllProjects, which lsGlobal
+// and a future canopy doctor will use.
+func (m *Manager) DiscoverOrphans(ctx context.Context) ([]OrphanDir, error) {
+	st, err := m.Store.Load()
+	if err != nil {
+		return nil, err
+	}
+	knownNames := map[string]struct{}{}
+	for _, w := range st.Workspaces {
+		if w.Project == m.Cfg.Project {
+			knownNames[filepath.Base(w.Path)] = struct{}{}
+		}
+	}
+
+	projDir := m.workspacesDir()
+	entries, err := os.ReadDir(projDir)
+	if os.IsNotExist(err) {
+		return nil, nil // no workspaces dir yet — no orphans
+	}
+	if err != nil {
+		return nil, fmt.Errorf("workspace.DiscoverOrphans: read %s: %w", projDir, err)
+	}
+
+	out := []OrphanDir{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, known := knownNames[e.Name()]; known {
+			continue
+		}
+		out = append(out, OrphanDir{
+			Project: m.Cfg.Project,
+			Name:    e.Name(),
+			Path:    filepath.Join(projDir, e.Name()),
+		})
+	}
+	return out, nil
+}
+
 // Reconcile walks every workspace for the current project, compares its
 // recorded status against disk + tmux reality, and updates state.json
 // where they disagree. Returns the per-workspace transition list so the

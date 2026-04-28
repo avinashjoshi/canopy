@@ -30,18 +30,44 @@ func reconcileCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			changes, err := mgr.Reconcile(cmd.Context())
+			ctx := cmd.Context()
+
+			// 1. Update statuses for known workspaces.
+			changes, err := mgr.Reconcile(ctx)
 			if err != nil {
 				return err
 			}
 			if len(changes) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "Nothing to reconcile — every workspace already matches reality.")
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Updated %d workspace(s):\n", len(changes))
+				for _, c := range changes {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s -> %s\n", c.Name, c.From, c.To)
+				}
+			}
+
+			// 2. Discover orphan dirs (workspace dirs on disk but not in
+			// state.json). Read-only — we don't auto-prune, the user might
+			// want them. Print suggested commands so they can clean up
+			// without thinking too hard.
+			orphans, err := mgr.DiscoverOrphans(ctx)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: orphan scan failed: %v\n", err)
 				return nil
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Updated %d workspace(s):\n", len(changes))
-			for _, c := range changes {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s -> %s\n", c.Name, c.From, c.To)
+			if len(orphans) == 0 {
+				return nil
 			}
+			fmt.Fprintf(cmd.OutOrStdout(), "\nFound %d orphan workspace dir(s) not in state.json:\n", len(orphans))
+			for _, o := range orphans {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", o.Path)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "\nTo remove orphans (NOT reversible — uncommitted work is lost):")
+			for _, o := range orphans {
+				fmt.Fprintf(cmd.OutOrStdout(), "  git -C %s worktree remove --force %s && git -C %s branch -D %s\n",
+					mgr.Cfg.ProjectRoot, o.Path, mgr.Cfg.ProjectRoot, o.Name)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "\n(`canopy adopt <name>` to take ownership without removing — coming in v0.5.)")
 			return nil
 		},
 	}
