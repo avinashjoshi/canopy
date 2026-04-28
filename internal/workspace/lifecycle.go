@@ -240,8 +240,25 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 		return fmt.Errorf("workspace.runSetup: mkdir %s: %w", parent, err)
 	}
 
-	// 1. git worktree add -b <branch> <path>
-	if err := git.Add(ctx, m.Cfg.ProjectRoot, ws.Branch, ws.Path); err != nil {
+	// 1. git worktree add. We base the new branch on origin/<default> so
+	// new workspaces start from the latest pushed code, not a stale local
+	// HEAD. Best-effort fetch first; both fetch and default-branch
+	// detection failures fall through to using local HEAD as the start
+	// point (preserving the old behavior for repos with no remote).
+	startPoint := ""
+	if defaultBranch, err := git.DetectDefaultBranch(ctx, m.Cfg.ProjectRoot); err == nil {
+		if ferr := git.Fetch(ctx, m.Cfg.ProjectRoot, "origin"); ferr != nil {
+			// Fetch failed (offline, auth, etc.). The remote ref might still
+			// exist locally from an earlier fetch; use it anyway.
+			log.Warn("workspace.create.fetch-failed", "err", ferr)
+			fmt.Fprintf(stderr, "warning: git fetch origin failed: %v\n", ferr)
+			fmt.Fprintf(stderr, "  proceeding with the local copy of origin/%s\n", defaultBranch)
+		}
+		startPoint = "origin/" + defaultBranch
+		fmt.Fprintf(stdout, "Basing %s on %s\n", ws.Branch, startPoint)
+	}
+
+	if err := git.Add(ctx, m.Cfg.ProjectRoot, ws.Branch, ws.Path, startPoint); err != nil {
 		return fmt.Errorf("workspace.runSetup: git: %w", err)
 	}
 

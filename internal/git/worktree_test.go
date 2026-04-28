@@ -82,7 +82,7 @@ func TestAddRemove_HappyPath(t *testing.T) {
 	wt := filepath.Join(t.TempDir(), "wt-feature-x")
 	ctx := context.Background()
 
-	if err := canopygit.Add(ctx, repo, "feature-x", wt); err != nil {
+	if err := canopygit.Add(ctx, repo, "feature-x", wt, ""); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	// The worktree dir should now exist with a .git file pointing back to
@@ -110,10 +110,10 @@ func TestAdd_BranchExists(t *testing.T) {
 	second := filepath.Join(t.TempDir(), "wt-2")
 	ctx := context.Background()
 
-	if err := canopygit.Add(ctx, repo, "feature-x", first); err != nil {
+	if err := canopygit.Add(ctx, repo, "feature-x", first, ""); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
-	err := canopygit.Add(ctx, repo, "feature-x", second)
+	err := canopygit.Add(ctx, repo, "feature-x", second, "")
 	if !errors.Is(err, canopygit.ErrBranchExists) {
 		t.Fatalf("second Add: got %v; want errors.Is(... ErrBranchExists)", err)
 	}
@@ -133,7 +133,7 @@ func TestAdd_PathExists(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	err := canopygit.Add(context.Background(), repo, "fresh-branch", collidingDir)
+	err := canopygit.Add(context.Background(), repo, "fresh-branch", collidingDir, "")
 	if !errors.Is(err, canopygit.ErrPathExists) {
 		t.Fatalf("Add(existing path): got %v; want errors.Is(... ErrPathExists)", err)
 	}

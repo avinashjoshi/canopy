@@ -47,14 +47,16 @@ var (
 )
 
 // Add creates a new git worktree at path with a new branch named branch.
-// The new branch is created from the current HEAD of repoRoot.
+// If startPoint is non-empty, the new branch is created from that ref
+// (typically "origin/main"); otherwise it's created from the current
+// HEAD of repoRoot.
 //
 // Returns ErrBranchExists or ErrPathExists for the corresponding conflicts.
 // These cases are checked via pre-flight (git rev-parse for the branch,
 // os.Stat for the path) so we don't depend on git's English error strings
 // to recognize them — the substring fallback is only for unexpected stderr.
-func Add(ctx context.Context, repoRoot, branch, path string) error {
-	log.Info("git.add", "repo", repoRoot, "branch", branch, "path", path)
+func Add(ctx context.Context, repoRoot, branch, path, startPoint string) error {
+	log.Info("git.add", "repo", repoRoot, "branch", branch, "path", path, "start", startPoint)
 
 	// Pre-flight: branch must not already exist.
 	if exists, err := branchExists(ctx, repoRoot, branch); err != nil {
@@ -70,7 +72,12 @@ func Add(ctx context.Context, repoRoot, branch, path string) error {
 		return fmt.Errorf("git.Add(%s): pre-flight path check: %w", path, err)
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "add", "-b", branch, path)
+	args := []string{"-C", repoRoot, "worktree", "add", "-b", branch, path}
+	if startPoint != "" {
+		args = append(args, startPoint)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 
@@ -82,6 +89,46 @@ func Add(ctx context.Context, repoRoot, branch, path string) error {
 			strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// Fetch runs `git fetch <remote>` from repoRoot. Quiet on success;
+// errors include the captured stderr so network/auth failures are
+// readable in logs and surfaced to the caller.
+//
+// The caller decides whether a fetch failure is fatal. Workspace
+// creation treats it as best-effort — a missing remote or offline
+// network shouldn't block creating a new branch from the local HEAD.
+func Fetch(ctx context.Context, repoRoot, remote string) error {
+	log.Info("git.fetch", "repo", repoRoot, "remote", remote)
+
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "fetch", remote, "--quiet")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git.Fetch(%s): %w (stderr: %s)", remote, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// DetectDefaultBranch returns the name of the repo's default branch
+// (without the "origin/" prefix). Tries the conventional names "main"
+// and "master" in order; returns the first one that exists as a
+// remote-tracking ref under refs/remotes/origin/.
+//
+// Returns an empty string + error when no default-shaped branch is
+// found — typically a fresh repo with no remote, or a repo whose
+// default branch has a non-conventional name (e.g. "develop"). The
+// caller can fall back to the local HEAD in those cases.
+func DetectDefaultBranch(ctx context.Context, repoRoot string) (string, error) {
+	for _, candidate := range []string{"main", "master"} {
+		cmd := exec.CommandContext(ctx, "git", "-C", repoRoot,
+			"rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+candidate)
+		if err := cmd.Run(); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("git.DetectDefaultBranch: no origin/main or origin/master")
 }
 
 // branchExists returns true if a local branch by that name exists in the
