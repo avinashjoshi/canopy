@@ -1,6 +1,20 @@
-# Canopy
+```
+   _____
+  / ____|
+ | |     __ _ _ __   ___  _ __  _   _
+ | |    / _` | '_ \ / _ \| '_ \| | | |
+ | |___| (_| | | | | (_) | |_) | |_| |
+  \_____\__,_|_| |_|\___/| .__/ \__, |
+                         | |     __/ |
+                         |_|    |___/
+```
 
-TUI for managing git worktrees with paired tmux sessions and per-project setup hooks.
+[![Go Reference](https://pkg.go.dev/badge/github.com/avinashjoshi/canopy.svg)](https://pkg.go.dev/github.com/avinashjoshi/canopy)
+[![Go Report Card](https://goreportcard.com/badge/github.com/avinashjoshi/canopy)](https://goreportcard.com/report/github.com/avinashjoshi/canopy)
+[![Tests](https://github.com/avinashjoshi/canopy/actions/workflows/test.yml/badge.svg)](https://github.com/avinashjoshi/canopy/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**TUI for managing git worktrees with paired tmux sessions and per-project setup hooks.**
 
 > Status: pre-v0.1, in active development. Not yet usable end-to-end. Watch this space.
 

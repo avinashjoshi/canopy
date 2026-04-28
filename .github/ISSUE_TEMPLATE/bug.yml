@@ -1,0 +1,72 @@
+name: Bug report
+description: Something canopy did wrong, or didn't do at all when it should have.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a clean bug. The faster we can reproduce, the faster we can fix.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the bug. What did you do, what did canopy do, what did you expect instead?
+      placeholder: |
+        I ran `canopy new`. It got stuck on "Working..." for 30 seconds and then said "scripts.setup failed."
+        Expected: a workspace at status=ready or a clear error message.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal sequence that triggers the bug. Ideally something we can paste into a fresh shell.
+      placeholder: |
+        1. `canopy init` in an empty git repo
+        2. Edit canopy.json to add `scripts.setup = "bin/canopy-setup"` (which doesn't exist)
+        3. `canopy new`
+        4. Observe the failure
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: |
+        Relevant lines from `~/.canopy/log/canopy.log`. Run `canopy --debug <subcommand>` for verbose output.
+        Don't paste the whole file — just the part that's relevant. Wrap in triple backticks.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: canopy version
+      description: Output of `canopy version`
+      placeholder: "canopy v0.1.0 (commit abc1234, built 2026-...)"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "Arch Linux 6.19, macOS 15, Ubuntu 24.04, etc."
+    validations:
+      required: true
+
+  - type: input
+    id: tmux-git
+    attributes:
+      label: tmux + git versions
+      description: Output of `tmux -V; git --version`
+      placeholder: "tmux 3.4 / git 2.45.1"
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Optional. Other context — does it happen every time? Only with a specific project? After a recent change?

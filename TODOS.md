@@ -5,6 +5,30 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## v0.1.0 — Demo recording for the launch
+
+**What:** A 30–45 second terminal recording showing the canopy happy path end-to-end: `canopy init` → `canopy new` (auto-attach into the 3-pane tmux session) → tiny edit → detach → `canopy ls` → `canopy switch <name>` (claude conversation resumes) → `canopy rm`. Output as `docs/demo.gif` referenced from the README hero and used as the launch-tweet asset.
+
+**Why:** People decide whether a CLI tool is worth installing in 10 seconds. A short, clean recording does the job better than 200 words of pitch copy — especially load-bearing for a launch where strangers see the README cold.
+
+**Pros:** Highest-leverage marketing artifact per minute of effort. Pairs with the v0.1.0 tag + Show HN / r/golang / Lobste.rs cross-post sequence. [vhs](https://github.com/charmbracelet/vhs) — Charm's recording tool, perfect aesthetic match for canopy's stack — makes the recording fully scripted and rerunnable as the UI evolves.
+
+**Cons:** Real polish work; first take never looks right. Recording inside canopy's live tmux is fiddly because the no-nesting guard refuses to run inside tmux (use `CANOPY_ALLOW_NESTED=1` for the recording session). The .tape script needs maintenance whenever the TUI keymap/layout changes.
+
+**Context:** Likely shape: `tape/canopy-demo.tape` (vhs convention) invoked via a `make demo` target. Aim for ~800×600, 30-second loop, pin font + dark theme to match the README aesthetic. Plan:
+
+1. Set up a fresh scratch project (Rails or Node — pick whichever onboards in <5s).
+2. Write `tape/canopy-demo.tape`. Comment each `Type` / `Sleep` / `Enter` block so future maintainers can iterate.
+3. `vhs tape/canopy-demo.tape` renders `docs/demo.gif`.
+4. Add `![demo](docs/demo.gif)` to README under the badge row.
+5. Optional: still frame at `docs/demo.png` for places that don't autoplay GIFs.
+
+Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Deferred until post-merge of the parallel agent's work AND post-org-move, so the recording reflects final TUI + final URLs.
+
+**Depends on / blocked by:** Org move complete; parallel agent's branch merged.
+
+---
+
 ## v0.5 — Repo org move (`avinashjoshi/canopy` → org)
 
 **What:** Move canopy out of Avi's personal GitHub into either **cravd** or **oncactus** org. Bulk-update `go install` URLs in README + docs, the module path in `go.mod`, every internal `import` line, and any `gh` URLs in CLAUDE.md.

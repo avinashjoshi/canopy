@@ -1,0 +1,55 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Read the Go version from go.mod so CI tracks whatever the
+          # project actually requires — no manual bump needed when
+          # we update go.mod.
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  e2e:
+    name: E2E tests (real tmux + git)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Install tmux
+        # ubuntu-latest ships git but not tmux. canopy's e2e tests use
+        # the canopy-test tmux socket so they don't pollute any
+        # ambient tmux server (none on the runner anyway).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+
+      - name: Verify versions meet canopy's minimums
+        run: |
+          git --version
+          tmux -V
+
+      - name: go test -tags=e2e
+        run: go test -tags=e2e ./...

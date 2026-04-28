@@ -1,0 +1,48 @@
+name: Feature request
+description: A new behavior, subcommand, or change you'd like canopy to support.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Canopy's design philosophy is "calm and focused beats feature-dense" — we'd rather do a smaller set of things really well than accumulate options. That means features are evaluated as much on what they take *away* as on what they add.
+
+        Before filing, scan [`TODOS.md`](https://github.com/avinashjoshi/canopy/blob/main/TODOS.md) — your idea may already be queued.
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: The use case
+      description: What problem are you trying to solve? Concrete is better than abstract.
+      placeholder: |
+        I work on multiple worktrees of the same project and want to switch between them
+        without detaching tmux. Today I have to prefix-d → wait for canopy → enter, which
+        is friction every time.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: |
+        What would the feature look like? CLI flag? TUI keybind? New subcommand?
+        Don't worry about getting the exact shape right — describe enough that we can discuss it.
+      placeholder: |
+        A tmux popup keybind (e.g. `prefix-c`) that opens canopy as a transient overlay.
+        Selecting a workspace switches the tmux client without needing to detach first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you've tried
+      description: Other tools, workarounds, or canopy features that come close but don't quite fit. Helps us see the gap.
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Mockups, related issues, prior art from other tools (Conductor, helmor, etc.).
