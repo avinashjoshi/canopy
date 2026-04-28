@@ -6,20 +6,65 @@ TUI for managing git worktrees with paired tmux sessions and per-project setup h
 
 The pitch in one sentence: `canopy new` and ten seconds later you're attached to a tmux session with `nvim`, `claude`, a shell, and a running dev server, all on a fresh git worktree against an isolated database. Reboot your laptop, `canopy switch <name>`, and you're back exactly where you left off, claude conversation included.
 
-## Build from source
+## Install
 
-Requires Go 1.22+ and a Linux box with `git >= 2.30` and `tmux >= 3.0` installed.
+### Requirements
 
-Clone and install for daily use (binary lands at `~/.local/bin/canopy`):
+| Tool | Why canopy needs it |
+|---|---|
+| `git >= 2.30` | worktree creation per workspace |
+| `tmux >= 3.0` | one tmux session per workspace |
+| `nvim` (Neovim) | launched in the top-left pane of every workspace |
+| `go >= 1.22` | only if installing from source (the `go install` and `make install` paths) |
+
+Optional but recommended:
+- `claude` ([Claude Code](https://docs.claude.com/en/docs/claude-code)) — populates the top-right pane. Canopy still works without it; the pane just says "command not found" until you install it.
+
+### Linux
+
+**Arch / CachyOS / Omarchy:**
+```bash
+sudo pacman -S git tmux neovim go
+go install github.com/avinashjoshi/canopy/cmd/canopy@latest
+```
+
+**Debian / Ubuntu:**
+```bash
+sudo apt install git tmux neovim golang
+go install github.com/avinashjoshi/canopy/cmd/canopy@latest
+```
+
+### macOS
+
+Homebrew handles all dependencies:
+```bash
+brew install git tmux neovim go
+go install github.com/avinashjoshi/canopy/cmd/canopy@latest
+```
+
+### Windows
+
+Canopy depends on `tmux`, which doesn't run natively on Windows. Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install):
+
+```powershell
+# In an admin PowerShell:
+wsl --install
+```
+
+Reboot, finish the Linux user setup, then inside the WSL shell follow the Debian/Ubuntu instructions above. Run `canopy` from inside WSL — Windows Terminal renders the TUI cleanly.
+
+### From source (any platform)
+
+If you want to track `main` or hack on canopy:
 
 ```bash
 git clone https://github.com/avinashjoshi/canopy.git
 cd canopy
-make install
+make install        # builds ./canopy and copies to ~/.local/bin
 canopy --help
 ```
 
-`make install` is the dogfood loop. Run it after every `git pull` to keep the installed binary current. If `~/.local/bin` isn't on your `$PATH`, the Makefile prints a one-liner to add it.
+`make install` is the dogfood loop — re-run it after every `git pull` to keep the installed binary current. If `~/.local/bin` isn't on your `$PATH`, the Makefile prints a one-liner to add it.
 
 Other Make targets:
 
@@ -32,10 +77,16 @@ make uninstall   # remove ~/.local/bin/canopy
 make clean       # remove ./canopy
 ```
 
-If you prefer `go install` (puts the binary in `$GOBIN`, default `~/go/bin`):
+### Verify
 
 ```bash
-go install github.com/avinashjoshi/canopy/cmd/canopy@latest
+canopy version
+```
+
+Should print something like `canopy v0.0.0-... (commit abc1234, built 2026-04-28T...)`. If you see `command not found`, your `go install` target dir (default `~/go/bin`) isn't on your `$PATH` — add it to your shell rc file (`~/.bashrc`, `~/.zshrc`, or your fish config):
+
+```bash
+export PATH="$HOME/go/bin:$PATH"
 ```
 
 ## What works today
