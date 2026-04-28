@@ -203,7 +203,7 @@ func TestGoToProject_InvokesCallback(t *testing.T) {
 	m.SetRows(sampleRows())
 	// Move to row 2 (canopy / ancient-hornet) and press c.
 	m, _ = m.Update(key("end"))
-	_, gotCmd := m.Update(key("c"))
+	_, gotCmd := m.Update(key("o"))
 
 	if !called {
 		t.Fatalf("OnGoToProject not invoked")
@@ -216,14 +216,14 @@ func TestGoToProject_InvokesCallback(t *testing.T) {
 	}
 }
 
-// TestGoToProject_NoCallback: c without OnGoToProject is a no-op.
+// TestGoToProject_NoCallback: o without OnGoToProject is a no-op.
 func TestGoToProject_NoCallback(t *testing.T) {
 	m := New(Options{}) // no OnGoToProject
 	m.SetRows(sampleRows())
 
-	_, cmd := m.Update(key("c"))
+	_, cmd := m.Update(key("o"))
 	if cmd != nil {
-		t.Errorf("c without OnGoToProject returned non-nil cmd")
+		t.Errorf("o without OnGoToProject returned non-nil cmd")
 	}
 }
 

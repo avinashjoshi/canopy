@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+var _ = filepath.Separator // keep filepath import even if a future edit drops the only user
+
 // TestIsRepo_InsideRepo: a freshly-`git init`'d directory should report true.
 func TestIsRepo_InsideRepo(t *testing.T) {
 	dir := t.TempDir()
@@ -77,5 +79,52 @@ func TestIsRepo_DirDoesNotExist(t *testing.T) {
 	got, _ := IsRepo(context.Background(), "/nonexistent/definitely/not/here")
 	if got {
 		t.Fatalf("IsRepo on nonexistent dir = true, want false")
+	}
+}
+
+// TestSourceRepoFromWorktree_DerivesParent: a worktree of repo R should
+// resolve back to R's directory, not the worktree's own dir.
+func TestSourceRepoFromWorktree_DerivesParent(t *testing.T) {
+	source := t.TempDir()
+
+	// Build a real source repo with one commit.
+	for _, args := range [][]string{
+		{"init", "--initial-branch=main", source},
+		{"-C", source, "config", "user.email", "t@e"},
+		{"-C", source, "config", "user.name", "t"},
+		{"-C", source, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", args, err, out)
+		}
+	}
+
+	// Add a worktree on a fresh branch.
+	worktree := filepath.Join(t.TempDir(), "wt")
+	if out, err := exec.Command("git", "-C", source, "worktree", "add", "-b", "feat/x", worktree).CombinedOutput(); err != nil {
+		t.Fatalf("worktree add: %v\n%s", err, out)
+	}
+
+	got, err := SourceRepoFromWorktree(context.Background(), worktree)
+	if err != nil {
+		t.Fatalf("SourceRepoFromWorktree: %v", err)
+	}
+	// On macOS, t.TempDir's /var/folders gets symlinked through /private/var,
+	// so EvalSymlinks may resolve to a different prefix. Compare basenames.
+	if filepath.Base(got) != filepath.Base(source) {
+		t.Errorf("SourceRepoFromWorktree(%q) = %q, want a path whose basename is %q",
+			worktree, got, filepath.Base(source))
+	}
+	// Sanity: the resolved path should NOT be the worktree itself.
+	if filepath.Base(got) == filepath.Base(worktree) {
+		t.Errorf("SourceRepoFromWorktree returned the worktree path itself")
+	}
+}
+
+// TestSourceRepoFromWorktree_NotARepo: passing a non-repo dir errors.
+func TestSourceRepoFromWorktree_NotARepo(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := SourceRepoFromWorktree(context.Background(), dir); err == nil {
+		t.Errorf("expected error on non-repo dir, got nil")
 	}
 }

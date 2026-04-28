@@ -19,10 +19,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
@@ -191,7 +193,7 @@ func (m *GlobalModel) renderHelpLine() string {
 	keys := []string{
 		"↑/↓ navigate",
 		"enter attach",
-		"c open project",
+		"o open project",
 		"r refresh",
 		"? help",
 		"q quit",
@@ -208,13 +210,13 @@ func (m *GlobalModel) renderHelp() string {
 		"  G, end         last row",
 		"",
 		"  enter          attach to selected (ready/main rows only)",
-		"  c              open the selected row's project (cd in + launch canopy)",
+		"  o              open the selected row's project (cd in + launch canopy)",
 		"  r              refresh state",
 		"",
 		"  ?              this help",
 		"  q, ctrl-c      quit",
 		"",
-		subtleStyle.Render("Tip: press c on any row to land in that project's TUI,"),
+		subtleStyle.Render("Tip: press o on any row to land in that project's TUI,"),
 		subtleStyle.Render("where you can create/remove/retry/resurrect workspaces."),
 		"",
 		subtleStyle.Render("Press any key to dismiss."),
@@ -237,17 +239,17 @@ func (m *GlobalModel) activate(row state.GlobalRow) tea.Cmd {
 		return m.attachCmd(row.TmuxSession)
 
 	case state.StatusStopped:
-		// Press 'c' to land in the project TUI where 'enter' on this same
+		// Press 'o' to land in the project TUI where 'enter' on this same
 		// row will resurrect the session.
-		hint := fmt.Errorf("workspace %q is stopped — press `c` to open the project and resurrect it", row.Name)
+		hint := fmt.Errorf("workspace %q is stopped — press `o` to open the project and resurrect it", row.Name)
 		return func() tea.Msg { return globalErrMsg{err: hint} }
 
 	case state.StatusBroken:
-		hint := fmt.Errorf("workspace %q is broken — press `c` to open the project (then `R` to retry)", row.Name)
+		hint := fmt.Errorf("workspace %q is broken — press `o` to open the project (then `R` to retry)", row.Name)
 		return func() tea.Msg { return globalErrMsg{err: hint} }
 
 	case state.StatusOrphaned:
-		hint := fmt.Errorf("workspace %q has no on-disk dir — press `c` to open the project (then `d` to clean up)", row.Name)
+		hint := fmt.Errorf("workspace %q has no on-disk dir — press `o` to open the project (then `d` to clean up)", row.Name)
 		return func() tea.Msg { return globalErrMsg{err: hint} }
 
 	case state.StatusSettingUp:
@@ -293,28 +295,40 @@ func (m *GlobalModel) attachCmd(session string) tea.Cmd {
 }
 
 // goToProject is the OnGoToProject callback. Re-launches `canopy` with
-// cwd set to the row's ProjectRoot — that way the user lands in the
-// project's TUI, where they can create/remove/resurrect workspaces with
-// full canopy.json context. When they quit the inner canopy, control
-// returns here and the global TUI re-renders.
+// cwd set to the row's project source repo — that way the user lands in
+// the project's TUI, where they can create/remove/resurrect workspaces
+// with full canopy.json context. When they quit the inner canopy,
+// control returns here and the global TUI re-renders.
 //
 // Why this exists: v0.5 global mode is read-only (create/remove deferred
-// to v0.6). Until then, "go to the project" is the escape hatch for any
+// to v0.6). Until then, "open the project" is the escape hatch for any
 // action the global mode can't take. Works on every row regardless of
 // status, so users have a clean path even from broken/orphaned rows.
 //
+// Project-root resolution (in order):
+//
+//  1. If ProjectRoot is already a canonical absolute path, use it
+//     directly. Post-migration rows take this path.
+//
+//  2. If ProjectRoot is empty or just a basename (v1 unmigrated state),
+//     derive the source repo from the row's worktree Path via
+//     `git rev-parse --git-common-dir`. This works because every canopy
+//     workspace IS a git worktree of the source repo, so git already
+//     knows where the source lives.
+//
+//  3. If neither works (e.g. a main-only row with no Path AND an
+//     unmigrated ProjectRoot), surface a clear error instead of
+//     chdir'ing into garbage.
+//
 // Implementation: tea.ExecProcess re-execs the running canopy binary
-// (os.Executable) with WorkingDir set to ProjectRoot. The inner canopy
-// goes through routeRoot, finds canopy.json, launches the project TUI.
-// On exit, we refresh so any new workspaces / status changes show up.
+// (os.Executable) with WorkingDir set to the resolved root. The inner
+// canopy goes through routeRoot, finds canopy.json, launches the project
+// TUI. On exit, we refresh so any new workspaces / status changes show
+// up.
 func (m *GlobalModel) goToProject(row state.GlobalRow) tea.Cmd {
-	if row.ProjectRoot == "" {
-		// Shouldn't happen post-migration, but defend against it.
-		return func() tea.Msg {
-			return globalErrMsg{err: fmt.Errorf(
-				"can't open project for row %q: ProjectRoot is empty (run a project-scoped command from the source repo to migrate)",
-				row.Name)}
-		}
+	root, err := resolveProjectRoot(row, m.list.Rows())
+	if err != nil {
+		return func() tea.Msg { return globalErrMsg{err: err} }
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -323,16 +337,55 @@ func (m *GlobalModel) goToProject(row state.GlobalRow) tea.Cmd {
 		}
 	}
 	cmd := exec.Command(exe)
-	cmd.Dir = row.ProjectRoot
+	cmd.Dir = root
 	// Inherit env. Notably, we do NOT set TMUX or CANOPY_WORKSPACE_PATH;
 	// the inner canopy treats this as a normal invocation from the project
 	// root and routes to the project TUI.
 	cmd.Env = os.Environ()
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
-			return globalErrMsg{err: fmt.Errorf("open project at %s: %w", row.ProjectRoot, err)}
+			return globalErrMsg{err: fmt.Errorf("open project at %s: %w", root, err)}
 		}
 		// Inner canopy quit cleanly — refresh in case workspaces changed.
 		return m.refreshCmd()()
 	})
+}
+
+// resolveProjectRoot returns the canonical absolute project root for the
+// given row. Tries ProjectRoot first (post-migration); on a v1 unmigrated
+// row whose ProjectRoot is just a basename, falls back to deriving the
+// source repo from any sibling workspace's worktree via git common-dir.
+//
+// Sibling fallback (for main-only rows with no own Path): scan allRows
+// for any row in the same project group that has a Path, and use that.
+// This keeps the resolution best-effort without requiring a project
+// registry.
+func resolveProjectRoot(row state.GlobalRow, allRows []state.GlobalRow) (string, error) {
+	// Case 1: ProjectRoot is already a canonical absolute path.
+	if filepath.IsAbs(row.ProjectRoot) {
+		return row.ProjectRoot, nil
+	}
+
+	// Case 2: this row has its own worktree Path (workspace rows do).
+	if row.Path != "" {
+		if root, err := git.SourceRepoFromWorktree(context.Background(), row.Path); err == nil {
+			return root, nil
+		}
+	}
+
+	// Case 3: a main-only row has no Path of its own. Find a sibling
+	// workspace row in the same project group and derive from its Path.
+	for _, sibling := range allRows {
+		if sibling.Project == row.Project && sibling.Path != "" {
+			if root, err := git.SourceRepoFromWorktree(context.Background(), sibling.Path); err == nil {
+				return root, nil
+			}
+		}
+	}
+
+	// All fallbacks exhausted — surface a clear error.
+	return "", fmt.Errorf(
+		"can't open project %q: no canonical root path on file. "+
+			"Run any canopy command from the project's source repo once to migrate state.json (e.g. cd into the repo and run `canopy ls`).",
+		row.Project)
 }

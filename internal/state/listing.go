@@ -33,6 +33,12 @@ type LivenessProbe interface {
 // IsMain marks the synthetic `<project>-main` row that's emitted when a
 // project's main tmux session is alive (canopy main, no workspace). For
 // main rows: Name="(main)", Branch="—", Status="main".
+//
+// Path is the worktree directory on disk. Empty for main rows (no
+// associated worktree). The TUI uses this as a fallback when a row's
+// ProjectRoot is unmigrated (a v1-format basename rather than a canonical
+// absolute path) — git's common-dir lookup against the worktree finds
+// the source repo without needing migration to have run first.
 type GlobalRow struct {
 	ProjectRoot string // canonical absolute path; authoritative ID
 	Project     string // basename for display (filepath.Base(ProjectRoot))
@@ -43,6 +49,7 @@ type GlobalRow struct {
 	Status Status
 	Port   int
 
+	Path        string // worktree dir on disk (workspace rows); empty for main rows
 	TmuxSession string
 	Alive       bool
 }
@@ -150,6 +157,7 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 				Branch:      w.Branch,
 				Status:      w.Status,
 				Port:        w.Port,
+				Path:        w.Path,
 				TmuxSession: w.TmuxSession,
 				Alive:       alive,
 			})

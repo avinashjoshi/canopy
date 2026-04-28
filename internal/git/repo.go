@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -35,4 +36,49 @@ func IsRepo(ctx context.Context, dir string) (bool, error) {
 		return false, err
 	}
 	return strings.TrimSpace(string(out)) == "true", nil
+}
+
+// SourceRepoFromWorktree returns the absolute path of the source repo
+// that owns the given worktree directory. Used by the global TUI's
+// "open project" keybind to find the project's root even when the
+// state.Workspace's ProjectRoot is an unmigrated v1 basename.
+//
+// Mechanism: `git -C <worktree> rev-parse --git-common-dir` returns the
+// path to the .git directory shared across all worktrees of a repo —
+// for a worktree, that's the SOURCE repo's .git, not the worktree's
+// .git file. Strip the trailing `/.git` and you have the source repo
+// path. EvalSymlinks canonicalizes the result so it matches what
+// config.Load would produce.
+//
+// Returns ("", err) on any failure: dir isn't a worktree, git missing,
+// path resolution fails. Caller treats as "can't derive."
+func SourceRepoFromWorktree(ctx context.Context, worktree string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", worktree, "rev-parse", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" {
+		return "", exec.ErrNotFound
+	}
+	// commonDir may be relative (typical: ".git" when run from the repo
+	// root) or absolute. Resolve against the worktree path.
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktree, commonDir)
+	}
+	// Strip the trailing .git (or /.git/worktrees/<name> for non-main
+	// worktrees of the source repo's worktree machinery — those still
+	// have the source repo as the parent of the .git dir).
+	repoRoot := strings.TrimSuffix(commonDir, "/.git")
+	repoRoot = strings.TrimSuffix(repoRoot, "/.git/")
+	if filepath.Base(repoRoot) == ".git" {
+		repoRoot = filepath.Dir(repoRoot)
+	}
+	resolved, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		// Fall back to the abs path if EvalSymlinks failed (rare).
+		return filepath.Abs(repoRoot)
+	}
+	return resolved, nil
 }

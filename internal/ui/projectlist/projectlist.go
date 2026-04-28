@@ -44,10 +44,10 @@ type Options struct {
 	// or a status-line update for a non-attachable row). nil is allowed.
 	OnActivate func(state.GlobalRow) tea.Cmd
 
-	// OnGoToProject fires when the user presses 'c' (for "canopy" / "cd
-	// into project"). The parent typically tea.ExecProcess's `canopy` with
-	// cwd set to the row's ProjectRoot — that way the user lands in the
-	// project's TUI without having to leave the global view first.
+	// OnGoToProject fires when the user presses 'o' (for "open project").
+	// The parent typically tea.ExecProcess's `canopy` with cwd set to the
+	// row's ProjectRoot — that way the user lands in the project's TUI
+	// without having to leave the global view first.
 	// nil is allowed; key becomes a no-op.
 	OnGoToProject func(state.GlobalRow) tea.Cmd
 
@@ -134,7 +134,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			return m, m.onActivate(m.rows[m.cursor])
 
-		case "c":
+		case "o":
 			// "Open project" — let the parent cd into the project's repo
 			// and re-launch canopy there. Works on any row regardless of
 			// status, so users have an escape hatch from broken/stopped
