@@ -213,4 +213,4 @@ For contributors / future-you:
 
 ## License
 
-TBD before public release.
+[MIT](LICENSE) © 2026 Cravd Inc.
