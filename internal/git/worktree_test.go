@@ -3,6 +3,7 @@ package git_test
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -115,6 +116,26 @@ func TestAdd_BranchExists(t *testing.T) {
 	err := canopygit.Add(ctx, repo, "feature-x", second)
 	if !errors.Is(err, canopygit.ErrBranchExists) {
 		t.Fatalf("second Add: got %v; want errors.Is(... ErrBranchExists)", err)
+	}
+}
+
+// TestAdd_PathExists covers the case where the target dir is already on
+// disk but the branch name is fresh. The pre-flight os.Stat catches this
+// without depending on git's stderr wording.
+func TestAdd_PathExists(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping integration test")
+	}
+
+	repo := newScratchRepo(t)
+	collidingDir := filepath.Join(t.TempDir(), "wt-already-here")
+	if err := os.MkdirAll(collidingDir, 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	err := canopygit.Add(context.Background(), repo, "fresh-branch", collidingDir)
+	if !errors.Is(err, canopygit.ErrPathExists) {
+		t.Fatalf("Add(existing path): got %v; want errors.Is(... ErrPathExists)", err)
 	}
 }
 
