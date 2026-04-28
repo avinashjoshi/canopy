@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/ui"
 )
 
 // debugFlag is the --debug switch on the root command. When true, the log
@@ -42,9 +43,14 @@ func main() {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TODO(step 6a): launch the Bubbletea TUI here. Until then,
-			// surface help so empty invocations don't silently do nothing.
-			return cmd.Help()
+			// `canopy` with no subcommand launches the Bubbletea TUI.
+			// Requires being inside a canopy-initialized project, same as
+			// every other lifecycle subcommand.
+			mgr, err := loadManager()
+			if err != nil {
+				return err
+			}
+			return ui.Run(mgr)
 		},
 	}
 	root.PersistentFlags().BoolVar(&debugFlag, "debug", false, "enable DEBUG-level logging to ~/.canopy/log/canopy.log")
