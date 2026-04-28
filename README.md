@@ -10,20 +10,32 @@ The pitch in one sentence: `canopy new` and ten seconds later you're attached to
 
 Requires Go 1.22+ and a Linux box with `git >= 2.30` and `tmux >= 3.0` installed.
 
-Clone and build:
+Clone and install for daily use (binary lands at `~/.local/bin/canopy`):
 
 ```bash
 git clone https://github.com/avinashjoshi/canopy.git
 cd canopy
-go build -o canopy ./cmd/canopy
-./canopy --help
+make install
+canopy --help
 ```
 
-Or install straight to your `$GOBIN` (typically `~/go/bin`, must be on your `$PATH`):
+`make install` is the dogfood loop. Run it after every `git pull` to keep the installed binary current. If `~/.local/bin` isn't on your `$PATH`, the Makefile prints a one-liner to add it.
+
+Other Make targets:
+
+```
+make build       # build ./canopy in repo root, don't install
+make test        # fast unit tests
+make test-e2e    # full E2E suite (real tmux, scratch repo, slow)
+make lint        # golangci-lint if installed
+make uninstall   # remove ~/.local/bin/canopy
+make clean       # remove ./canopy
+```
+
+If you prefer `go install` (puts the binary in `$GOBIN`, default `~/go/bin`):
 
 ```bash
 go install github.com/avinashjoshi/canopy/cmd/canopy@latest
-canopy --help
 ```
 
 ## What works today
