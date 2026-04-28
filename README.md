@@ -40,11 +40,25 @@ go install github.com/avinashjoshi/canopy/cmd/canopy@latest
 
 ## What works today
 
-- `canopy version` prints version + commit + build date
-- `canopy --help` lists available commands
-- `canopy --debug <cmd>` writes DEBUG-level JSON logs to `~/.canopy/log/canopy.log` (rotated automatically: 10 MB max per file, 3 backups, 28 days retention, gzip-compressed)
+The wedge feature is live. From inside any project that has a `canopy.json`:
 
-The wedge feature (`canopy new` → 10-second workspace setup, attached to a tmux session) lands in commit 4 per the build plan.
+```bash
+canopy new                  # creates a workspace with a random name (e.g. bold-falcon)
+canopy new --name fix-bug   # explicit name
+canopy ls                   # list workspaces for the current project
+canopy switch <name>        # attach (resurrect first if stopped)
+canopy rm <name>            # tear down (archive script + tmux + git + branch)
+```
+
+Plus operational glue:
+
+- `canopy init` — onboard a project (creates `canopy.json` + stub `bin/canopy-*` scripts; detects existing `conductor.json` and mirrors its schema)
+- `canopy version` — version, commit, build date
+- `canopy --debug` — DEBUG-level JSON logs to `~/.canopy/log/canopy.log` (auto-rotated: 10 MB / 3 backups / 28 days / gzip)
+
+Workspaces live at `~/.canopy/workspaces/<project>/<name>` — canopy owns the storage so the source repo stays clean. Each workspace gets a 4-pane tmux session (nvim, claude, shell, your dev server) and a unique TCP port via `CANOPY_PORT`.
+
+A Bubbletea TUI (`canopy` with no args) is on the roadmap for the next milestone.
 
 ## Project structure
 
@@ -64,9 +78,20 @@ docs/design/               Design doc (the source of truth)
 docs/reviews/              Test plan + review artifacts
 ```
 
-## Configuration (planned)
+## Onboarding a project
 
-Each project that wants to use canopy drops a `canopy.json` at its root:
+Run `canopy init` from your project root:
+
+```bash
+cd ~/Work/your-project
+canopy init
+```
+
+That drops a `canopy.json` plus three stub scripts at `bin/canopy-{setup,run,archive}` for you to fill in. Edit the scripts, commit them, then run `canopy new`.
+
+If the project already has a `conductor.json` (Conductor's config — same schema), `canopy init` detects it and copies the script paths verbatim. Your existing `bin/conductor-*` scripts keep working; just remember to switch any `CONDUCTOR_*` env-var references in your scripts and config files to the `CANOPY_*` equivalents.
+
+### canopy.json schema
 
 ```json
 {
@@ -78,7 +103,15 @@ Each project that wants to use canopy drops a `canopy.json` at its root:
 }
 ```
 
-Three script paths, three env vars passed in (`CANOPY_WORKSPACE_PATH`, `CANOPY_ROOT_PATH`, `CANOPY_PORT`). The schema mirrors [Conductor.build's](https://conductor.build) on purpose; migrations from `conductor.json` are a five-minute `sed`.
+Three script paths. Each script gets the same env vars when canopy invokes it:
+
+| Var | Meaning |
+|---|---|
+| `CANOPY_WORKSPACE_PATH` | absolute path to the workspace dir |
+| `CANOPY_ROOT_PATH` | absolute path to the original repo root |
+| `CANOPY_PORT` | allocated TCP port for this workspace (3000-3999) |
+
+`setup` runs once at workspace creation. `run` is the long-running command for the server pane (re-launched on resurrection). `archive` runs at workspace removal.
 
 ## Documentation
 

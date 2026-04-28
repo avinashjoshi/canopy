@@ -50,6 +50,7 @@ func main() {
 	root.PersistentFlags().BoolVar(&debugFlag, "debug", false, "enable DEBUG-level logging to ~/.canopy/log/canopy.log")
 
 	root.AddCommand(versionCmd())
+	root.AddCommand(initCmd())
 	root.AddCommand(newCmd())
 	root.AddCommand(lsCmd())
 	root.AddCommand(switchCmd())
