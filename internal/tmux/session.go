@@ -140,8 +140,14 @@ func (c *Client) HasSession(ctx context.Context, name string) (bool, error) {
 // Callers that want canopy's standard 4-pane workspace layout call this
 // to seed the session, then SplitPane for each additional pane. That
 // orchestration lives in internal/workspace, not here.
-func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string) error {
-	log.Info("tmux.create", "name", name, "cwd", cwd, "cmd", shellCmd)
+//
+// env contains "KEY=VALUE" entries that set session-level environment
+// variables (via tmux's -e flag), inherited by every pane in the session,
+// including future panes the user creates with prefix-c. Use this for
+// CANOPY_PORT and friends so commands typed in the shell pane (like
+// `bin/dev`) can read them.
+func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string, env ...string) error {
+	log.Info("tmux.create", "name", name, "cwd", cwd, "cmd", shellCmd, "env_count", len(env))
 
 	exists, err := c.HasSession(ctx, name)
 	if err != nil {
@@ -152,6 +158,9 @@ func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string) error {
 	}
 
 	args := c.args("new-session", "-d", "-s", name, "-c", cwd)
+	for _, kv := range env {
+		args = append(args, "-e", kv)
+	}
 	if shellCmd != "" {
 		// `sh -c "<expr>"` so any shell metachars (&&, |, $VAR) work.
 		// Single-command cases (just "nvim") run via sh too; the extra

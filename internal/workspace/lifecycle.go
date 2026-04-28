@@ -188,10 +188,12 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		for _, w := range s.Workspaces {
 			used = append(used, w.Port)
 		}
-		// Search just this project's block, stepping by workspace_stride.
-		// Last slot before the next project's range is project_base + project_stride - 1.
+		// Allocate within this project's block, starting at base+stride
+		// (the base itself is RESERVED for `canopy main` — the main-branch
+		// session). Workspaces from canopy new walk base+10, base+20, ...
+		// up to just before the next project's base.
 		p, err := port.Allocate(
-			projectBase,
+			projectBase+ports.WorkspaceStride,
 			projectBase+ports.ProjectStride-1,
 			ports.WorkspaceStride,
 			used,
@@ -332,6 +334,11 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 // the server, they type the command themselves (or future versions will
 // add `canopy run` to invoke it on demand).
 //
+// CANOPY_* env vars are set at session level (via tmux -e), so every
+// pane (nvim's wrapped sh, claude's wrapped sh, the bare shell, plus
+// any panes the user creates later with prefix-c) sees CANOPY_PORT
+// etc. without canopy doing per-pane plumbing.
+//
 // Layout sequence (all splits use -d so the active pane stays on the
 // initial nvim pane and subsequent splits target it):
 //   1. new-session: pane 0 = nvim, full window.
@@ -343,7 +350,8 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 // nvim and claude are wrapped in keepAlive so :q from nvim or claude
 // ending drops the pane to a shell instead of closing it.
 func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
-	if err := m.Tmux.Create(ctx, ws.TmuxSession, ws.Path, keepAlive("nvim")); err != nil {
+	env := hooks.WorkspaceEnv(ws.Path, m.Cfg.ProjectRoot, ws.Port)
+	if err := m.Tmux.Create(ctx, ws.TmuxSession, ws.Path, keepAlive("nvim"), env...); err != nil {
 		return err
 	}
 	// Shell, ~15% of window height, full-width bottom strip.
@@ -485,7 +493,8 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	// dir) we silently fall back to a fresh claude. Without the fallback
 	// the user sees a confusing "no conversation found to continue"
 	// before the keep-alive drops them to a shell.
-	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim")); err != nil {
+	env := hooks.WorkspaceEnv(wsCopy.Path, m.Cfg.ProjectRoot, wsCopy.Port)
+	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim"), env...); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
 	}
 	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {

@@ -55,10 +55,17 @@ type PortPlan struct {
 
 // Default returns the recommended settings. Used when no config.json
 // exists, and as the merge baseline for partial configs.
+//
+// Base=40000 deliberately avoids the 3000-9000 range where webapps
+// commonly live (Rails, Next.js, Django, Flask, generic http servers).
+// 40000 is well above the k8s NodePort range (30000-32767) and below
+// the IANA ephemeral range (49152+), so it almost never collides with
+// other tooling on a developer machine. With ProjectStride=1000, the
+// realistic 50-project ceiling fits comfortably in 40000-90000.
 func Default() Settings {
 	return Settings{
 		Ports: PortPlan{
-			Base:            3000,
+			Base:            40000,
 			ProjectStride:   1000,
 			WorkspaceStride: 10,
 		},
