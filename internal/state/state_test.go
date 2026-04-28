@@ -1,0 +1,273 @@
+package state_test
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/state"
+)
+
+func TestMain(m *testing.M) {
+	teardown, err := clog.Init(false)
+	if err != nil {
+		_ = err
+	}
+	defer teardown()
+	m.Run()
+}
+
+// TestLoad_Missing covers the first-run case: no state.json on disk yet.
+// Load must return an empty State with SchemaVersion set, not error out.
+func TestLoad_Missing(t *testing.T) {
+	t.Parallel()
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	st, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if st.SchemaVersion != state.SchemaVersion {
+		t.Errorf("SchemaVersion = %d; want %d", st.SchemaVersion, state.SchemaVersion)
+	}
+	if len(st.Workspaces) != 0 {
+		t.Errorf("Workspaces len = %d; want 0", len(st.Workspaces))
+	}
+}
+
+// TestSave_RoundTrip covers the basic write+read cycle.
+func TestSave_RoundTrip(t *testing.T) {
+	t.Parallel()
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	original := &state.State{
+		SchemaVersion: state.SchemaVersion,
+		Workspaces: []state.Workspace{
+			{
+				Project:     "cravd",
+				Name:        "bold-falcon",
+				Branch:      "bold-falcon",
+				Path:        "/home/avi/Work/cravd/worktrees/bold-falcon",
+				TmuxSession: "cravd-bold-falcon",
+				Port:        3001,
+				Status:      state.StatusReady,
+				CreatedAt:   time.Now().UTC().Round(time.Second),
+			},
+		},
+	}
+	if err := store.Save(original); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Workspaces) != 1 {
+		t.Fatalf("loaded len = %d; want 1", len(loaded.Workspaces))
+	}
+	got := loaded.Workspaces[0]
+	want := original.Workspaces[0]
+	if got.Name != want.Name || got.Port != want.Port || got.Status != want.Status {
+		t.Errorf("loaded mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+// TestSave_AtomicRename verifies the tmpfile+rename pattern: a state.json
+// that would crash mid-write leaves either the old contents or the new,
+// never half-written JSON. We can't easily simulate a crash mid-write, but
+// we can verify no .tmp file is left behind on success.
+func TestSave_AtomicRename(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(&state.State{SchemaVersion: state.SchemaVersion}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.json.tmp")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected no leftover .tmp file; got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.json")); err != nil {
+		t.Errorf("state.json missing after Save: %v", err)
+	}
+}
+
+// TestState_AddFindRemove covers the in-memory CRUD on the State struct.
+func TestState_AddFindRemove(t *testing.T) {
+	t.Parallel()
+	st := &state.State{SchemaVersion: state.SchemaVersion}
+
+	w := state.Workspace{Project: "cravd", Name: "bold-falcon", Status: state.StatusReady}
+	if err := st.Add(w); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Duplicate add must error with sentinel.
+	if err := st.Add(w); !errors.Is(err, state.ErrAlreadyExists) {
+		t.Fatalf("duplicate Add: got %v; want errors.Is(... ErrAlreadyExists)", err)
+	}
+
+	// Find by (project, name).
+	found, err := st.Find("cravd", "bold-falcon")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if found.Name != "bold-falcon" {
+		t.Errorf("Find got %q; want bold-falcon", found.Name)
+	}
+
+	// Find returns ErrNotFound for unknown.
+	_, err = st.Find("cravd", "missing")
+	if !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("Find(missing): got %v; want errors.Is(... ErrNotFound)", err)
+	}
+
+	// Remove and verify.
+	if err := st.Remove("cravd", "bold-falcon"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if len(st.Workspaces) != 0 {
+		t.Errorf("after Remove, len = %d; want 0", len(st.Workspaces))
+	}
+	if err := st.Remove("cravd", "bold-falcon"); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("Remove(missing): got %v; want errors.Is(... ErrNotFound)", err)
+	}
+}
+
+// TestWithLock_HappyPath covers the basic load-mutate-save cycle through
+// WithLock.
+func TestWithLock_HappyPath(t *testing.T) {
+	t.Parallel()
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	if err := store.WithLock(func(s *state.State) error {
+		return s.Add(state.Workspace{Project: "cravd", Name: "bold-falcon", Status: state.StatusReady})
+	}); err != nil {
+		t.Fatalf("WithLock: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Workspaces) != 1 {
+		t.Fatalf("after WithLock, len = %d; want 1", len(loaded.Workspaces))
+	}
+}
+
+// TestWithLock_FnErrorSkipsSave covers the case where fn returns an error:
+// state.json should NOT be modified.
+func TestWithLock_FnErrorSkipsSave(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := state.NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sentinel := errors.New("intentional fn failure")
+	err = store.WithLock(func(s *state.State) error {
+		s.Workspaces = append(s.Workspaces, state.Workspace{Name: "should-not-persist"})
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error; got %v", err)
+	}
+
+	// state.json should NOT contain the workspace fn tried to add.
+	loaded, _ := store.Load()
+	if len(loaded.Workspaces) != 0 {
+		t.Errorf("after fn failure, persisted len = %d; want 0", len(loaded.Workspaces))
+	}
+}
+
+// TestWithLock_ParallelWriters is the CRITICAL test from the design doc.
+// Two goroutines both run WithLock concurrently; each appends a distinct
+// workspace. After both complete, BOTH workspaces must be present.
+//
+// Without the flock, this would race: both goroutines load (empty slice),
+// both append their own workspace, both save — the second save overwrites
+// the first. We'd see len == 1.
+//
+// With the flock, the second WithLock blocks until the first releases,
+// then sees the first's write before doing its own. We see len == 2.
+//
+// Run with -race to also catch any in-process data race in Store/State.
+func TestWithLock_ParallelWriters(t *testing.T) {
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	const N = 10
+	var wg sync.WaitGroup
+	wg.Add(N)
+	errs := make(chan error, N)
+
+	for i := 0; i < N; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			err := store.WithLock(func(s *state.State) error {
+				// Sleep inside the critical section to amplify any race window.
+				// 1ms * 10 goroutines means the test takes at least 10ms total
+				// even when it succeeds — fine, sub-100ms in practice.
+				time.Sleep(1 * time.Millisecond)
+				return s.Add(state.Workspace{
+					Project: "cravd",
+					Name:    workspaceName(i),
+					Status:  state.StatusReady,
+				})
+			})
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("WithLock returned error: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Workspaces) != N {
+		t.Fatalf("after %d parallel writers, persisted len = %d; want %d", N, len(loaded.Workspaces), N)
+	}
+
+	// Verify each writer's workspace landed (no overwrites).
+	seen := map[string]bool{}
+	for _, w := range loaded.Workspaces {
+		seen[w.Name] = true
+	}
+	for i := 0; i < N; i++ {
+		if !seen[workspaceName(i)] {
+			t.Errorf("missing workspace #%d", i)
+		}
+	}
+}
+
+// workspaceName returns a stable per-index identifier so the parallel
+// test can verify every writer's mutation persisted.
+func workspaceName(i int) string {
+	const names = "abcdefghijklmnopqrstuvwxyz"
+	return "ws-" + string(names[i%len(names)])
+}
