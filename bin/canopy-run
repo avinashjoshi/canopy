@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Canopy's "server pane" command for canopy itself.
+#
+# Canopy doesn't have a long-running server like a Rails app would. The
+# server pane in this project hosts a `go test ./...` watcher so any
+# code change reruns the suite immediately — that's the closest thing
+# to a "dev loop" for a CLI tool.
+#
+# CANOPY_PORT is set but unused here (canopy doesn't bind a network
+# port internally; the var is reserved for projects that do).
+set -euo pipefail
+
+cd "${CANOPY_WORKSPACE_PATH:-.}"
+
+# If watchexec is available, use it for incremental test runs on file
+# change. Otherwise fall back to a single test pass + idle prompt so
+# the pane doesn't immediately exit (which would close it).
+if command -v watchexec >/dev/null 2>&1; then
+  echo "watching for changes; running tests on save..."
+  exec watchexec --exts go --restart -- go test ./...
+else
+  echo "watchexec not installed; running tests once."
+  go test ./... || true
+  echo ""
+  echo "Test run complete. (Install watchexec for auto-rerun-on-save.)"
+  echo "Press Ctrl-C to close this pane."
+  # Keep the pane alive so the user can read output.
+  exec sleep infinity
+fi

@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "setup": "bin/canopy-setup",
+    "run": "bin/canopy-run",
+    "archive": "bin/canopy-archive"
+  }
+}

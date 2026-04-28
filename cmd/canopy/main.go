@@ -50,6 +50,10 @@ func main() {
 	root.PersistentFlags().BoolVar(&debugFlag, "debug", false, "enable DEBUG-level logging to ~/.canopy/log/canopy.log")
 
 	root.AddCommand(versionCmd())
+	root.AddCommand(newCmd())
+	root.AddCommand(lsCmd())
+	root.AddCommand(switchCmd())
+	root.AddCommand(rmCmd())
 
 	if err := root.Execute(); err != nil {
 		// cobra has already printed the error; just exit non-zero.

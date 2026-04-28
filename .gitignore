@@ -17,3 +17,6 @@
 
 # test scratch
 /tmp-canopy-test/
+
+# canopy's own workspaces (when dogfooding canopy on canopy)
+/worktrees/

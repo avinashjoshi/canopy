@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Canopy workspace archive for canopy itself.
+#
+# Canopy doesn't allocate per-workspace databases or background
+# processes that need cleanup. The archive script just logs and exits
+# cleanly so canopy's removal flow has a hook to invoke.
+set -euo pipefail
+
+echo "canopy workspace archive:"
+echo "  CANOPY_WORKSPACE_PATH = ${CANOPY_WORKSPACE_PATH}"
+echo "  CANOPY_PORT           = ${CANOPY_PORT}"
+echo "Archive complete."

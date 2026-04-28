@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Canopy workspace setup for canopy itself.
+#
+# Canopy is a Go project — `go build` works in any worktree without
+# additional setup. This script logs the workspace context and exits 0
+# so canopy's status flips to ready. Future enhancements (pre-fetch
+# modules, run go mod tidy, etc.) can land here.
+set -euo pipefail
+
+echo "canopy workspace setup:"
+echo "  CANOPY_WORKSPACE_PATH = ${CANOPY_WORKSPACE_PATH}"
+echo "  CANOPY_ROOT_PATH      = ${CANOPY_ROOT_PATH}"
+echo "  CANOPY_PORT           = ${CANOPY_PORT}"
+
+# Prefetch Go modules so the first build inside the worktree is fast.
+# `go mod download` reuses the global module cache, so this is fast even
+# on subsequent setups.
+if command -v go >/dev/null 2>&1; then
+  echo "go mod download..."
+  cd "${CANOPY_WORKSPACE_PATH}"
+  go mod download
+fi
+
+echo "Setup complete."
