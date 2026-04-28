@@ -287,13 +287,16 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 }
 
 // buildSession creates the tmux session and lays out canopy's standard
-// 3-pane workspace:
+// 3-pane workspace, modeled on omarchy's `tdl` layout:
 //
-//	+--------+--------+
-//	|  nvim  | claude |
-//	+--------+--------+
-//	|     shell       |
-//	+--------+--------+
+//	+-------------------------+--------+
+//	|                         |        |
+//	|         nvim            | claude |
+//	|        (~70%)           | (~30%) |
+//	|                         |        |
+//	+-------------------------+--------+
+//	|             shell  (~15%)        |
+//	+----------------------------------+
 //
 // scripts.run is NOT launched automatically. Most of the time the user
 // wants a terminal, not a permanent server pane — when they need to run
@@ -303,8 +306,10 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 // Layout sequence (all splits use -d so the active pane stays on the
 // initial nvim pane and subsequent splits target it):
 //   1. new-session: pane 0 = nvim, full window.
-//   2. split-v: pane 1 = shell, full-width below nvim. nvim now top half.
-//   3. split-h: pane 2 = claude, right of nvim. nvim becomes top-left.
+//   2. split-v with -l 15%: pane 1 = shell, 15% of window height at the
+//      bottom. nvim becomes the top 85%, full-width.
+//   3. split-h with -l 30%: pane 2 = claude, 30% of nvim's width on the
+//      right. nvim becomes top-left ~70%.
 //
 // nvim and claude are wrapped in keepAlive so :q from nvim or claude
 // ending drops the pane to a shell instead of closing it.
@@ -312,13 +317,12 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	if err := m.Tmux.Create(ctx, ws.TmuxSession, ws.Path, keepAlive("nvim")); err != nil {
 		return err
 	}
-	// Shell, full-width bottom (vertical split puts the new pane below).
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, "", tmux.SplitVertical); err != nil {
+	// Shell, ~15% of window height, full-width bottom strip.
+	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, "", tmux.SplitVertical, 15); err != nil {
 		return err
 	}
-	// Claude, top-right (horizontal split puts the new pane to the right
-	// of the still-active nvim pane).
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive("claude"), tmux.SplitHorizontal); err != nil {
+	// Claude, ~30% of the top pane's width on the right.
+	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive("claude"), tmux.SplitHorizontal, 30); err != nil {
 		return err
 	}
 	return nil
@@ -446,16 +450,16 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		return nil, fmt.Errorf("workspace.Resurrect(%s): workspace dir missing at %s", name, wsCopy.Path)
 	}
 
-	// Rebuild the same 3-pane layout as buildSession. Claude pane uses
-	// --continue so the prior conversation history is restored; nvim
-	// and shell are unchanged.
+	// Rebuild the same tdl-style 3-pane layout as buildSession. Claude
+	// pane uses --continue so the prior conversation history is restored;
+	// nvim and shell are unchanged.
 	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim")); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical); err != nil {
+	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {
 		return nil, err
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("claude --continue"), tmux.SplitHorizontal); err != nil {
+	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("claude --continue"), tmux.SplitHorizontal, 30); err != nil {
 		return nil, err
 	}
 

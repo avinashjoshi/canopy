@@ -71,19 +71,21 @@ func mainCmd() *cobra.Command {
 	}
 }
 
-// buildMainSession creates the 3-pane layout for `canopy main`. Identical
-// shape to workspace.buildSession but without the workspace-specific env
-// or scripts; this session lives at the project root, not a worktree.
+// buildMainSession creates the tdl-style 3-pane layout for `canopy main`.
+// Identical shape to workspace.buildSession but without the workspace-
+// specific env or scripts; this session lives at the project root, not
+// a worktree.
+//
+// Same proportions as workspace sessions: 15% shell on the bottom,
+// 30% claude on the top-right, ~70% nvim on the top-left.
 func buildMainSession(ctx context.Context, tc *tmux.Client, session, projectRoot string) error {
 	if err := tc.Create(ctx, session, projectRoot, `nvim; exec "$SHELL"`); err != nil {
 		return err
 	}
-	// Shell, full-width bottom.
-	if err := tc.SplitPane(ctx, session, projectRoot, "", tmux.SplitVertical); err != nil {
+	if err := tc.SplitPane(ctx, session, projectRoot, "", tmux.SplitVertical, 15); err != nil {
 		return err
 	}
-	// Claude top-right (--continue so prior conversation in this dir resumes).
-	if err := tc.SplitPane(ctx, session, projectRoot, `claude --continue; exec "$SHELL"`, tmux.SplitHorizontal); err != nil {
+	if err := tc.SplitPane(ctx, session, projectRoot, `claude --continue; exec "$SHELL"`, tmux.SplitHorizontal, 30); err != nil {
 		return err
 	}
 	return nil

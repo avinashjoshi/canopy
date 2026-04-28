@@ -191,13 +191,25 @@ const (
 // cwd becomes the new pane's working directory; shellCmd is run via
 // sh -c (or the default shell if empty), same semantics as Create.
 //
+// sizePercent is variadic for backward-compat — pass nothing for an
+// even split (default 50/50), or pass a single integer 1-99 to size
+// the NEW pane to that percentage of the parent. Used for the tdl-style
+// layout where the bottom shell is 15% of the window and the right-side
+// AI pane is 30% of the top.
+//
 // Layout note: chained splits produce a tree, not a balanced grid.
-// Call SelectLayout("tiled") after the last split to rearrange into a
-// clean 2×2 (or N-up) layout regardless of split history.
-func (c *Client) SplitPane(ctx context.Context, session, cwd, shellCmd string, dir SplitDirection) error {
+// SelectLayout can rearrange tiled grids, but for fixed proportional
+// layouts (like tdl), use sizePercent on each split to set the geometry
+// at creation time.
+func (c *Client) SplitPane(ctx context.Context, session, cwd, shellCmd string, dir SplitDirection, sizePercent ...int) error {
 	log.Info("tmux.split-pane", "session", session, "cwd", cwd, "cmd", shellCmd, "dir", dir)
 
 	args := c.args("split-window", "-d", string(dir), "-t", session, "-c", cwd)
+	if len(sizePercent) > 0 && sizePercent[0] > 0 && sizePercent[0] < 100 {
+		// `-l <N>%` is the modern tmux size syntax (the deprecated form is
+		// `-p <N>`). Sizes the NEW pane to N% of the parent pane.
+		args = append(args, "-l", fmt.Sprintf("%d%%", sizePercent[0]))
+	}
 	if shellCmd != "" {
 		args = append(args, "sh", "-c", shellCmd)
 	}
