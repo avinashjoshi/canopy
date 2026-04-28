@@ -351,7 +351,17 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "warning: git worktree remove failed: %v\n", err)
 	}
 
-	// 4. Drop the state row.
+	// 4. Delete the underlying branch. Canopy's workspaces are ephemeral
+	// by design — leaving the branch behind every `canopy rm` would
+	// pile up dead branches the user has to clean by hand. force=true
+	// because the branch may have unmerged work and the user explicitly
+	// asked for removal anyway.
+	if err := git.DeleteBranch(ctx, m.Cfg.ProjectRoot, wsCopy.Branch, true); err != nil {
+		log.Warn("workspace.remove.branch-delete-failed", "name", name, "branch", wsCopy.Branch, "err", err)
+		fmt.Fprintf(stderr, "warning: failed to delete branch %s: %v\n", wsCopy.Branch, err)
+	}
+
+	// 5. Drop the state row.
 	return m.Store.WithLock(func(s *state.State) error {
 		return s.Remove(m.Cfg.Project, name)
 	})

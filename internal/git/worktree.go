@@ -135,6 +135,42 @@ func Remove(ctx context.Context, repoRoot, path string, force bool) error {
 	return nil
 }
 
+// DeleteBranch removes a local branch from repoRoot. Used by workspace
+// removal so canopy doesn't leave dead branches behind after every
+// `canopy rm` — workspaces are ephemeral by design and their branches
+// should follow them out.
+//
+// Pass force=true to delete branches that haven't been merged. canopy's
+// remove flow always uses force=true because the user explicitly asked
+// for removal and may be removing a feature branch with unmerged work.
+//
+// Returns nil if the branch doesn't exist (idempotent — Remove can call
+// this even after the branch has already been cleaned up by something else).
+func DeleteBranch(ctx context.Context, repoRoot, branch string, force bool) error {
+	log.Info("git.delete-branch", "repo", repoRoot, "branch", branch, "force", force)
+
+	exists, err := branchExists(ctx, repoRoot, branch)
+	if err != nil {
+		return fmt.Errorf("git.DeleteBranch(%s): pre-flight: %w", branch, err)
+	}
+	if !exists {
+		return nil // idempotent no-op
+	}
+
+	flag := "-d"
+	if force {
+		flag = "-D"
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "branch", flag, branch)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git.DeleteBranch(%s): %w (stderr: %s)", branch, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 // isWorktree returns true if path is a registered worktree of the repo at
 // repoRoot. Uses `git worktree list --porcelain`, which prints a line like
 // "worktree /abs/path/to/wt" for each entry — stable, machine-readable
