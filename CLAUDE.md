@@ -81,6 +81,18 @@ Five statuses: `setting_up`, `ready`, `stopped`, `broken`, `orphaned`. See desig
 - E2E tests gated behind `-tags=e2e` build tag. Use `t.TempDir()` and `tmux -L canopy-test` socket so they don't pollute the user's tmux server.
 - The three CRITICAL tests (`state.WithLock`, `port.Allocate`, `worktree.Create` E2E) ship with v0. The other ~50 paths grow with the code as bugs surface.
 
+### Test discipline (always-on)
+
+Every code change ships with tests. No exceptions.
+
+- **New behavior** → write a unit test that exercises it. Cover both branches of every conditional (`if` true AND false, env var set AND unset, success AND error path). Do NOT hand-wave with "the UI layer is intentionally test-light" — write the test.
+- **Bug fix** → write a regression test FIRST that reproduces the bug, then fix.
+- **Cosmetic-only changes** (color tweaks, spacing, copy edits) → still ship a test if there's a conditional or branch involved. Pure literal swaps in style values are the only exception.
+- **TUI changes are testable.** Build a `*Model` literal directly for keymap/render tests; use `tmux.WithSocket("canopy-test")` to avoid touching the user's tmux server. See `internal/ui/model_test.go` for the pattern.
+- **Coverage gate before shipping:** every new conditional branch in the diff must have a test. If you're about to commit code with new branches and no tests, stop and write them. The first place this rule slips is "I'll add tests later" — there is no later.
+
+If a change genuinely cannot be tested (e.g., a typo in a log line), say so explicitly in the PR body and explain why. Don't quietly skip.
+
 ## Skill routing
 
 When the user's request matches an available skill, invoke it via the Skill tool. The

@@ -31,11 +31,14 @@ var (
 	// help line, project label, hints).
 	subtleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
-	// selectedStyle highlights the row the cursor is on. Background highlight
-	// + bold cell so it pops without going garish.
+	// selectedStyle highlights the row the cursor is on. Bright violet
+	// background + near-white foreground + bold so the selected row
+	// pops on both light and dark terminals. The previous styling
+	// (bg=237 dim gray) was too subtle on terminals with dark themes
+	// and high-contrast color palettes.
 	selectedStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("237")).
-			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("62")).
+			Foreground(lipgloss.Color("231")).
 			Bold(true)
 
 	// status colors keyed by the state.Status enum. Mirrored in lsGlobal's

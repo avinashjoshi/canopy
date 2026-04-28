@@ -362,9 +362,13 @@ func subtleHelper() lipgloss.Style {
 }
 
 func selectionStyle() lipgloss.Style {
+	// Bright violet bg + near-white fg + bold. Mirrors selectedStyle in
+	// internal/ui/render.go so the selection looks identical between the
+	// project TUI and the global TUI. The previous bg=237 (dim gray)
+	// was too subtle on a lot of terminals.
 	return lipgloss.NewStyle().
-		Background(lipgloss.Color("237")).
-		Foreground(lipgloss.Color("230")).
+		Background(lipgloss.Color("62")).
+		Foreground(lipgloss.Color("231")).
 		Bold(true)
 }
 

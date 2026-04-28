@@ -17,6 +17,7 @@ package ui
 
 import (
 	"context"
+	"os"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -107,6 +108,14 @@ type Model struct {
 
 	// Loaded once at startup, used in title rendering.
 	projectName string
+
+	// fromGlobal is true when this project TUI was launched from the
+	// cross-project global view (model_global.go's goToProject sets the
+	// CANOPY_FROM_GLOBAL=1 env var on the re-execed canopy). When true,
+	// the listMode keymap accepts `b`/`esc` as a "back to global" key —
+	// they just quit the inner program; the outer global TUI's
+	// ExecProcess onExit refreshes and re-renders.
+	fromGlobal bool
 }
 
 // New constructs a Model. The caller must already have a workspace.Manager
@@ -123,6 +132,7 @@ func New(mgr *workspace.Manager) *Model {
 		projectName: mgr.Cfg.Project,
 		nameInput:   ti,
 		mode:        listMode,
+		fromGlobal:  os.Getenv("CANOPY_FROM_GLOBAL") == "1",
 	}
 }
 

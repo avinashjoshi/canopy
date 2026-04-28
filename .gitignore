@@ -2,6 +2,9 @@
 /canopy
 /dist/
 
+# Claude Code project-local settings (personal hooks, etc. — not team policy)
+/.claude/settings.local.json
+
 # logs
 *.log
 
