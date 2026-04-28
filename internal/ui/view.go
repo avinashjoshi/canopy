@@ -54,6 +54,12 @@ func (m *Model) View() string {
 	if m.showHelp {
 		return m.renderHelp()
 	}
+	switch m.mode {
+	case newMode:
+		return m.renderNewModal()
+	case busyMode:
+		return m.renderBusyView()
+	}
 
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("canopy") + " " + subtleStyle.Render(m.projectName))
@@ -135,11 +141,59 @@ func (m *Model) renderHelpLine() string {
 	keys := []string{
 		"↑/↓ navigate",
 		"enter attach",
+		"n new",
 		"r refresh",
 		"? help",
 		"q quit",
 	}
 	return subtleStyle.Render(strings.Join(keys, "  ·  "))
+}
+
+// renderNewModal is the new-workspace prompt. Shows the textinput plus
+// a one-line hint. Esc cancels, Enter submits.
+func (m *Model) renderNewModal() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new") + " " + subtleStyle.Render(m.projectName))
+	b.WriteString("\n\n")
+	b.WriteString("  Workspace name (leave blank for a random one):")
+	b.WriteString("\n\n  ")
+	b.WriteString(m.nameInput.View())
+	b.WriteString("\n\n")
+	b.WriteString(subtleStyle.Render("  enter to create  ·  esc to cancel"))
+	return b.String()
+}
+
+// renderBusyView is shown while a Create is in progress and immediately
+// after it completes (so the user can see the captured setup output).
+// While busy, it's a simple "creating..." line; once done, it shows the
+// success/error summary plus the captured output buffer.
+func (m *Model) renderBusyView() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(m.busyTitle))
+	b.WriteString("\n\n")
+
+	if !m.busyDone {
+		b.WriteString(subtleStyle.Render("  Working — this may take a few seconds while scripts.setup runs."))
+		b.WriteString("\n\n")
+		b.WriteString(subtleStyle.Render("  (The TUI is responsive; canopy is doing the heavy lifting in a goroutine.)"))
+		return b.String()
+	}
+
+	// Done: show the result.
+	if m.busyErr != nil {
+		b.WriteString(errorStyle.Render(fmt.Sprintf("Failed: %v", m.busyErr)))
+	} else {
+		b.WriteString(readyStyle.Render("Workspace created successfully."))
+	}
+	b.WriteString("\n\n")
+	if m.busyOutput != "" {
+		b.WriteString(subtleStyle.Render("Output:"))
+		b.WriteString("\n")
+		b.WriteString(m.busyOutput)
+		b.WriteString("\n")
+	}
+	b.WriteString(subtleStyle.Render("Press any key to dismiss."))
+	return b.String()
 }
 
 // renderHelp draws the full keybind reference (toggled with ?). Any key
@@ -153,7 +207,7 @@ func (m *Model) renderHelp() string {
 		"  G, end         last row",
 		"",
 		"  enter          attach to selected workspace",
-		"  n              new workspace            (coming step 6c)",
+		"  n              new workspace",
 		"  d              delete selected          (coming step 6d)",
 		"  r              refresh state",
 		"",

@@ -18,6 +18,7 @@ package ui
 import (
 	"context"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
@@ -41,6 +42,17 @@ type Row struct {
 	Alive       bool // tmux session liveness, queried at refresh time
 }
 
+// viewMode tracks which screen the TUI is showing. listMode is the
+// default table; newMode is the new-workspace text input; busyMode is
+// the wait/output screen during workspace creation.
+type viewMode int
+
+const (
+	listMode viewMode = iota
+	newMode
+	busyMode
+)
+
 // Model is the Bubbletea state. Constructed via New(), updated via
 // Update(), rendered via View().
 type Model struct {
@@ -54,8 +66,18 @@ type Model struct {
 	height int
 
 	// Toggles + ephemeral UI state.
+	mode     viewMode
 	showHelp bool
 	err      error // last operational error to surface; cleared on next refresh
+
+	// New-workspace modal (mode == newMode).
+	nameInput textinput.Model
+
+	// Creation in progress (mode == busyMode).
+	busyTitle  string // e.g. "Creating workspace 'bold-falcon'..."
+	busyOutput string // captured stdout/stderr after Create returns
+	busyDone   bool   // true once the Create goroutine completes
+	busyErr    error  // the Create error if any (separate from m.err to keep busy view focused)
 
 	// Loaded once at startup, used in title rendering.
 	projectName string
@@ -65,10 +87,16 @@ type Model struct {
 // (loaded via cmd/canopy's loadManager helper). Initial rows are empty;
 // the first tea.Cmd returned by Init() loads them.
 func New(mgr *workspace.Manager) *Model {
+	ti := textinput.New()
+	ti.Placeholder = "leave blank for a random name"
+	ti.CharLimit = 60
+	ti.Width = 40
 	return &Model{
 		mgr:         mgr,
 		tc:          mgr.Tmux,
 		projectName: mgr.Cfg.Project,
+		nameInput:   ti,
+		mode:        listMode,
 	}
 }
 

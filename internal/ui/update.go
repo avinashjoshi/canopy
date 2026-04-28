@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/state"
@@ -35,8 +37,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the direct ready-status path.
 		return m, attachCmd(m.mgr, msg.session)
 
+	case createDoneMsg:
+		// Workspace creation finished (success or error). Stash the
+		// output + result for the busy view to render. The user dismisses
+		// the busy view with any keypress, which fires a refresh.
+		m.busyDone = true
+		m.busyErr = msg.err
+		m.busyOutput = msg.output
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	}
+
+	// In newMode, route non-handled messages (mostly textinput-internal
+	// like cursor blink ticks) through the input.
+	if m.mode == newMode {
+		var cmd tea.Cmd
+		m.nameInput, cmd = m.nameInput.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
@@ -44,6 +63,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKey is the keymap. Conductor-flavored: small, opinionated, no
 // clever chords. Help is one keypress (?), nav is the standard
 // arrow/jk/gG, attach is enter, refresh is r, quit is q.
+//
+// Modal modes (newMode, busyMode) intercept first; only listMode
+// reaches the navigation block at the bottom.
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.showHelp {
 		// Any key dismisses help.
@@ -51,6 +73,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Mode-specific handling first.
+	switch m.mode {
+	case newMode:
+		return m.handleNewModeKey(msg)
+	case busyMode:
+		return m.handleBusyModeKey(msg)
+	}
+
+	// listMode keymap.
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -62,6 +93,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		// Manual refresh. Same flow as the initial load.
 		return m, refreshCmd(m.mgr, m.tc)
+
+	case "n":
+		// Open the new-workspace modal. Reset input each time so a
+		// previous attempt doesn't leak into the fresh prompt.
+		m.mode = newMode
+		m.nameInput.Reset()
+		m.nameInput.Focus()
+		return m, textinputBlink()
 
 	case "enter":
 		// Attach to the selected workspace. Resurrects first if the
@@ -197,4 +236,78 @@ func resurrectAndAttachCmd(mgr *workspace.Manager, name string) tea.Cmd {
 // catches it and dispatches attachCmd.
 type attachAfterMsg struct {
 	session string
+}
+
+// handleNewModeKey is the keymap while the new-workspace modal is open.
+// Esc cancels back to the list. Enter submits with whatever's typed
+// (empty -> namegen picks a random name). Anything else falls through
+// to textinput's own Update.
+func (m *Model) handleNewModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = listMode
+		m.nameInput.Blur()
+		return m, nil
+	case "enter":
+		name := m.nameInput.Value()
+		m.mode = busyMode
+		m.busyTitle = "Creating workspace..."
+		if name != "" {
+			m.busyTitle = fmt.Sprintf("Creating workspace %q...", name)
+		}
+		m.busyDone = false
+		m.busyOutput = ""
+		m.busyErr = nil
+		m.nameInput.Blur()
+		return m, createCmd(m.mgr, name)
+	}
+	// Forward to textinput for character handling.
+	var cmd tea.Cmd
+	m.nameInput, cmd = m.nameInput.Update(msg)
+	return m, cmd
+}
+
+// handleBusyModeKey: the busy view shows the in-progress or completed
+// workspace creation. While in progress, every key is ignored. Once
+// done (busyDone=true), any key dismisses the view and triggers a
+// refresh so the new row shows up.
+func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if !m.busyDone {
+		return m, nil
+	}
+	// Dismiss + refresh.
+	m.mode = listMode
+	m.busyOutput = ""
+	m.busyTitle = ""
+	m.busyDone = false
+	if m.busyErr != nil {
+		m.err = m.busyErr
+		m.busyErr = nil
+	}
+	return m, refreshCmd(m.mgr, m.tc)
+}
+
+// createDoneMsg carries the result of a Manager.Create call back to
+// Update. Output is whatever Create wrote to its stdout/stderr writers.
+type createDoneMsg struct {
+	output string
+	err    error
+}
+
+// createCmd kicks off Manager.Create asynchronously. Captures the
+// streamed setup output into a single buffer (no live streaming in v0;
+// the user sees output after Create returns). Sends createDoneMsg back
+// to Update when finished.
+func createCmd(mgr *workspace.Manager, name string) tea.Cmd {
+	return func() tea.Msg {
+		var buf bytes.Buffer
+		_, err := mgr.Create(context.Background(), name, &buf, &buf)
+		return createDoneMsg{output: buf.String(), err: err}
+	}
+}
+
+// textinputBlink dispatches the cursor blink command for the textinput.
+// Wrapper kept so the modal-open code reads cleanly.
+func textinputBlink() tea.Cmd {
+	return textinput.Blink
 }
