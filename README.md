@@ -87,7 +87,7 @@ Plus operational glue:
 
 Workspaces live at `~/.canopy/workspaces/<project>/<name>` — canopy owns the storage so the source repo stays clean. Each workspace gets a 4-pane tmux session (nvim, claude, shell, your dev server) and a unique TCP port via `CANOPY_PORT`.
 
-A Bubbletea TUI (`canopy` with no args) is on the roadmap for the next milestone.
+`canopy` with no args launches a Bubbletea TUI — the same workspace list with arrow-key navigation, `enter` to attach, `n` to create, `d` to delete (with confirmation), `?` for help. CLI subcommands work alongside it; both call into the same `workspace.Manager` underneath.
 
 ## Project structure
 
@@ -101,8 +101,8 @@ internal/hooks/            script execution with CANOPY_* env      (step 3)
 internal/state/            workspace registry + flock              (step 3)
 internal/workspace/        orchestration: Create/Remove/Reconcile  (step 4)
 internal/namegen/          random adjective-noun workspace names   (step 4)
-internal/ui/               Bubbletea Model/Update/View             (step 6)
-internal/ai/               AI-tool defaults (multi-AI ready)       (step 6b)
+internal/ui/               Bubbletea Model/Update/View
+internal/ai/               AI-tool defaults (multi-AI ready)       (deferred)
 docs/design/               Design doc (the source of truth)
 docs/reviews/              Test plan + review artifacts
 ```
