@@ -1,0 +1,19 @@
+# build artifacts
+/canopy
+/dist/
+
+# logs
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# environment
+.env
+.env.local
+
+# test scratch
+/tmp-canopy-test/
