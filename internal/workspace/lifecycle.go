@@ -31,10 +31,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/clog"
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/hooks"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/namegen"
 	"github.com/avinashjoshi/canopy/internal/port"
 	"github.com/avinashjoshi/canopy/internal/settings"
@@ -292,7 +294,10 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		return &ws, setupErr
 	}
 
-	// Phase 3: flip to ready under the lock.
+	// Phase 3: flip to ready under the lock + bump AgentLaunchCount
+	// (the agent pane was just spawned in buildSession's runSetup).
+	// AgentLaunchCount drives the v0.6 hybrid briefing strategy:
+	// count==0 → fresh briefing; count>0 → delta-only on the next launch.
 	err = m.Store.WithLock(func(s *state.State) error {
 		row, err := s.Find(ws.ProjectRoot, ws.Name)
 		if err != nil {
@@ -300,6 +305,7 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		}
 		row.Status = state.StatusReady
 		row.LastError = ""
+		row.AgentLaunchCount++
 		ws = *row
 		return nil
 	})
@@ -307,7 +313,7 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		return nil, fmt.Errorf("workspace.Create: finalize: %w", err)
 	}
 
-	log.Info("workspace.create.ready", "name", ws.Name)
+	log.Info("workspace.create.ready", "name", ws.Name, "agent_launch_count", ws.AgentLaunchCount)
 	return &ws, nil
 }
 
@@ -510,11 +516,116 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, "", tmux.SplitVertical, 15); err != nil {
 		return err
 	}
-	// Claude, ~30% of the top pane's width on the right.
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive("claude"), tmux.SplitHorizontal, 30); err != nil {
+	// Agent pane, ~30% of the top pane's width on the right. Uses
+	// canopy.json's agent.type to pick the launcher (claude by default;
+	// codex/opencode/aider supported); briefing is built from workspace
+	// state + canopy lifecycle conventions and handed to the agent
+	// inline (claude/codex), via temp file (aider), or via AGENTS.md
+	// in the worktree (opencode).
+	agentCmd, err := m.agentPaneCmd(ws, false /* fresh: AgentLaunchCount==0 */)
+	if err != nil {
+		return fmt.Errorf("workspace.buildSession: agent pane: %w", err)
+	}
+	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
 		return err
 	}
 	return nil
+}
+
+// agentPaneCmd assembles the shell command for the workspace's agent
+// pane. resume=false means "fresh launch" (AgentLaunchCount==0 path —
+// full briefing); resume=true means "resurrect" (hybrid strategy —
+// hints-only delta or no briefing flag if no hints active).
+//
+// Sequence:
+//
+//  1. Resolve the launcher from canopy.json's agent.type
+//     (default "claude"). Returns ErrUnknownAgent for typos.
+//  2. Verify the agent binary is on PATH. Surfaces a clean error with
+//     install hint instead of a cryptic shell failure inside the pane.
+//  3. Build the briefing string via agent.BuildBriefing (handles the
+//     hybrid fresh-vs-resume strategy).
+//  4. Write briefing to a temp file (or skip if empty — happens on
+//     resume + no active hints; the launcher then drops the briefing
+//     flag entirely).
+//  5. Build the shell command via launcher.PlanLaunch, prepending any
+//     PreRun (e.g., the cp-to-AGENTS.md for opencode).
+//
+// Detector hints are read once at this call's time. Future detector
+// state changes between this call and the agent actually launching are
+// not reflected — that's acceptable; the agent gets a fresh briefing
+// on every relaunch.
+func (m *Manager) agentPaneCmd(ws *state.Workspace, resume bool) (string, error) {
+	launcher, err := agent.Resolve(m.Cfg.Agent.Type)
+	if err != nil {
+		return "", err
+	}
+	if err := launcher.VerifyInstalled(); err != nil {
+		return "", err
+	}
+
+	// Detector hints. RunFast is the cheap-only set (rename + shipped);
+	// pr_status is excluded here because shelling to gh during workspace
+	// creation is the wrong place for that latency. The next reconcile /
+	// TUI refresh will pick it up.
+	hints := lifecycle.RunFast(context.Background(), *ws)
+
+	briefing := agent.BuildBriefing(*ws, m.Cfg, hints)
+
+	// Write briefing to a temp file. Empty briefing → empty path → the
+	// launcher drops the flag entirely (handled in PlanLaunch).
+	briefingPath := ""
+	if briefing != "" {
+		path, err := writeBriefingTemp(briefing, ws.Name)
+		if err != nil {
+			return "", fmt.Errorf("write briefing temp file: %w", err)
+		}
+		briefingPath = path
+	}
+
+	plan := launcher.PlanLaunch(briefingPath, resume, ws.Path)
+	cmd := plan.ShellCommand
+	if plan.PreRun != "" {
+		cmd = plan.PreRun + " && " + cmd
+	}
+	return cmd, nil
+}
+
+// writeBriefingTemp writes the briefing string to a temp file under
+// ~/.canopy/tmp/. Returns the absolute path. The temp file persists
+// after the agent reads it (the agent might re-read mid-session); we
+// rely on system tmp cleanup to evict eventually.
+//
+// Filename pattern: agent-briefing-<workspace>-<random>.md so a `ls
+// ~/.canopy/tmp/` shows which workspace each briefing belongs to.
+func writeBriefingTemp(briefing, workspaceName string) (string, error) {
+	tmpDir := filepath.Join(canopyHomeOrFallback(), "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return "", err
+	}
+	pattern := "agent-briefing-" + workspaceName + "-*.md"
+	f, err := os.CreateTemp(tmpDir, pattern)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(briefing); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// canopyHomeOrFallback returns ~/.canopy or os.TempDir() as a last
+// resort. canopy.Manager already has CanopyHome on it, but this helper
+// is called from agentPaneCmd which has access to *Manager — refactor:
+// take the manager. Simpler.
+func canopyHomeOrFallback() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return os.TempDir()
+	}
+	return filepath.Join(home, ".canopy")
 }
 
 // keepAlive wraps a shell command so that when the command exits (cleanly
@@ -648,12 +759,13 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		return nil, fmt.Errorf("workspace.Resurrect(%s): workspace dir missing at %s", name, wsCopy.Path)
 	}
 
-	// Rebuild the same tdl-style 3-pane layout as buildSession. Claude
-	// pane uses `claude --continue || claude` so the prior conversation
-	// resumes when one exists; otherwise (no conversation yet for this
-	// dir) we silently fall back to a fresh claude. Without the fallback
-	// the user sees a confusing "no conversation found to continue"
-	// before the keep-alive drops them to a shell.
+	// Rebuild the same tdl-style 3-pane layout as buildSession. The
+	// agent pane uses agentPaneCmd with resume=true: launcher's Resume
+	// argv is selected (e.g., claude --continue ...), and the briefing
+	// follows the hybrid strategy — hints-only delta when active hints
+	// exist, no --append-system-prompt at all when none. The agent's
+	// conversation history is preserved by the agent itself
+	// (claude --continue resumes; aider --restore-chat-history; etc).
 	env := hooks.WorkspaceEnv(wsCopy.Path, m.Cfg.ProjectRoot, wsCopy.Port)
 	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim ."), env...); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
@@ -661,11 +773,18 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {
 		return nil, err
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("claude --continue || claude"), tmux.SplitHorizontal, 30); err != nil {
+	agentCmd, err := m.agentPaneCmd(&wsCopy, true /* resume */)
+	if err != nil {
+		return nil, fmt.Errorf("workspace.Resurrect: agent pane: %w", err)
+	}
+	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
 		return nil, err
 	}
 
-	// Flip status to ready.
+	// Flip status to ready + bump AgentLaunchCount. The agent pane was
+	// just respawned with the resume launcher; next time we resurrect,
+	// the briefing strategy will see count>1 and emit a delta-only
+	// briefing.
 	err = m.Store.WithLock(func(s *state.State) error {
 		row, err := s.Find(m.Cfg.ProjectRoot, name)
 		if err != nil {
@@ -673,6 +792,7 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		}
 		row.Status = state.StatusReady
 		row.LastError = ""
+		row.AgentLaunchCount++
 		wsCopy = *row
 		return nil
 	})

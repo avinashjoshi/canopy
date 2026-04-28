@@ -156,6 +156,109 @@ func TestVerifyInstalled_NotFound(t *testing.T) {
 	}
 }
 
+// TestPlanLaunch_ClaudeFresh: fresh launch with briefing inlines via
+// $(cat <path>) shell substitution.
+func TestPlanLaunch_ClaudeFresh(t *testing.T) {
+	l, _ := Resolve("claude")
+	plan := l.PlanLaunch("/tmp/briefing.md", false, "/tmp/worktree")
+	want := `claude --append-system-prompt "$(cat /tmp/briefing.md)"`
+	if plan.ShellCommand != want {
+		t.Errorf("ShellCommand = %q\nwant %q", plan.ShellCommand, want)
+	}
+	if plan.PreRun != "" {
+		t.Errorf("claude PreRun should be empty; got %q", plan.PreRun)
+	}
+}
+
+// TestPlanLaunch_ClaudeResume: resume with briefing has --continue prefix.
+func TestPlanLaunch_ClaudeResume(t *testing.T) {
+	l, _ := Resolve("claude")
+	plan := l.PlanLaunch("/tmp/briefing.md", true, "/tmp/worktree")
+	want := `claude --continue --append-system-prompt "$(cat /tmp/briefing.md)"`
+	if plan.ShellCommand != want {
+		t.Errorf("ShellCommand = %q\nwant %q", plan.ShellCommand, want)
+	}
+}
+
+// TestPlanLaunch_ClaudeResumeNoBriefing: resume with empty path drops the
+// --append-system-prompt flag entirely. This is the "hybrid strategy:
+// resume + no active hints = no briefing flag" case.
+func TestPlanLaunch_ClaudeResumeNoBriefing(t *testing.T) {
+	l, _ := Resolve("claude")
+	plan := l.PlanLaunch("", true, "/tmp/worktree")
+	want := `claude --continue`
+	if plan.ShellCommand != want {
+		t.Errorf("ShellCommand = %q\nwant %q", plan.ShellCommand, want)
+	}
+}
+
+// TestPlanLaunch_AiderFile: aider uses --message-file with the path
+// directly (no $(cat) — aider reads the file itself).
+func TestPlanLaunch_AiderFile(t *testing.T) {
+	l, _ := Resolve("aider")
+	plan := l.PlanLaunch("/tmp/briefing.md", false, "/tmp/worktree")
+	want := `aider --message-file /tmp/briefing.md`
+	if plan.ShellCommand != want {
+		t.Errorf("ShellCommand = %q\nwant %q", plan.ShellCommand, want)
+	}
+}
+
+// TestPlanLaunch_OpencodeAgentsMd: opencode pre-copies the briefing into
+// the worktree's AGENTS.md (PreRun) and then just invokes opencode.
+func TestPlanLaunch_OpencodeAgentsMd(t *testing.T) {
+	l, _ := Resolve("opencode")
+	plan := l.PlanLaunch("/tmp/briefing.md", false, "/tmp/worktree")
+	if plan.ShellCommand != "opencode" {
+		t.Errorf("ShellCommand = %q; want opencode", plan.ShellCommand)
+	}
+	wantPreRun := "cp /tmp/briefing.md /tmp/worktree/AGENTS.md"
+	if plan.PreRun != wantPreRun {
+		t.Errorf("PreRun = %q\nwant %q", plan.PreRun, wantPreRun)
+	}
+}
+
+// TestPlanLaunch_OpencodeNoBriefing: empty briefing path → no PreRun
+// (don't overwrite an existing AGENTS.md if there's nothing to write).
+func TestPlanLaunch_OpencodeNoBriefing(t *testing.T) {
+	l, _ := Resolve("opencode")
+	plan := l.PlanLaunch("", true, "/tmp/worktree")
+	if plan.ShellCommand != "opencode" {
+		t.Errorf("ShellCommand = %q; want opencode", plan.ShellCommand)
+	}
+	if plan.PreRun != "" {
+		t.Errorf("opencode PreRun should be empty when briefingPath is empty; got %q", plan.PreRun)
+	}
+}
+
+// TestPlanLaunch_PathWithSpaces: paths containing spaces / shell-special
+// characters get single-quoted properly.
+func TestPlanLaunch_PathWithSpaces(t *testing.T) {
+	l, _ := Resolve("claude")
+	plan := l.PlanLaunch("/tmp/with spaces/briefing.md", false, "")
+	// Path should appear single-quoted.
+	if !contains(plan.ShellCommand, "'/tmp/with spaces/briefing.md'") {
+		t.Errorf("path with spaces not single-quoted: %s", plan.ShellCommand)
+	}
+}
+
+// TestShellQuote_BasicCases: spot-check shellQuote for the typical inputs.
+func TestShellQuote_BasicCases(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"claude", "claude"},
+		{"/tmp/foo.md", "/tmp/foo.md"},
+		{"with spaces", "'with spaces'"},
+		{"has'quote", `'has'\''quote'`},
+		{"", "''"},
+	}
+	for _, c := range cases {
+		if got := shellQuote(c.in); got != c.want {
+			t.Errorf("shellQuote(%q) = %q; want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // equalSlice compares two []string by value. testing.T doesn't ship
 // with reflect.DeepEqual-shaped helpers and pulling in reflect for one
 // comparison is heavy; manual loop keeps the test file self-contained.

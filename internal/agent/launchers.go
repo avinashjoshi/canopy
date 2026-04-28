@@ -184,6 +184,159 @@ func (l Launcher) VerifyInstalled() error {
 	return nil
 }
 
+// BriefingPlan is what canopy.workspace.lifecycle needs to spawn the
+// agent in a tmux pane. It tells the caller two things:
+//
+//  1. ShellCommand: the literal command string to pass to tmux pane spawn
+//     (via tmux send-keys / new-window / split-window). Already shell-
+//     safe — uses $(cat <path>) substitution to inject the briefing
+//     content rather than trying to shell-escape arbitrary markdown.
+//
+//  2. PreRun: a shell command that must run BEFORE ShellCommand starts.
+//     Used by BriefingAgentsMd mode (opencode) to copy the briefing
+//     into <worktree>/AGENTS.md. Empty string for other modes.
+//
+// The briefing temp file is the caller's responsibility — workspace.lifecycle
+// writes it to ~/.canopy/tmp/agent-briefing-<random>.md before calling
+// PlanLaunch, and persists for the agent's lifetime (tiny files, system
+// tmp cleanup handles eviction).
+type BriefingPlan struct {
+	// ShellCommand is the command tmux pane spawn invokes. It includes
+	// any --append-system-prompt / --message-file / etc flags assembled
+	// per the launcher's BriefingMode. Empty briefingPath produces a
+	// command without the briefing flag (the "resume + no hints" case
+	// from the hybrid strategy).
+	ShellCommand string
+
+	// PreRun runs once before ShellCommand. Empty string for all modes
+	// except BriefingAgentsMd. When set, the caller is expected to
+	// chain: `<PreRun> && <ShellCommand>` in the tmux pane invocation.
+	PreRun string
+}
+
+// PlanLaunch builds a BriefingPlan for spawning this launcher's agent
+// in a tmux pane. briefingPath is the absolute path to a temp file
+// containing the briefing (or "" to skip the briefing entirely — used
+// for "resume + no hints" launches).
+//
+// resume picks the Resume vs Fresh argv tails. When resume is true AND
+// briefingPath is empty, the briefing flag (and its preceding flag-name)
+// is dropped — for claude this means `claude --continue`, no
+// --append-system-prompt at all.
+//
+// worktreePath is required for BriefingAgentsMd (opencode writes
+// AGENTS.md to the worktree's cwd). Other modes ignore it.
+//
+// All command strings are shell-safe: paths are not embedded raw, and
+// the briefing content is read via $(cat ...) substitution rather than
+// inlined as a shell-escaped string.
+func (l Launcher) PlanLaunch(briefingPath string, resume bool, worktreePath string) BriefingPlan {
+	tail := l.Fresh
+	if resume {
+		tail = l.Resume
+	}
+
+	// Walk the argv tail. For each "{{briefing}}" token, replace it
+	// according to BriefingMode. When briefingPath is empty AND the
+	// token would have been a flag value, drop both the token and the
+	// preceding flag name.
+	parts := []string{shellQuote(l.Cmd)}
+	for i := 0; i < len(tail); i++ {
+		arg := tail[i]
+		if arg != "{{briefing}}" {
+			parts = append(parts, shellQuote(arg))
+			continue
+		}
+		// Token at position i.
+		if briefingPath == "" {
+			// Drop this token AND the preceding flag, if any.
+			if len(parts) > 1 {
+				parts = parts[:len(parts)-1]
+			}
+			continue
+		}
+		// Replace per mode.
+		switch l.BriefingMode {
+		case BriefingInline:
+			// Shell substitution: $(cat <path>). The path itself is
+			// shell-quoted so spaces / special chars in path are safe.
+			// The cat'd content goes verbatim into the arg — no further
+			// escaping needed even for markdown with backticks etc.
+			parts = append(parts, fmt.Sprintf(`"$(cat %s)"`, shellQuote(briefingPath)))
+		case BriefingFile:
+			// Pass the path as the flag value directly. aider reads it.
+			parts = append(parts, shellQuote(briefingPath))
+		case BriefingAgentsMd:
+			// No replacement — the briefing was already cp'd to
+			// AGENTS.md by PreRun. This branch shouldn't normally fire
+			// because BriefingAgentsMd launchers don't use the
+			// {{briefing}} token in their argv. Defensive no-op.
+		}
+	}
+
+	plan := BriefingPlan{
+		ShellCommand: strings.Join(parts, " "),
+	}
+
+	// BriefingAgentsMd mode: pre-copy the briefing into the worktree's
+	// AGENTS.md. opencode reads AGENTS.md from cwd at startup; we need
+	// it in place before opencode runs.
+	//
+	// When briefingPath is empty (resume + no hints), we skip the cp —
+	// the agent uses whatever AGENTS.md already exists in the worktree
+	// from a prior launch (or none, if this is the first time).
+	if l.BriefingMode == BriefingAgentsMd && briefingPath != "" && worktreePath != "" {
+		plan.PreRun = fmt.Sprintf("cp %s %s",
+			shellQuote(briefingPath),
+			shellQuote(worktreePath+"/AGENTS.md"))
+	}
+
+	return plan
+}
+
+// shellQuote wraps a string in single quotes and escapes any embedded
+// single quotes via the standard '\'' trick. Safe for any string —
+// single-quoted POSIX shell strings have NO escape sequences except
+// for the close-quote-escape-quote-reopen pattern.
+//
+// Empty string becomes ''. Used when assembling shell commands from
+// trusted-but-arbitrary inputs (file paths, briefing paths).
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	// If the string is alphanum + safe punctuation only, no quoting
+	// needed. Cuts noise in the resulting shell command for the common
+	// case of agent binary names like "claude".
+	safe := true
+	for _, r := range s {
+		if !isShellSafe(r) {
+			safe = false
+			break
+		}
+	}
+	if safe {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// isShellSafe reports whether r is a character that needs no shell
+// quoting in a POSIX shell command. Conservative — only allows
+// alphanumerics, underscore, hyphen, dot, slash, comma, equals.
+// Anything else triggers single-quoting.
+func isShellSafe(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z',
+		r >= 'A' && r <= 'Z',
+		r >= '0' && r <= '9':
+		return true
+	case r == '_', r == '-', r == '.', r == '/', r == ',', r == '=', r == '+', r == ':':
+		return true
+	}
+	return false
+}
+
 // installHint returns a one-line install pointer for known agents.
 // Empty string for unknown commands (we just say "install it" generically).
 func installHint(cmd string) string {
