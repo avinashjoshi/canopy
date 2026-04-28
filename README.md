@@ -198,6 +198,7 @@ Three script paths. Each script gets the same env vars when canopy invokes it:
 User-facing guides:
 
 - [`docs/getting-started.md`](docs/getting-started.md) — 5-minute tour: install, init, first workspace
+- [`docs/landscape.md`](docs/landscape.md) — where canopy fits next to Conductor, tmuxinator, raw `git worktree`, and the agent CLIs it hosts
 - [`docs/canopy-json.md`](docs/canopy-json.md) — schema reference + `~/.canopy/config.json` settings
 - [`docs/migrate-from-conductor.md`](docs/migrate-from-conductor.md) — step-by-step for projects with `conductor.json`
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — common problems and fixes
