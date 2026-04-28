@@ -35,6 +35,14 @@ func main() {
 			"session (nvim / claude / shell / server). One TUI lets you switch\n" +
 			"between workspaces and resurrect them after reboots.\n",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Guard first: if canopy is running inside an existing tmux
+			// session (and isn't an explicitly-allowed subcommand like
+			// `version`), refuse before doing any other work. Surfaces
+			// to the user as a cobra error, which prints to stderr and
+			// exits non-zero — clean and visible.
+			if err := enforceNoNestedTmux(cmd); err != nil {
+				return err
+			}
 			teardown, err := clog.Init(debugFlag)
 			if err != nil {
 				return err
@@ -79,6 +87,11 @@ func versionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print canopy's version, commit, and build date.",
+		// version is the one subcommand we let users run from inside an
+		// existing tmux session — it's the canonical "is canopy
+		// installed?" probe and must answer regardless of context. See
+		// enforceNoNestedTmux + allowInTmuxAnnotation in guard.go.
+		Annotations: map[string]string{allowInTmuxAnnotation: "true"},
 		Run: func(cmd *cobra.Command, args []string) {
 			v, commit, date := versionInfo()
 			fmt.Fprintf(cmd.OutOrStdout(), "canopy %s (commit %s, built %s)\n", v, commit, date)

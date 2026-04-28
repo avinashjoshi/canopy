@@ -14,6 +14,20 @@ canopy.json already exists. This project is already initialized.
 
 That's the friendly message, not an error — `canopy init` is idempotent. You're done. If you really want to overwrite, `--force`.
 
+## "canopy refuses to run inside a tmux session"
+
+Canopy intentionally refuses to run from inside an existing tmux session — including (and especially) from inside a canopy workspace's tmux session. Reasons: nesting canopy means nesting tmux's attach/detach machinery (running `tmux attach` inside an attached session breaks in confusing ways), and accidentally creating workspaces from inside another workspace is the failure mode this guard exists to prevent.
+
+The fix: detach the current tmux session first (`prefix-d` on whatever tmux prefix you've configured) and run canopy from the outer terminal.
+
+`canopy version` is the one subcommand that always works regardless of context — it's the canonical "is canopy installed?" probe.
+
+If you genuinely need to bypass the guard (testing, status-line scripting, CI), set `CANOPY_ALLOW_NESTED=1` for that invocation:
+
+```bash
+CANOPY_ALLOW_NESTED=1 canopy ls
+```
+
 ## "no canopy.json found in cwd or any parent directory"
 
 You're not inside a canopy-initialized project. Three options:
