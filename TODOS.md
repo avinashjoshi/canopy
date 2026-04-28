@@ -253,3 +253,35 @@ not the stale original.
 **Context:** Likely command shape: `canopy adopt <branch>` with a `-p <port>` to specify which port the existing setup is using. Marks status as `ready` directly. Skips `scripts.setup`. Useful corollary: a `canopy adopt --all` that scans the project's worktree dir and adopts every git worktree found.
 
 **Depends on / blocked by:** v0.
+
+---
+
+## v0.5 — Auto-detect fixable setup failures
+
+**What:** When `scripts.setup` fails, scan its stderr for known signatures (`master.key not found`, `bundle: command not found`, network errors) and surface a one-line "what to fix" hint in the TUI before the user has to dig through `~/.canopy/log/canopy.log`.
+
+**Why:** The `canopy retry` flow added 2026-04-27 covers "I fixed it, run it again." The remaining gap is "I don't know what to fix." Avi's first cravd attempt failed on a missing Active Record encryption credential — diagnosable in one line of stderr, but the user still had to read the log file.
+
+**Pros:** ~50 LOC + a small registry of regex → hint pairs. Makes the broken state actionable instead of just informational. Pairs naturally with the existing retry verb.
+
+**Cons:** Heuristic. Wrong hint is worse than no hint. Needs a curated registry that grows as we see real failures across users.
+
+**Context:** Likely lives in `internal/workspace/lifecycle.go` next to `markBroken`. Signature: `func diagnoseSetup(stderr []byte) (hint string, ok bool)`. Registry as a `[]struct{ pattern *regexp.Regexp; hint string }`. The hint shows in the TUI's broken-row error banner and in `canopy ls --verbose`. Bonus: dump the matching log lines with the hint so the user can confirm without `tail -f`.
+
+**Depends on / blocked by:** v0 retry verb exists.
+
+---
+
+## v1 — Edit-and-retry directly from the TUI
+
+**What:** When a workspace is in `broken` status, offer an "edit + retry" affordance from the TUI: open `$EDITOR` on the failing script (or its log), let the user fix, then re-run with one keystroke.
+
+**Why:** The `R`-to-retry flow in v0 assumes the user can fix the issue out-of-band (in another terminal). The whole point of the TUI is to keep the user inside one surface. Round-tripping through "open another tmux pane, fix the file, come back, press R" is the obvious next refinement.
+
+**Pros:** Closes the recovery loop entirely inside canopy. Pairs with auto-detect above — the hint says what's wrong, the editor opens the right file, R re-runs.
+
+**Cons:** Adds editor-handoff complexity (tea.ExecProcess on `$EDITOR`, then refresh). Picking *which* file to open is non-trivial — sometimes it's `scripts.setup`, sometimes a config file the script reads, sometimes a missing secret.
+
+**Context:** Likely shape: a new modal that lists candidate files (the script itself, recently-modified files in the project, `~/.canopy/log/canopy.log`) and on selection opens `$EDITOR` via `tea.ExecProcess`. After the editor exits, the modal asks "Retry now? (y/N)". Could be gated behind the auto-detect hint registry: only files mentioned in the hint show up as candidates.
+
+**Depends on / blocked by:** v0 retry verb. Best paired with auto-detect (above) so the candidate list isn't a dump of every file in the repo.

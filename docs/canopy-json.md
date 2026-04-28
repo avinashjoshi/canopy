@@ -20,9 +20,11 @@ All three script fields are optional. A `canopy.json` of `{}` is valid and means
 
 | Field | When it runs | If empty |
 |---|---|---|
-| `scripts.setup` | Once at workspace creation, after the worktree is checked out. Failure -> workspace marked `broken`. | Skipped silently. |
+| `scripts.setup` | Once at workspace creation, after the worktree is checked out. Failure -> workspace marked `broken`. Re-runnable via `canopy retry <name>` (or `R` in the TUI) without losing the worktree, branch, port, or claude history. | Skipped silently. |
 | `scripts.run` | Reserved for future on-demand invocation (`canopy run` is a v0.5 TODO). v0 does NOT auto-launch this. | No effect today. |
 | `scripts.archive` | At workspace removal, before the worktree is deleted. Failure logged but doesn't block removal. | Skipped silently. |
+
+Write `scripts.setup` to be safely re-runnable. If the first invocation crashes halfway through, the recovery path is `canopy retry <name>` — same script, same env, same workspace dir. A setup that hard-fails on `bin/rails db:create` because the DB already exists from the first attempt forces the user to fall back to `canopy rm` + `canopy new`, which throws away the worktree and claude history. Use `db:prepare` over `db:create`, `bundle install` over `bundle install --deployment`, idempotent symlinks (`ln -sf`), and existence checks before destructive ops.
 
 Script paths are relative to the project root (the directory containing `canopy.json`). They must be executable files (have a shebang and the executable bit set). canopy invokes them via `exec.CommandContext` directly — there's no `sh -c` wrapper, so multi-arg shell expressions like `"rm -rf .sock && bin/dev"` won't work as a script path. Put that logic inside a script instead.
 

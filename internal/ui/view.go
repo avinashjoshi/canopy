@@ -145,6 +145,7 @@ func (m *Model) renderHelpLine() string {
 		"enter attach",
 		"n new",
 		"d delete",
+		"R retry",
 		"r refresh",
 		"? help",
 		"q quit",
@@ -200,11 +201,12 @@ func (m *Model) renderBusyView() string {
 		return b.String()
 	}
 
-	// Done: show the result.
+	// Done: show the result. Success message pivots on which operation
+	// just finished — same view, three different verbs.
 	if m.busyErr != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("Failed: %v", m.busyErr)))
 	} else {
-		b.WriteString(readyStyle.Render("Workspace created successfully."))
+		b.WriteString(readyStyle.Render(busySuccessMessage(m.busyOp)))
 	}
 	b.WriteString("\n\n")
 	if m.busyOutput != "" {
@@ -230,6 +232,7 @@ func (m *Model) renderHelp() string {
 		"  enter          attach to selected workspace",
 		"  n              new workspace",
 		"  d              delete selected (with confirmation)",
+		"  R              retry scripts.setup on a broken workspace",
 		"  r              refresh state",
 		"",
 		"  ?              this help",
@@ -238,6 +241,21 @@ func (m *Model) renderHelp() string {
 		subtleStyle.Render("Press any key to dismiss."),
 	}, "\n")
 	return helpBodyStyle.Render(body)
+}
+
+// busySuccessMessage maps a completed busy-mode op to the right success
+// line. Kept as a small switch so the View stays declarative and so we
+// can extend without touching renderBusyView again.
+func busySuccessMessage(op busyOpKind) string {
+	switch op {
+	case busyOpRemove:
+		return "Workspace removed."
+	case busyOpRetry:
+		return "Workspace recovered — scripts.setup re-ran cleanly."
+	case busyOpCreate:
+		return "Workspace created successfully."
+	}
+	return "Done."
 }
 
 // statusStyle picks the lipgloss color for a given status string. Falls

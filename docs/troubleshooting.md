@@ -24,7 +24,12 @@ You're not inside a canopy-initialized project. Three options:
 
 ## `canopy new` fails with "already exists"
 
-Run `canopy ls`. If the workspace is in state.json with `status: ready` or `stopped`, use `canopy switch` to attach. If it's `broken`, `canopy rm <name>` first, then try `canopy new` again.
+Run `canopy ls`. If the workspace is in state.json with `status: ready` or `stopped`, use `canopy switch` to attach. If it's `broken`, you have two paths:
+
+- **`canopy retry <name>`** — re-runs only `scripts.setup` against the existing worktree. Same dir, same branch, same port, same claude history; the workspace flips back to `ready` if setup succeeds. This is the right verb when the failure was a fixable knob (missing config, network blip, dep conflict) and you don't want to lose state.
+- **`canopy rm <name>` then `canopy new`** — full teardown + fresh build. Use when the worktree itself is wrong (bad branch, corrupted checkout) or when you want a clean slate.
+
+In the TUI the same choice is `R` (retry) vs `d` (delete) on the selected broken row.
 
 If there's no row but git says the branch exists, the branch lingered from a previous workspace whose state.json got nuked. Clean up the branch manually:
 

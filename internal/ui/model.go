@@ -45,8 +45,7 @@ type Row struct {
 // viewMode tracks which screen the TUI is showing. listMode is the
 // default table; newMode is the new-workspace text input;
 // confirmDeleteMode is the y/N prompt before tearing down a workspace;
-// busyMode is the wait/output screen during a long-running create or
-// remove.
+// busyMode is the wait/output screen during a long-running operation.
 type viewMode int
 
 const (
@@ -54,6 +53,20 @@ const (
 	newMode
 	confirmDeleteMode
 	busyMode
+)
+
+// busyOpKind identifies which long-running operation is currently in
+// busyMode. The View uses this to render the right success message
+// ("Workspace created" vs "Workspace removed" vs "Workspace recovered")
+// and decides what to do after dismiss (e.g., retry's success could
+// offer to attach automatically).
+type busyOpKind int
+
+const (
+	busyOpNone busyOpKind = iota
+	busyOpCreate
+	busyOpRemove
+	busyOpRetry
 )
 
 // Model is the Bubbletea state. Constructed via New(), updated via
@@ -80,11 +93,12 @@ type Model struct {
 	deleteTarget string // workspace name pending removal
 
 	// Long-running operation in progress (mode == busyMode). Reused by
-	// both Create and Remove flows.
-	busyTitle  string // e.g. "Creating workspace 'bold-falcon'..." or "Removing 'bold-falcon'..."
-	busyOutput string // captured stdout/stderr after the goroutine returns
-	busyDone   bool   // true once the goroutine completes
-	busyErr    error  // the goroutine's error if any (separate from m.err to keep busy view focused)
+	// Create, Remove, and Retry flows.
+	busyOp     busyOpKind // distinguishes the success message + post-action
+	busyTitle  string     // e.g. "Creating workspace 'bold-falcon'..." / "Removing 'foo'..."
+	busyOutput string     // captured stdout/stderr after the goroutine returns
+	busyDone   bool       // true once the goroutine completes
+	busyErr    error      // the goroutine's error if any (separate from m.err)
 
 	// Loaded once at startup, used in title rendering.
 	projectName string

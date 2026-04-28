@@ -62,6 +62,12 @@ var (
 	// ErrSetupFailed wraps any failure during scripts.setup. The state
 	// row's status flips to broken and last_error captures the chain.
 	ErrSetupFailed = errors.New("workspace: setup script failed")
+
+	// ErrCannotRetry is returned by RetrySetup when the workspace is
+	// not in `broken` status. Retry is intentionally narrow — only
+	// broken workspaces (where scripts.setup failed) can be retried.
+	// stopped uses canopy switch (resurrect); orphaned uses canopy rm.
+	ErrCannotRetry = errors.New("workspace: retry only applies to broken workspaces")
 )
 
 // Manager owns the dependency wiring for workspace operations. Construct
@@ -293,9 +299,16 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 		return fmt.Errorf("workspace.runSetup: git: %w", err)
 	}
 
-	// 2. scripts.setup with CANOPY_* env, cwd = workspace dir.
-	// Empty scripts.setup -> skip; canopy.json is allowed to omit hooks
-	// entirely for projects that just want the worktree + tmux session.
+	// 2 + 3: setup script + tmux session. Extracted so RetrySetup can
+	// invoke them on an already-existing worktree without redoing git.
+	return m.runSetupHooksOnly(ctx, ws, stdout, stderr)
+}
+
+// runSetupHooksOnly runs scripts.setup (if configured) then builds the
+// tmux session. Shared between Create (after git worktree add) and
+// RetrySetup (where the worktree already exists). Caller is responsible
+// for ensuring ws.Path is a real, ready-to-use directory.
+func (m *Manager) runSetupHooksOnly(ctx context.Context, ws *state.Workspace, stdout, stderr io.Writer) error {
 	if m.Cfg.Scripts.Setup != "" {
 		scriptPath := filepath.Join(m.Cfg.ProjectRoot, m.Cfg.Scripts.Setup)
 		if err := hooks.Run(ctx, scriptPath, hooks.Options{
@@ -304,17 +317,108 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 			Stdout: stdout,
 			Stderr: stderr,
 		}); err != nil {
-			return fmt.Errorf("workspace.runSetup: %w: %v", ErrSetupFailed, err)
+			return fmt.Errorf("workspace.runSetupHooksOnly: %w: %v", ErrSetupFailed, err)
 		}
 	} else {
 		fmt.Fprintln(stdout, "(no scripts.setup configured; skipping)")
 	}
 
-	// 3. tmux session + 4 panes (nvim, claude, $SHELL, scripts.run).
+	// Build the tmux session if not already alive. Retry on a broken
+	// workspace usually has no tmux session yet (setup failed before
+	// the buildSession step), but we check defensively in case a future
+	// failure mode leaves a half-built session lying around.
+	alive, err := m.Tmux.HasSession(ctx, ws.TmuxSession)
+	if err != nil {
+		return fmt.Errorf("workspace.runSetupHooksOnly: tmux check: %w", err)
+	}
+	if alive {
+		return nil
+	}
 	if err := m.buildSession(ctx, ws); err != nil {
-		return fmt.Errorf("workspace.runSetup: tmux: %w", err)
+		return fmt.Errorf("workspace.runSetupHooksOnly: tmux: %w", err)
 	}
 	return nil
+}
+
+// RetrySetup re-runs scripts.setup on an existing broken workspace.
+// Used to recover from a transient or fixable setup failure (missing
+// credential, network blip, dependency conflict that the user has now
+// resolved) without losing the worktree, branch, port, or claude
+// conversation history that an alternative canopy rm + canopy new
+// cycle would discard.
+//
+// Only allowed on workspaces with status=broken. Other statuses get
+// ErrCannotRetry — stopped uses canopy switch to resurrect; orphaned
+// (dir missing) uses canopy rm; setting_up means a retry is already
+// in flight.
+//
+// Output from scripts.setup streams to stdout/stderr. On success, the
+// status flips to ready and last_error is cleared. On failure, the
+// status stays broken with last_error updated to reflect the new
+// failure (the retry replaces, not appends, the error chain).
+func (m *Manager) RetrySetup(ctx context.Context, name string, stdout, stderr io.Writer) (*state.Workspace, error) {
+	if stdout == nil || stderr == nil {
+		return nil, fmt.Errorf("workspace.RetrySetup: stdout and stderr writers required")
+	}
+
+	// Phase 1: validate + flip to setting_up under the lock so a parallel
+	// retry on the same name fast-fails.
+	var ws state.Workspace
+	err := m.Store.WithLock(func(s *state.State) error {
+		row, err := s.Find(m.Cfg.Project, name)
+		if err != nil {
+			return fmt.Errorf("workspace.RetrySetup(%s): %w", name, ErrWorkspaceNotFound)
+		}
+		if row.Status != state.StatusBroken {
+			return fmt.Errorf("workspace.RetrySetup(%s) in status %q: %w",
+				name, row.Status, ErrCannotRetry)
+		}
+		// Defensive: if the dir vanished between original Create and now,
+		// the user should canopy rm — we can't run setup against nothing.
+		if _, err := os.Stat(row.Path); os.IsNotExist(err) {
+			return fmt.Errorf("workspace.RetrySetup(%s): workspace dir missing at %s; run canopy rm",
+				name, row.Path)
+		}
+		row.Status = state.StatusSettingUp
+		row.LastError = ""
+		ws = *row
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	log.Info("workspace.retry.start",
+		"project", ws.Project, "name", ws.Name, "path", ws.Path, "port", ws.Port)
+	start := time.Now()
+
+	// Phase 2: re-run hooks + tmux build (slow, no lock held).
+	hookErr := m.runSetupHooksOnly(ctx, &ws, stdout, stderr)
+	if hookErr != nil {
+		_ = m.markBroken(&ws, hookErr)
+		log.Info("workspace.retry.failure",
+			"name", ws.Name, "err", hookErr.Error(), "duration_ms", time.Since(start).Milliseconds())
+		return &ws, hookErr
+	}
+
+	// Phase 3: flip to ready under the lock.
+	err = m.Store.WithLock(func(s *state.State) error {
+		row, err := s.Find(ws.Project, ws.Name)
+		if err != nil {
+			return err
+		}
+		row.Status = state.StatusReady
+		row.LastError = ""
+		ws = *row
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace.RetrySetup: finalize: %w", err)
+	}
+
+	log.Info("workspace.retry.success",
+		"name", ws.Name, "duration_ms", time.Since(start).Milliseconds())
+	return &ws, nil
 }
 
 // buildSession creates the tmux session and lays out canopy's standard

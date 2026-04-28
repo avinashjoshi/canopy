@@ -255,6 +255,176 @@ func TestList(t *testing.T) {
 	}
 }
 
+// retryFixture is a fixture variant where scripts.setup is intentionally
+// broken (exits 1 unconditionally) so we can observe the broken state
+// and then "fix" the script before retrying.
+//
+// Returns the manager + the path to the setup script so the test can
+// rewrite it to succeed before calling RetrySetup.
+func retryFixture(t *testing.T) (*workspace.Manager, string) {
+	t.Helper()
+
+	projectRoot := t.TempDir()
+	stateDir := t.TempDir()
+
+	// git init + initial commit.
+	gitSteps := [][]string{
+		{"init", "--initial-branch=main", projectRoot},
+		{"-C", projectRoot, "config", "user.email", "test@canopy.local"},
+		{"-C", projectRoot, "config", "user.name", "canopy-test"},
+		{"-C", projectRoot, "commit", "--allow-empty", "-m", "initial"},
+	}
+	for _, args := range gitSteps {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	// scripts.setup that exits 1; tests rewrite this to test happy retry.
+	setupPath := filepath.Join(projectRoot, "bin", "canopy-setup")
+	if err := os.MkdirAll(filepath.Dir(setupPath), 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	failBody := "#!/usr/bin/env bash\necho 'intentionally failing'\nexit 1\n"
+	if err := os.WriteFile(setupPath, []byte(failBody), 0o755); err != nil {
+		t.Fatalf("write setup: %v", err)
+	}
+	for _, name := range []string{"run", "archive"} {
+		path := filepath.Join(projectRoot, "bin", "canopy-"+name)
+		body := fmt.Sprintf("#!/usr/bin/env bash\necho 'canopy-%s ran'\nexit 0\n", name)
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	cfgJSON := `{"scripts": {"setup": "bin/canopy-setup", "run": "bin/canopy-run", "archive": "bin/canopy-archive"}}`
+	if err := os.WriteFile(filepath.Join(projectRoot, "canopy.json"), []byte(cfgJSON), 0o644); err != nil {
+		t.Fatalf("write canopy.json: %v", err)
+	}
+
+	cfg, err := config.DiscoverAndLoad(projectRoot)
+	if err != nil {
+		t.Fatalf("DiscoverAndLoad: %v", err)
+	}
+	store, err := state.NewStore(stateDir)
+	if err != nil {
+		t.Fatalf("state.NewStore: %v", err)
+	}
+	tmuxClient := tmux.WithSocket("canopy-test")
+	mgr := &workspace.Manager{
+		Cfg:        cfg,
+		Store:      store,
+		Tmux:       tmuxClient,
+		CanopyHome: stateDir,
+		Settings: settings.Settings{
+			Ports: settings.PortPlan{
+				Base:            39200,
+				ProjectStride:   100,
+				WorkspaceStride: 10,
+			},
+		},
+	}
+	t.Cleanup(func() {
+		_ = tmuxClient.KillServer(context.Background())
+	})
+	return mgr, setupPath
+}
+
+// TestRetry_HappyPath: scripts.setup fails first, leaving status=broken;
+// fix the script; RetrySetup flips status to ready and the workspace
+// is fully usable.
+func TestRetry_HappyPath(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, setupPath := retryFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ctx := context.Background()
+
+	// First attempt fails.
+	ws, err := mgr.Create(ctx, "fix-me", &stdout, &stderr)
+	if !errors.Is(err, workspace.ErrSetupFailed) {
+		t.Fatalf("expected ErrSetupFailed on initial create; got %v", err)
+	}
+	if ws == nil || ws.Status != state.StatusBroken {
+		t.Fatalf("expected status=broken; got ws=%+v", ws)
+	}
+
+	// Fix the script.
+	okBody := "#!/usr/bin/env bash\necho 'fixed setup'\nexit 0\n"
+	if err := os.WriteFile(setupPath, []byte(okBody), 0o755); err != nil {
+		t.Fatalf("rewrite setup: %v", err)
+	}
+
+	// Retry.
+	stdout.Reset()
+	stderr.Reset()
+	revived, err := mgr.RetrySetup(ctx, "fix-me", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("RetrySetup: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if revived.Status != state.StatusReady {
+		t.Errorf("post-retry status = %q; want ready", revived.Status)
+	}
+	if revived.LastError != "" {
+		t.Errorf("post-retry LastError = %q; want empty", revived.LastError)
+	}
+	if !strings.Contains(stdout.String(), "fixed setup") {
+		t.Errorf("stdout missing fixed-setup output: %q", stdout.String())
+	}
+}
+
+// TestRetry_StillFailing: retry while the script is still broken.
+// Status stays broken; last_error reflects the new failure.
+func TestRetry_StillFailing(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := retryFixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ctx := context.Background()
+	if _, err := mgr.Create(ctx, "still-broken", &stdout, &stderr); !errors.Is(err, workspace.ErrSetupFailed) {
+		t.Fatalf("expected ErrSetupFailed; got %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	ws, err := mgr.RetrySetup(ctx, "still-broken", &stdout, &stderr)
+	if !errors.Is(err, workspace.ErrSetupFailed) {
+		t.Errorf("retry on still-broken script: got %v; want ErrSetupFailed", err)
+	}
+	if ws == nil || ws.Status != state.StatusBroken {
+		t.Errorf("status after failed retry: got %+v; want broken", ws)
+	}
+}
+
+// TestRetry_WrongStatus: retry on a ready workspace -> ErrCannotRetry.
+func TestRetry_WrongStatus(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t) // healthy fixture; Create succeeds
+
+	var stdout, stderr bytes.Buffer
+	ctx := context.Background()
+	if _, err := mgr.Create(ctx, "ready-ws", &stdout, &stderr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err := mgr.RetrySetup(ctx, "ready-ws", &stdout, &stderr)
+	if !errors.Is(err, workspace.ErrCannotRetry) {
+		t.Errorf("retry on ready workspace: got %v; want ErrCannotRetry", err)
+	}
+}
+
+// TestRetry_NotFound: retry on a name that isn't in state.
+func TestRetry_NotFound(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	_, err := mgr.RetrySetup(context.Background(), "never-existed", &stdout, &stderr)
+	if !errors.Is(err, workspace.ErrWorkspaceNotFound) {
+		t.Errorf("retry on missing name: got %v; want ErrWorkspaceNotFound", err)
+	}
+}
+
 // TestResurrect_HappyPath: Create -> Kill tmux -> Resurrect -> tmux alive
 // again with 4 panes. Per-dir claude history isn't testable here (no
 // claude conversation in scratch), but the structural rebuild is.

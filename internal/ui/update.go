@@ -54,6 +54,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyOutput = msg.output
 		return m, nil
 
+	case retryDoneMsg:
+		// scripts.setup re-run finished. Same shape as the others;
+		// renderBusyView branches on busyOp to label success.
+		m.busyDone = true
+		m.busyErr = msg.err
+		m.busyOutput = msg.output
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -137,6 +145,33 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// updates the rendered status.
 		return m.attachSelected()
 
+	case "R":
+		// Retry scripts.setup on a broken workspace. Capital R so it
+		// doesn't collide with lowercase r (refresh). Only valid when
+		// the selected row is in broken status — we just no-op
+		// otherwise. Recovery flow: user fixes the underlying issue
+		// (missing config, deps, etc.), presses R, scripts.setup
+		// re-runs against the existing worktree.
+		if len(m.rows) == 0 {
+			return m, nil
+		}
+		row := m.rows[m.cursor]
+		if row.IsMain {
+			return m, nil
+		}
+		if row.Status != state.StatusBroken {
+			m.err = fmt.Errorf("retry only applies to broken workspaces; %q is %q",
+				row.Name, row.Status)
+			return m, nil
+		}
+		m.mode = busyMode
+		m.busyOp = busyOpRetry
+		m.busyTitle = fmt.Sprintf("Retrying setup for %q...", row.Name)
+		m.busyDone = false
+		m.busyOutput = ""
+		m.busyErr = nil
+		return m, retryCmdUI(m.mgr, row.Name)
+
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -199,7 +234,7 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 		return m, resurrectAndAttachCmd(m.mgr, row.Name)
 
 	case state.StatusBroken:
-		m.err = fmt.Errorf("workspace %q is broken — see ~/.canopy/log/canopy.log; run `canopy rm %s` to clean up",
+		m.err = fmt.Errorf("workspace %q is broken — see ~/.canopy/log/canopy.log; press R to retry scripts.setup, or `canopy rm %s` to drop it",
 			row.Name, row.Name)
 		return m, nil
 
@@ -278,6 +313,7 @@ func (m *Model) handleNewModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		name := m.nameInput.Value()
 		m.mode = busyMode
+		m.busyOp = busyOpCreate
 		m.busyTitle = "Creating workspace..."
 		if name != "" {
 			m.busyTitle = fmt.Sprintf("Creating workspace %q...", name)
@@ -307,6 +343,7 @@ func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.busyOutput = ""
 	m.busyTitle = ""
 	m.busyDone = false
+	m.busyOp = busyOpNone
 	if m.busyErr != nil {
 		m.err = m.busyErr
 		m.busyErr = nil
@@ -323,6 +360,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "y", "Y":
 		name := m.deleteTarget
 		m.mode = busyMode
+		m.busyOp = busyOpRemove
 		m.busyTitle = fmt.Sprintf("Removing workspace %q...", name)
 		m.busyDone = false
 		m.busyOutput = ""
@@ -350,6 +388,27 @@ type createDoneMsg struct {
 type removeDoneMsg struct {
 	output string
 	err    error
+}
+
+// retryDoneMsg is the RetrySetup counterpart. Same shape as the others;
+// kept distinct so the success-message branch in renderBusyView (and
+// any future post-retry behavior, e.g. auto-attach on success) can
+// pivot on type rather than spelunking the busyOp field.
+type retryDoneMsg struct {
+	output string
+	err    error
+}
+
+// retryCmdUI kicks off Manager.RetrySetup asynchronously. Same shape as
+// createCmd / removeCmd: capture stdout+stderr to a buffer, send a
+// retryDoneMsg back to Update when finished. The "UI" suffix
+// disambiguates from cmd/canopy/retry.go's cobra retryCmd.
+func retryCmdUI(mgr *workspace.Manager, name string) tea.Cmd {
+	return func() tea.Msg {
+		var buf bytes.Buffer
+		_, err := mgr.RetrySetup(context.Background(), name, &buf, &buf)
+		return retryDoneMsg{output: buf.String(), err: err}
+	}
 }
 
 // removeCmd kicks off Manager.Remove asynchronously. Captures the
