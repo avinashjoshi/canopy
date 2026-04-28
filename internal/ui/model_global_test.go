@@ -103,8 +103,56 @@ func TestGlobalModel_ActivateOnStoppedSurfacesHint(t *testing.T) {
 	if !strings.Contains(gotErr.err.Error(), "stopped") {
 		t.Errorf("hint missing 'stopped': %v", gotErr.err)
 	}
-	if !strings.Contains(gotErr.err.Error(), "/a/cravd") {
-		t.Errorf("hint missing project path: %v", gotErr.err)
+	// Hint now points at the 'c' keybind (open the project) instead of
+	// telling the user to cd manually.
+	if !strings.Contains(gotErr.err.Error(), "`c`") {
+		t.Errorf("hint missing 'c' keybind reference: %v", gotErr.err)
+	}
+}
+
+// TestGlobalModel_GoToProject_NonEmptyRoot: row with a populated
+// ProjectRoot produces a non-nil cmd (tea.ExecProcess against the canopy
+// binary). Smoke check that the dispatch happens.
+func TestGlobalModel_GoToProject_NonEmptyRoot(t *testing.T) {
+	store, _ := state.NewStore(t.TempDir())
+	gm := NewGlobal(store, tmux.New())
+
+	row := state.GlobalRow{
+		Project:     "cravd",
+		ProjectRoot: "/home/avi/Work/cravd",
+		Name:        "soft-fox",
+		Status:      state.StatusReady,
+	}
+	cmd := gm.goToProject(row)
+	if cmd == nil {
+		t.Errorf("goToProject(populated row) returned nil cmd")
+	}
+}
+
+// TestGlobalModel_GoToProject_EmptyRootFails: a row with no ProjectRoot
+// (legacy v1 row that hasn't been migrated yet) surfaces a helpful error
+// instead of trying to exec with an empty cwd.
+func TestGlobalModel_GoToProject_EmptyRootFails(t *testing.T) {
+	store, _ := state.NewStore(t.TempDir())
+	gm := NewGlobal(store, tmux.New())
+
+	row := state.GlobalRow{
+		Project: "cravd",
+		// ProjectRoot deliberately empty — pre-migration row.
+		Name:   "soft-fox",
+		Status: state.StatusReady,
+	}
+	cmd := gm.goToProject(row)
+	if cmd == nil {
+		t.Fatal("expected error cmd, got nil")
+	}
+	msg := cmd()
+	gotErr, ok := msg.(globalErrMsg)
+	if !ok {
+		t.Fatalf("expected globalErrMsg, got %T", msg)
+	}
+	if !strings.Contains(gotErr.err.Error(), "ProjectRoot is empty") {
+		t.Errorf("error message should call out empty ProjectRoot: %v", gotErr.err)
 	}
 }
 

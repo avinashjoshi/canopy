@@ -188,6 +188,70 @@ func TestEnter_EmptyListIsNoOp(t *testing.T) {
 	}
 }
 
+// TestGoToProject_InvokesCallback: 'c' calls OnGoToProject with the row
+// at the cursor and forwards its tea.Cmd.
+func TestGoToProject_InvokesCallback(t *testing.T) {
+	var captured state.GlobalRow
+	called := false
+	m := New(Options{
+		OnGoToProject: func(r state.GlobalRow) tea.Cmd {
+			captured = r
+			called = true
+			return func() tea.Msg { return "go-to" }
+		},
+	})
+	m.SetRows(sampleRows())
+	// Move to row 2 (canopy / ancient-hornet) and press c.
+	m, _ = m.Update(key("end"))
+	_, gotCmd := m.Update(key("c"))
+
+	if !called {
+		t.Fatalf("OnGoToProject not invoked")
+	}
+	if captured.Name != "ancient-hornet" {
+		t.Errorf("captured row %q, want ancient-hornet", captured.Name)
+	}
+	if gotCmd == nil {
+		t.Errorf("c returned nil cmd; expected forwarded callback cmd")
+	}
+}
+
+// TestGoToProject_NoCallback: c without OnGoToProject is a no-op.
+func TestGoToProject_NoCallback(t *testing.T) {
+	m := New(Options{}) // no OnGoToProject
+	m.SetRows(sampleRows())
+
+	_, cmd := m.Update(key("c"))
+	if cmd != nil {
+		t.Errorf("c without OnGoToProject returned non-nil cmd")
+	}
+}
+
+// TestRender_GroupsByProject: consecutive rows with the same Project share
+// one header line; a project change emits a new header. Verifies the
+// grouped layout doesn't repeat project names per row.
+func TestRender_GroupsByProject(t *testing.T) {
+	m := New(Options{})
+	m.SetRows(sampleRows())
+	out := m.View()
+
+	// Project headers appear exactly once per project even when there are
+	// multiple rows. cravd has 2 rows; the literal "cravd" should appear
+	// only on its header line in the rendered output (status cells, etc.,
+	// don't echo the project basename).
+	cravdCount := strings.Count(out, "cravd")
+	if cravdCount != 1 {
+		t.Errorf("rendered output mentions 'cravd' %d times, want exactly 1 (header only)\noutput:\n%s",
+			cravdCount, out)
+	}
+	// canopy has 1 row; same expectation.
+	canopyCount := strings.Count(out, "canopy")
+	if canopyCount != 1 {
+		t.Errorf("rendered output mentions 'canopy' %d times, want exactly 1\noutput:\n%s",
+			canopyCount, out)
+	}
+}
+
 // TestRefresh_InvokesOnRefresh: r calls OnRefresh and forwards its cmd.
 func TestRefresh_InvokesOnRefresh(t *testing.T) {
 	called := false

@@ -17,6 +17,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -69,8 +71,9 @@ func NewGlobal(store *state.Store, tc *tmux.Client) *GlobalModel {
 		tc:    tc,
 	}
 	gm.list = projectlist.New(projectlist.Options{
-		OnActivate: gm.activate,
-		OnRefresh:  gm.refreshCmd,
+		OnActivate:    gm.activate,
+		OnGoToProject: gm.goToProject,
+		OnRefresh:     gm.refreshCmd,
 	})
 	return gm
 }
@@ -188,6 +191,7 @@ func (m *GlobalModel) renderHelpLine() string {
 	keys := []string{
 		"↑/↓ navigate",
 		"enter attach",
+		"c open project",
 		"r refresh",
 		"? help",
 		"q quit",
@@ -204,13 +208,14 @@ func (m *GlobalModel) renderHelp() string {
 		"  G, end         last row",
 		"",
 		"  enter          attach to selected (ready/main rows only)",
+		"  c              open the selected row's project (cd in + launch canopy)",
 		"  r              refresh state",
 		"",
 		"  ?              this help",
 		"  q, ctrl-c      quit",
 		"",
-		subtleStyle.Render("Note: create/remove a workspace by cd'ing into the project"),
-		subtleStyle.Render("and running `canopy` there. Global mode is read-only in v0.5."),
+		subtleStyle.Render("Tip: press c on any row to land in that project's TUI,"),
+		subtleStyle.Render("where you can create/remove/retry/resurrect workspaces."),
 		"",
 		subtleStyle.Render("Press any key to dismiss."),
 	}, "\n")
@@ -232,27 +237,21 @@ func (m *GlobalModel) activate(row state.GlobalRow) tea.Cmd {
 		return m.attachCmd(row.TmuxSession)
 
 	case state.StatusStopped:
-		hint := fmt.Errorf(
-			"workspace %q is stopped — cd into %q and run `canopy` to resurrect",
-			row.Name, projectHint(row))
+		// Press 'c' to land in the project TUI where 'enter' on this same
+		// row will resurrect the session.
+		hint := fmt.Errorf("workspace %q is stopped — press `c` to open the project and resurrect it", row.Name)
 		return func() tea.Msg { return globalErrMsg{err: hint} }
 
 	case state.StatusBroken:
-		hint := fmt.Errorf(
-			"workspace %q is broken — see ~/.canopy/log/canopy.log; cd into %q to clean up",
-			row.Name, projectHint(row))
+		hint := fmt.Errorf("workspace %q is broken — press `c` to open the project (then `R` to retry)", row.Name)
 		return func() tea.Msg { return globalErrMsg{err: hint} }
 
 	case state.StatusOrphaned:
-		hint := fmt.Errorf(
-			"workspace %q has no on-disk dir — cd into %q and run `canopy rm %s`",
-			row.Name, projectHint(row), row.Name)
+		hint := fmt.Errorf("workspace %q has no on-disk dir — press `c` to open the project (then `d` to clean up)", row.Name)
 		return func() tea.Msg { return globalErrMsg{err: hint} }
 
 	case state.StatusSettingUp:
-		hint := fmt.Errorf(
-			"workspace %q is still setting up — try `r` to refresh in a moment",
-			row.Name)
+		hint := fmt.Errorf("workspace %q is still setting up — press `r` to refresh in a moment", row.Name)
 		return func() tea.Msg { return globalErrMsg{err: hint} }
 	}
 
@@ -267,20 +266,16 @@ type globalErrMsg struct {
 	err error
 }
 
-// projectHint chooses the most helpful path string for an error message.
-// Prefer the canonical root if we have it; fall back to the basename.
-func projectHint(row state.GlobalRow) string {
-	if row.ProjectRoot != "" {
-		return row.ProjectRoot
-	}
-	return row.Project
-}
-
 // attachCmd builds a tea.Cmd that dispatches `tmux attach -t <session>`
 // via tea.ExecProcess. The handoff is the same pattern as the project-
 // mode TUI: tmux takes over the terminal until the user detaches with
 // prefix-d, then we refresh so any state changes during the session
 // surface in the next render.
+//
+// Error from tea.ExecProcess: tmux's stderr was visible to the user
+// during the exec attempt, but the err object only carries exit status.
+// We surface a friendly hint pointing at the most common cause (session
+// died between probe and attach).
 func (m *GlobalModel) attachCmd(session string) tea.Cmd {
 	cmd, err := m.tc.AttachCmd(context.Background(), session)
 	if err != nil {
@@ -288,9 +283,56 @@ func (m *GlobalModel) attachCmd(session string) tea.Cmd {
 	}
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
-			return globalErrMsg{err: fmt.Errorf("attach %s: %w", session, err)}
+			return globalErrMsg{err: fmt.Errorf(
+				"attach %s failed: %w (session may have died — press r to refresh)",
+				session, err)}
 		}
 		// Detach completed cleanly — refresh state so any changes show up.
+		return m.refreshCmd()()
+	})
+}
+
+// goToProject is the OnGoToProject callback. Re-launches `canopy` with
+// cwd set to the row's ProjectRoot — that way the user lands in the
+// project's TUI, where they can create/remove/resurrect workspaces with
+// full canopy.json context. When they quit the inner canopy, control
+// returns here and the global TUI re-renders.
+//
+// Why this exists: v0.5 global mode is read-only (create/remove deferred
+// to v0.6). Until then, "go to the project" is the escape hatch for any
+// action the global mode can't take. Works on every row regardless of
+// status, so users have a clean path even from broken/orphaned rows.
+//
+// Implementation: tea.ExecProcess re-execs the running canopy binary
+// (os.Executable) with WorkingDir set to ProjectRoot. The inner canopy
+// goes through routeRoot, finds canopy.json, launches the project TUI.
+// On exit, we refresh so any new workspaces / status changes show up.
+func (m *GlobalModel) goToProject(row state.GlobalRow) tea.Cmd {
+	if row.ProjectRoot == "" {
+		// Shouldn't happen post-migration, but defend against it.
+		return func() tea.Msg {
+			return globalErrMsg{err: fmt.Errorf(
+				"can't open project for row %q: ProjectRoot is empty (run a project-scoped command from the source repo to migrate)",
+				row.Name)}
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return func() tea.Msg {
+			return globalErrMsg{err: fmt.Errorf("locate canopy binary: %w", err)}
+		}
+	}
+	cmd := exec.Command(exe)
+	cmd.Dir = row.ProjectRoot
+	// Inherit env. Notably, we do NOT set TMUX or CANOPY_WORKSPACE_PATH;
+	// the inner canopy treats this as a normal invocation from the project
+	// root and routes to the project TUI.
+	cmd.Env = os.Environ()
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			return globalErrMsg{err: fmt.Errorf("open project at %s: %w", row.ProjectRoot, err)}
+		}
+		// Inner canopy quit cleanly — refresh in case workspaces changed.
 		return m.refreshCmd()()
 	})
 }

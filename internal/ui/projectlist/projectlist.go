@@ -36,15 +36,20 @@ import (
 	"github.com/avinashjoshi/canopy/internal/state"
 )
 
-// Options is the parent's wiring for a projectlist Model. Both callbacks
-// are required when the parent wants the corresponding key to do anything;
-// supplying nil makes that key a no-op (useful when a parent wants a
-// read-only listing with no actions).
+// Options is the parent's wiring for a projectlist Model. All callbacks
+// are optional; supplying nil makes the corresponding key a no-op.
 type Options struct {
 	// OnActivate fires when the user presses enter on a row. The parent
 	// returns a tea.Cmd (typically tea.ExecProcess for a tmux attach,
 	// or a status-line update for a non-attachable row). nil is allowed.
 	OnActivate func(state.GlobalRow) tea.Cmd
+
+	// OnGoToProject fires when the user presses 'c' (for "canopy" / "cd
+	// into project"). The parent typically tea.ExecProcess's `canopy` with
+	// cwd set to the row's ProjectRoot — that way the user lands in the
+	// project's TUI without having to leave the global view first.
+	// nil is allowed; key becomes a no-op.
+	OnGoToProject func(state.GlobalRow) tea.Cmd
 
 	// OnRefresh fires when the user presses r. Parent returns a tea.Cmd
 	// that re-fetches state and pushes new rows via SetRows. nil is allowed.
@@ -73,16 +78,18 @@ type Model struct {
 	// stopped — cd into <project> to resurrect."
 	err error
 
-	onActivate func(state.GlobalRow) tea.Cmd
-	onRefresh  func() tea.Cmd
+	onActivate    func(state.GlobalRow) tea.Cmd
+	onGoToProject func(state.GlobalRow) tea.Cmd
+	onRefresh     func() tea.Cmd
 }
 
 // New constructs a Model with no rows. The parent typically follows up
 // immediately with SetRows once its first state load resolves.
 func New(opts Options) Model {
 	return Model{
-		onActivate: opts.OnActivate,
-		onRefresh:  opts.OnRefresh,
+		onActivate:    opts.OnActivate,
+		onGoToProject: opts.OnGoToProject,
+		onRefresh:     opts.OnRefresh,
 	}
 }
 
@@ -126,6 +133,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, m.onActivate(m.rows[m.cursor])
+
+		case "c":
+			// "Open project" — let the parent cd into the project's repo
+			// and re-launch canopy there. Works on any row regardless of
+			// status, so users have an escape hatch from broken/stopped
+			// rows that would otherwise just show a hint.
+			if len(m.rows) == 0 || m.onGoToProject == nil {
+				return m, nil
+			}
+			return m, m.onGoToProject(m.rows[m.cursor])
 
 		case "r":
 			if m.onRefresh == nil {
@@ -200,17 +217,31 @@ func (m Model) View() string {
 	return b.String()
 }
 
-// renderTable computes column widths from the row data, then renders each
-// row with the cursor's row highlighted via selectedStyle.
+// renderTable groups rows by project, emits a project-name header line for
+// each group, then indents the workspace rows underneath. The cursor still
+// moves linearly over rows (no skipping); headers are visual chrome only.
 //
-// Column widths are derived dynamically per-frame: PROJECT and NAME stretch
-// to fit the longest entry, BRANCH and STATUS use sane minimums. lipgloss
-// doesn't help with manual tabular alignment when rows have styled cells
-// of different visible widths, so we compute widths ourselves.
+// Layout:
+//
+//	canopy
+//	  ●  (main)          —              main    40000
+//	  ●  ancient-hornet  ancient-hornet  ready  40010
+//
+//	cravd
+//	  ○  misty-aspen     misty-aspen     broken 41010
+//
+// Why grouped instead of flat-with-PROJECT-column: with basename uniqueness
+// invariant (every project basename is unique in v0.5+), repeating the
+// project name on every row was wasted ink. Headers + indentation read
+// faster and free up horizontal space for the actual workspace identity
+// (NAME, BRANCH).
+//
+// Column widths are derived once from the longest entries; lipgloss
+// doesn't help with column alignment when rows have styled cells of
+// different visible widths, so we compute widths ourselves.
 func (m Model) renderTable() string {
-	colProject, colName, colBranch, colStatus, colPort := 7, 4, 6, 6, 4
+	colName, colBranch, colStatus, colPort := 4, 6, 6, 4
 	for _, r := range m.rows {
-		colProject = maxInt(colProject, len(r.Project))
 		colName = maxInt(colName, len(r.Name))
 		colBranch = maxInt(colBranch, len(r.Branch))
 		colStatus = maxInt(colStatus, len(string(r.Status)))
@@ -219,27 +250,32 @@ func (m Model) renderTable() string {
 		}
 	}
 
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s",
-		colProject, "PROJECT",
-		colName, "NAME",
-		colBranch, "BRANCH",
-		colStatus, "STATUS",
-		colPort, "PORT")
-
 	var b strings.Builder
-	b.WriteString(headerStyle().Render(header))
-	b.WriteString("\n")
+	prevProject := ""
 
 	for i, r := range m.rows {
+		// New project group: emit a blank separator + project header line.
+		// First group skips the blank line so the table flush-aligns under
+		// the title.
+		if r.Project != prevProject {
+			if prevProject != "" {
+				b.WriteString("\n")
+			}
+			b.WriteString("  ")
+			b.WriteString(projectHeaderStyle().Render(r.Project))
+			b.WriteString("\n")
+			prevProject = r.Project
+		}
+
 		port := "—"
 		if r.Port > 0 {
 			port = fmt.Sprintf("%d", r.Port)
 		}
 		badge := badgeFor(r.Alive)
 		statusCell := statusStyleFor(r.Status).Render(fmt.Sprintf("%-*s", colStatus, r.Status))
-		line := fmt.Sprintf("%s %-*s  %-*s  %-*s  %s  %*s",
+		// Two-space indent under the project header so rows visually nest.
+		line := fmt.Sprintf("    %s  %-*s  %-*s  %s  %*s",
 			badge,
-			colProject, r.Project,
 			colName, r.Name,
 			colBranch, r.Branch,
 			statusCell,
@@ -310,6 +346,15 @@ func maxInt(a, b int) int {
 
 func headerStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+}
+
+// projectHeaderStyle is the project-name banner above each group. Bold +
+// pale-violet so the name stands out as a section header without competing
+// with the alive/dead badges below it.
+func projectHeaderStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("99")).
+		Bold(true)
 }
 
 func subtleHelper() lipgloss.Style {
