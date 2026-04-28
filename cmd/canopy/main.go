@@ -56,6 +56,7 @@ func main() {
 	root.AddCommand(switchCmd())
 	root.AddCommand(rmCmd())
 	root.AddCommand(reconcileCmd())
+	root.AddCommand(mainCmd())
 
 	if err := root.Execute(); err != nil {
 		// cobra has already printed the error; just exit non-zero.

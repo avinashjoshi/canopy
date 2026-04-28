@@ -269,33 +269,42 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 	return nil
 }
 
-// buildSession creates the tmux session and adds the standard 4-pane
-// layout. Each pane runs a different command; the layout call rearranges
-// them into a clean 2×2.
+// buildSession creates the tmux session and lays out canopy's standard
+// 3-pane workspace:
 //
-// Pane commands are wrapped in keepAlive so that when the user exits
-// nvim or the dev server crashes, the pane drops to a shell instead of
-// vanishing. Without this, a missing script or a `:q` from nvim closes
-// the pane and the layout gets unbalanced. The shell pane (empty cmd)
-// is naturally a shell so it doesn't need wrapping.
+//	+--------+--------+
+//	|  nvim  | claude |
+//	+--------+--------+
+//	|     shell       |
+//	+--------+--------+
+//
+// scripts.run is NOT launched automatically. Most of the time the user
+// wants a terminal, not a permanent server pane — when they need to run
+// the server, they type the command themselves (or future versions will
+// add `canopy run` to invoke it on demand).
+//
+// Layout sequence (all splits use -d so the active pane stays on the
+// initial nvim pane and subsequent splits target it):
+//   1. new-session: pane 0 = nvim, full window.
+//   2. split-v: pane 1 = shell, full-width below nvim. nvim now top half.
+//   3. split-h: pane 2 = claude, right of nvim. nvim becomes top-left.
+//
+// nvim and claude are wrapped in keepAlive so :q from nvim or claude
+// ending drops the pane to a shell instead of closing it.
 func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	if err := m.Tmux.Create(ctx, ws.TmuxSession, ws.Path, keepAlive("nvim")); err != nil {
 		return err
 	}
-	// Pane 1: claude (per-dir storage means resurrection picks up history).
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive("claude"), tmux.SplitHorizontal); err != nil {
-		return err
-	}
-	// Pane 2: default shell (empty cmd, no wrapping needed).
+	// Shell, full-width bottom (vertical split puts the new pane below).
 	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, "", tmux.SplitVertical); err != nil {
 		return err
 	}
-	// Pane 3: scripts.run (the long-running server command).
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive(m.Cfg.Scripts.Run), tmux.SplitVertical); err != nil {
+	// Claude, top-right (horizontal split puts the new pane to the right
+	// of the still-active nvim pane).
+	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive("claude"), tmux.SplitHorizontal); err != nil {
 		return err
 	}
-	// Tile into a 2×2 regardless of split history.
-	return m.Tmux.SelectLayout(ctx, ws.TmuxSession, "tiled")
+	return nil
 }
 
 // keepAlive wraps a shell command so that when the command exits (cleanly
@@ -420,22 +429,16 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		return nil, fmt.Errorf("workspace.Resurrect(%s): workspace dir missing at %s", name, wsCopy.Path)
 	}
 
-	// Rebuild the tmux session. Pane 1 uses `claude --continue` so the
-	// prior conversation history is restored. Same keep-alive wrapping
-	// as buildSession — pane survives if the user exits nvim/claude.
+	// Rebuild the same 3-pane layout as buildSession. Claude pane uses
+	// --continue so the prior conversation history is restored; nvim
+	// and shell are unchanged.
 	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim")); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
-	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("claude --continue"), tmux.SplitHorizontal); err != nil {
-		return nil, err
 	}
 	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical); err != nil {
 		return nil, err
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive(m.Cfg.Scripts.Run), tmux.SplitVertical); err != nil {
-		return nil, err
-	}
-	if err := m.Tmux.SelectLayout(ctx, wsCopy.TmuxSession, "tiled"); err != nil {
+	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("claude --continue"), tmux.SplitHorizontal); err != nil {
 		return nil, err
 	}
 

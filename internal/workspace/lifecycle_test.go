@@ -135,12 +135,13 @@ func TestCreate_HappyPath(t *testing.T) {
 		t.Errorf("workspace dir missing at %s: %v", ws.Path, err)
 	}
 
-	// tmux session must exist with 4 panes.
+	// tmux session must exist with the standard 3-pane layout
+	// (nvim top-left, claude top-right, shell full-width bottom).
 	out, err := exec.Command("tmux", "-L", "canopy-test", "list-panes", "-t", ws.TmuxSession).Output()
 	if err != nil {
 		t.Errorf("list-panes: %v", err)
-	} else if got := len(strings.Split(strings.TrimSpace(string(out)), "\n")); got != 4 {
-		t.Errorf("pane count = %d; want 4", got)
+	} else if got := len(strings.Split(strings.TrimSpace(string(out)), "\n")); got != 3 {
+		t.Errorf("pane count = %d; want 3", got)
 	}
 }
 
@@ -274,7 +275,7 @@ func TestResurrect_HappyPath(t *testing.T) {
 	out, err := exec.Command("tmux", "-L", "canopy-test", "list-panes", "-t", ws.TmuxSession).Output()
 	if err != nil {
 		t.Errorf("list-panes: %v", err)
-	} else if got := len(strings.Split(strings.TrimSpace(string(out)), "\n")); got != 4 {
-		t.Errorf("pane count after resurrect = %d; want 4", got)
+	} else if got := len(strings.Split(strings.TrimSpace(string(out)), "\n")); got != 3 {
+		t.Errorf("pane count after resurrect = %d; want 3", got)
 	}
 }
