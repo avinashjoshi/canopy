@@ -18,9 +18,20 @@ type diagnosis struct {
 // Compile-once at package init via MustCompile; the regex cost is
 // paid once on program startup, not per Diagnose call.
 var diagnoses = []diagnosis{
-	// Rails / Active Record encryption — the cravd dogfood failure
-	// that motivated this whole verb. master.key missing means the
-	// user copied the repo but not the credential.
+	// Rails Active Record encryption (Rails 7+) — distinct from
+	// master.key. The credentials file is missing the AR encryption
+	// keys (primary_key, deterministic_key, key_derivation_salt).
+	// Specific entry first so it wins over the broader master.key
+	// pattern below. Real failure observed on cravd 2026-04-28.
+	{
+		pattern: regexp.MustCompile(`(?i)(active\s+record\s+encryption\s+credential|active_record_encryption\.(deterministic_key|primary_key|key_derivation_salt))`),
+		hint:    "Active Record encryption credentials missing — run `bin/rails db:encryption:init` in your source repo, then add the printed keys to config/credentials/<env>.yml.enc via `bin/rails credentials:edit --environment <env>`",
+	},
+
+	// Rails master.key — distinct from AR encryption above.
+	// master.key missing means the user copied the repo but not
+	// the file (it's gitignored). Caught by the original cravd
+	// dogfood failure that motivated the retry verb.
 	{
 		pattern: regexp.MustCompile(`(?i)(missing\s+(active\s+record\s+)?encryption\s+key|RAILS_MASTER_KEY|master\.key)`),
 		hint:    "Missing Rails master key — symlink config/master.key from the source repo or set RAILS_MASTER_KEY in scripts.setup",

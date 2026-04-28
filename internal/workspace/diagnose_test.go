@@ -32,6 +32,19 @@ func TestDiagnose(t *testing.T) {
 			wantSubstr: "Rails master key",
 		},
 		{
+			// Real failure from cravd 2026-04-28. Distinct from
+			// master.key — Rails 7+ AR encryption requires its own
+			// keys in config/credentials/<env>.yml.enc.
+			name:       "rails AR encryption credential missing",
+			stderr:     "ActiveRecord::Encryption::Errors::Configuration: Missing Active Record encryption credential: active_record_encryption.deterministic_key\n",
+			wantSubstr: "Active Record encryption credentials missing",
+		},
+		{
+			name:       "rails AR encryption primary_key key path",
+			stderr:     "Missing key in active_record_encryption.primary_key\n",
+			wantSubstr: "Active Record encryption credentials missing",
+		},
+		{
 			name:       "database already exists postgres",
 			stderr:     `database "cravd_canopy_dev" already exists` + "\n",
 			wantSubstr: "Database already exists",

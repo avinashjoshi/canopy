@@ -5,6 +5,24 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## v0.5 — `canopy debug <name>` verb (attach without running scripts)
+
+**What:** A new subcommand that opens a tmux session attached to a workspace's directory *without* running `scripts.setup` or any other lifecycle hook. Pure escape hatch for diagnosing why a broken workspace is broken — get into the worktree, poke at it, run the failing script manually with `bash -x`, fix the underlying issue, then `canopy retry` once you know what to fix.
+
+**Why:** Avi hit this 2026-04-28 with cravd's misty-aspen workspace failing on AR encryption. `canopy retry` re-ran the same broken script in a loop with no way to inspect intermediate state. The current workaround is a manual `tmux new-session -c <workspace path>` — works but is friction every time. A first-class verb closes the gap.
+
+**Pros:** ~30 LOC. Reuses the existing `tmux.AttachCmd` and dir resolution. Only new logic is "attach without invoking buildSession" — basically half of `Resurrect` minus the pane build. Becomes the recommended diagnostic flow alongside auto-detect hints + canopy retry.
+
+**Cons:** Yet another verb in the CLI surface. Could be a flag on `canopy switch` instead (`canopy switch <name> --bare` or `--no-setup`). Argument for a separate verb: `canopy switch` refuses broken workspaces today; making it accept them under a flag muddies the contract. Argument for a flag: fewer top-level verbs = simpler CLI.
+
+**Context:** Likely shape: `canopy debug <name>` opens a one-pane tmux session at the workspace path with `CANOPY_*` env vars set (so manual `bin/conductor-setup` calls inherit the right env). No nvim, no claude, no auto-runs — just a shell. Status field is untouched (debugging doesn't change `broken` → `ready`). Implementation lives in a new `cmd/canopy/debug.go` and a tiny `Manager.AttachBare(ctx, name)` method that asserts the workspace exists on disk and hands off to `tmux.AttachCmd` with `-c <path>`.
+
+Pairs with the v0.5 per-workspace setup logs entry: those write `setup.log` per attempt; `canopy debug` lets you read it from inside the workspace's own dir without leaving the canopy ergonomics.
+
+**Depends on / blocked by:** v0. No blockers.
+
+---
+
 ## v0.1.0 — Demo recording for the launch
 
 **What:** A 30–45 second terminal recording showing the canopy happy path end-to-end: `canopy init` → `canopy new` (auto-attach into the 3-pane tmux session) → tiny edit → detach → `canopy ls` → `canopy switch <name>` (claude conversation resumes) → `canopy rm`. Output as `docs/demo.gif` referenced from the README hero and used as the launch-tweet asset.
