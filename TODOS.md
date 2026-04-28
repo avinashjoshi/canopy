@@ -106,6 +106,75 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## v0.5 — `canopy run` subcommand for on-demand scripts.run
+
+**What:** `canopy run` invokes the project's `scripts.run` with the
+right `CANOPY_*` env vars in the user's current workspace. Replaces
+the old "always-running server pane" model with a deliberate "start
+the server when I need it" UX.
+
+**Why:** v0 dropped the auto-running server pane (the design-doc 4-pane
+layout). The new 3-pane layout is nvim + claude + shell — the user
+runs `bin/dev` in the shell when they want it. `canopy run` is the
+ergonomic shortcut: from inside any pane, type `canopy run` and the
+right command fires with the right env, regardless of which workspace
+you're in.
+
+**Pros:** One canopical way to start the dev server. Removes the
+"which directory am I in / what env do I need" friction. Avi's
+mental model from Conductor was `cmd+r` to fire the run hook;
+`canopy run` is that idea ported to the terminal.
+
+**Cons:** Needs a way to know which workspace you're in. Easiest:
+match `pwd` against state.json paths. If no match, error with
+suggestion ("you're in the source repo; cd into a workspace or run
+`canopy main`"). Implementation is ~30 LOC.
+
+**Context:** `scripts.run` already exists in canopy.json schema and
+is currently unused at create time. `canopy run` activates the field.
+Could also pair with a tmux key-binding helper (see "tmux navigation
+help" below) so `canopy main`'s sessions can offer a hotkey overlay.
+
+**Depends on / blocked by:** v0.
+
+---
+
+## v0.5 — Tmux navigation help / overlay
+
+**What:** A small in-session help cheatsheet that explains canopy's
+pane layout + the most useful tmux navigation keys to a user who
+isn't fluent in tmux yet. Could be:
+  - A `?` keybinding in canopy-managed sessions that pops up a
+    visible overlay (popup window, or `tmux display-message`)
+  - A `canopy help-tmux` subcommand that prints a cheat sheet
+  - A static "your panes" header at the top of each window with
+    pane labels (file, claude, shell)
+
+**Why:** Avi noted the experimental layout is fine for now but mentioned
+"some sort of help for navigating tmux" as future polish. A tool that
+opinionates about tmux layouts owes its users a way to learn the
+keys without reading the tmux man page.
+
+**Pros:** Lowers the floor for first-time tmux users. Makes canopy's
+opinionated layout self-explaining. Conductor's GUI surfaces hotkeys
+visually; this is the terminal equivalent.
+
+**Cons:** Tmux popup support varies across versions (>=3.2 required
+for popup-window). A static cheatsheet is easier but less discoverable.
+
+**Context:** Useful keys to teach:
+  - prefix-d: detach (return to canopy CLI)
+  - prefix-arrow: switch panes
+  - prefix-z: zoom active pane (toggle fullscreen)
+  - prefix-c: new window
+  - prefix-1/2/3: switch to window N
+  - prefix-,: rename window
+  - prefix-[: scroll mode (q to exit)
+
+**Depends on / blocked by:** none. Easy add post-v0.
+
+---
+
 ## v1 — Pluggable session backend (tmux → zellij/kitty/etc.)
 
 **What:** Abstract the tmux dependency behind a `SessionBackend` interface so canopy can swap to other multiplexers (zellij, kitty's session protocol, Ghostty's eventual native persistence, etc.) without changing core logic.

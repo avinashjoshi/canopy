@@ -45,11 +45,15 @@ The wedge feature is live. From inside any project that has a `canopy.json`:
 ```bash
 canopy new                  # creates a workspace with a random name (e.g. bold-falcon)
 canopy new --name fix-bug   # explicit name
+canopy main                 # opens a tmux session in the project root (no worktree)
 canopy ls                   # workspaces in the current project
 canopy ls --all             # workspaces across every project (also implicit when run outside any project)
-canopy switch <name>        # attach (resurrect first if stopped)
+canopy switch <name>        # attach (resurrect first if stopped; auto-reconciles status)
 canopy rm <name>            # tear down (archive script + tmux + git + branch)
+canopy reconcile            # update workspace statuses to match disk + tmux reality
 ```
+
+Each workspace gets a 3-pane tmux session: nvim top-left, claude top-right (with `--continue` on resurrect so prior conversation history resumes), shell full-width on the bottom. `scripts.run` from `canopy.json` is reserved for a future on-demand `canopy run` invocation; v0 doesn't auto-start it.
 
 Plus operational glue:
 
