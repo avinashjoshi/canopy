@@ -1,4 +1,4 @@
-package main
+package workspace
 
 import (
 	"context"
@@ -10,8 +10,10 @@ import (
 )
 
 // setupCleanWorktree creates a fresh git repo with one commit and a
-// worktree on a feature branch. Returns the worktree path.
-func setupCleanWorktree(t *testing.T, branch string) string {
+// worktree on a feature branch. Returns the worktree path. Mirrors
+// the helper in lifecycle's tests; kept package-local because both
+// packages need their own (workspace doesn't depend on lifecycle).
+func setupCleanWorktreeForSafety(t *testing.T, branch string) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -29,8 +31,6 @@ func setupCleanWorktree(t *testing.T, branch string) string {
 		}
 	}
 
-	// Forge origin/main + origin/HEAD so default-branch resolution works
-	// without a real remote.
 	if out, err := exec.Command("git", "-C", source, "update-ref",
 		"refs/remotes/origin/main", "main").CombinedOutput(); err != nil {
 		t.Fatalf("update-ref: %v\n%s", err, out)
@@ -48,26 +48,26 @@ func setupCleanWorktree(t *testing.T, branch string) string {
 	return wt
 }
 
-// TestSafetyPreflight_Clean: a freshly-created worktree with no
+// TestSafetyChecks_Clean: a freshly-created worktree with no
 // uncommitted changes and no commits past origin/main → no hangs.
-func TestSafetyPreflight_Clean(t *testing.T) {
-	wt := setupCleanWorktree(t, "ancient-hornet")
+func TestSafetyChecks_Clean(t *testing.T) {
+	wt := setupCleanWorktreeForSafety(t, "ancient-hornet")
 
-	hangs := safetyPreflight(context.Background(), wt, "ancient-hornet")
+	hangs := safetyChecks(context.Background(), wt, "ancient-hornet")
 	if len(hangs) != 0 {
 		t.Errorf("clean worktree should have no hangs; got %v", hangs)
 	}
 }
 
-// TestSafetyPreflight_Uncommitted: an uncommitted file in the worktree
+// TestSafetyChecks_Uncommitted: an uncommitted file in the worktree
 // triggers the uncommitted hang.
-func TestSafetyPreflight_Uncommitted(t *testing.T) {
-	wt := setupCleanWorktree(t, "ancient-hornet")
+func TestSafetyChecks_Uncommitted(t *testing.T) {
+	wt := setupCleanWorktreeForSafety(t, "ancient-hornet")
 	if err := os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("hi"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	hangs := safetyPreflight(context.Background(), wt, "ancient-hornet")
+	hangs := safetyChecks(context.Background(), wt, "ancient-hornet")
 	found := false
 	for _, h := range hangs {
 		if strings.Contains(h, "uncommitted") {
@@ -80,17 +80,16 @@ func TestSafetyPreflight_Uncommitted(t *testing.T) {
 	}
 }
 
-// TestSafetyPreflight_UnpushedCommits: commits past origin/main with
-// no upstream tracked → unpushed hang.
-func TestSafetyPreflight_UnpushedCommits(t *testing.T) {
-	wt := setupCleanWorktree(t, "feature")
-	// Commit on the feature branch — diverges from origin/main.
+// TestSafetyChecks_UnpushedCommits: commits past origin/main with no
+// upstream tracked → unpushed hang.
+func TestSafetyChecks_UnpushedCommits(t *testing.T) {
+	wt := setupCleanWorktreeForSafety(t, "feature")
 	if out, err := exec.Command("git", "-C", wt,
 		"commit", "--allow-empty", "-m", "feature").CombinedOutput(); err != nil {
 		t.Fatalf("commit: %v\n%s", err, out)
 	}
 
-	hangs := safetyPreflight(context.Background(), wt, "feature")
+	hangs := safetyChecks(context.Background(), wt, "feature")
 	found := false
 	for _, h := range hangs {
 		if strings.Contains(h, "unpushed") || strings.Contains(h, "no upstream") {
@@ -103,30 +102,30 @@ func TestSafetyPreflight_UnpushedCommits(t *testing.T) {
 	}
 }
 
-// TestSafetyPreflight_OrphanWorktree: worktree dir gone → safety
-// pre-flight returns no hangs (degrades gracefully — never blocks rm).
+// TestSafetyChecks_OrphanWorktree: worktree dir gone → safetyChecks
+// returns no hangs (degrades gracefully — never blocks rm).
 //
 // IRON RULE: regression test for the v0.5 "rm always proceeds" behavior
 // when the worktree has been hand-deleted. The new safety checks must
 // not regress this.
-func TestSafetyPreflight_OrphanWorktree(t *testing.T) {
-	hangs := safetyPreflight(context.Background(), "/nonexistent/worktree/path", "feature")
+func TestSafetyChecks_OrphanWorktree(t *testing.T) {
+	hangs := safetyChecks(context.Background(), "/nonexistent/worktree/path", "feature")
 	if len(hangs) != 0 {
 		t.Errorf("orphan worktree must not block rm; got %v", hangs)
 	}
 }
 
-// TestSafetyPreflight_EmptyPath: empty worktree path (defensive) returns
+// TestSafetyChecks_EmptyPath: empty worktree path (defensive) returns
 // no hangs.
-func TestSafetyPreflight_EmptyPath(t *testing.T) {
-	hangs := safetyPreflight(context.Background(), "", "feature")
+func TestSafetyChecks_EmptyPath(t *testing.T) {
+	hangs := safetyChecks(context.Background(), "", "feature")
 	if len(hangs) != 0 {
 		t.Errorf("empty path should be no-op; got %v", hangs)
 	}
 }
 
-// TestExtractPRNumber_HappyPath: parse a typical gh JSON snippet.
-func TestExtractPRNumber_HappyPath(t *testing.T) {
+// TestExtractPRNumber: parse typical gh JSON output.
+func TestExtractPRNumber(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{

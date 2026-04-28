@@ -147,6 +147,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Open the confirm-delete modal for the selected row. Refuses
 		// to delete the synthetic main row (canopy main is ephemeral —
 		// kill the tmux session externally if you want it gone).
+		//
+		// v0.6: run the workspace safety preflight before showing the
+		// modal. When hangs are detected (uncommitted/unpushed/open-PR),
+		// the modal renders the list and requires a capital F to force,
+		// matching the CLI's `canopy rm --force` semantics. When clean,
+		// the modal shows today's normal y/N prompt.
 		if len(m.rows) == 0 {
 			return m, nil
 		}
@@ -156,8 +162,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				row.TmuxSession)
 			return m, nil
 		}
+		// SafetyPreflight returns nil hangs for orphan workspaces (worktree
+		// dir gone) — degrade gracefully so the user can still rm orphans.
+		// Errors are non-fatal; we proceed with no hangs and let Remove
+		// handle the not-found case if state diverged.
+		hangs, _ := m.mgr.SafetyPreflight(context.Background(), row.Name)
 		m.mode = confirmDeleteMode
 		m.deleteTarget = row.Name
+		m.deleteHangs = hangs
 		return m, nil
 
 	case "enter":
@@ -374,13 +386,43 @@ func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, refreshCmd(m.mgr, m.tc)
 }
 
-// handleConfirmDeleteKey is the keymap while the y/N delete prompt is
-// up. y or Y kicks off the removal; anything else (n, N, Esc, Enter,
-// stray keys) cancels back to the list. Cancel-by-default is the safe
-// posture for a destructive operation.
+// handleConfirmDeleteKey is the keymap while the delete prompt is up.
+//
+// Two modes based on whether v0.6 SafetyPreflight detected hangs:
+//
+//   - Clean (no hangs): y or Y kicks off the removal. Lowercase y is
+//     an explicit choice for safety (no accidental keypress) but
+//     forgiving for the muscle-memory case (most users hit y).
+//   - Hanging work: ONLY capital F kicks off the (forced) removal.
+//     Lowercase y, n, N, esc, anything else cancels. Capital F mirrors
+//     the CLI's --force flag and makes the user's destructive intent
+//     explicit ("yes, lose the uncommitted work").
+//
+// Cancel-by-default is the safe posture for a destructive operation;
+// we only proceed on a deliberate keypress.
 func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "y", "Y":
+	hasHangs := len(m.deleteHangs) > 0
+
+	// Force key (capital F): only valid path when hangs exist. Falls
+	// through to cancel when no hangs (capital F isn't documented for
+	// the clean path, but isn't harmful — just resets the modal).
+	if msg.String() == "F" && hasHangs {
+		name := m.deleteTarget
+		m.mode = busyMode
+		m.busyOp = busyOpRemove
+		m.busyTitle = fmt.Sprintf("Force-removing workspace %q...", name)
+		m.busyDone = false
+		m.busyOutput = ""
+		m.busyErr = nil
+		m.deleteTarget = ""
+		m.deleteHangs = nil
+		return m, removeCmd(m.mgr, name)
+	}
+
+	// Normal y/Y: only valid when no hangs. When hangs exist, lowercase
+	// y is an UNDER-AGREEMENT — user said "yes" to the wrong question.
+	// Treat as cancel to force them to acknowledge the hangs explicitly.
+	if !hasHangs && (msg.String() == "y" || msg.String() == "Y") {
 		name := m.deleteTarget
 		m.mode = busyMode
 		m.busyOp = busyOpRemove
@@ -389,13 +431,16 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.busyOutput = ""
 		m.busyErr = nil
 		m.deleteTarget = ""
+		m.deleteHangs = nil
 		return m, removeCmd(m.mgr, name)
-	default:
-		// Anything else cancels.
-		m.mode = listMode
-		m.deleteTarget = ""
-		return m, nil
 	}
+
+	// Anything else cancels (n, N, esc, enter, stray keys, lowercase y
+	// when hangs are present).
+	m.mode = listMode
+	m.deleteTarget = ""
+	m.deleteHangs = nil
+	return m, nil
 }
 
 // createDoneMsg carries the result of a Manager.Create call back to

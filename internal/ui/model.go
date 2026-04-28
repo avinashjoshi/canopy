@@ -96,7 +96,8 @@ type Model struct {
 	nameInput textinput.Model
 
 	// Confirm-delete modal (mode == confirmDeleteMode).
-	deleteTarget string // workspace name pending removal
+	deleteTarget string   // workspace name pending removal
+	deleteHangs  []string // v0.6 safety check results — populated when 'd' is pressed; non-empty triggers the force-required path in renderConfirmDelete + handleConfirmDeleteKey
 
 	// Long-running operation in progress (mode == busyMode). Reused by
 	// Create, Remove, and Retry flows.

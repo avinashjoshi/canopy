@@ -1,0 +1,167 @@
+package workspace
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// SafetyPreflight runs the v0.6 hanging-work checks against a workspace
+// and returns a list of human-readable messages for each one that
+// triggered. Empty slice means "clean to remove."
+//
+// Lives in package workspace (not cmd/canopy) so both the CLI's
+// `canopy rm` AND the TUI's 'd' delete flow share the same checks.
+// v0.6 first cut put this in cmd/canopy/rm.go and the TUI's delete
+// path silently bypassed it — bug surfaced on first real test.
+//
+// The three checks (in order):
+//
+//  1. uncommitted changes (`git status --porcelain`)
+//  2. unpushed commits (HEAD ahead of upstream OR ahead of origin/<default>
+//     when no upstream is tracked)
+//  3. open PR for the branch (gh pr view)
+//
+// Best-effort: each check is independent and a failure of one (e.g.,
+// git status erroring on an orphaned worktree) doesn't block the others.
+// Returning an empty slice from a check failure means "no hang detected"
+// — we never block rm because the diagnostic itself failed.
+//
+// Order of returned messages matters for UX: uncommitted comes first
+// (most actionable; user likely needs to commit/stash), then unpushed
+// (less common but data-loss-risk), then open-PR (informational; user
+// might still want to rm and let the PR close naturally).
+func (m *Manager) SafetyPreflight(ctx context.Context, name string) ([]string, error) {
+	ws, err := m.Find(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return safetyChecks(ctx, ws.Path, ws.Branch), nil
+}
+
+// safetyChecks is the package-private worker. Takes path + branch
+// directly so callers can run the checks without first calling Find
+// (e.g., when they already have ws in hand from a prior load).
+func safetyChecks(ctx context.Context, worktreePath, branch string) []string {
+	if worktreePath == "" {
+		return nil // no path to check; orphaned-row safe path
+	}
+	var hangs []string
+	if msg := checkUncommitted(ctx, worktreePath); msg != "" {
+		hangs = append(hangs, msg)
+	}
+	if msg := checkUnpushed(ctx, worktreePath); msg != "" {
+		hangs = append(hangs, msg)
+	}
+	if msg := checkOpenPR(ctx, worktreePath, branch); msg != "" {
+		hangs = append(hangs, msg)
+	}
+	return hangs
+}
+
+// checkUncommitted: empty git status --porcelain output = clean tree.
+// Any output (or git error) is treated conservatively: empty output
+// means clean, errors mean "can't tell, don't block."
+func checkUncommitted(ctx context.Context, path string) string {
+	cmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return "" // diagnostic failed; orphan-friendly path
+	}
+	if len(strings.TrimSpace(string(out))) == 0 {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	return fmt.Sprintf("uncommitted changes (%d file(s)) — commit, stash, or discard first", len(lines))
+}
+
+// checkUnpushed: HEAD has commits not on the upstream branch (or, when
+// no upstream is tracked, on origin/<default>).
+func checkUnpushed(ctx context.Context, path string) string {
+	cmd := exec.CommandContext(ctx, "git", "-C", path, "log",
+		"--oneline", "@{u}..HEAD")
+	out, err := cmd.Output()
+	if err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) == 1 && lines[0] == "" {
+			return ""
+		}
+		return fmt.Sprintf("%d unpushed commit(s) — push first or accept the loss", len(lines))
+	}
+	// No upstream tracked; fall back to origin/<default>..HEAD.
+	defaultBranch := defaultBranchSafe(ctx, path)
+	if defaultBranch == "" {
+		return ""
+	}
+	cmd = exec.CommandContext(ctx, "git", "-C", path, "log",
+		"--oneline", "origin/"+defaultBranch+"..HEAD")
+	out, err = cmd.Output()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return ""
+	}
+	return fmt.Sprintf("%d commit(s) on this branch with no upstream — push or accept the loss", len(lines))
+}
+
+// checkOpenPR: gh pr view for an open PR on the branch.
+func checkOpenPR(ctx context.Context, worktreePath, branch string) string {
+	if _, err := exec.LookPath("gh"); err != nil {
+		return ""
+	}
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch,
+		"--json", "state,number")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	if strings.Contains(string(out), `"state":"OPEN"`) {
+		num := extractPRNumber(string(out))
+		if num != "" {
+			return fmt.Sprintf("PR #%s is open — let it merge or close it first", num)
+		}
+		return "an open PR exists for this branch — let it merge or close it first"
+	}
+	return ""
+}
+
+// defaultBranchSafe: same shape as the lifecycle package's helper
+// but kept local to avoid a back-import (lifecycle imports state, and
+// we don't want lifecycle importing workspace either).
+func defaultBranchSafe(ctx context.Context, path string) string {
+	cmd := exec.CommandContext(ctx, "git", "-C", path, "symbolic-ref",
+		"--short", "refs/remotes/origin/HEAD")
+	out, err := cmd.Output()
+	if err == nil {
+		ref := strings.TrimSpace(string(out))
+		return strings.TrimPrefix(ref, "origin/")
+	}
+	for _, b := range []string{"main", "master"} {
+		probe := exec.CommandContext(ctx, "git", "-C", path, "rev-parse",
+			"--verify", "origin/"+b)
+		if err := probe.Run(); err == nil {
+			return b
+		}
+	}
+	return ""
+}
+
+// extractPRNumber pulls the PR number out of gh's JSON output via a
+// small string scan — full json.Unmarshal would be heavy for one field.
+func extractPRNumber(s string) string {
+	const tag = `"number":`
+	i := strings.Index(s, tag)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(tag):]
+	end := strings.IndexAny(rest, ",}")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
+}

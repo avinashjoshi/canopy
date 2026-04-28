@@ -139,17 +139,46 @@ func (m *Model) renderNewModal() string {
 	return b.String()
 }
 
-// renderConfirmDelete is the y/N prompt shown before tearing down a
-// workspace. Spells out what the operation does so the user knows what
-// they're agreeing to (this isn't a "press y to retry, idk lol" prompt).
+// renderConfirmDelete is the modal shown before tearing down a workspace.
+//
+// Two visual modes based on whether the v0.6 SafetyPreflight detected
+// hangs (uncommitted/unpushed/open-PR):
+//
+//   - Clean (no hangs): standard y/N prompt as in v0.5.
+//   - Hanging work: lists each hang as a bullet point in red, requires
+//     CAPITAL F to force. Lowercase y or any other key cancels — capital
+//     F mirrors the CLI's --force flag and makes the destructive intent
+//     explicit. The prompt copy spells out the consequences ("uncommitted
+//     work will be lost") so the user can't accidentally torch progress.
 func (m *Model) renderConfirmDelete() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("canopy rm"))
 	b.WriteString("\n\n")
+
+	if len(m.deleteHangs) > 0 {
+		b.WriteString(fmt.Sprintf("  ! Refusing to remove workspace %q — hanging work detected:\n\n", m.deleteTarget))
+		for _, h := range m.deleteHangs {
+			b.WriteString("    ")
+			b.WriteString(brokenStyle.Render("•"))
+			b.WriteString(" ")
+			b.WriteString(h)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(subtleStyle.Render("  Resolve the issues above, OR press the force key to remove anyway.\n"))
+		b.WriteString(subtleStyle.Render("  Forced removal still runs scripts.archive + tmux kill + git worktree remove.\n"))
+		b.WriteString(subtleStyle.Render("  Uncommitted work is lost permanently.\n"))
+		b.WriteString("\n")
+		b.WriteString("  ")
+		b.WriteString(brokenStyle.Render("F"))
+		b.WriteString(" (capital) to force-remove  ·  any other key to cancel")
+		return b.String()
+	}
+
 	b.WriteString(fmt.Sprintf("  Remove workspace %q?\n\n", m.deleteTarget))
 	b.WriteString(subtleStyle.Render("  This runs scripts.archive, kills the tmux session, removes the\n"))
 	b.WriteString(subtleStyle.Render("  git worktree, deletes the underlying branch, and drops the row\n"))
-	b.WriteString(subtleStyle.Render("  from state.json. Uncommitted work is lost — push first if needed.\n"))
+	b.WriteString(subtleStyle.Render("  from state.json.\n"))
 	b.WriteString("\n")
 	b.WriteString("  ")
 	b.WriteString(brokenStyle.Render("y"))
