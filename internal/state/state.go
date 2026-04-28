@@ -50,6 +50,41 @@ var log = clog.Pkg("state")
 // fields stay zero until migration runs).
 const SchemaVersion = 2
 
+// Hint is a v0.6 lifecycle hint surfaced by a detector
+// (internal/lifecycle/). Hints are NOT persisted in state.json — they're
+// recomputed on every TUI refresh / canopy reconcile run because
+// persisting risks staleness after a manual git operation outside canopy.
+//
+// The Hint type lives in package state (not internal/lifecycle) because
+// many packages consume it (UI for badges, agent for briefings, cmd for
+// rm safety checks). Putting it in the package that all consumers
+// already depend on avoids a circular-dep dance.
+//
+// Detectors return zero or one Hint per kind per workspace. Multiple
+// hint kinds can be active at once (e.g., rename_suggested AND pr_status
+// firing on the same workspace mid-flight).
+type Hint struct {
+	// Kind is one of: "rename_suggested", "shipped", "pr_status".
+	// Adding a new kind: register the detector in internal/lifecycle/
+	// and document the kind in docs/design/v0.6-agent-lifecycle.md.
+	Kind string
+
+	// Message is human-readable, one line, present tense. E.g.:
+	// "branch 'ancient-hornet' has 3 commits past main; rename to reflect intent"
+	Message string
+
+	// Action is an optional suggested command for the user OR the
+	// agent to run. E.g. "git branch -m <name>". Surfaced in TUI
+	// hover (eventually) and in the AGENT.md briefing's hint section.
+	// Empty when no specific action applies.
+	Action string
+
+	// DetectedAt is when this hint was last refreshed. Used by stale-
+	// data indicators (e.g., pr_status hint from a 1h-old cache shows
+	// "stale" tag). Not persisted; reset on every detector run.
+	DetectedAt time.Time
+}
+
 // Status enumerates the five workspace states from the design doc.
 //
 //	setting_up -> ready  (scripts.setup succeeded)

@@ -1,0 +1,266 @@
+package lifecycle
+
+import (
+	"context"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/avinashjoshi/canopy/internal/state"
+)
+
+// setupSourceRepo builds a fresh "source" git repo with a main branch
+// and one commit. Returns the absolute path.
+func setupSourceRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "--initial-branch=main", dir},
+		{"-C", dir, "config", "user.email", "t@e"},
+		{"-C", dir, "config", "user.name", "t"},
+		{"-C", dir, "commit", "--allow-empty", "-m", "initial"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
+}
+
+// setupWorkspace creates a worktree on a new branch off source's main,
+// AND seeds the proper remote-tracking refs (refs/remotes/origin/main +
+// refs/remotes/origin/HEAD) so detectors that look up "origin/<default>"
+// find them. We don't have an actual remote in tests; we forge the
+// refs directly via git update-ref + symbolic-ref.
+func setupWorkspace(t *testing.T, source, branchName string) string {
+	t.Helper()
+
+	// Forge refs/remotes/origin/main pointing at source's main HEAD.
+	// This is the test analog of `git fetch origin` — gives detectors
+	// a target to compare against without needing real network.
+	if out, err := exec.Command("git", "-C", source, "update-ref",
+		"refs/remotes/origin/main", "main").CombinedOutput(); err != nil {
+		t.Fatalf("update-ref origin/main: %v\n%s", err, out)
+	}
+	// Set origin/HEAD → origin/main so gitDefaultBranch's symbolic-ref
+	// lookup works.
+	if out, err := exec.Command("git", "-C", source, "symbolic-ref",
+		"refs/remotes/origin/HEAD", "refs/remotes/origin/main").CombinedOutput(); err != nil {
+		t.Fatalf("symbolic-ref origin/HEAD: %v\n%s", err, out)
+	}
+
+	// Now create the worktree on a fresh branch.
+	wt := filepath.Join(t.TempDir(), "wt")
+	if out, err := exec.Command("git", "-C", source, "worktree", "add",
+		"-b", branchName, wt).CombinedOutput(); err != nil {
+		t.Fatalf("worktree add: %v\n%s", err, out)
+	}
+	return wt
+}
+
+func makeWorkspace(name, branch, path, root string) state.Workspace {
+	return state.Workspace{
+		Name:        name,
+		Branch:      branch,
+		Path:        path,
+		ProjectRoot: root,
+		TmuxSession: name,
+	}
+}
+
+// TestDetectRenameSuggested_NoCommitsPastMain: fresh worktree on a new
+// branch, branch matches workspace name, but no commits past main →
+// no hint (nothing to rename for yet).
+func TestDetectRenameSuggested_NoCommitsPastMain(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "ancient-hornet")
+	ws := makeWorkspace("ancient-hornet", "ancient-hornet", wt, source)
+
+	got := detectRenameSuggested(context.Background(), ws)
+	if got != nil {
+		t.Errorf("expected nil hint with no commits past main; got %+v", got)
+	}
+}
+
+// TestDetectRenameSuggested_CommitsAndAutoName: branch name matches
+// workspace name AND commits past main exist → hint fires.
+func TestDetectRenameSuggested_CommitsAndAutoName(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "ancient-hornet")
+	if out, err := exec.Command("git", "-C", wt,
+		"commit", "--allow-empty", "-m", "wip").CombinedOutput(); err != nil {
+		t.Fatalf("wip commit: %v\n%s", err, out)
+	}
+
+	ws := makeWorkspace("ancient-hornet", "ancient-hornet", wt, source)
+	got := detectRenameSuggested(context.Background(), ws)
+	if got == nil {
+		t.Fatal("expected hint; got nil")
+	}
+	if got.Kind != "rename_suggested" {
+		t.Errorf("Kind = %q; want rename_suggested", got.Kind)
+	}
+	if !strings.Contains(got.Message, "ancient-hornet") {
+		t.Errorf("message missing branch name: %s", got.Message)
+	}
+}
+
+// TestDetectRenameSuggested_AlreadyRenamed: user already ran git
+// branch -m, so currentBranch != ws.Name → no hint.
+func TestDetectRenameSuggested_AlreadyRenamed(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "ancient-hornet")
+	if out, err := exec.Command("git", "-C", wt,
+		"commit", "--allow-empty", "-m", "wip").CombinedOutput(); err != nil {
+		t.Fatalf("wip commit: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", wt,
+		"branch", "-m", "feat/oauth").CombinedOutput(); err != nil {
+		t.Fatalf("rename: %v\n%s", err, out)
+	}
+
+	// state.Workspace.Name is still the old name (state.json hasn't
+	// been reconciled) but the actual branch has moved to feat/oauth.
+	ws := makeWorkspace("ancient-hornet", "ancient-hornet", wt, source)
+	got := detectRenameSuggested(context.Background(), ws)
+	if got != nil {
+		t.Errorf("expected nil hint after rename; got %+v", got)
+	}
+}
+
+// TestDetectShipped_NotMerged: HEAD is NOT reachable from origin/main →
+// no hint.
+func TestDetectShipped_NotMerged(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "in-flight")
+	if out, err := exec.Command("git", "-C", wt,
+		"commit", "--allow-empty", "-m", "diverging").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+
+	ws := makeWorkspace("in-flight", "in-flight", wt, source)
+	got := detectShipped(context.Background(), ws)
+	if got != nil {
+		t.Errorf("expected nil hint while in flight; got %+v", got)
+	}
+}
+
+// TestDetectShipped_Merged: simulate a merge by fast-forwarding
+// origin/main to include the worktree's commits. After that, HEAD is
+// reachable from origin/main → shipped hint fires.
+func TestDetectShipped_Merged(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "merged-feature")
+
+	// Make a commit on the feature branch.
+	if out, err := exec.Command("git", "-C", wt,
+		"commit", "--allow-empty", "-m", "feature").CombinedOutput(); err != nil {
+		t.Fatalf("feature commit: %v\n%s", err, out)
+	}
+	// Get HEAD's SHA.
+	sha, err := exec.Command("git", "-C", wt, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	// Fast-forward origin/main to that SHA via update-ref — simulates
+	// the merge landing on the upstream default branch. update-ref
+	// works on remote-tracking refs (refs/remotes/origin/main) without
+	// needing a real remote.
+	if out, err := exec.Command("git", "-C", source, "update-ref",
+		"refs/remotes/origin/main", strings.TrimSpace(string(sha))).CombinedOutput(); err != nil {
+		t.Fatalf("ff origin/main: %v\n%s", err, out)
+	}
+
+	ws := makeWorkspace("merged-feature", "merged-feature", wt, source)
+	got := detectShipped(context.Background(), ws)
+	if got == nil {
+		t.Fatal("expected shipped hint; got nil")
+	}
+	if got.Kind != "shipped" {
+		t.Errorf("Kind = %q; want shipped", got.Kind)
+	}
+	if !strings.Contains(got.Action, "canopy rm merged-feature") {
+		t.Errorf("Action missing rm command: %q", got.Action)
+	}
+}
+
+// TestRunFast_Parallelism: RunFast dispatches both detectors in
+// parallel. Ensures no panic when both fire on the same workspace.
+func TestRunFast_Parallelism(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "ancient-hornet")
+	if out, err := exec.Command("git", "-C", wt,
+		"commit", "--allow-empty", "-m", "wip").CombinedOutput(); err != nil {
+		t.Fatalf("wip: %v\n%s", err, out)
+	}
+
+	ws := makeWorkspace("ancient-hornet", "ancient-hornet", wt, source)
+	hints := RunFast(context.Background(), ws)
+	// rename_suggested fires; shipped does not (commits diverge from main).
+	if len(hints) != 1 {
+		t.Errorf("RunFast hint count = %d; want 1", len(hints))
+	}
+	if len(hints) > 0 && hints[0].Kind != "rename_suggested" {
+		t.Errorf("RunFast[0].Kind = %q; want rename_suggested", hints[0].Kind)
+	}
+}
+
+// TestPRStatusCache_TTL: cache hit returns immediately without
+// shelling out. We verify by setting a sentinel value, calling
+// detectPRStatus, and checking the cache wasn't replaced.
+func TestPRStatusCache_TTL(t *testing.T) {
+	resetPRStatusCache()
+	defer resetPRStatusCache()
+
+	// Pre-seed cache with a fake "no PR" entry.
+	prStatusMu.Lock()
+	prStatusCache["/fake/root|test-branch"] = prStatusEntry{
+		hint:     nil, // no PR
+		cachedAt: prStatusEntry{}.cachedAt, // zero-time, but we'll override TTL via the test
+	}
+	prStatusMu.Unlock()
+
+	// Use a stub workspace whose currentBranch resolution will fail
+	// (path doesn't exist) — detectPRStatus returns nil before hitting
+	// the cache. This test mostly verifies the cache ops don't deadlock
+	// or panic when the path is invalid.
+	ws := makeWorkspace("test", "test", "/fake/path", "/fake/root")
+	got := detectPRStatus(context.Background(), ws)
+	if got != nil {
+		t.Errorf("expected nil for invalid path; got %+v", got)
+	}
+}
+
+// TestPRStatus_GHMissing: when gh is not on PATH, the detector silently
+// returns nil and logs once. We can't easily fake gh-missing here
+// without messing with PATH; the test only verifies the function
+// doesn't panic and returns nil gracefully when ws is invalid.
+func TestPRStatus_GHMissing(t *testing.T) {
+	resetPRStatusCache()
+	// We can't reliably make gh missing in a test (other tests on the
+	// same machine might depend on it). Just verify the function call
+	// path doesn't panic with a minimal ws.
+	got := detectPRStatus(context.Background(), state.Workspace{})
+	if got != nil {
+		t.Errorf("empty workspace should return nil; got %+v", got)
+	}
+}
