@@ -7,7 +7,7 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ## v0.5 — multi-project support
 
-**What:** Replace single-project-via-cwd-walkup with cross-project workspace listing. Project picker modal in TUI. `-p <project>` flag on subcommands. Project sidebar UX (Conductor uses one).
+**What:** Replace single-project-via-cwd-walkup with cross-project workspace listing. Project picker modal in TUI. `-p <project>` flag on subcommands. Project sidebar UX.
 
 **Why:** Avi has multiple projects in `~/Work/` (cravd, brain, hey-cli, dotfiles, tries). v0 only handles whichever repo you're cd'd into. Once cravd is dogfood-stable, switching across projects in one TUI session is the next big UX unlock.
 
@@ -15,7 +15,7 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 **Cons:** Adds project-picker modal (~3 hours Bubbletea), `-p` flag plumbing, and a registry of "known projects" (probably `~/.canopy/projects.json` — list of repo paths that have a `canopy.json`). Real scope.
 
-**Context:** v0 design discovers project via cwd walk-up. State already keys workspaces by `(project, name)` tuple, so the data model supports multi-project from day 1 — only the UX and discovery layer need work. Good entry points: `internal/config/discover.go` (add `DiscoverAll() []Project`), `internal/ui/` (add project sidebar), `cmd/canopy/new.go` (add `-p` flag). Conductor's UX is the reference.
+**Context:** v0 design discovers project via cwd walk-up. State already keys workspaces by `(project, name)` tuple, so the data model supports multi-project from day 1 — only the UX and discovery layer need work. Good entry points: `internal/config/discover.go` (add `DiscoverAll() []Project`), `internal/ui/` (add project sidebar), `cmd/canopy/new.go` (add `-p` flag).
 
 **Depends on / blocked by:** v0 must ship first. No technical blockers.
 
@@ -59,7 +59,7 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 **Why:** v0 declares hooks non-interactive. If a hook ever needs to prompt for input, today's plan freezes (process waits for stdin that's not connected). Real fix is allocating a PTY and proxying it through the TUI — non-trivial.
 
-**Pros:** Removes a class of hook failures. Aligns with how Conductor and other workspace managers handle this.
+**Pros:** Removes a class of hook failures. Aligns with how mature workspace managers handle this.
 
 **Cons:** Real engineering work. PTY libs (`creack/pty`, etc.) introduce a non-stdlib dep. UX for "show a prompt inside the running-setup view" is its own design problem.
 
@@ -69,29 +69,13 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
-## v0.5 — Log rotation
-
-**What:** Rotate `~/.canopy/log/canopy.log` when it exceeds N MB. Either built into canopy or offered by `canopy doctor`.
-
-**Why:** v0 logs grow unbounded. Six months of daily usage on a chatty project = file gets big.
-
-**Pros:** Prevents the "wait, why is canopy slow" moment when logs hit hundreds of MB.
-
-**Cons:** Decisions about rotation policy (size-based, time-based, count-based). Adds a small dep (`gopkg.in/natefinch/lumberjack.v2` is the standard) or rolling-our-own.
-
-**Context:** Trivial: pull in lumberjack, configure in `internal/log/`, done. Or: have `canopy doctor` (above) rotate manually. The "automatic, no config" route is the right call long-term.
-
-**Depends on / blocked by:** v0.
-
----
-
 ## v0.2 — darwin / macOS releases
 
 **What:** Add `darwin/amd64` + `darwin/arm64` to `goreleaser` config. Code-signing if needed for Gatekeeper compliance.
 
 **Why:** v0.1.0 ships linux-only. macOS is plausible secondary audience (lots of devs on Macs); cross-compile is free; sign+notarize is not.
 
-**Pros:** Doubles potential audience. `go build` already cross-compiles cleanly. Avi's Conductor history means there's signal that Mac users want this category of tool.
+**Pros:** Doubles potential audience. `go build` already cross-compiles cleanly. There's existing signal that Mac users want this category of tool.
 
 **Cons:** Notarization requires an Apple Developer account (currently $99/year), code-signing certs, and a `goreleaser` Notary config. Several hours to set up.
 
@@ -158,7 +142,7 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 **What:** `canopy adopt <branch>` — register an existing git worktree (created via `git worktree add` outside canopy) into state.json without re-running `scripts.setup`.
 
-**Why:** Migration path for users who already have manually-created worktrees. Especially useful for Avi during the cravd dogfood: existing Conductor-managed worktrees can be "adopted" instead of recreated.
+**Why:** Migration path for users who already have manually-created worktrees. Especially useful for Avi during the cravd dogfood: existing worktrees can be "adopted" instead of recreated.
 
 **Pros:** Smooth onboarding. Doesn't force users to nuke existing work to start using canopy.
 

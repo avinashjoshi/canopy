@@ -1,6 +1,6 @@
 # Canopy
 
-Conductor for Linux, in your terminal. Go + Bubbletea TUI for managing git worktrees with paired tmux sessions.
+Go + Bubbletea TUI for managing git worktrees with paired tmux sessions and per-project setup hooks.
 
 Design doc: `docs/design/v0-canopy.md` (canonical, committed)
 Test plan: `docs/reviews/v0-test-plan.md` (canonical, committed)
@@ -14,7 +14,7 @@ gstack mirrors: `~/.gstack/projects/canopy/` (regenerated; not load-bearing)
 - Workspaces live on disk at `~/Work/<project>/worktrees/<branch>` (the dir is a git worktree).
 - State + logs in `~/.canopy/`. Project config in `<repo>/canopy.json`.
 
-## canopy.json schema (matches Conductor)
+## canopy.json schema
 
 ```json
 {

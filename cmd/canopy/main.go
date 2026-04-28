@@ -28,7 +28,7 @@ var version = "dev"
 func main() {
 	root := &cobra.Command{
 		Use:   "canopy",
-		Short: "Conductor-style TUI for managing git worktrees with tmux sessions.",
+		Short: "TUI for managing git worktrees with paired tmux sessions and per-project setup hooks.",
 		Long: "Canopy creates per-branch git worktrees, runs configurable setup\n" +
 			"and teardown scripts, and pairs each workspace with a 4-pane tmux\n" +
 			"session (nvim / claude / shell / server). One TUI lets you switch\n" +
