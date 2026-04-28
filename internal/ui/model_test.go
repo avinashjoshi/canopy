@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
@@ -213,6 +214,80 @@ func TestRenderHelp_BackKeyConditional(t *testing.T) {
 			t.Errorf("help overlay should not mention back key standalone: %q", out)
 		}
 	})
+}
+
+// TestRowHintsMsg_MergesIntoMatchingRow: late-arriving lifecycle hints
+// merge into the matching row by name. Two-phase refresh: the project
+// TUI renders rows immediately, then per-row hint loaders deliver their
+// results as separate rowHintsMsg arrivals.
+func TestRowHintsMsg_MergesIntoMatchingRow(t *testing.T) {
+	m := newTestModel(false)
+	m.rows = []Row{
+		{Name: "soft-fox"},
+		{Name: "ancient-hornet"},
+	}
+	hints := []state.Hint{{Kind: "shipped", Message: "merged"}}
+
+	model, _ := m.Update(rowHintsMsg{name: "soft-fox", hints: hints})
+	m = model.(*Model)
+
+	if len(m.rows[0].Hints) != 1 {
+		t.Errorf("hints not merged into soft-fox; got %v", m.rows[0].Hints)
+	}
+	if len(m.rows[1].Hints) != 0 {
+		t.Errorf("ancient-hornet hints should be untouched")
+	}
+}
+
+// TestRowHintsMsg_NoMatchIsSilent: a hint update for a row that no
+// longer exists (concurrent rm dropped it) is a no-op, not a panic.
+func TestRowHintsMsg_NoMatchIsSilent(t *testing.T) {
+	m := newTestModel(false)
+	m.rows = []Row{{Name: "soft-fox"}}
+
+	model, _ := m.Update(rowHintsMsg{name: "ghost-row", hints: []state.Hint{{Kind: "shipped"}}})
+	m = model.(*Model)
+
+	if len(m.rows[0].Hints) != 0 {
+		t.Errorf("unrelated hint mutated existing row")
+	}
+}
+
+// TestRenderTable_HintBadgesAppearedNextToRow: the project TUI's
+// renderTable picks up Hints via projectlist.RenderHintBadges so the
+// surface matches the global TUI. Critical for consistency — both
+// surfaces showing the same hints means the user doesn't have to
+// learn two badge vocabularies.
+func TestRenderTable_HintBadgesAppearedNextToRow(t *testing.T) {
+	m := newTestModel(false)
+	m.rows = []Row{{
+		Name:   "soft-fox",
+		Branch: "soft-fox",
+		Status: state.StatusReady,
+		Hints:  []state.Hint{{Kind: "pr_status", Message: "PR #42 merged; ready to close workspace"}},
+	}}
+	out := m.renderTable()
+	if !strings.Contains(out, "PR merged") {
+		t.Errorf("PR merged badge missing in project TUI table:\n%s", out)
+	}
+}
+
+// TestRenderTable_NoHintsNoBadges: rows without hints render unchanged
+// (no trailing badge text). Regression check that the badge rendering
+// is purely additive.
+func TestRenderTable_NoHintsNoBadges(t *testing.T) {
+	m := newTestModel(false)
+	m.rows = []Row{{
+		Name:   "soft-fox",
+		Branch: "soft-fox",
+		Status: state.StatusReady,
+	}}
+	out := m.renderTable()
+	for _, badge := range []string{"↻ rename", "✓ shipped", "PR open", "PR merged"} {
+		if strings.Contains(out, badge) {
+			t.Errorf("unexpected badge %q in row without hints:\n%s", badge, out)
+		}
+	}
 }
 
 // errFakeCreate is a sentinel for the create-error test. Lives here

@@ -30,6 +30,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cursor >= len(m.rows) {
 			m.cursor = max0(len(m.rows) - 1)
 		}
+		// Phase 2: kick off per-row hint loaders in parallel. Each
+		// returns a rowHintsMsg as it completes. Skipped on error
+		// (no rows to decorate) and on empty lists.
+		if msg.err != nil || len(m.rows) == 0 {
+			return m, nil
+		}
+		return m, loadRowHintsCmds(m.rows, m.mgr.Cfg.ProjectRoot)
+
+	case rowHintsMsg:
+		// Late-arriving lifecycle detector result. Find the row by
+		// name and merge the hints in. Silent no-op if the row is
+		// gone (e.g. concurrent rm).
+		for i := range m.rows {
+			if m.rows[i].Name == msg.name {
+				m.rows[i].Hints = msg.hints
+				break
+			}
+		}
 		return m, nil
 
 	case attachAfterMsg:

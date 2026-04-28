@@ -175,6 +175,25 @@ func (m Model) Rows() []state.GlobalRow {
 	return m.rows
 }
 
+// UpdateRowHints replaces the Hints slice for the row matching
+// (project, name). Used by the parent's two-phase refresh: rows render
+// immediately with no badges, then per-row lifecycle detector results
+// arrive as separate messages and merge in via this method.
+//
+// Identifier is (project, name) rather than slice index because rows
+// can be reordered or removed between dispatch and arrival (e.g. a
+// concurrent reconcile drops an orphan workspace mid-flight). Returns
+// silently if no matching row exists — late-arriving hints for a now-
+// gone workspace are dropped on the floor.
+func (m *Model) UpdateRowHints(project, name string, hints []state.Hint) {
+	for i := range m.rows {
+		if m.rows[i].Project == project && m.rows[i].Name == name {
+			m.rows[i].Hints = hints
+			return
+		}
+	}
+}
+
 // CursorRow returns the row currently under the cursor, or zero value +
 // false if the list is empty. Parents that need to act on selection
 // outside an enter keystroke (e.g. a 'd' delete from the parent's keymap)
@@ -303,7 +322,7 @@ func (m Model) renderTable() string {
 		// stealing focus from the workspace's primary fields. Badges
 		// only appear when the corresponding detector fired; rows with
 		// no active hints render exactly as before.
-		if hintBadges := renderHintBadges(r.Hints); hintBadges != "" {
+		if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 			line += "  " + hintBadges
 		}
 		if i == m.cursor {
@@ -315,10 +334,14 @@ func (m Model) renderTable() string {
 	return b.String()
 }
 
-// renderHintBadges produces the short-form badge text appended to a row
+// RenderHintBadges produces the short-form badge text appended to a row
 // when detector hints are active. Returns "" when no hints — the caller
 // appends nothing in that case, keeping rows visually identical to v0.5
 // for workspaces without active lifecycle signals.
+//
+// Exported so the project-mode TUI (internal/ui/view.go) can render the
+// same badges next to its own table rows. Both surfaces should produce
+// identical badge output for the same hints.
 //
 // Badge precedence: PR status wins over the local "shipped" detector
 // when both fire for the same workspace. The local-shipped signal only
@@ -339,7 +362,7 @@ func (m Model) renderTable() string {
 //
 // Multiple hints surface as space-separated badges; order is rename →
 // pr_status / shipped so the "what next action" badge stays rightmost.
-func renderHintBadges(hints []state.Hint) string {
+func RenderHintBadges(hints []state.Hint) string {
 	if len(hints) == 0 {
 		return ""
 	}

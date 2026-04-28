@@ -268,6 +268,43 @@ func TestRender_HintBadges(t *testing.T) {
 	}
 }
 
+// TestUpdateRowHints_MergesIntoMatchingRow: late-arriving hint update
+// finds the matching (project, name) row and replaces its Hints slice.
+// Two-phase refresh relies on this — rows render first, hints catch up.
+func TestUpdateRowHints_MergesIntoMatchingRow(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{Project: "canopy", Name: "soft-fox"},
+		{Project: "canopy", Name: "ancient-hornet"},
+		{Project: "cravd", Name: "soft-fox"}, // same name, different project
+	})
+
+	hints := []state.Hint{{Kind: "shipped", Message: "merged"}}
+	m.UpdateRowHints("canopy", "soft-fox", hints)
+
+	if len(m.rows[0].Hints) != 1 {
+		t.Errorf("expected hints set on canopy/soft-fox; got %v", m.rows[0].Hints)
+	}
+	if len(m.rows[1].Hints) != 0 {
+		t.Errorf("ancient-hornet hints should be untouched")
+	}
+	if len(m.rows[2].Hints) != 0 {
+		t.Errorf("cravd/soft-fox hints should be untouched (same name, different project)")
+	}
+}
+
+// TestUpdateRowHints_NoMatchIsSilent: a hint update for a row that no
+// longer exists (concurrent rm dropped it) is a no-op, not a panic.
+func TestUpdateRowHints_NoMatchIsSilent(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{Project: "canopy", Name: "soft-fox"}})
+	// Before: original row has no hints.
+	m.UpdateRowHints("canopy", "ghost-row", []state.Hint{{Kind: "shipped"}})
+	if len(m.rows[0].Hints) != 0 {
+		t.Errorf("unrelated update mutated existing row's hints")
+	}
+}
+
 // TestRender_NoHintBadges: rows without hints render exactly as before
 // (no badge column, no extra whitespace at the row's tail).
 func TestRender_NoHintBadges(t *testing.T) {

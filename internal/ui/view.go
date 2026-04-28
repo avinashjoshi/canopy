@@ -3,6 +3,8 @@ package ui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and
@@ -98,6 +100,14 @@ func (m *Model) renderTable() string {
 			statusCell,
 			colPort, port,
 		)
+		// Append v0.6 lifecycle hint badges (rename / shipped /
+		// pr_status). Reuses the same renderer as the global TUI so
+		// both surfaces produce identical output. Empty string when
+		// no hints are active — keeps rows visually unchanged for
+		// workspaces without lifecycle signals.
+		if hintBadges := projectlist.RenderHintBadges(r.Hints); hintBadges != "" {
+			line += "  " + hintBadges
+		}
 		if i == m.cursor {
 			line = selectedStyle.Render(line)
 		}

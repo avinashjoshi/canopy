@@ -23,6 +23,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/workspace"
@@ -37,6 +38,7 @@ type Row struct {
 	IsMain      bool         // true for the synthetic (main) row
 	Name        string       // "(main)" or the workspace name
 	Branch      string       // "—" for main, the branch name otherwise
+	Path        string       // worktree path; empty for main / orphan rows
 	Status      state.Status // for main, the literal "main"; otherwise the workspace status
 	Port        int          // 0 means "no port to show" -> renders as "—"
 	TmuxSession string
@@ -46,6 +48,12 @@ type Row struct {
 	// canopy recognized the failure signature. Rendered as a
 	// "hint:" line under the table when the cursor sits on this row.
 	LastErrorHint string
+	// Hints are the v0.6 lifecycle detector results (rename / shipped
+	// / pr_status). Loaded asynchronously in a second refresh phase
+	// so the table renders immediately without waiting for the gh
+	// shellout. Empty slice on first render; populated by rowHintsMsg
+	// after each per-row detector returns.
+	Hints []state.Hint
 }
 
 // viewMode tracks which screen the TUI is showing. listMode is the
@@ -210,6 +218,7 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client) tea.Cmd {
 				IsMain:        false,
 				Name:          w.Name,
 				Branch:        w.Branch,
+				Path:          w.Path,
 				Status:        w.Status,
 				Port:          w.Port,
 				TmuxSession:   w.TmuxSession,
@@ -219,4 +228,44 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client) tea.Cmd {
 		}
 		return rowsLoadedMsg{rows: rows}
 	}
+}
+
+// rowHintsMsg carries a single workspace's lifecycle detector result.
+// Update merges it into the matching Row by Name. Identified by name
+// rather than slice index so a concurrent state mutation doesn't
+// strand the hint update on the wrong row.
+type rowHintsMsg struct {
+	name  string
+	hints []state.Hint
+}
+
+// loadRowHintsCmds returns a tea.Batch of per-row hint-loading cmds.
+// Each runs lifecycle.RunFast for one workspace in its own goroutine
+// and emits a rowHintsMsg when done. tea.Batch dispatches them
+// concurrently, so cold-start gh latency parallelizes across rows.
+//
+// Skips main rows and rows with empty Path. Mirror of GlobalModel's
+// loadHintsCmds — same shape, same rationale, two-phase rendering.
+func loadRowHintsCmds(rows []Row, projectRoot string) tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(rows))
+	for _, r := range rows {
+		if r.IsMain || r.Path == "" {
+			continue
+		}
+		row := r // capture by value
+		cmds = append(cmds, func() tea.Msg {
+			ws := state.Workspace{
+				Name:        row.Name,
+				Branch:      row.Branch,
+				Path:        row.Path,
+				ProjectRoot: projectRoot,
+				Status:      row.Status,
+			}
+			return rowHintsMsg{
+				name:  row.Name,
+				hints: lifecycle.RunFast(context.Background(), ws),
+			}
+		})
+	}
+	return tea.Batch(cmds...)
 }

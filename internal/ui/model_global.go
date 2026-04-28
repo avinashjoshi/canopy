@@ -106,21 +106,26 @@ type globalRowsLoadedMsg struct {
 	err  error
 }
 
-// refreshCmd builds the tea.Cmd that re-reads state.json, re-probes
-// tmux liveness, and runs all v0.6 detectors (rename, shipped, pr_status)
-// per workspace row. Used by Init and as the OnRefresh callback for
-// the embedded projectlist.
+// globalRowHintsMsg is a per-row hint-loading result. Update merges it
+// into the embedded projectlist via UpdateRowHints. Identified by
+// (project, name) rather than slice index so a concurrent row
+// rearrangement doesn't strand a hint update on the wrong row.
+type globalRowHintsMsg struct {
+	project string
+	name    string
+	hints   []state.Hint
+}
+
+// refreshCmd builds the tea.Cmd that re-reads state.json and re-probes
+// tmux liveness. Returns rows WITHOUT hints — those load asynchronously
+// after the rows render via loadHintsCmds.
 //
-// pr_status caches its gh call 10min per (project, branch), so calling
-// it on every refresh is cheap in steady state. The first refresh after
-// startup pays the gh latency once per workspace; subsequent refreshes
-// hit the cache instantly.
-//
-// Detector calls run sequentially per row (lifecycle.RunFast already
-// parallelizes the three detectors internally). For 10 workspaces × ~10ms
-// each = ~100ms total in the cache-hit case — invisible to the user.
-// If this ever gets felt, switch to per-row tea.Cmds with merged
-// hintLoadedMsg.
+// Two-phase rationale: lifecycle.RunFast includes pr_status (a `gh pr
+// view` shellout). On first launch with cold caches, that's ~1-2s per
+// workspace. Sequential loading of N workspaces would freeze the UI
+// for N-2N seconds before any row appeared. The two-phase split keeps
+// the table responsive: rows show up immediately, badges fade in as
+// each per-row detector finishes.
 func (m *GlobalModel) refreshCmd() tea.Cmd {
 	return func() tea.Msg {
 		st, err := m.store.Load()
@@ -129,26 +134,42 @@ func (m *GlobalModel) refreshCmd() tea.Cmd {
 		}
 		ctx := context.Background()
 		rows := st.BuildGlobalRows(ctx, m.tc)
-
-		// Decorate with detector hints. Skip main rows (no Path = no
-		// worktree to detect against). Skip rows with empty Path
-		// (legacy / orphan defensive; detectors rely on a real
-		// worktree).
-		for i := range rows {
-			if rows[i].IsMain || rows[i].Path == "" {
-				continue
-			}
-			ws := state.Workspace{
-				Name:        rows[i].Name,
-				Branch:      rows[i].Branch,
-				Path:        rows[i].Path,
-				ProjectRoot: rows[i].ProjectRoot,
-				Status:      rows[i].Status,
-			}
-			rows[i].Hints = lifecycle.RunFast(ctx, ws)
-		}
 		return globalRowsLoadedMsg{rows: rows}
 	}
+}
+
+// loadHintsCmds builds a tea.Batch of per-row hint-loading cmds. Each
+// cmd runs lifecycle.RunFast for one row in its own goroutine and
+// emits a globalRowHintsMsg when done. tea.Batch dispatches them
+// concurrently — N gh shellouts run in parallel rather than serially,
+// so the worst-case cold-start latency is dominated by the slowest
+// single row instead of the sum.
+//
+// Skips main rows and rows with empty Path (no worktree to detect
+// against). Rows that match get exactly one msg per refresh.
+func loadHintsCmds(rows []state.GlobalRow) tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(rows))
+	for _, r := range rows {
+		if r.IsMain || r.Path == "" {
+			continue
+		}
+		row := r // capture by value for the goroutine closure
+		cmds = append(cmds, func() tea.Msg {
+			ws := state.Workspace{
+				Name:        row.Name,
+				Branch:      row.Branch,
+				Path:        row.Path,
+				ProjectRoot: row.ProjectRoot,
+				Status:      row.Status,
+			}
+			return globalRowHintsMsg{
+				project: row.Project,
+				name:    row.Name,
+				hints:   lifecycle.RunFast(context.Background(), ws),
+			}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update implements tea.Model. Routes messages: window size to projectlist,
@@ -169,6 +190,16 @@ func (m *GlobalModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.list.SetError(nil)
 		m.list.SetRows(msg.rows)
+		// Phase 2: kick off per-row hint loaders in parallel. Each
+		// emits a globalRowHintsMsg as it completes; Update merges
+		// them into the already-rendered rows.
+		return m, loadHintsCmds(msg.rows)
+
+	case globalRowHintsMsg:
+		// Late-arriving hint result — merge into the matching row.
+		// UpdateRowHints is silent on no-match so a concurrent
+		// reconcile that dropped the row doesn't crash here.
+		m.list.UpdateRowHints(msg.project, msg.name, msg.hints)
 		return m, nil
 
 	case globalErrMsg:
