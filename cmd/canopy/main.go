@@ -29,7 +29,16 @@ func main() {
 	root := &cobra.Command{
 		Use:   "canopy",
 		Short: "TUI for managing git worktrees with paired tmux sessions and per-project setup hooks.",
-		Long: "Canopy creates per-branch git worktrees, runs configurable setup\n" +
+		Long: "   _____\n" +
+			"  / ____|\n" +
+			" | |     __ _ _ __   ___  _ __  _   _\n" +
+			" | |    / _` | '_ \\ / _ \\| '_ \\| | | |\n" +
+			" | |___| (_| | | | | (_) | |_) | |_| |\n" +
+			"  \\_____\\__,_|_| |_|\\___/| .__/ \\__, |\n" +
+			"                         | |     __/ |\n" +
+			"                         |_|    |___/\n" +
+			"\n" +
+			"Canopy creates per-branch git worktrees, runs configurable setup\n" +
 			"and teardown scripts, and pairs each workspace with a 4-pane tmux\n" +
 			"session (nvim / claude / shell / server). One TUI lets you switch\n" +
 			"between workspaces and resurrect them after reboots.\n",
