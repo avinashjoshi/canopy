@@ -39,15 +39,19 @@ func writeScript(t *testing.T, path, content string) {
 	}
 }
 
-// TestWorkspaceEnv covers the canonical CANOPY_* env construction.
+// TestWorkspaceEnv covers both the canonical CANOPY_* env triplet AND
+// the CONDUCTOR_* aliases canopy exports for migration compatibility.
 func TestWorkspaceEnv(t *testing.T) {
 	t.Parallel()
 	env := hooks.WorkspaceEnv("/home/avi/Work/cravd/worktrees/feature-x", "/home/avi/Work/cravd", 3001)
 
 	want := map[string]string{
-		"CANOPY_WORKSPACE_PATH": "/home/avi/Work/cravd/worktrees/feature-x",
-		"CANOPY_ROOT_PATH":      "/home/avi/Work/cravd",
-		"CANOPY_PORT":           "3001",
+		"CANOPY_WORKSPACE_PATH":    "/home/avi/Work/cravd/worktrees/feature-x",
+		"CANOPY_ROOT_PATH":         "/home/avi/Work/cravd",
+		"CANOPY_PORT":              "3001",
+		"CONDUCTOR_WORKSPACE_PATH": "/home/avi/Work/cravd/worktrees/feature-x",
+		"CONDUCTOR_ROOT_PATH":      "/home/avi/Work/cravd",
+		"CONDUCTOR_PORT":           "3001",
 	}
 	got := map[string]string{}
 	for _, kv := range env {
@@ -59,8 +63,8 @@ func TestWorkspaceEnv(t *testing.T) {
 			t.Errorf("env[%q] = %q; want %q", k, got[k], v)
 		}
 	}
-	if len(env) != 3 {
-		t.Errorf("env len = %d; want 3 (no os.Environ() pollution)", len(env))
+	if len(env) != 6 {
+		t.Errorf("env len = %d; want 6 (CANOPY_* triplet + CONDUCTOR_* aliases)", len(env))
 	}
 }
 

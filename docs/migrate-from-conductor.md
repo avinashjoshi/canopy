@@ -11,8 +11,8 @@ Conductor.build (the macOS workspace manager) and canopy use the same configurat
 ## What changes
 
 - `conductor.json` -> `canopy.json` (you can keep both side by side; canopy doesn't touch conductor's file).
-- `CONDUCTOR_*` env vars -> `CANOPY_*` (one-line `sed` per file).
 - macOS GUI -> Linux TUI (canopy command surface).
+- env-var references: **nothing required**. canopy exports both `CANOPY_*` and `CONDUCTOR_*` aliases so existing scripts work as-is (see Step 2 below).
 
 ## Step 1: generate canopy.json
 
@@ -31,36 +31,31 @@ Wrote /home/you/Work/cravd/canopy.json
 
 Next steps:
   1. Review canopy.json and confirm the script paths look right.
-  2. If your scripts read CONDUCTOR_PORT / CONDUCTOR_WORKSPACE_PATH /
-     CONDUCTOR_ROOT_PATH from env, switch them to the CANOPY_* equivalents.
-  3. If config files (database.yml, etc.) reference CONDUCTOR_*, update those too.
-  4. Commit canopy.json.
-  5. Run `canopy new` to verify.
+  2. Commit canopy.json.
+  3. Run `canopy new` to verify.
 ```
 
-`conductor.json` is left untouched. The new `canopy.json` points at your existing `bin/conductor-*` scripts unchanged.
+`conductor.json` is left untouched. The new `canopy.json` points at your existing `bin/conductor-*` scripts unchanged. canopy invokes them with both `CANOPY_*` and `CONDUCTOR_*` env vars set, so they work as-is.
 
-## Step 2: update env-var references
+## Step 2: env-var references — no changes required
 
-Anywhere your scripts or config files reference `CONDUCTOR_*`, switch to `CANOPY_*`. The two sets are 1:1 — same meaning, different prefix.
+canopy exports BOTH `CANOPY_*` and `CONDUCTOR_*` versions of every workspace env var, so your existing scripts and config files keep working unchanged:
 
-| Conductor | canopy |
+| Var | canopy exports |
 |---|---|
-| `CONDUCTOR_WORKSPACE_PATH` | `CANOPY_WORKSPACE_PATH` |
-| `CONDUCTOR_ROOT_PATH` | `CANOPY_ROOT_PATH` |
-| `CONDUCTOR_PORT` | `CANOPY_PORT` |
+| Workspace path | `CANOPY_WORKSPACE_PATH` AND `CONDUCTOR_WORKSPACE_PATH` |
+| Repo root | `CANOPY_ROOT_PATH` AND `CONDUCTOR_ROOT_PATH` |
+| Allocated port | `CANOPY_PORT` AND `CONDUCTOR_PORT` |
 
-The mechanical fix is `sed`. From your project root:
+That means `bin/conductor-setup` reading `$CONDUCTOR_WORKSPACE_PATH` works on day one, and `config/database.yml` referencing `<%= ENV['CONDUCTOR_PORT'] %>` keeps working. Drop in the `canopy.json`, run `canopy new`, done.
+
+If you want to clean up to canonical `CANOPY_*` names later, the mechanical fix is `sed`:
 
 ```bash
-# Update the scripts
-sed -i 's/CONDUCTOR_/CANOPY_/g' bin/conductor-*
-
-# Update database.yml or any config files that read CONDUCTOR_PORT
-sed -i 's/CONDUCTOR_PORT/CANOPY_PORT/g' config/database.yml
+sed -i 's/CONDUCTOR_/CANOPY_/g' bin/conductor-* config/database.yml
 ```
 
-Adjust the file list to match your project. Review the diff (`git diff`) before committing.
+But it's purely cosmetic — canopy will keep exporting the `CONDUCTOR_*` aliases indefinitely.
 
 ## Step 3 (optional): rename the scripts
 

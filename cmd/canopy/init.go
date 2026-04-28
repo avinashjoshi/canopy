@@ -116,11 +116,12 @@ func initCmd() *cobra.Command {
 			switch {
 			case source != "":
 				fmt.Fprintln(cmd.OutOrStdout(), "  1. Review canopy.json and confirm the script paths look right.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  2. If your scripts read CONDUCTOR_PORT / CONDUCTOR_WORKSPACE_PATH /")
-				fmt.Fprintln(cmd.OutOrStdout(), "     CONDUCTOR_ROOT_PATH from env, switch them to the CANOPY_* equivalents.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  3. If config files (database.yml, etc.) reference CONDUCTOR_*, update those too.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  4. Commit canopy.json.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  5. Run `canopy new` to verify.")
+				fmt.Fprintln(cmd.OutOrStdout(), "  2. Commit canopy.json.")
+				fmt.Fprintln(cmd.OutOrStdout(), "  3. Run `canopy new` to verify.")
+				fmt.Fprintln(cmd.OutOrStdout(), "")
+				fmt.Fprintln(cmd.OutOrStdout(), "  Your existing bin/conductor-* scripts and any config files reading")
+				fmt.Fprintln(cmd.OutOrStdout(), "  CONDUCTOR_* env vars will keep working — canopy exports the CONDUCTOR_*")
+				fmt.Fprintln(cmd.OutOrStdout(), "  aliases alongside CANOPY_* for migration compatibility.")
 			case generatedStubs:
 				fmt.Fprintln(cmd.OutOrStdout(), "  1. Edit bin/canopy-setup to install deps and prepare the workspace.")
 				fmt.Fprintln(cmd.OutOrStdout(), "  2. Edit bin/canopy-run with your dev-server command (or delete it if not needed).")

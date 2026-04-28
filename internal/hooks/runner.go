@@ -73,15 +73,32 @@ type Options struct {
 	Stderr io.Writer
 }
 
-// WorkspaceEnv returns the canonical CANOPY_* env triplet ready to merge
-// into Options.Env. It does NOT include os.Environ() — the runner does
-// that automatically. Returning just the canopy-specific entries keeps
+// WorkspaceEnv returns the canopy env vars ready to merge into
+// Options.Env. It does NOT include os.Environ() — the runner does that
+// automatically. Returning just the canopy-specific entries keeps
 // callers from accidentally double-merging.
+//
+// Both CANOPY_* and CONDUCTOR_* are exported. The CONDUCTOR_* aliases
+// are deliberate: anyone migrating from Conductor (Avi's cravd is the
+// canonical case) has bin/conductor-setup, bin/conductor-teardown, and
+// config/database.yml referring to CONDUCTOR_WORKSPACE_PATH /
+// CONDUCTOR_ROOT_PATH / CONDUCTOR_PORT. Forcing them to grep-and-replace
+// every reference before canopy works at all is the kind of friction
+// that breaks adoption. Cheaper to export the aliases unconditionally;
+// six env entries instead of three, vanishing cost, smooth migration.
+//
+// New canopy projects should reference CANOPY_*; the CONDUCTOR_*
+// aliases stay forever (or at least until canopy reaches a v1 with a
+// formal deprecation notice).
 func WorkspaceEnv(workspacePath, rootPath string, port int) []string {
 	return []string{
 		"CANOPY_WORKSPACE_PATH=" + workspacePath,
 		"CANOPY_ROOT_PATH=" + rootPath,
 		"CANOPY_PORT=" + strconv.Itoa(port),
+		// Conductor-compatibility aliases.
+		"CONDUCTOR_WORKSPACE_PATH=" + workspacePath,
+		"CONDUCTOR_ROOT_PATH=" + rootPath,
+		"CONDUCTOR_PORT=" + strconv.Itoa(port),
 	}
 }
 
