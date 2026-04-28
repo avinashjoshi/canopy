@@ -15,8 +15,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 )
@@ -83,15 +85,19 @@ func (c *Client) HasSession(ctx context.Context, name string) (bool, error) {
 	return false, fmt.Errorf("tmux.HasSession(%s): %w", name, err)
 }
 
-// Create starts a new detached tmux session named name with the working
-// directory cwd. The session has one default pane running the user's shell;
-// callers that want a richer pane layout (canopy's standard 4-pane workspace)
-// should call this then issue follow-up tmux commands. That orchestration
-// lives in internal/workspace, not here.
+// Create starts a new detached tmux session named name with cwd as the
+// initial working directory. If shellCmd is non-empty, the first pane runs
+// "sh -c <shellCmd>" so multi-arg shell expressions work (e.g.
+// "rm -rf .overmind.sock && bin/dev"); otherwise the pane runs the user's
+// default shell.
 //
 // Returns ErrSessionExists if a session with that name is already alive.
-func (c *Client) Create(ctx context.Context, name, cwd string) error {
-	log.Info("tmux.create", "name", name, "cwd", cwd)
+//
+// Callers that want canopy's standard 4-pane workspace layout call this
+// to seed the session, then SplitPane for each additional pane. That
+// orchestration lives in internal/workspace, not here.
+func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string) error {
+	log.Info("tmux.create", "name", name, "cwd", cwd, "cmd", shellCmd)
 
 	exists, err := c.HasSession(ctx, name)
 	if err != nil {
@@ -101,11 +107,78 @@ func (c *Client) Create(ctx context.Context, name, cwd string) error {
 		return fmt.Errorf("tmux.Create(%s): %w", name, ErrSessionExists)
 	}
 
-	cmd := exec.CommandContext(ctx, "tmux", c.args("new-session", "-d", "-s", name, "-c", cwd)...)
+	args := c.args("new-session", "-d", "-s", name, "-c", cwd)
+	if shellCmd != "" {
+		// `sh -c "<expr>"` so any shell metachars (&&, |, $VAR) work.
+		// Single-command cases (just "nvim") run via sh too; the extra
+		// process is microseconds and not worth the API split.
+		args = append(args, "sh", "-c", shellCmd)
+	}
+	cmd := exec.CommandContext(ctx, "tmux", args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("tmux.Create(%s): %w (stderr: %s)", name, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// SplitDirection picks how SplitPane carves up the target pane. tmux uses
+// "-h" for a side-by-side (horizontal split = vertical divider line) and
+// "-v" for stacked (vertical split = horizontal divider line). The naming
+// has historically tripped people up; the constants below match tmux.
+type SplitDirection string
+
+const (
+	// SplitHorizontal places the new pane to the RIGHT of target (vertical line).
+	SplitHorizontal SplitDirection = "-h"
+
+	// SplitVertical places the new pane BELOW target (horizontal line).
+	SplitVertical SplitDirection = "-v"
+)
+
+// SplitPane creates a new pane by splitting the session's *active* pane.
+// We target the session by name (`-t session`) rather than a specific
+// pane index because window/pane base indices are user-configurable
+// (many configs set `base-index 1`), and the orchestrator always wants
+// to split the most recently created pane anyway — that's always the
+// active one immediately after a previous split.
+//
+// cwd becomes the new pane's working directory; shellCmd is run via
+// sh -c (or the default shell if empty), same semantics as Create.
+//
+// Layout note: chained splits produce a tree, not a balanced grid.
+// Call SelectLayout("tiled") after the last split to rearrange into a
+// clean 2×2 (or N-up) layout regardless of split history.
+func (c *Client) SplitPane(ctx context.Context, session, cwd, shellCmd string, dir SplitDirection) error {
+	log.Info("tmux.split-pane", "session", session, "cwd", cwd, "cmd", shellCmd, "dir", dir)
+
+	args := c.args("split-window", "-d", string(dir), "-t", session, "-c", cwd)
+	if shellCmd != "" {
+		args = append(args, "sh", "-c", shellCmd)
+	}
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux.SplitPane(%s, %s): %w (stderr: %s)", session, dir, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// SelectLayout applies a named tmux layout preset to the session's
+// active window. The most useful preset for canopy's 4-pane workspace
+// is "tiled", which arranges N panes in a clean grid regardless of
+// split history. Other presets: "main-horizontal", "main-vertical",
+// "even-horizontal", "even-vertical".
+func (c *Client) SelectLayout(ctx context.Context, session, layout string) error {
+	cmd := exec.CommandContext(ctx, "tmux", c.args("select-layout", "-t", session, layout)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux.SelectLayout(%s, %s): %w (stderr: %s)", session, layout, err,
+			strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
@@ -132,15 +205,42 @@ func (c *Client) Kill(ctx context.Context, name string) error {
 	return nil
 }
 
-// Attach hands the current terminal off to a tmux attach. In v0 step 2 this
-// is a stub that logs and returns nil — the real handoff (tea.ExecProcess
-// from inside the Bubbletea program) lands in step 6b.
+// Attach hands the current process off to `tmux attach -t <name>`. On
+// success, syscall.Exec replaces the canopy process image with tmux —
+// this function never returns. When the user detaches with prefix-d,
+// they end up back at their original shell, not in canopy.
 //
-// TODO(step 6b): wire tea.ExecProcess. This stub exists so callers can
-// already depend on the package shape during steps 3-5.
+// This is the right shape for CLI subcommands (`canopy switch`,
+// `canopy new` after setup completes). The Bubbletea TUI in step 6b
+// will use tea.ExecProcess instead, which gives control back to canopy
+// after detach so the TUI can be re-rendered.
+//
+// On failure (session doesn't exist, tmux missing), Attach returns an
+// error and does NOT exec — the canopy process stays alive and can
+// surface the error to the user.
 func (c *Client) Attach(ctx context.Context, name string) error {
-	log.Info("tmux.attach (stub)", "name", name)
-	return nil
+	log.Info("tmux.attach", "name", name)
+
+	// Pre-flight: the session must exist. If we exec into `tmux attach`
+	// for a missing session, tmux exits non-zero and the user sees a
+	// raw error — better to surface it cleanly here.
+	exists, err := c.HasSession(ctx, name)
+	if err != nil {
+		return fmt.Errorf("tmux.Attach(%s): %w", name, err)
+	}
+	if !exists {
+		return fmt.Errorf("tmux.Attach(%s): %w", name, ErrSessionNotFound)
+	}
+
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return fmt.Errorf("tmux.Attach: tmux not on PATH: %w", err)
+	}
+
+	args := []string{"tmux"}
+	args = append(args, c.args("attach", "-t", name)...)
+	// syscall.Exec replaces the current process image. Returns only on error.
+	return syscall.Exec(tmuxPath, args, os.Environ())
 }
 
 // KillServer shuts down the tmux server bound to this client's socket.

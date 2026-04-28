@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
@@ -64,7 +65,7 @@ func TestSession_HappyPath(t *testing.T) {
 		t.Fatalf("pre-create HasSession: got (%v, %v); want (false, nil)", has, err)
 	}
 
-	if err := c.Create(ctx, name, cwd); err != nil {
+	if err := c.Create(ctx, name, cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -91,13 +92,67 @@ func TestCreate_AlreadyExists(t *testing.T) {
 	name := "already-exists"
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, name, cwd); err != nil {
+	if err := c.Create(ctx, name, cwd, ""); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 
-	err := c.Create(ctx, name, cwd)
+	err := c.Create(ctx, name, cwd, "")
 	if !errors.Is(err, tmux.ErrSessionExists) {
 		t.Fatalf("second Create: got %v; want errors.Is(... ErrSessionExists)", err)
+	}
+}
+
+// TestSplitPane covers the four-pane build the workspace orchestrator
+// performs. Start a session, split three times (each split targets the
+// active pane, so we never reference indices). End with 4 panes.
+func TestSplitPane(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	name := "split-test"
+	cwd := t.TempDir()
+
+	if err := c.Create(ctx, name, cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
+		t.Fatalf("SplitPane #1: %v", err)
+	}
+	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical); err != nil {
+		t.Fatalf("SplitPane #2: %v", err)
+	}
+	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical); err != nil {
+		t.Fatalf("SplitPane #3: %v", err)
+	}
+
+	// Verify pane count via tmux list-panes.
+	out, err := exec.Command("tmux", "-L", "canopy-test", "list-panes", "-t", name).Output()
+	if err != nil {
+		t.Fatalf("list-panes: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 4 {
+		t.Errorf("pane count = %d; want 4 (got: %s)", len(lines), out)
+	}
+}
+
+// TestSelectLayout confirms the layout call returns nil for a known-good
+// preset name.
+func TestSelectLayout(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	name := "layout-test"
+	cwd := t.TempDir()
+
+	if err := c.Create(ctx, name, cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+	if err := c.SelectLayout(ctx, name, "tiled"); err != nil {
+		t.Errorf("SelectLayout: %v", err)
 	}
 }
 
