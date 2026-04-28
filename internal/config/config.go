@@ -144,23 +144,17 @@ func DiscoverAndLoad(startDir string) (*Config, error) {
 	return Load(path)
 }
 
-// validate enforces that all three scripts are non-empty. We don't check
-// that the scripts are executable (or even exist on disk) here — that's
-// the runner's job at execution time, with a clearer error message than
-// "validation failed."
+// validate is a no-op for canopy.json today. All three script fields are
+// optional: a canopy.json with `{}` or `{"scripts": {}}` is fully valid
+// and means "no setup hook, no server command, no archive hook" — canopy
+// will still create the worktree and tmux session, just without running
+// anything user-supplied. Future schema additions (layout, env, etc.)
+// will live here when they grow up to need real validation.
+//
+// We deliberately do NOT check that script paths exist or are executable.
+// The runner's error at execution time is more precise ("script not
+// found" vs "validation failed"), and tools like `canopy init --with-scripts`
+// might generate the canopy.json before the scripts exist on disk.
 func validate(c *Config) error {
-	missing := []string{}
-	if c.Scripts.Setup == "" {
-		missing = append(missing, "scripts.setup")
-	}
-	if c.Scripts.Run == "" {
-		missing = append(missing, "scripts.run")
-	}
-	if c.Scripts.Archive == "" {
-		missing = append(missing, "scripts.archive")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("%w: missing required fields: %v", ErrInvalid, missing)
-	}
 	return nil
 }

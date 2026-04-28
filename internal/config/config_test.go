@@ -115,18 +115,26 @@ func TestLoad_BadJSON(t *testing.T) {
 	}
 }
 
-// TestLoad_MissingRequiredFields covers validation: file parses but a
-// required script is missing.
-func TestLoad_MissingRequiredFields(t *testing.T) {
+// TestLoad_OptionalScripts confirms that scripts fields are optional —
+// canopy.json with `{}` or `{"scripts": {}}` parses fine. canopy creates
+// workspaces with no setup/run/archive hooks in that case.
+func TestLoad_OptionalScripts(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "canopy.json")
-	// Missing scripts.archive.
-	writeFile(t, path, `{"scripts": {"setup": "s", "run": "r"}}`)
 
-	_, err := config.Load(path)
-	if !errors.Is(err, config.ErrInvalid) {
-		t.Errorf("Load(missing-archive): got %v; want errors.Is(... ErrInvalid)", err)
+	cases := []string{
+		`{}`,
+		`{"scripts": {}}`,
+		`{"scripts": {"setup": "s"}}`,        // partial: only setup
+		`{"scripts": {"run": "bin/dev"}}`,    // partial: only run
+		`{"scripts": {"setup": "s", "run": "r"}}`, // partial: no archive
+	}
+	for _, body := range cases {
+		writeFile(t, path, body)
+		if _, err := config.Load(path); err != nil {
+			t.Errorf("Load(%q): %v; want no error", body, err)
+		}
 	}
 }
 

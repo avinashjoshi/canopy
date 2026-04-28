@@ -11,29 +11,42 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// initFlags holds parsed --force (overwrite existing canopy.json).
+// initFlags holds the parsed flag values for `canopy init`.
 var initFlags struct {
-	force bool
+	force       bool
+	withScripts bool
 }
 
 // initCmd returns the `canopy init` cobra subcommand.
 //
-// Onboards a project to canopy by dropping a canopy.json plus stub
-// scripts at bin/canopy-{setup,run,archive}. Detects an existing
-// conductor.json (Conductor's config) and offers to translate it.
+// Onboards a project to canopy by dropping a minimal canopy.json into
+// the current directory. Scripts are optional: by default the generated
+// canopy.json has empty scripts and canopy will create workspaces with
+// no setup hook, no server command, and no archive — fine for projects
+// that just want git worktrees + tmux sessions.
+//
+// --with-scripts also writes stubs at bin/canopy-{setup,run,archive}
+// for projects that want to grow into the full pattern.
+//
+// If a conductor.json exists, init mirrors its script paths into the
+// new canopy.json (Conductor's schema is identical to canopy's). Stub
+// scripts are not written in this mode — Conductor projects already
+// have working scripts under bin/conductor-*.
 //
 // Refuses to overwrite an existing canopy.json unless --force is set.
 func initCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Onboard the current directory to canopy (creates canopy.json + bin/canopy-* stubs)",
-		Long: "Drops a canopy.json and three stub scripts (bin/canopy-{setup,run,archive})\n" +
-			"into the current directory. Edit the scripts to match your project's needs,\n" +
-			"then commit them and run `canopy new`.\n\n" +
-			"If a conductor.json exists in the current directory, init will copy its\n" +
-			"script paths into canopy.json verbatim — Conductor's schema is identical\n" +
-			"to canopy's. The bin/conductor-* scripts are NOT copied or renamed; you\n" +
-			"likely want to keep them and have canopy invoke them directly.",
+		Short: "Onboard the current directory to canopy (creates canopy.json)",
+		Long: "Drops a minimal canopy.json into the current directory.\n\n" +
+			"By default the canopy.json has no scripts — canopy will create\n" +
+			"workspaces with just a worktree + tmux session, no setup or run\n" +
+			"hooks. Pass --with-scripts to also generate stub scripts at\n" +
+			"bin/canopy-{setup,run,archive} you can customize.\n\n" +
+			"If a conductor.json exists in the current directory, init mirrors\n" +
+			"its script paths into canopy.json verbatim — Conductor's schema is\n" +
+			"identical to canopy's. The bin/conductor-* scripts are NOT copied\n" +
+			"or renamed; canopy invokes them directly.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -45,11 +58,22 @@ func initCmd() *cobra.Command {
 				return fmt.Errorf("init: %s already exists (pass --force to overwrite)", canopyJSON)
 			}
 
-			// If a conductor.json sits next to us, mirror its scripts. Otherwise
-			// emit stub paths.
+			// If a conductor.json sits next to us, mirror its scripts. The
+			// presence of a conductor.json takes precedence over --with-scripts:
+			// the user already has working scripts and we shouldn't generate
+			// stubs that would shadow them.
 			scripts, source := readConductor(cwd)
-			if scripts == nil {
+			generatedStubs := false
+			if scripts != nil {
+				// Conductor mode — use conductor.json's script paths verbatim.
+			} else if initFlags.withScripts {
+				// Fresh project + opted in to scaffolding.
 				scripts = stubScripts()
+				generatedStubs = true
+			} else {
+				// Fresh project, default mode: empty scripts. canopy will
+				// create workspaces with no hooks until the user fills them in.
+				scripts = &canopyScripts{}
 			}
 
 			if err := writeCanopyJSON(canopyJSON, scripts); err != nil {
@@ -61,11 +85,7 @@ func initCmd() *cobra.Command {
 					"  (mirrored scripts from %s — canopy uses the same schema)\n", source)
 			}
 
-			// Write stub scripts only when the source was the stub list (no
-			// conductor.json present). If the user already has bin/conductor-*
-			// from Conductor, canopy's pointing at them is enough — we don't
-			// want to clobber working scripts.
-			if source == "" {
+			if generatedStubs {
 				written, err := writeStubScripts(cwd, scripts)
 				if err != nil {
 					return err
@@ -73,28 +93,37 @@ func initCmd() *cobra.Command {
 				for _, p := range written {
 					fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", p)
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), "")
-				fmt.Fprintln(cmd.OutOrStdout(), "Next steps:")
-				fmt.Fprintln(cmd.OutOrStdout(), "  1. Edit bin/canopy-setup to install deps and prepare the workspace.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  2. Edit bin/canopy-run with your dev-server command.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  3. Edit bin/canopy-archive to drop databases / kill processes.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  4. Commit canopy.json and bin/canopy-*.")
-				fmt.Fprintln(cmd.OutOrStdout(), "  5. Run `canopy new` to create your first workspace.")
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), "")
-				fmt.Fprintln(cmd.OutOrStdout(), "Next steps:")
-				fmt.Fprintln(cmd.OutOrStdout(), "  1. Review canopy.json and confirm the script paths are correct.")
+			}
+
+			fmt.Fprintln(cmd.OutOrStdout(), "")
+			fmt.Fprintln(cmd.OutOrStdout(), "Next steps:")
+			switch {
+			case source != "":
+				fmt.Fprintln(cmd.OutOrStdout(), "  1. Review canopy.json and confirm the script paths look right.")
 				fmt.Fprintln(cmd.OutOrStdout(), "  2. If your scripts read CONDUCTOR_PORT / CONDUCTOR_WORKSPACE_PATH /")
 				fmt.Fprintln(cmd.OutOrStdout(), "     CONDUCTOR_ROOT_PATH from env, switch them to the CANOPY_* equivalents.")
 				fmt.Fprintln(cmd.OutOrStdout(), "  3. If config files (database.yml, etc.) reference CONDUCTOR_*, update those too.")
 				fmt.Fprintln(cmd.OutOrStdout(), "  4. Commit canopy.json.")
 				fmt.Fprintln(cmd.OutOrStdout(), "  5. Run `canopy new` to verify.")
+			case generatedStubs:
+				fmt.Fprintln(cmd.OutOrStdout(), "  1. Edit bin/canopy-setup to install deps and prepare the workspace.")
+				fmt.Fprintln(cmd.OutOrStdout(), "  2. Edit bin/canopy-run with your dev-server command (or delete it if not needed).")
+				fmt.Fprintln(cmd.OutOrStdout(), "  3. Edit bin/canopy-archive to drop databases / kill processes (or delete it if not needed).")
+				fmt.Fprintln(cmd.OutOrStdout(), "  4. Commit canopy.json and bin/canopy-*.")
+				fmt.Fprintln(cmd.OutOrStdout(), "  5. Run `canopy new` to create your first workspace.")
+			default:
+				fmt.Fprintln(cmd.OutOrStdout(), "  Run `canopy new` to create your first workspace — canopy will spin up")
+				fmt.Fprintln(cmd.OutOrStdout(), "  a worktree + tmux session with no setup hook.")
+				fmt.Fprintln(cmd.OutOrStdout(), "")
+				fmt.Fprintln(cmd.OutOrStdout(), "  Want hooks? Re-run `canopy init --with-scripts --force` to scaffold")
+				fmt.Fprintln(cmd.OutOrStdout(), "  bin/canopy-{setup,run,archive} stubs you can fill in.")
 			}
-
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&initFlags.force, "force", false, "overwrite an existing canopy.json")
+	cmd.Flags().BoolVar(&initFlags.withScripts, "with-scripts", false,
+		"also write stub bin/canopy-{setup,run,archive} scripts (ignored when a conductor.json is detected)")
 	return cmd
 }
 
@@ -117,7 +146,11 @@ func readConductor(cwd string) (*canopyScripts, string) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, ""
 	}
-	if doc.Scripts.Setup == "" || doc.Scripts.Run == "" || doc.Scripts.Archive == "" {
+	// Mirror as long as conductor.json declares at least one script —
+	// scripts are optional in canopy too, so a partial conductor.json is
+	// still useful to copy. An entirely empty conductor.json is treated
+	// as "no conductor here" so we fall through to default-init behavior.
+	if doc.Scripts.Setup == "" && doc.Scripts.Run == "" && doc.Scripts.Archive == "" {
 		return nil, ""
 	}
 	return &doc.Scripts, path
@@ -127,10 +160,13 @@ func readConductor(cwd string) (*canopyScripts, string) {
 // doesn't import config just for the JSON shape (cmd already imports
 // config via loadManager but a small amount of duplication keeps init
 // independent of config validation rules).
+//
+// omitempty keeps a default `canopy init` output looking clean —
+// `{"scripts":{}}` rather than three empty strings.
 type canopyScripts struct {
-	Setup   string `json:"setup"`
-	Run     string `json:"run"`
-	Archive string `json:"archive"`
+	Setup   string `json:"setup,omitempty"`
+	Run     string `json:"run,omitempty"`
+	Archive string `json:"archive,omitempty"`
 }
 
 // stubScripts returns the canonical canopy.json paths for a fresh

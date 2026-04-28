@@ -174,9 +174,14 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		// Compute paths and tmux session identifier. Workspace dirs live
 		// in canopy's home, NOT inside the source repo — the repo stays
 		// clean and canopy "owns" workspace storage.
+		//
+		// Use git.Sanitize for the on-disk path component (allows dots,
+		// matches typical git/repo conventions) but tmux.SafeName for the
+		// tmux session name (must NOT contain dots or colons, which are
+		// tmux's target-syntax separators).
 		safeBranch := git.Sanitize(name)
 		wsPath := filepath.Join(m.workspacesDir(), safeBranch)
-		session := m.Cfg.Project + "-" + safeBranch
+		session := tmux.SafeName(m.Cfg.Project) + "-" + tmux.SafeName(safeBranch)
 
 		ws = state.Workspace{
 			Project:     m.Cfg.Project,
@@ -241,14 +246,20 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 	}
 
 	// 2. scripts.setup with CANOPY_* env, cwd = workspace dir.
-	scriptPath := filepath.Join(m.Cfg.ProjectRoot, m.Cfg.Scripts.Setup)
-	if err := hooks.Run(ctx, scriptPath, hooks.Options{
-		Cwd:    ws.Path,
-		Env:    hooks.WorkspaceEnv(ws.Path, m.Cfg.ProjectRoot, ws.Port),
-		Stdout: stdout,
-		Stderr: stderr,
-	}); err != nil {
-		return fmt.Errorf("workspace.runSetup: %w: %v", ErrSetupFailed, err)
+	// Empty scripts.setup -> skip; canopy.json is allowed to omit hooks
+	// entirely for projects that just want the worktree + tmux session.
+	if m.Cfg.Scripts.Setup != "" {
+		scriptPath := filepath.Join(m.Cfg.ProjectRoot, m.Cfg.Scripts.Setup)
+		if err := hooks.Run(ctx, scriptPath, hooks.Options{
+			Cwd:    ws.Path,
+			Env:    hooks.WorkspaceEnv(ws.Path, m.Cfg.ProjectRoot, ws.Port),
+			Stdout: stdout,
+			Stderr: stderr,
+		}); err != nil {
+			return fmt.Errorf("workspace.runSetup: %w: %v", ErrSetupFailed, err)
+		}
+	} else {
+		fmt.Fprintln(stdout, "(no scripts.setup configured; skipping)")
 	}
 
 	// 3. tmux session + 4 panes (nvim, claude, $SHELL, scripts.run).
@@ -343,16 +354,18 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 	}
 	wsCopy := *ws // capture before slice mutations
 
-	// 1. scripts.archive — log failure but proceed.
-	scriptPath := filepath.Join(m.Cfg.ProjectRoot, m.Cfg.Scripts.Archive)
-	if err := hooks.Run(ctx, scriptPath, hooks.Options{
-		Cwd:    wsCopy.Path,
-		Env:    hooks.WorkspaceEnv(wsCopy.Path, m.Cfg.ProjectRoot, wsCopy.Port),
-		Stdout: stdout,
-		Stderr: stderr,
-	}); err != nil {
-		log.Warn("workspace.remove.archive-failed", "name", name, "err", err)
-		fmt.Fprintf(stderr, "warning: archive script failed: %v\n", err)
+	// 1. scripts.archive — log failure but proceed. Empty -> skip.
+	if m.Cfg.Scripts.Archive != "" {
+		scriptPath := filepath.Join(m.Cfg.ProjectRoot, m.Cfg.Scripts.Archive)
+		if err := hooks.Run(ctx, scriptPath, hooks.Options{
+			Cwd:    wsCopy.Path,
+			Env:    hooks.WorkspaceEnv(wsCopy.Path, m.Cfg.ProjectRoot, wsCopy.Port),
+			Stdout: stdout,
+			Stderr: stderr,
+		}); err != nil {
+			log.Warn("workspace.remove.archive-failed", "name", name, "err", err)
+			fmt.Fprintf(stderr, "warning: archive script failed: %v\n", err)
+		}
 	}
 
 	// 2. tmux kill — log failure but proceed.

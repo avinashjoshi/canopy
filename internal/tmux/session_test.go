@@ -156,6 +156,39 @@ func TestSelectLayout(t *testing.T) {
 	}
 }
 
+// TestSafeName covers the "tmux session name sanitizer" — stricter than
+// git.Sanitize because tmux can't tolerate dots or colons in names
+// (target syntax uses them as separators). Real-world cases include
+// project dirs like "avi.tools" or temp dirs from mktemp ("tmp.X").
+func TestSafeName(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"plain", "plain"},
+		{"v1.2.3", "v1-2-3"},
+		{"avi.tools", "avi-tools"},
+		{"tmp.X-feat", "tmp-X-feat"},
+		{"feature/oauth", "feature-oauth"},
+		{"feature: bug", "feature-bug"},
+		{"a..b", "a-b"},   // run of dots collapses
+		{"-leading", "leading"},
+		{"trailing-", "trailing"},
+		{"", ""},
+		{"underscore_kept", "underscore_kept"},
+		{"JIRA-1234", "JIRA-1234"}, // case preserved
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			if got := tmux.SafeName(tc.in); got != tc.want {
+				t.Errorf("SafeName(%q) = %q; want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestKill_NotFound covers the "kill what isn't there" case. Reconciliation
 // will hit this on every startup if a session was killed externally.
 func TestKill_NotFound(t *testing.T) {

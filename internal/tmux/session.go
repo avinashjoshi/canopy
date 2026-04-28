@@ -25,6 +25,50 @@ import (
 
 var log = clog.Pkg("tmux")
 
+// SafeName turns an arbitrary identifier into one safe for use as a tmux
+// session or window name. tmux's target syntax uses `:` and `.` as
+// separators (`session:window.pane`), so neither character can appear
+// unescaped in a name without breaking every subsequent target lookup.
+//
+// This is stricter than git.Sanitize — git allows dots in branch names
+// (v1.2.3 stays v1.2.3) but tmux can't have them. Other unsafe characters
+// collapse to a single `-`; alphanumerics, underscore, and hyphen pass
+// through. Leading/trailing hyphens are trimmed.
+//
+//	SafeName("v1.2.3")            -> "v1-2-3"
+//	SafeName("avi.tools")         -> "avi-tools"
+//	SafeName("feature/oauth")     -> "feature-oauth"
+//	SafeName("tmp.X-feat")        -> "tmp-X-feat"
+func SafeName(s string) string {
+	var b []byte
+	prevDash := false
+	for _, r := range s {
+		safe := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_' || r == '-'
+		if safe {
+			b = append(b, byte(r))
+			prevDash = (r == '-')
+			continue
+		}
+		// Collapse runs of unsafe chars into a single hyphen.
+		if !prevDash {
+			b = append(b, '-')
+			prevDash = true
+		}
+	}
+	// Trim leading/trailing hyphens.
+	start, end := 0, len(b)
+	for start < end && b[start] == '-' {
+		start++
+	}
+	for end > start && b[end-1] == '-' {
+		end--
+	}
+	return string(b[start:end])
+}
+
 // Sentinel errors. Callers use errors.Is to distinguish "this is the
 // 'doesn't exist' case" from genuine failures.
 var (
