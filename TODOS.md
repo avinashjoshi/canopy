@@ -183,9 +183,7 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 **Deferred to v0.6 follow-up:**
 - `canopy new --pr <num>` / `--issue <num>` / `--branch <name>` / `--allow-local` flags. The plumbing for SourceKind variants exists in the briefing assembler; the CLI flags + gh integration are pending.
-
-**Shipped after the initial v0.6 cut:**
-- `auto_close_shipped` flag in `~/.canopy/config.json` (under `lifecycle`). When true, pressing enter on a ✓ shipped row in the global TUI starts a 5-second countdown, then execs `canopy rm <name> --yes --force` against the project root. Any key cancels mid-countdown. Off by default — opt-in only, since auto-rm is destructive. Help overlay (?) surfaces the keybind when the flag is on.
+- `auto_close_shipped` flag in `~/.canopy/config.json` for the auto-close-on-merge UX with 5s cancel window. v0.6 currently surfaces a hint (`canopy rm <name>`) instead of auto-running.
 
 201 tests across 14 packages. Smoke verified: build clean, all tests green including `-tags=e2e`.
 

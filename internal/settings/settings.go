@@ -26,18 +26,7 @@ const FileName = "config.json"
 // Settings is the parsed content of ~/.canopy/config.json plus the
 // defaults for any missing fields.
 type Settings struct {
-	Ports     PortPlan  `json:"ports"`
-	Lifecycle Lifecycle `json:"lifecycle"`
-}
-
-// Lifecycle controls v0.6 lifecycle automation toggles. Today the only
-// knob is AutoCloseShipped: when true, pressing enter on a row whose
-// shipped detector fired starts a 5-second countdown that culminates in
-// `canopy rm <name> --yes --force`. The user can cancel by pressing any
-// key during the countdown. Defaults to false because auto-removing is
-// destructive and surprise rm-on-enter would be a sharp edge.
-type Lifecycle struct {
-	AutoCloseShipped bool `json:"auto_close_shipped"`
+	Ports PortPlan `json:"ports"`
 }
 
 // PortPlan controls how canopy allocates TCP ports across projects and
@@ -79,9 +68,6 @@ func Default() Settings {
 			Base:            40000,
 			ProjectStride:   1000,
 			WorkspaceStride: 10,
-		},
-		Lifecycle: Lifecycle{
-			AutoCloseShipped: false,
 		},
 	}
 }
