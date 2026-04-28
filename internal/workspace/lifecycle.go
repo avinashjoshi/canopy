@@ -485,3 +485,94 @@ func (m *Manager) Find(ctx context.Context, name string) (*state.Workspace, erro
 	wCopy := *w
 	return &wCopy, nil
 }
+
+// Reconcile walks every workspace for the current project, compares its
+// recorded status against disk + tmux reality, and updates state.json
+// where they disagree. Returns the per-workspace transition list so the
+// caller (CLI or TUI) can print what changed.
+//
+// Reconcile NEVER deletes a workspace row. Stale rows transition to
+// orphaned and stay in state.json until the user explicitly runs
+// `canopy rm`. Better to leave a row a user might still want than to
+// silently disappear data.
+//
+// Status mapping (for each workspace row):
+//
+//	dir on disk + tmux session alive -> ready
+//	dir on disk + tmux session gone  -> stopped
+//	dir gone, regardless of tmux     -> orphaned
+//	status==setting_up older than 5m -> broken (probably crashed mid-setup)
+//
+// The setting_up timeout exists because a canopy process killed during
+// hook execution leaves a setting_up row behind; without the timeout
+// it would block re-creation forever.
+func (m *Manager) Reconcile(ctx context.Context) ([]ReconcileChange, error) {
+	changes := []ReconcileChange{}
+	err := m.Store.WithLock(func(s *state.State) error {
+		for i := range s.Workspaces {
+			w := &s.Workspaces[i]
+			if w.Project != m.Cfg.Project {
+				continue
+			}
+			newStatus, err := m.observeStatus(ctx, w)
+			if err != nil {
+				// Don't fail the whole reconcile on one bad row; log and skip.
+				log.Warn("reconcile.observe-failed", "name", w.Name, "err", err)
+				continue
+			}
+			if newStatus != w.Status {
+				changes = append(changes, ReconcileChange{
+					Name: w.Name, From: w.Status, To: newStatus,
+				})
+				w.Status = newStatus
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return changes, nil
+}
+
+// ReconcileChange records one workspace's status transition during a
+// Reconcile pass. Useful for printing "what changed" reports.
+type ReconcileChange struct {
+	Name string
+	From state.Status
+	To   state.Status
+}
+
+// observeStatus computes the right status for a workspace row based on
+// what's actually on disk and in tmux RIGHT NOW. Pure observation — does
+// not mutate state. Caller decides whether to persist the transition.
+func (m *Manager) observeStatus(ctx context.Context, w *state.Workspace) (state.Status, error) {
+	// Setting_up that's gone stale (probably a crashed `canopy new`).
+	const settingUpTimeout = 5 * time.Minute
+	if w.Status == state.StatusSettingUp {
+		if time.Since(w.CreatedAt) > settingUpTimeout {
+			return state.StatusBroken, nil
+		}
+		return w.Status, nil // still might be legitimately running
+	}
+	// Broken stays broken until the user `canopy rm`s and recreates.
+	if w.Status == state.StatusBroken {
+		return state.StatusBroken, nil
+	}
+
+	// Disk check first — if the dir is gone, nothing else matters.
+	if _, err := os.Stat(w.Path); os.IsNotExist(err) {
+		return state.StatusOrphaned, nil
+	} else if err != nil {
+		return "", fmt.Errorf("stat %s: %w", w.Path, err)
+	}
+
+	alive, err := m.Tmux.HasSession(ctx, w.TmuxSession)
+	if err != nil {
+		return "", fmt.Errorf("tmux.HasSession(%s): %w", w.TmuxSession, err)
+	}
+	if alive {
+		return state.StatusReady, nil
+	}
+	return state.StatusStopped, nil
+}

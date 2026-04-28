@@ -10,8 +10,13 @@ import (
 
 // switchCmd returns the `canopy switch <name>` cobra subcommand.
 //
-// Behavior depends on the workspace's status (per the design doc's
-// state machine):
+// Before dispatching, switch runs a lazy reconcile: if the recorded
+// status disagrees with reality (state says ready but tmux session is
+// gone, or the dir has been hand-deleted), the row's status is updated
+// in place. That way `canopy switch` always operates on the truth, not
+// on whatever state.json said the last time canopy was used.
+//
+// Behavior by status (after reconcile):
 //
 //	ready      -> attach (syscall.Exec into tmux)
 //	stopped    -> resurrect (rebuild tmux session, claude --continue),
@@ -31,6 +36,13 @@ func switchCmd() *cobra.Command {
 			}
 			name := args[0]
 			ctx := cmd.Context()
+
+			// Lazy reconcile: ensure status reflects reality before we act on it.
+			// Errors here are non-fatal; if reconcile fails we proceed with the
+			// stale status (and the user can re-run `canopy reconcile` directly).
+			if _, err := mgr.Reconcile(ctx); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: reconcile failed: %v\n", err)
+			}
 
 			ws, err := mgr.Find(ctx, name)
 			if err != nil {

@@ -47,6 +47,11 @@ func initCmd() *cobra.Command {
 			"its script paths into canopy.json verbatim — Conductor's schema is\n" +
 			"identical to canopy's. The bin/conductor-* scripts are NOT copied\n" +
 			"or renamed; canopy invokes them directly.",
+		// Already-initialized is a friendly "you're done" state, not an
+		// error worthy of a usage block. SilenceUsage keeps the cobra
+		// help text from printing when we return early below.
+		SilenceUsage:  true,
+		SilenceErrors: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -55,7 +60,18 @@ func initCmd() *cobra.Command {
 
 			canopyJSON := filepath.Join(cwd, "canopy.json")
 			if _, err := os.Stat(canopyJSON); err == nil && !initFlags.force {
-				return fmt.Errorf("init: %s already exists (pass --force to overwrite)", canopyJSON)
+				// Friendly path: this project is already initialized. Print a
+				// helpful message, exit 0 — `canopy init` is idempotent in
+				// spirit. --force is documented inline so the user doesn't
+				// have to read --help.
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"%s already exists. This project is already initialized.\n",
+					canopyJSON)
+				fmt.Fprintln(cmd.OutOrStdout(), "")
+				fmt.Fprintln(cmd.OutOrStdout(), "  - Run `canopy new` to create a workspace.")
+				fmt.Fprintln(cmd.OutOrStdout(), "  - Run `canopy init --force` to regenerate canopy.json.")
+				fmt.Fprintln(cmd.OutOrStdout(), "  - Run `canopy init --with-scripts --force` to also write bin/canopy-* stubs.")
+				return nil
 			}
 
 			// If a conductor.json sits next to us, mirror its scripts. The
