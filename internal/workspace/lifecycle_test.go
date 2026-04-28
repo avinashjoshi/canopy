@@ -93,11 +93,12 @@ func fixture(t *testing.T) (*workspace.Manager, func()) {
 
 	tmuxClient := tmux.WithSocket("canopy-test")
 	mgr := &workspace.Manager{
-		Cfg:     cfg,
-		Store:   store,
-		Tmux:    tmuxClient,
-		PortMin: 39000, // safe range, well above typical dev servers
-		PortMax: 39100,
+		Cfg:        cfg,
+		Store:      store,
+		Tmux:       tmuxClient,
+		CanopyHome: stateDir, // workspaces dir is derived from this
+		PortMin:    39000,    // safe range, well above typical dev servers
+		PortMax:    39100,
 	}
 
 	cleanup := func() {

@@ -174,7 +174,7 @@ Layout-as-config is a v0.5 feature.
       "project": "cravd",
       "name": "feature-x",
       "branch": "feature-x",
-      "path": "/home/avi/Work/cravd/worktrees/feature-x",
+      "path": "/home/avi/.canopy/workspaces/cravd/feature-x",
       "tmux_session": "cravd-feature-x",
       "port": 3001,
       "status": "ready",

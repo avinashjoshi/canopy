@@ -72,14 +72,23 @@ type Manager struct {
 	Store *state.Store
 	Tmux  *tmux.Client
 
+	// CanopyHome is the directory canopy uses for state, logs, and
+	// workspace storage. Defaults to ~/.canopy; tests override.
+	// Workspace dirs live at <CanopyHome>/workspaces/<project>/<name>
+	// so the source repo stays clean — git worktrees are perfectly happy
+	// being created outside the source tree, and centralizing them
+	// means canopy "owns" workspace storage instead of polluting every
+	// repo with a worktrees/ directory.
+	CanopyHome string
+
 	// PortMin and PortMax bound the port allocator. Defaults to
 	// DefaultPortMin/Max; tests and future config override.
 	PortMin int
 	PortMax int
 }
 
-// New constructs a Manager from a loaded config. It creates the state
-// directory at ~/.canopy if missing.
+// New constructs a Manager from a loaded config. It creates the canopy
+// home (~/.canopy) and its state directory if missing.
 func New(cfg *config.Config) (*Manager, error) {
 	home, err := canopyHome()
 	if err != nil {
@@ -90,12 +99,19 @@ func New(cfg *config.Config) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		Cfg:     cfg,
-		Store:   store,
-		Tmux:    tmux.New(),
-		PortMin: DefaultPortMin,
-		PortMax: DefaultPortMax,
+		Cfg:        cfg,
+		Store:      store,
+		Tmux:       tmux.New(),
+		CanopyHome: home,
+		PortMin:    DefaultPortMin,
+		PortMax:    DefaultPortMax,
 	}, nil
+}
+
+// workspacesDir returns <CanopyHome>/workspaces/<project>. Created on
+// demand by Create; safe to call before the dir exists.
+func (m *Manager) workspacesDir() string {
+	return filepath.Join(m.CanopyHome, "workspaces", m.Cfg.Project)
 }
 
 // canopyHome returns the directory canopy uses for state and logs.
@@ -155,9 +171,11 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 			return fmt.Errorf("workspace.Create(%s): %w", name, err)
 		}
 
-		// Compute paths and tmux session identifier.
+		// Compute paths and tmux session identifier. Workspace dirs live
+		// in canopy's home, NOT inside the source repo — the repo stays
+		// clean and canopy "owns" workspace storage.
 		safeBranch := git.Sanitize(name)
-		wsPath := filepath.Join(m.Cfg.ProjectRoot, "worktrees", safeBranch)
+		wsPath := filepath.Join(m.workspacesDir(), safeBranch)
 		session := m.Cfg.Project + "-" + safeBranch
 
 		ws = state.Workspace{
