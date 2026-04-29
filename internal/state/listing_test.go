@@ -29,8 +29,9 @@ func TestBuildGlobalRows_Empty(t *testing.T) {
 	}
 }
 
-// TestBuildGlobalRows_WorkspacesOnly: state with workspaces but no main
-// sessions alive should emit only workspace rows.
+// TestBuildGlobalRows_WorkspacesOnly: state with workspaces and no
+// alive main session — main row is still emitted (Alive=false) so the
+// user always sees the project's main entry. Workspace rows follow.
 func TestBuildGlobalRows_WorkspacesOnly(t *testing.T) {
 	s := &State{
 		Projects: map[string]ProjectMeta{
@@ -47,23 +48,28 @@ func TestBuildGlobalRows_WorkspacesOnly(t *testing.T) {
 	}}
 
 	rows := s.BuildGlobalRows(context.Background(), probe)
-	if len(rows) != 2 {
-		t.Fatalf("got %d rows, want 2", len(rows))
+	// 1 main + 2 workspace = 3.
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3 (main + 2 workspaces)", len(rows))
+	}
+	// Main row is first, dead.
+	if !rows[0].IsMain || rows[0].Alive {
+		t.Errorf("expected dead main row first; got IsMain=%v, Alive=%v", rows[0].IsMain, rows[0].Alive)
 	}
 	// Sorted by name within project: bold-falcon comes before soft-fox.
-	if rows[0].Name != "bold-falcon" || rows[1].Name != "soft-fox" {
-		t.Errorf("unexpected order: %q, %q", rows[0].Name, rows[1].Name)
+	if rows[1].Name != "bold-falcon" || rows[2].Name != "soft-fox" {
+		t.Errorf("unexpected order: %q, %q", rows[1].Name, rows[2].Name)
 	}
-	// Liveness reflected.
-	if rows[0].Alive {
+	// Liveness reflected on workspace rows.
+	if rows[1].Alive {
 		t.Errorf("bold-falcon should be Alive=false")
 	}
-	if !rows[1].Alive {
+	if !rows[2].Alive {
 		t.Errorf("soft-fox should be Alive=true")
 	}
 	// Project basename derived from root path.
-	if rows[0].Project != "cravd" || rows[0].ProjectRoot != "/a/cravd" {
-		t.Errorf("project fields: got Project=%q, ProjectRoot=%q", rows[0].Project, rows[0].ProjectRoot)
+	if rows[1].Project != "cravd" || rows[1].ProjectRoot != "/a/cravd" {
+		t.Errorf("project fields: got Project=%q, ProjectRoot=%q", rows[1].Project, rows[1].ProjectRoot)
 	}
 }
 
@@ -92,7 +98,10 @@ func TestBuildGlobalRows_MainOnly(t *testing.T) {
 	}
 }
 
-// TestBuildGlobalRows_Mixed: main + workspaces in two projects, sort order.
+// TestBuildGlobalRows_Mixed: two projects, one with a live main + a
+// live workspace, one with a dead main + a dead workspace. Both
+// projects' main rows emit regardless of liveness; sort order within
+// each project: main first, then workspaces by name.
 func TestBuildGlobalRows_Mixed(t *testing.T) {
 	s := &State{
 		Projects: map[string]ProjectMeta{
@@ -111,23 +120,28 @@ func TestBuildGlobalRows_Mixed(t *testing.T) {
 	}}
 
 	rows := s.BuildGlobalRows(context.Background(), probe)
-	if len(rows) != 3 {
-		t.Fatalf("got %d rows, want 3", len(rows))
+	// 2 mains + 2 workspaces = 4.
+	if len(rows) != 4 {
+		t.Fatalf("got %d rows, want 4 (2 mains + 2 workspaces)", len(rows))
 	}
-	// Project sort: /a/cravd before /b/canopy. Within /a/cravd: main row first, then workspaces.
+	// Project sort: /a/cravd before /b/canopy. Within each: main first.
 	want := []struct {
 		project string
 		name    string
 		isMain  bool
+		alive   bool
 	}{
-		{"cravd", "(main)", true},
-		{"cravd", "bold-falcon", false},
-		{"canopy", "ancient-hornet", false},
+		{"cravd", "(main)", true, true},
+		{"cravd", "bold-falcon", false, true},
+		{"canopy", "(main)", true, false},
+		{"canopy", "ancient-hornet", false, false},
 	}
 	for i, w := range want {
-		if rows[i].Project != w.project || rows[i].Name != w.name || rows[i].IsMain != w.isMain {
-			t.Errorf("row %d: got (%s, %s, isMain=%v); want (%s, %s, isMain=%v)",
-				i, rows[i].Project, rows[i].Name, rows[i].IsMain, w.project, w.name, w.isMain)
+		if rows[i].Project != w.project || rows[i].Name != w.name ||
+			rows[i].IsMain != w.isMain || rows[i].Alive != w.alive {
+			t.Errorf("row %d: got (%s, %s, isMain=%v, alive=%v); want (%s, %s, isMain=%v, alive=%v)",
+				i, rows[i].Project, rows[i].Name, rows[i].IsMain, rows[i].Alive,
+				w.project, w.name, w.isMain, w.alive)
 		}
 	}
 }
@@ -144,12 +158,14 @@ func TestBuildGlobalRows_ProbeError(t *testing.T) {
 	probe := &fakeProbe{err: errors.New("tmux daemon down")}
 
 	rows := s.BuildGlobalRows(context.Background(), probe)
-	// Workspace row only (main session probe also errored, treated as dead).
-	if len(rows) != 1 {
-		t.Fatalf("got %d rows, want 1", len(rows))
+	// Main + workspace = 2 (main always emits; probe error → Alive=false).
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2 (main + workspace)", len(rows))
 	}
-	if rows[0].Alive {
-		t.Errorf("Alive should be false when probe errors")
+	for _, r := range rows {
+		if r.Alive {
+			t.Errorf("Alive should be false when probe errors; got Alive=true on %s", r.Name)
+		}
 	}
 }
 
@@ -165,11 +181,12 @@ func TestBuildGlobalRows_LegacyV1Workspace(t *testing.T) {
 	}
 	probe := &fakeProbe{}
 	rows := s.BuildGlobalRows(context.Background(), probe)
-	if len(rows) != 1 {
-		t.Fatalf("legacy row got %d rows, want 1", len(rows))
+	// Main + workspace = 2.
+	if len(rows) != 2 {
+		t.Fatalf("legacy row got %d rows, want 2 (main + workspace)", len(rows))
 	}
-	if rows[0].Project != "cravd" {
-		t.Errorf("legacy row Project: got %q", rows[0].Project)
+	if rows[0].Project != "cravd" || rows[1].Project != "cravd" {
+		t.Errorf("legacy rows Project: got %q, %q", rows[0].Project, rows[1].Project)
 	}
 }
 

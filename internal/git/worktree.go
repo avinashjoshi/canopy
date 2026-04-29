@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
@@ -89,6 +90,116 @@ func Add(ctx context.Context, repoRoot, branch, path, startPoint string) error {
 			strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// AddExisting checks an EXISTING branch into a new worktree at path.
+// Used by canopy new --branch and --pr where the branch already
+// exists (locally or as a remote-tracking ref) and should be reused
+// rather than re-created.
+//
+// branchOrRef may be a local branch name ("feature/oauth"), a
+// remote-tracking ref ("origin/feature/oauth"), or a fetched PR
+// head ("canopy/pr-42"). git's `worktree add <path> <branch>` does
+// the right thing for all three: if it's a local branch, it's
+// checked out; if it's a remote-tracking ref, git auto-creates a
+// matching local branch tracking the remote.
+//
+// Returns ErrPathExists if path is already populated.
+func AddExisting(ctx context.Context, repoRoot, branchOrRef, path string) error {
+	log.Info("git.add-existing", "repo", repoRoot, "ref", branchOrRef, "path", path)
+
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("git.AddExisting(%s): %w", path, ErrPathExists)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("git.AddExisting(%s): pre-flight path check: %w", path, err)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "add", path, branchOrRef)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git.AddExisting(%s -> %s): %w (stderr: %s)", branchOrRef, path, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// FetchRefspec runs `git fetch <remote> <refspec>` to pull a specific
+// ref into a local branch or ref. Used by canopy new --pr to fetch
+// PR heads (which aren't ordinary branches on origin) via the
+// `refs/pull/<num>/head:<localref>` refspec syntax that GitHub
+// exposes for every PR, including ones from forks.
+//
+// Example: FetchRefspec(ctx, root, "origin",
+//
+//	"refs/pull/42/head:canopy/pr-42")
+//
+// fetches PR #42's head and stores it locally as canopy/pr-42, ready
+// to be checked out with AddExisting.
+func FetchRefspec(ctx context.Context, repoRoot, remote, refspec string) error {
+	log.Info("git.fetch-refspec", "repo", repoRoot, "remote", remote, "refspec", refspec)
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "fetch", remote, refspec, "--quiet")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git.FetchRefspec(%s %s): %w (stderr: %s)", remote, refspec, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// ListBranches returns local + remote branches in the repo at
+// repoRoot, deduplicated and sorted. Used by canopy new --branch's
+// TUI picker (and the future shell completion).
+//
+// Format: bare branch names for locals, "origin/<name>" for remotes.
+// HEAD pointers (origin/HEAD → origin/main) and detached-HEAD entries
+// are filtered out — they're not useful as workspace start points.
+//
+// Best-effort: errors return an empty slice + nil. The picker
+// surfaces "no branches" rather than "failed to read branches" for
+// the same reason ListPRs returns empty on no-PRs: an empty result
+// is a valid state, not a failure.
+func ListBranches(ctx context.Context, repoRoot string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot,
+		"for-each-ref", "--format=%(refname:short)",
+		"refs/heads/", "refs/remotes/origin/")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git.ListBranches: %w", err)
+	}
+
+	seen := map[string]bool{}
+	branches := make([]string, 0, 32)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip HEAD pointers ("origin/HEAD") — they're aliases, not
+		// real branches the user wants to check out.
+		if strings.HasSuffix(line, "/HEAD") {
+			continue
+		}
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		branches = append(branches, line)
+	}
+	sort.Strings(branches)
+	return branches, nil
+}
+
+// RefExists reports whether ref resolves to a commit in the repo.
+// Wraps `git rev-parse --verify --quiet <ref>^{commit}`. Used to
+// validate user-supplied --branch values (does the branch actually
+// exist?) before kicking off a worktree creation that's going to
+// fail anyway.
+func RefExists(ctx context.Context, repoRoot, ref string) bool {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse",
+		"--verify", "--quiet", ref+"^{commit}")
+	return cmd.Run() == nil
 }
 
 // Fetch runs `git fetch <remote>` from repoRoot. Quiet on success;

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -203,6 +204,70 @@ func TestGlobalModel_GoToProject_DerivesFromWorktreePath(t *testing.T) {
 	// /private/var); compare basenames as the cheap correctness signal.
 	if filepath.Base(got) != filepath.Base(source) {
 		t.Errorf("resolved root basename = %q, want %q", filepath.Base(got), filepath.Base(source))
+	}
+}
+
+// TestGlobalModel_RowsLoadedDispatchesHintLoaders: receiving a
+// globalRowsLoadedMsg renders the rows immediately and returns a
+// follow-up tea.Cmd that fires off the per-row hint loaders. This is
+// the core of the two-phase refresh — rows MUST be visible before any
+// gh shellouts complete.
+func TestGlobalModel_RowsLoadedDispatchesHintLoaders(t *testing.T) {
+	store, _ := state.NewStore(t.TempDir())
+	gm := NewGlobal(store, tmux.New())
+
+	rows := []state.GlobalRow{
+		{Project: "canopy", Name: "soft-fox", Path: "/tmp/wt-1", ProjectRoot: "/a/canopy"},
+		{Project: "canopy", Name: "ancient-hornet", Path: "/tmp/wt-2", ProjectRoot: "/a/canopy"},
+	}
+	model, cmd := gm.Update(globalRowsLoadedMsg{rows: rows})
+	gm = model.(*GlobalModel)
+
+	// Rows should be installed in the embedded list right away.
+	if len(gm.list.Rows()) != 2 {
+		t.Errorf("rows not installed before hint loaders dispatched; got %d", len(gm.list.Rows()))
+	}
+	// The follow-up cmd is the tea.Batch of per-row hint loaders.
+	if cmd == nil {
+		t.Errorf("expected hint-loader batch cmd; got nil — rows would render with no badges, ever")
+	}
+}
+
+// TestGlobalModel_RowsLoadedSkipsHintLoadersOnError: an error from the
+// state load short-circuits hint dispatch (no rows to decorate).
+func TestGlobalModel_RowsLoadedSkipsHintLoadersOnError(t *testing.T) {
+	store, _ := state.NewStore(t.TempDir())
+	gm := NewGlobal(store, tmux.New())
+
+	_, cmd := gm.Update(globalRowsLoadedMsg{err: fmt.Errorf("boom")})
+	if cmd != nil {
+		t.Errorf("error path should not dispatch hint loaders; got %T", cmd)
+	}
+}
+
+// TestGlobalModel_RowHintsMergeIntoList: a per-row hint result merges
+// into the embedded list via UpdateRowHints. Verifies the late-arrival
+// merge path that the two-phase refresh depends on.
+func TestGlobalModel_RowHintsMergeIntoList(t *testing.T) {
+	store, _ := state.NewStore(t.TempDir())
+	gm := NewGlobal(store, tmux.New())
+
+	rows := []state.GlobalRow{
+		{Project: "canopy", Name: "soft-fox", Path: "/tmp/wt"},
+	}
+	model, _ := gm.Update(globalRowsLoadedMsg{rows: rows})
+	gm = model.(*GlobalModel)
+
+	model, _ = gm.Update(globalRowHintsMsg{
+		project: "canopy",
+		name:    "soft-fox",
+		hints:   []state.Hint{{Kind: "shipped"}},
+	})
+	gm = model.(*GlobalModel)
+
+	got := gm.list.Rows()
+	if len(got) != 1 || len(got[0].Hints) != 1 {
+		t.Errorf("hints did not merge into row; got rows=%+v", got)
 	}
 }
 

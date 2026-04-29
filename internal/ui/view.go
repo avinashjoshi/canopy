@@ -2,7 +2,11 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+
+	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and
@@ -16,8 +20,16 @@ func (m *Model) View() string {
 		return m.renderHelp()
 	}
 	switch m.mode {
-	case newMode:
-		return m.renderNewModal()
+	case newPickerMode:
+		return m.renderNewPicker()
+	case newFreshMode:
+		return m.renderNewFresh()
+	case newPRMode:
+		return m.renderNewPR()
+	case newIssueMode:
+		return m.renderNewIssue()
+	case newBranchMode:
+		return m.renderNewBranch()
 	case confirmDeleteMode:
 		return m.renderConfirmDelete()
 	case busyMode:
@@ -98,6 +110,14 @@ func (m *Model) renderTable() string {
 			statusCell,
 			colPort, port,
 		)
+		// Append v0.6 lifecycle hint badges (rename / shipped /
+		// pr_status). Reuses the same renderer as the global TUI so
+		// both surfaces produce identical output. Empty string when
+		// no hints are active — keeps rows visually unchanged for
+		// workspaces without lifecycle signals.
+		if hintBadges := projectlist.RenderHintBadges(r.Hints); hintBadges != "" {
+			line += "  " + hintBadges
+		}
 		if i == m.cursor {
 			line = selectedStyle.Render(line)
 		}
@@ -125,31 +145,516 @@ func (m *Model) renderHelpLine() string {
 	return subtleStyle.Render(strings.Join(keys, "  ·  "))
 }
 
-// renderNewModal is the new-workspace prompt. Shows the textinput plus
-// a one-line hint. Esc cancels, Enter submits.
-func (m *Model) renderNewModal() string {
+// renderNewPicker is step 1 of the new-workspace flow — the variant
+// picker. Each option carries a single-letter shortcut printed in
+// brackets so the user sees "press p for pull request" without
+// having to read a footer. Arrow nav is a discoverable alternative
+// for keyboard-only users who scan before they act.
+//
+// Self-evident over self-explanatory: the user shouldn't have to
+// read the footer to know what to do. The bracketed letters
+// telegraph the entire keymap inline with the options.
+func (m *Model) renderNewPicker() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("canopy new") + " " + subtleStyle.Render(m.projectName))
 	b.WriteString("\n\n")
-	b.WriteString("  Workspace name (leave blank for a random one):")
-	b.WriteString("\n\n  ")
-	b.WriteString(m.nameInput.View())
-	b.WriteString("\n\n")
-	b.WriteString(subtleStyle.Render("  enter to create  ·  esc to cancel"))
+	b.WriteString("  How do you want to start?\n\n")
+
+	for i, opt := range newPickerOptions {
+		cursor := "    "
+		if i == m.newPickerCursor {
+			cursor = "  > "
+		}
+		// Letter shortcut + label, then a dim description on the
+		// next line. Two-line entries give the picker breathing
+		// room and let the description carry the "why this option"
+		// without bloating the headline.
+		b.WriteString(cursor)
+		b.WriteString(brokenStyle.Render("[" + opt.key + "] "))
+		if i == m.newPickerCursor {
+			b.WriteString(selectedStyle.Render(opt.label))
+		} else {
+			b.WriteString(opt.label)
+		}
+		b.WriteString("\n        ")
+		b.WriteString(subtleStyle.Render(opt.description))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(subtleStyle.Render(
+		"  press a letter  ·  ↑/↓ then enter  ·  esc back"))
 	return b.String()
 }
 
-// renderConfirmDelete is the y/N prompt shown before tearing down a
-// workspace. Spells out what the operation does so the user knows what
-// they're agreeing to (this isn't a "press y to retry, idk lol" prompt).
+// newPickerOption is one row in the variant picker. Order in the
+// slice = visual order = cursor index. Adding a 5th option requires
+// updating newPickerOptionCount in update.go.
+type newPickerOption struct {
+	key         string // single-letter shortcut
+	label       string // headline shown next to the cursor
+	description string // dim one-liner under the label
+}
+
+// newPickerOptions is the canonical list of source variants.
+// Mirrors workspace.SourceSpec — one row per variant so adding a
+// new SourceKind means adding a row here, a case in update.go's
+// dispatch, and a renderer below.
+var newPickerOptions = []newPickerOption{
+	{"n", "Fresh workspace", "random name, branch off main"},
+	{"p", "From a pull request", "check out a PR's branch (uses gh)"},
+	{"i", "From an issue", "implement work from an issue (uses gh)"},
+	{"b", "From a branch", "check out an existing branch"},
+}
+
+// renderNewFresh is step 2a — name input for the fresh-workspace
+// path. Same shape as the v0 modal that the picker replaced; this
+// is the simple/common case that most `n` presses end at.
+func (m *Model) renderNewFresh() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· fresh"))
+	b.WriteString("\n\n")
+	b.WriteString("  Workspace name (leave blank for a random one):\n\n  ")
+	b.WriteString(m.nameInput.View())
+	b.WriteString("\n\n")
+	b.WriteString(subtleStyle.Render("  enter to create  ·  esc to back"))
+	return b.String()
+}
+
+// pickerVisibleRows returns how many list rows fit in the picker
+// modal given the terminal height. Reserves a fixed budget for
+// chrome (title, blank line, filter label + input, blank, footer,
+// scroll-hint lines, margins). When height is unknown (zero —
+// before the first WindowSizeMsg arrives) returns a sensible
+// default so the picker still renders.
+func (m *Model) pickerVisibleRows() int {
+	const chrome = 9 // 8 lines of title/input/footer + 1 line slack
+	const minVisible = 5
+	if m.height <= 0 {
+		return 15 // pre-WindowSize fallback
+	}
+	v := m.height - chrome
+	if v < minVisible {
+		return minVisible
+	}
+	return v
+}
+
+// pickerWindow clamps a cursor + total length into a (top, end)
+// range that holds the cursor in the visible window. Pure function
+// so each renderer can inline it without state-tracking. Returns
+// indices into the FULL filtered list; the renderer slices it.
+//
+// Behavior: the cursor sits anywhere in the window. When it crosses
+// the bottom edge, the window scrolls so cursor is the LAST visible
+// row. When it crosses the top edge (back-arrow into hidden rows),
+// cursor becomes the FIRST visible row. This is the standard
+// "cursor stays visible, list scrolls" pattern from lazygit/k9s.
+func pickerWindow(cursor, total, visible int) (int, int) {
+	if total <= visible {
+		return 0, total
+	}
+	top := cursor - visible + 1
+	if top < 0 {
+		top = 0
+	}
+	if top > total-visible {
+		top = total - visible
+	}
+	return top, top + visible
+}
+
+// renderScrollHint emits a one-line "↑ N more above" / "↓ N more
+// below" indicator so the user knows the list extends past what's
+// rendered. Empty string when the whole list fits.
+func renderScrollHint(top, end, total int) string {
+	if total <= end-top {
+		return ""
+	}
+	above := top
+	below := total - end
+	parts := []string{}
+	if above > 0 {
+		parts = append(parts, fmt.Sprintf("↑ %d more above", above))
+	}
+	if below > 0 {
+		parts = append(parts, fmt.Sprintf("↓ %d more below", below))
+	}
+	return subtleStyle.Render("  " + strings.Join(parts, "  ·  "))
+}
+
+// renderNewPR is step 2b — the PR picker. Layout:
+//
+//	canopy new · pull request
+//
+//	  PR number or filter:
+//	  [_______________________]
+//
+//	  ● #1185  pdx91   Inbox improvements
+//	    #1182  jess    Fix oauth redirect
+//	    #1180  sam     Add export endpoint
+//
+//	  enter to check out · ↑/↓ pick · esc to back
+//
+// Three states: loading (spinner-ish hint), error (gh missing /
+// network failed), populated (list with cursor). Even with empty
+// list the user can type a number directly — that's the power-user
+// fast path.
+func (m *Model) renderNewPR() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· pull request"))
+	b.WriteString("\n\n")
+
+	b.WriteString("  PR number or filter:\n  ")
+	b.WriteString(m.listInput.View())
+	b.WriteString("\n\n")
+
+	switch {
+	case m.newLoading && len(m.newPRs) == 0:
+		b.WriteString(subtleStyle.Render("  Loading PRs from gh..."))
+		b.WriteString("\n")
+	case m.newLoadErr != nil:
+		b.WriteString("  ")
+		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.newLoadErr)))
+		b.WriteString("\n")
+	case len(m.newPRs) == 0:
+		b.WriteString(subtleStyle.Render("  No open PRs found. Type a number to fetch any PR by ID."))
+		b.WriteString("\n")
+	default:
+		filtered := filterPRs(m.newPRs, m.listInput.Value())
+		if len(filtered) == 0 {
+			b.WriteString(subtleStyle.Render("  No PRs match. Type a number to fetch by ID."))
+			b.WriteString("\n")
+		} else {
+			cursor := m.listCursor
+			if cursor >= len(filtered) {
+				cursor = len(filtered) - 1
+			}
+			top, end := pickerWindow(cursor, len(filtered), m.pickerVisibleRows())
+			for i := top; i < end; i++ {
+				pr := filtered[i]
+				marker := "    "
+				if i == cursor {
+					marker = "  ● "
+				}
+				// Lookup the workspace (if any) currently holding
+				// this PR's branch so the row can be tagged "in
+				// <ws>". Recognition cue: don't try to re-create
+				// what's already a workspace.
+				wsName, taken := m.branchInWorkspace(pr.HeadRefName)
+				core := fmt.Sprintf("%s#%-5d %-12s %s",
+					marker, pr.Number, truncateRight(pr.Author.Login, 12), pr.Title)
+				suffix := ""
+				if taken {
+					suffix = subtleStyle.Render("  (in workspace " + wsName + ")")
+					core = subtleStyle.Render(core)
+				}
+				if i == cursor && !taken {
+					b.WriteString(selectedStyle.Render(core))
+				} else {
+					b.WriteString(core)
+				}
+				b.WriteString(suffix)
+				b.WriteString("\n")
+			}
+			if hint := renderScrollHint(top, end, len(filtered)); hint != "" {
+				b.WriteString(hint)
+				b.WriteString("\n")
+			}
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render(
+		"  enter to check out  ·  ↑/↓ pick row  ·  esc back"))
+	return b.String()
+}
+
+// filterPRs narrows the loaded list when the user types in the
+// filter field. Three match modes (in priority order):
+//
+//   - Numeric: the input is a number, so match the PR number prefix
+//     (typing "11" matches #11, #1185, #1182). Useful for power
+//     users who half-remember a PR number.
+//   - Substring: case-insensitive match against title + author.
+//
+// Returns the same slice unfiltered when the input is empty.
+func filterPRs(prs []ghx.PRSummary, filter string) []ghx.PRSummary {
+	filter = strings.TrimSpace(filter)
+	if filter == "" {
+		return prs
+	}
+	out := make([]ghx.PRSummary, 0, len(prs))
+	if _, isNum := parsePositiveIntForView(filter); isNum {
+		for _, pr := range prs {
+			if strings.HasPrefix(strconv.Itoa(pr.Number), filter) {
+				out = append(out, pr)
+			}
+		}
+		return out
+	}
+	lower := strings.ToLower(filter)
+	for _, pr := range prs {
+		if strings.Contains(strings.ToLower(pr.Title), lower) ||
+			strings.Contains(strings.ToLower(pr.Author.Login), lower) {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+// parsePositiveIntForView mirrors parsePositiveInt in update.go.
+// Duplicated here to avoid a view→update package edge; tiny helper.
+func parsePositiveIntForView(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// truncateRight clips a string to width with no ellipsis. Used in
+// fixed-column rows where ellipsis would visually compete with
+// other markers (cursor `●`, etc.).
+func truncateRight(s string, width int) string {
+	if len(s) <= width {
+		return s
+	}
+	return s[:width]
+}
+
+// renderNewIssue mirrors renderNewPR for the issue picker. Same
+// layout and state-switch logic; different data type rendered.
+func (m *Model) renderNewIssue() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· issue"))
+	b.WriteString("\n\n")
+
+	b.WriteString("  Issue number or filter:\n  ")
+	b.WriteString(m.listInput.View())
+	b.WriteString("\n\n")
+
+	switch {
+	case m.newLoading && len(m.newIssues) == 0:
+		b.WriteString(subtleStyle.Render("  Loading issues from gh..."))
+		b.WriteString("\n")
+	case m.newLoadErr != nil:
+		b.WriteString("  ")
+		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.newLoadErr)))
+		b.WriteString("\n")
+	case len(m.newIssues) == 0:
+		b.WriteString(subtleStyle.Render("  No open issues found. Type a number to fetch any issue by ID."))
+		b.WriteString("\n")
+	default:
+		filtered := filterIssues(m.newIssues, m.listInput.Value())
+		if len(filtered) == 0 {
+			b.WriteString(subtleStyle.Render("  No issues match. Type a number to fetch by ID."))
+			b.WriteString("\n")
+		} else {
+			cursor := m.listCursor
+			if cursor >= len(filtered) {
+				cursor = len(filtered) - 1
+			}
+			top, end := pickerWindow(cursor, len(filtered), m.pickerVisibleRows())
+			for i := top; i < end; i++ {
+				iss := filtered[i]
+				marker := "    "
+				if i == cursor {
+					marker = "  ● "
+				}
+				line := fmt.Sprintf("%s#%-5d %-12s %s",
+					marker, iss.Number, truncateRight(iss.Author.Login, 12), iss.Title)
+				if i == cursor {
+					b.WriteString(selectedStyle.Render(line))
+				} else {
+					b.WriteString(line)
+				}
+				b.WriteString("\n")
+			}
+			if hint := renderScrollHint(top, end, len(filtered)); hint != "" {
+				b.WriteString(hint)
+				b.WriteString("\n")
+			}
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render(
+		"  enter to use issue  ·  ↑/↓ pick row  ·  esc back"))
+	return b.String()
+}
+
+// filterIssues mirrors filterPRs but for issues. Same numeric-prefix
+// + substring split.
+func filterIssues(issues []ghx.IssueSummary, filter string) []ghx.IssueSummary {
+	filter = strings.TrimSpace(filter)
+	if filter == "" {
+		return issues
+	}
+	out := make([]ghx.IssueSummary, 0, len(issues))
+	if _, isNum := parsePositiveIntForView(filter); isNum {
+		for _, iss := range issues {
+			if strings.HasPrefix(strconv.Itoa(iss.Number), filter) {
+				out = append(out, iss)
+			}
+		}
+		return out
+	}
+	lower := strings.ToLower(filter)
+	for _, iss := range issues {
+		if strings.Contains(strings.ToLower(iss.Title), lower) ||
+			strings.Contains(strings.ToLower(iss.Author.Login), lower) {
+			out = append(out, iss)
+		}
+	}
+	return out
+}
+
+// renderNewBranch is step 2d — the branch picker. Different from
+// PR/issue: branches don't have numeric IDs, so the "type number"
+// fast-path is gone. Filter + arrow-pick is the only flow. Local-
+// only branches get a "(local only)" tag so the user knows they're
+// using the --allow-local-equivalent path.
+func (m *Model) renderNewBranch() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· branch"))
+	b.WriteString("\n\n")
+
+	b.WriteString("  Filter:\n  ")
+	b.WriteString(m.listInput.View())
+	b.WriteString("\n\n")
+
+	switch {
+	case m.newLoading && len(m.newBranches) == 0:
+		b.WriteString(subtleStyle.Render("  Reading branches..."))
+		b.WriteString("\n")
+	case m.newLoadErr != nil:
+		b.WriteString("  ")
+		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.newLoadErr)))
+		b.WriteString("\n")
+	case len(m.newBranches) == 0:
+		b.WriteString(subtleStyle.Render("  No branches found in this repo."))
+		b.WriteString("\n")
+	default:
+		filtered := filterBranches(m.newBranches, m.listInput.Value())
+		if len(filtered) == 0 {
+			b.WriteString(subtleStyle.Render("  No branches match the filter."))
+			b.WriteString("\n")
+		} else {
+			cursor := m.listCursor
+			if cursor >= len(filtered) {
+				cursor = len(filtered) - 1
+			}
+			top, end := pickerWindow(cursor, len(filtered), m.pickerVisibleRows())
+			for i := top; i < end; i++ {
+				ref := filtered[i]
+				marker := "    "
+				if i == cursor {
+					marker = "  ● "
+				}
+				// Strip "origin/" for the workspace-conflict
+				// lookup so a remote-tracking ref that points at
+				// the same logical branch as a local checkout
+				// still shows the "in workspace X" tag.
+				bare := strings.TrimPrefix(ref, "origin/")
+				wsName, taken := m.branchInWorkspace(bare)
+
+				suffix := ""
+				core := marker + ref
+				switch {
+				case taken:
+					suffix = subtleStyle.Render("  (in workspace " + wsName + ")")
+					core = subtleStyle.Render(core)
+				case !strings.HasPrefix(ref, "origin/") &&
+					!branchHasOriginInline(m.newBranches, ref):
+					// Local-only branch — keep the existing tag.
+					suffix = subtleStyle.Render("  (local only)")
+				}
+				if i == cursor && !taken {
+					core = selectedStyle.Render(marker + ref)
+				}
+				b.WriteString(core)
+				b.WriteString(suffix)
+				b.WriteString("\n")
+			}
+			if hint := renderScrollHint(top, end, len(filtered)); hint != "" {
+				b.WriteString(hint)
+				b.WriteString("\n")
+			}
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render(
+		"  enter to check out  ·  ↑/↓ pick row  ·  esc back"))
+	return b.String()
+}
+
+// branchHasOriginInline mirrors update.go's branchHasOrigin for the
+// view layer. View doesn't import update, so we duplicate this tiny
+// helper rather than create a shared package edge for one function.
+func branchHasOriginInline(branches []string, bare string) bool {
+	target := "origin/" + bare
+	for _, b := range branches {
+		if b == target {
+			return true
+		}
+	}
+	return false
+}
+
+
+// renderConfirmDelete is the modal shown before tearing down a workspace.
+//
+// Two visual modes based on whether the v0.6 SafetyPreflight detected
+// hangs (uncommitted/unpushed/open-PR):
+//
+//   - Clean (no hangs): standard y/N prompt as in v0.5.
+//   - Hanging work: lists each hang as a bullet point in red, requires
+//     CAPITAL F to force. Lowercase y or any other key cancels — capital
+//     F mirrors the CLI's --force flag and makes the destructive intent
+//     explicit. The prompt copy spells out the consequences ("uncommitted
+//     work will be lost") so the user can't accidentally torch progress.
 func (m *Model) renderConfirmDelete() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("canopy rm"))
 	b.WriteString("\n\n")
+
+	if len(m.deleteHangs) > 0 {
+		b.WriteString(fmt.Sprintf("  ! Refusing to remove workspace %q — hanging work detected:\n\n", m.deleteTarget))
+		for _, h := range m.deleteHangs {
+			b.WriteString("    ")
+			b.WriteString(brokenStyle.Render("•"))
+			b.WriteString(" ")
+			b.WriteString(h)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(subtleStyle.Render("  Resolve the issues above, OR press the force key to remove anyway.\n"))
+		b.WriteString(subtleStyle.Render("  Forced removal still runs scripts.archive + tmux kill + git worktree remove.\n"))
+		b.WriteString(subtleStyle.Render("  Uncommitted work is lost permanently.\n"))
+		b.WriteString("\n")
+		b.WriteString("  ")
+		b.WriteString(brokenStyle.Render("F"))
+		b.WriteString(" (capital) to force-remove  ·  any other key to cancel")
+		return b.String()
+	}
+
 	b.WriteString(fmt.Sprintf("  Remove workspace %q?\n\n", m.deleteTarget))
 	b.WriteString(subtleStyle.Render("  This runs scripts.archive, kills the tmux session, removes the\n"))
 	b.WriteString(subtleStyle.Render("  git worktree, deletes the underlying branch, and drops the row\n"))
-	b.WriteString(subtleStyle.Render("  from state.json. Uncommitted work is lost — push first if needed.\n"))
+	b.WriteString(subtleStyle.Render("  from state.json.\n"))
 	b.WriteString("\n")
 	b.WriteString("  ")
 	b.WriteString(brokenStyle.Render("y"))
@@ -167,9 +672,24 @@ func (m *Model) renderBusyView() string {
 	b.WriteString("\n\n")
 
 	if !m.busyDone {
-		b.WriteString(subtleStyle.Render("  Working — this may take a few seconds while scripts.setup runs."))
-		b.WriteString("\n\n")
-		b.WriteString(subtleStyle.Render("  (The TUI is responsive; canopy is doing the heavy lifting in a goroutine.)"))
+		// Live output: scripts.setup writes to a buffer that the
+		// progressTick drain into m.busyOutput every ~150ms. While
+		// the buffer is empty (very early, before scripts produce
+		// anything) we show the static hint; once output arrives it
+		// streams here as it would in a regular shell.
+		if m.busyOutput == "" {
+			b.WriteString(subtleStyle.Render("  Working — this may take a few seconds while scripts.setup runs."))
+			b.WriteString("\n\n")
+			b.WriteString(subtleStyle.Render("  (The TUI is responsive; canopy is doing the heavy lifting in a goroutine.)"))
+			return b.String()
+		}
+		// Tail the streaming output. lipgloss has no built-in tail
+		// helper; we just print everything and rely on terminal
+		// scrollback for long runs. Most scripts.setup output is
+		// short (~20-100 lines).
+		b.WriteString(m.busyOutput)
+		b.WriteString("\n")
+		b.WriteString(subtleStyle.Render("  ...running"))
 		return b.String()
 	}
 

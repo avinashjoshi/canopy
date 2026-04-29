@@ -40,7 +40,7 @@ var (
 	ErrInvalid = errors.New("config: canopy.json is invalid")
 )
 
-// Scripts holds the three script paths that define a project's lifecycle.
+// Scripts holds the script paths that define a project's lifecycle.
 // All paths are relative to the project root (the directory containing
 // canopy.json) and must be executable files.
 type Scripts struct {
@@ -51,6 +51,40 @@ type Scripts struct {
 	Run string `json:"run"`
 	// Archive runs when canopy removes a workspace (DB drop, server kill).
 	Archive string `json:"archive"`
+	// Agent is the v0.6 power-user override: when set, canopy spawns
+	// this script in the agent pane instead of using the built-in
+	// launcher dispatch (internal/agent/launchers.go) keyed on Agent.Type.
+	// The script receives CANOPY_AGENT_BRIEFING (the assembled briefing
+	// text inline) plus the standard CANOPY_* env vars. Empty by default —
+	// most users get the right behavior from Agent.Type alone.
+	Agent string `json:"agent,omitempty"`
+}
+
+// Agent holds the v0.6 agent-launcher config: which agent to spawn and
+// what project-specific briefing to include in its system prompt.
+//
+// Agent.Type picks the built-in launcher from internal/agent/launchers.go.
+// Default "claude" — keeps existing canopy.json files working unchanged.
+//
+// Briefing vs BriefingFile: the inline string is convenient for short
+// project notes; the file path is the right shape for longer briefings
+// that benefit from being committed and edited as proper markdown. If
+// both are set, the file wins (with a warning logged at canopy.json load
+// time). Empty Briefing + empty BriefingFile means "no project-specific
+// briefing" — the canopy lifecycle conventions still get injected.
+type Agent struct {
+	// Type picks the built-in launcher. Known values: "claude", "codex",
+	// "opencode", "aider". Default "claude". Unknown → error at load time.
+	Type string `json:"type,omitempty"`
+
+	// Briefing is inline project-specific text appended to the canopy
+	// universal lifecycle conventions in the AGENT.md briefing.
+	Briefing string `json:"briefing,omitempty"`
+
+	// BriefingFile is a path (relative to project root) to a .md file
+	// whose contents are appended to the briefing. Wins over Briefing
+	// if both are set.
+	BriefingFile string `json:"briefing_file,omitempty"`
 }
 
 // Config is the parsed canopy.json plus metadata about where it was found.
@@ -60,6 +94,11 @@ type Scripts struct {
 type Config struct {
 	// Scripts comes from the JSON.
 	Scripts Scripts `json:"scripts"`
+
+	// Agent comes from the JSON. Empty block (no agent.type set) is
+	// treated as Type="claude" by validate(), so existing canopy.json
+	// files without an agent block keep working unchanged.
+	Agent Agent `json:"agent,omitempty"`
 
 	// ProjectRoot is set by Load (not from the JSON). Absolute path to the
 	// directory containing canopy.json.
@@ -155,17 +194,31 @@ func DiscoverAndLoad(startDir string) (*Config, error) {
 	return Load(path)
 }
 
-// validate is a no-op for canopy.json today. All three script fields are
-// optional: a canopy.json with `{}` or `{"scripts": {}}` is fully valid
-// and means "no setup hook, no server command, no archive hook" — canopy
-// will still create the worktree and tmux session, just without running
-// anything user-supplied. Future schema additions (layout, env, etc.)
-// will live here when they grow up to need real validation.
+// validate normalizes the loaded config and surfaces user-fixable
+// problems. Today it:
+//   - Defaults Agent.Type to "claude" when unset (back-compat for
+//     canopy.json files that predate v0.6).
+//   - Logs a warning if both Briefing and BriefingFile are set
+//     (BriefingFile wins; this is documented but worth alerting).
 //
-// We deliberately do NOT check that script paths exist or are executable.
-// The runner's error at execution time is more precise ("script not
-// found" vs "validation failed"), and tools like `canopy init --with-scripts`
-// might generate the canopy.json before the scripts exist on disk.
+// We deliberately do NOT check that script paths or briefing files
+// exist or are executable here. The runner's error at execution time
+// is more precise ("script not found" vs "validation failed"), and
+// tools like `canopy init --with-scripts` might generate the canopy.json
+// before the scripts exist on disk.
+//
+// Agent.Type is NOT validated against the known launcher map here —
+// that check lives in internal/agent.ResolveLauncher, which is the
+// single source of truth for which agents canopy supports. Keeping
+// the check there means new agents land via one PR (add a launcher),
+// not two (add a launcher + update config validation).
 func validate(c *Config) error {
+	if c.Agent.Type == "" {
+		c.Agent.Type = "claude"
+	}
+	if c.Agent.Briefing != "" && c.Agent.BriefingFile != "" {
+		log.Warn("config.agent: both briefing and briefing_file set; file wins",
+			"briefing_file", c.Agent.BriefingFile)
+	}
 	return nil
 }

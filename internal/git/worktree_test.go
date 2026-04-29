@@ -156,6 +156,92 @@ func TestRemove_PathNotFound(t *testing.T) {
 	}
 }
 
+// TestAddExisting_CheckoutExistingBranch verifies that AddExisting can
+// place an existing branch into a new worktree without re-creating it.
+// canopy new --branch / --pr rely on this path so they can pick up
+// upstream branches as workspaces.
+func TestAddExisting_CheckoutExistingBranch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping integration test")
+	}
+
+	repo := newScratchRepo(t)
+	// Create a branch in the source repo.
+	if out, err := exec.Command("git", "-C", repo, "branch", "feature/oauth").CombinedOutput(); err != nil {
+		t.Fatalf("create branch: %v\n%s", err, out)
+	}
+
+	// Now add it to a worktree via AddExisting (no -b).
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := canopygit.AddExisting(context.Background(), repo, "feature/oauth", wt); err != nil {
+		t.Fatalf("AddExisting: %v", err)
+	}
+	// The worktree should be on the right branch.
+	out, err := exec.Command("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "feature/oauth" {
+		t.Errorf("worktree HEAD = %q; want feature/oauth", got)
+	}
+}
+
+// TestAdd_TrackingBranch_FromOriginRef: regression test for the v0.6
+// detached-HEAD bug.
+//
+// Bug recap: the PR-checkout flow used `git worktree add <path> origin/<head>`
+// which produces a detached HEAD because git treats `origin/<head>`
+// as a commit-ish, not a branch. The fix uses `-b <head>` with
+// `origin/<head>` as the start point, creating a proper local branch.
+//
+// This test forges that scenario: forge an origin/feature-x ref in
+// the source repo, then call Add(repo, "feature-x", wt, "origin/feature-x").
+// The resulting worktree must be on a real branch named "feature-x",
+// not a detached HEAD.
+func TestAdd_TrackingBranch_FromOriginRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping integration test")
+	}
+
+	repo := newScratchRepo(t)
+	// Forge a remote-tracking ref pointing at main's tip.
+	if out, err := exec.Command("git", "-C", repo, "update-ref",
+		"refs/remotes/origin/feature-x", "main").CombinedOutput(); err != nil {
+		t.Fatalf("update-ref: %v\n%s", err, out)
+	}
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := canopygit.Add(context.Background(), repo, "feature-x", wt, "origin/feature-x"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// HEAD must be on a real branch, not detached.
+	out, err := exec.Command("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "feature-x" {
+		t.Errorf("worktree HEAD = %q; want feature-x (detached HEAD regression?)", got)
+	}
+}
+
+// TestRefExists covers the rev-parse-based ref probe used by canopy
+// new --branch to validate user-supplied branches before kicking off
+// a worktree.
+func TestRefExists(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping integration test")
+	}
+	repo := newScratchRepo(t)
+	// main was created at init.
+	if !canopygit.RefExists(context.Background(), repo, "main") {
+		t.Errorf("RefExists(main) = false; want true")
+	}
+	if canopygit.RefExists(context.Background(), repo, "no-such-branch") {
+		t.Errorf("RefExists(no-such-branch) = true; want false")
+	}
+}
+
 // newScratchRepo creates a brand-new git repo in a temp dir with one empty
 // initial commit (worktree-add requires at least one commit to know what
 // HEAD points at). Returns the absolute path. Cleanup is automatic via t.TempDir.

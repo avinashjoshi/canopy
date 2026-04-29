@@ -4,37 +4,72 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
-// newWorkspaceFlags holds the parsed --name and --no-attach values.
-// Package-level rather than per-Cmd so they're easy to test/inspect.
+// newWorkspaceFlags holds parsed CLI flags. Package-level so they're
+// easy to test/inspect. v0.6 added --pr / --issue / --branch /
+// --allow-local for the source-variant flows; the original --name
+// and --no-attach still work as before.
 var newWorkspaceFlags struct {
 	name     string
 	noAttach bool
+	pr       int    // --pr <num>: check out this PR's branch into a workspace
+	issue    int    // --issue <num>: create workspace, briefing references this issue
+	branch   string // --branch <name>: check out an existing branch
+	allowLoc bool   // --allow-local: with --branch, allow non-existent on origin
 }
 
 // newCmd returns the `canopy new` cobra subcommand.
 //
-// Usage:
+// Source variants (mutually exclusive):
 //
-//	canopy new                  # generates a random name (e.g. bold-falcon)
-//	canopy new --name fix-bug   # explicit name
-//	canopy new --no-attach      # create but don't auto-attach to tmux
+//	canopy new                       # fresh workspace, random name
+//	canopy new --name fix-bug        # fresh, explicit name
+//	canopy new --pr 42               # check out PR #42 into a new workspace
+//	canopy new --issue 17            # implementation workspace seeded with issue body
+//	canopy new --branch feat/x       # check out existing branch from origin
+//	canopy new --branch feat/x --allow-local
+//	                                 # check out existing local-only branch
 func newCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "new",
 		Short: "Create a new workspace and attach to its tmux session",
 		Long: "Generates a random adjective-noun workspace name (or uses --name),\n" +
 			"creates a git worktree, runs scripts.setup, builds the standard 4-pane\n" +
-			"tmux session (nvim / claude / shell / scripts.run), and attaches.",
+			"tmux session (nvim / claude / shell / scripts.run), and attaches.\n\n" +
+			"Source variants (mutually exclusive):\n" +
+			"  --pr <num>     check out PR <num>'s branch (briefing includes PR body)\n" +
+			"  --issue <num>  fresh branch off main; briefing seeded with issue body\n" +
+			"  --branch <n>   check out existing branch <n> from origin\n" +
+			"  --allow-local  with --branch, allow checkout of a local-only branch",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mgr, err := loadManager()
 			if err != nil {
 				return err
 			}
-
 			ctx := cmd.Context()
-			ws, err := mgr.Create(ctx, newWorkspaceFlags.name, cmd.OutOrStdout(), cmd.ErrOrStderr())
+
+			spec := workspace.SourceSpec{
+				PR:         newWorkspaceFlags.pr,
+				Issue:      newWorkspaceFlags.issue,
+				Branch:     newWorkspaceFlags.branch,
+				AllowLocal: newWorkspaceFlags.allowLoc,
+			}
+			opts, suggestedName, err := mgr.ResolveSource(ctx, spec)
+			if err != nil {
+				return err
+			}
+			// Pick the workspace name. Explicit --name beats the
+			// source-derived suggestion, which beats namegen (the
+			// empty string case, handled inside Manager.Create).
+			name := newWorkspaceFlags.name
+			if name == "" {
+				name = suggestedName
+			}
+
+			ws, err := mgr.Create(ctx, name, opts, cmd.OutOrStdout(), cmd.ErrOrStderr())
 			if err != nil {
 				// Even on failure, print the workspace summary if we have one
 				// so the user knows where to find logs / what to clean up.
@@ -76,5 +111,13 @@ func newCmd() *cobra.Command {
 		"explicit workspace name (default: random adjective-noun)")
 	cmd.Flags().BoolVar(&newWorkspaceFlags.noAttach, "no-attach", false,
 		"don't auto-attach to the tmux session after creation")
+	cmd.Flags().IntVar(&newWorkspaceFlags.pr, "pr", 0,
+		"check out the given PR number into a new workspace (uses gh)")
+	cmd.Flags().IntVar(&newWorkspaceFlags.issue, "issue", 0,
+		"seed the briefing with the given issue's body (uses gh)")
+	cmd.Flags().StringVar(&newWorkspaceFlags.branch, "branch", "",
+		"check out an existing branch (must exist on origin unless --allow-local)")
+	cmd.Flags().BoolVar(&newWorkspaceFlags.allowLoc, "allow-local", false,
+		"with --branch, allow a branch that exists only locally (no origin/<name>)")
 	return cmd
 }

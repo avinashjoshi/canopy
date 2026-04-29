@@ -52,6 +52,16 @@ type GlobalRow struct {
 	Path        string // worktree dir on disk (workspace rows); empty for main rows
 	TmuxSession string
 	Alive       bool
+
+	// Hints are v0.6 lifecycle detector results for this row, populated
+	// when the caller wants the row decorated with badges (the global
+	// TUI). Empty when the caller skips detection (e.g., canopy ls --all
+	// from the CLI prints rows without hints to keep the tabwriter
+	// output narrow).
+	//
+	// Populated by BuildGlobalRowsWithHints; the older BuildGlobalRows
+	// leaves this empty for callers that don't need detector decoration.
+	Hints []Hint
 }
 
 // BuildGlobalRows is the single source of truth for the cross-project
@@ -124,28 +134,36 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 	for _, root := range roots {
 		basename := filepath.Base(root)
 
-		// Main row (synthetic) if the <basename>-main tmux session is
-		// alive. The session name uses the basename, not the canonical
+		// Main row (synthetic) — always included so each project shows
+		// its main entry regardless of whether `canopy main` has been
+		// run yet. Alive reflects the actual session state; the
+		// activate handler decides what enter does (attach if alive,
+		// otherwise surface a "run canopy main" hint).
+		//
+		// Earlier versions gated this on session liveness, but that
+		// hid the existence of a main option from users who hadn't
+		// started one yet — confusing UX since you couldn't tell
+		// from the TUI whether a project HAD a main concept at all.
+		// The session name uses the basename, not the canonical
 		// root, because tmux session names need to stay short and
-		// human-readable. The basename-uniqueness invariant enforced at
-		// canopy init prevents same-name collisions in the tmux layer.
+		// human-readable. The basename-uniqueness invariant enforced
+		// at canopy init prevents same-name collisions.
 		mainSession := safeMainSessionName(basename)
-		if alive, _ := probe.HasSession(ctx, mainSession); alive {
-			row := GlobalRow{
-				ProjectRoot: root,
-				Project:     basename,
-				IsMain:      true,
-				Name:        "(main)",
-				Branch:      "—",
-				Status:      "main",
-				TmuxSession: mainSession,
-				Alive:       true,
-			}
-			if meta, ok := s.Projects[root]; ok {
-				row.Port = meta.PortBase
-			}
-			rows = append(rows, row)
+		alive, _ := probe.HasSession(ctx, mainSession)
+		mainRow := GlobalRow{
+			ProjectRoot: root,
+			Project:     basename,
+			IsMain:      true,
+			Name:        "(main)",
+			Branch:      "—",
+			Status:      "main",
+			TmuxSession: mainSession,
+			Alive:       alive,
 		}
+		if meta, ok := s.Projects[root]; ok {
+			mainRow.Port = meta.PortBase
+		}
+		rows = append(rows, mainRow)
 
 		// Workspace rows.
 		for _, w := range byProject[root] {

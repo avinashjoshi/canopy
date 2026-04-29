@@ -211,7 +211,33 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.6 — Agent lifecycle wrapper + detectors
+## v0.6 — Agent lifecycle wrapper + detectors — PARTIAL (2026-04-28)
+
+**Shipped on `agent-lifecycle` branch:**
+- Agent launcher map (`internal/agent/launchers.go`) for claude/codex/opencode/aider, picked via `agent.type` in canopy.json. Backwards compat: empty agent block defaults to claude.
+- Briefing assembly (`internal/agent/briefing.go`) with the hybrid fresh-vs-resume strategy. Full briefing on `AgentLaunchCount==0`; hints-only delta on resume; empty (no `--append-system-prompt` flag) on resume + no active hints. Briefing rebuilt fresh on every agent launch via in-memory assembly + temp file at `~/.canopy/tmp/`. SourceKind variants (fresh/pr/issue/branch) with prompt-injection delimiter framing.
+- Detector framework (`internal/lifecycle/`) with three detectors: rename_suggested (cheap, runs every TUI tick), shipped (cheap, every tick), pr_status (10min cache, runs only on canopy reconcile + manual `r`). All run in parallel via tea.Cmd goroutines.
+- Hint badges in the global TUI: `↻ rename` (amber), `✓ shipped` (green bold), `PR` / `✓ PR` (cyan). Pressing enter on a row with `shipped` hint routes through `OnCloseOut` instead of attaching.
+- `canopy rm` smart safety pre-flight: refuses on uncommitted / unpushed / open-PR unless `--force`. Orphan workspaces (worktree dir gone) get a graceful pass-through, NOT a block.
+- State schema additions: `Workspace.AgentLaunchCount` (incremented on Create + Resurrect), `Workspace.SourceKind` (immutable). Both omitempty.
+- Config schema additions: `agent.{type, briefing, briefing_file}`. `scripts.agent` retained as power-user override.
+- O1 (claude --continue + --append-system-prompt) verified empirically.
+
+**Refined after first dogfood (2026-04-28):**
+- Removed the OnCloseOut routing entirely. Enter on a shipped/PR-merged row attaches normally; deletion stays a manual `canopy rm` step. The `auto_close_shipped` config flag was reverted — destructive auto-rm was the wrong shape.
+- `pr_status` moved into the cheap-tick set (RunFast). With the 10min cache, the API budget concern was overstated; running it on every refresh means PR state shows immediately rather than only on `r`.
+- Badge precedence: PR state wins when present. The local "shipped" detector now renders as `✓ shipped (local)` and is hidden when a `pr_status` hint is also active for the same workspace. PR badges decode the message into open/approved/changes/merged/closed colored variants.
+- `detectShipped` now falls back to local `<default>` when there's no remote, so purely-local repos surface a "shipped" signal without needing a GitHub remote.
+
+**Shipped in agent-lifecycle follow-ups:**
+- `canopy new --pr <num>` / `--issue <num>` / `--branch <name>` / `--allow-local` flags. PR flow handles same-repo PRs (checkout origin/<head>) and cross-repo / fork PRs (fetch via `refs/pull/<n>/head:canopy/pr-<n>`). Issue flow seeds the briefing with the issue body. --branch checks out an existing branch, requiring origin/<name> unless --allow-local. SourceContext (PR/issue body) flows through state.Workspace into the briefing wrapped in a `<<<CANOPY_SOURCE_DATA>>>` data fence.
+- `auto_close_shipped` flag in `~/.canopy/config.json` for the auto-close-on-merge UX with 5s cancel window. v0.6 currently surfaces a hint (`canopy rm <name>`) instead of auto-running.
+
+201 tests across 14 packages. Smoke verified: build clean, all tests green including `-tags=e2e`.
+
+---
+
+## v0.6 — Agent lifecycle wrapper + detectors (original entry, kept for context)
 
 **What:** Wrap every agent session with canopy-assembled workspace context + active lifecycle detector hints so any coding agent (Claude, Codex, OpenCode, aider) boots knowing where it is in the feature lifecycle. Seven accepted scope items:
 

@@ -23,6 +23,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/workspace"
@@ -37,6 +39,7 @@ type Row struct {
 	IsMain      bool         // true for the synthetic (main) row
 	Name        string       // "(main)" or the workspace name
 	Branch      string       // "—" for main, the branch name otherwise
+	Path        string       // worktree path; empty for main / orphan rows
 	Status      state.Status // for main, the literal "main"; otherwise the workspace status
 	Port        int          // 0 means "no port to show" -> renders as "—"
 	TmuxSession string
@@ -46,20 +49,57 @@ type Row struct {
 	// canopy recognized the failure signature. Rendered as a
 	// "hint:" line under the table when the cursor sits on this row.
 	LastErrorHint string
+	// Hints are the v0.6 lifecycle detector results (rename / shipped
+	// / pr_status). Loaded asynchronously in a second refresh phase
+	// so the table renders immediately without waiting for the gh
+	// shellout. Empty slice on first render; populated by rowHintsMsg
+	// after each per-row detector returns.
+	Hints []state.Hint
 }
 
-// viewMode tracks which screen the TUI is showing. listMode is the
-// default table; newMode is the new-workspace text input;
+// viewMode tracks which screen the TUI is showing.
+//
+// listMode is the default table.
+//
+// The new-workspace flow is a two-step picker (canopy convention,
+// lazygit-flavored):
+//
+//   - newPickerMode: variant chooser. Single-key shortcuts pick a
+//     branch direction (Fresh / PR / Issue / Branch). Self-evident,
+//     no syntax to recall.
+//   - newFreshMode: name input for the "blank workspace" path.
+//   - newPRMode / newIssueMode / newBranchMode: per-variant sub-modals
+//     that load live data (gh / git) and let the user pick from a
+//     filtered list.
+//
+// Esc steps back one level; from a sub-modal back to the picker, from
+// the picker back to listMode. Never exits canopy outright.
+//
 // confirmDeleteMode is the y/N prompt before tearing down a workspace;
 // busyMode is the wait/output screen during a long-running operation.
 type viewMode int
 
 const (
 	listMode viewMode = iota
-	newMode
+	newPickerMode
+	newFreshMode
+	newPRMode
+	newIssueMode
+	newBranchMode
 	confirmDeleteMode
 	busyMode
 )
+
+// inNewFlow reports whether the current mode is any step of the
+// new-workspace flow. Used by Update to route messages to the right
+// per-mode handler without listing all five constants every time.
+func (m viewMode) inNewFlow() bool {
+	return m == newPickerMode ||
+		m == newFreshMode ||
+		m == newPRMode ||
+		m == newIssueMode ||
+		m == newBranchMode
+}
 
 // busyOpKind identifies which long-running operation is currently in
 // busyMode. The View uses this to render the right success message
@@ -92,11 +132,32 @@ type Model struct {
 	showHelp bool
 	err      error // last operational error to surface; cleared on next refresh
 
-	// New-workspace modal (mode == newMode).
-	nameInput textinput.Model
+	// New-workspace flow state.
+	//
+	// Step 1 (newPickerMode): newPickerCursor selects which variant
+	// to launch. 0..3 maps to fresh / pr / issue / branch.
+	//
+	// Step 2 (newFreshMode): nameInput captures the optional workspace
+	// name. Empty → namegen picks a random one.
+	//
+	// Step 2b/c (newPRMode, newIssueMode): list-with-filter pickers.
+	// listInput is the number-or-filter input; listCursor is the
+	// arrow-selected index into the (filtered) list. newPRs / newIssues
+	// hold the live data once the async loader returns.
+	newPickerCursor int
+	nameInput       textinput.Model
+
+	listInput   textinput.Model
+	listCursor  int
+	newLoading  bool
+	newLoadErr  error
+	newPRs      []ghx.PRSummary
+	newIssues   []ghx.IssueSummary
+	newBranches []string // local + remote branches; remote prefixed "origin/"
 
 	// Confirm-delete modal (mode == confirmDeleteMode).
-	deleteTarget string // workspace name pending removal
+	deleteTarget string   // workspace name pending removal
+	deleteHangs  []string // v0.6 safety check results — populated when 'd' is pressed; non-empty triggers the force-required path in renderConfirmDelete + handleConfirmDeleteKey
 
 	// Long-running operation in progress (mode == busyMode). Reused by
 	// Create, Remove, and Retry flows.
@@ -118,6 +179,31 @@ type Model struct {
 	fromGlobal bool
 }
 
+// branchInWorkspace reports whether a branch name is currently
+// checked out by an existing canopy workspace in this project. Used
+// by the PR + branch pickers to tag conflicting rows so the user
+// doesn't try to create a duplicate (which would fail at git-
+// worktree-add time anyway with a confusing error).
+//
+// Match is exact-string. Caller is responsible for normalizing the
+// branch name (stripping "origin/" prefix etc.) before passing it
+// in. The main row is excluded — its branch is "—" sentinel and
+// shouldn't shadow real workspaces.
+func (m *Model) branchInWorkspace(branch string) (string, bool) {
+	if branch == "" {
+		return "", false
+	}
+	for _, r := range m.rows {
+		if r.IsMain {
+			continue
+		}
+		if r.Branch == branch {
+			return r.Name, true
+		}
+	}
+	return "", false
+}
+
 // New constructs a Model. The caller must already have a workspace.Manager
 // (loaded via cmd/canopy's loadManager helper). Initial rows are empty;
 // the first tea.Cmd returned by Init() loads them.
@@ -126,11 +212,18 @@ func New(mgr *workspace.Manager) *Model {
 	ti.Placeholder = "leave blank for a random name"
 	ti.CharLimit = 60
 	ti.Width = 40
+
+	li := textinput.New()
+	li.Placeholder = "type to filter, or a number to fetch by ID"
+	li.CharLimit = 80
+	li.Width = 60
+
 	return &Model{
 		mgr:         mgr,
 		tc:          mgr.Tmux,
 		projectName: mgr.Cfg.Project,
 		nameInput:   ti,
+		listInput:   li,
 		mode:        listMode,
 		fromGlobal:  os.Getenv("CANOPY_FROM_GLOBAL") == "1",
 	}
@@ -185,22 +278,29 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client) tea.Cmd {
 
 		rows := []Row{}
 
-		// Main row: present iff the session is alive.
+		// Main row (synthetic) — always present so the user can see
+		// the project has a main concept and reach for `canopy main`
+		// even when no session is active. Alive reflects whether the
+		// tmux session is currently up; the activate handler decides
+		// what enter does (attach if alive, "run canopy main" hint
+		// otherwise).
 		mainSession := tmux.SafeName(mgr.Cfg.Project) + "-main"
-		if alive, _ := tc.HasSession(ctx, mainSession); alive {
-			r := Row{
-				IsMain:      true,
-				Name:        "(main)",
-				Branch:      "—",
-				Status:      "main", // not one of the 5 workspace states
-				TmuxSession: mainSession,
-				Alive:       true,
-			}
-			if meta, ok := st.Projects[mgr.Cfg.Project]; ok {
-				r.Port = meta.PortBase
-			}
-			rows = append(rows, r)
+		alive, _ := tc.HasSession(ctx, mainSession)
+		r := Row{
+			IsMain:      true,
+			Name:        "(main)",
+			Branch:      "—",
+			Status:      "main", // not one of the 5 workspace states
+			TmuxSession: mainSession,
+			Alive:       alive,
 		}
+		if meta, ok := st.Projects[mgr.Cfg.Project]; ok {
+			// ProjectRoot key — matches BuildGlobalRows. The basename
+			// key path (legacy) is also tolerated by st.Projects
+			// readers, so this lookup works for v1 and v2 state.
+			r.Port = meta.PortBase
+		}
+		rows = append(rows, r)
 
 		// Workspace rows.
 		for _, w := range workspaces {
@@ -209,6 +309,7 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client) tea.Cmd {
 				IsMain:        false,
 				Name:          w.Name,
 				Branch:        w.Branch,
+				Path:          w.Path,
 				Status:        w.Status,
 				Port:          w.Port,
 				TmuxSession:   w.TmuxSession,
@@ -218,4 +319,44 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client) tea.Cmd {
 		}
 		return rowsLoadedMsg{rows: rows}
 	}
+}
+
+// rowHintsMsg carries a single workspace's lifecycle detector result.
+// Update merges it into the matching Row by Name. Identified by name
+// rather than slice index so a concurrent state mutation doesn't
+// strand the hint update on the wrong row.
+type rowHintsMsg struct {
+	name  string
+	hints []state.Hint
+}
+
+// loadRowHintsCmds returns a tea.Batch of per-row hint-loading cmds.
+// Each runs lifecycle.RunFast for one workspace in its own goroutine
+// and emits a rowHintsMsg when done. tea.Batch dispatches them
+// concurrently, so cold-start gh latency parallelizes across rows.
+//
+// Skips main rows and rows with empty Path. Mirror of GlobalModel's
+// loadHintsCmds — same shape, same rationale, two-phase rendering.
+func loadRowHintsCmds(rows []Row, projectRoot string) tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(rows))
+	for _, r := range rows {
+		if r.IsMain || r.Path == "" {
+			continue
+		}
+		row := r // capture by value
+		cmds = append(cmds, func() tea.Msg {
+			ws := state.Workspace{
+				Name:        row.Name,
+				Branch:      row.Branch,
+				Path:        row.Path,
+				ProjectRoot: projectRoot,
+				Status:      row.Status,
+			}
+			return rowHintsMsg{
+				name:  row.Name,
+				hints: lifecycle.RunFast(context.Background(), ws),
+			}
+		})
+	}
+	return tea.Batch(cmds...)
 }

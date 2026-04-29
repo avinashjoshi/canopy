@@ -29,12 +29,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/clog"
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/hooks"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/namegen"
 	"github.com/avinashjoshi/canopy/internal/port"
 	"github.com/avinashjoshi/canopy/internal/settings"
@@ -174,12 +177,58 @@ func canopyHome() (string, error) {
 	return filepath.Join(home, ".canopy"), nil
 }
 
+// CreateOptions configures Manager.Create's source variant. Zero-value
+// means "fresh" — random name, branch off origin/<default>, no source
+// metadata. The opts struct lets canopy new --pr / --issue / --branch
+// thread custom branches and source-context briefings through Create
+// without a separate per-variant API.
+//
+// Mutual exclusion: at most one of SourceKind ("pr", "issue", "branch")
+// should be set. The CLI gates this; Create itself doesn't enforce
+// because internal callers may legitimately compose options that don't
+// fit a single SourceKind.
+type CreateOptions struct {
+	// SourceKind ends up on the persisted Workspace row and drives
+	// the briefing variant. Empty/"fresh" → ordinary new-workspace
+	// flow. "pr"/"issue"/"branch" — see SourceContext below for the
+	// corresponding briefing data.
+	SourceKind string
+
+	// SourceContext is the body text rendered into the agent
+	// briefing's "Source context" section, wrapped in data-not-
+	// instructions delimiters. For PRs/issues this is the upstream
+	// body; for branch this is empty and the agent falls back to the
+	// "read git log" instruction in sourceKindBlock.
+	SourceContext string
+
+	// Branch overrides the workspace's local branch name. When empty,
+	// Create defaults to the workspace name (legacy v0 behavior).
+	// Set this for canopy new --pr (use the PR's headRefName) or
+	// canopy new --branch (use the supplied branch).
+	Branch string
+
+	// StartPoint overrides the git ref that the new worktree branches
+	// from. When empty, Create defaults to origin/<default> (current
+	// behavior). Set to a specific ref ("origin/feature/oauth",
+	// "canopy/pr-42") to base the worktree on existing work.
+	StartPoint string
+
+	// CreateBranch controls whether `git worktree add` should create
+	// a new branch (-b) or check out an existing one. true = create
+	// new (-b Branch StartPoint); false = check out existing
+	// (StartPoint must already be a branch ref). Defaults to true to
+	// preserve legacy behavior for callers that don't set it.
+	CreateBranch bool
+}
+
 // Create runs the full workspace setup lifecycle. name may be empty to
-// have the manager generate a random name via namegen.
+// have the manager generate a random name via namegen. opts customizes
+// source variant + branch routing; zero-value opts gives the ordinary
+// "fresh workspace off origin/<default>" flow.
 //
 // Output from scripts.setup streams to stdout/stderr live so the caller
 // (CLI or TUI) can show progress.
-func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Writer) (*state.Workspace, error) {
+func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, stdout, stderr io.Writer) (*state.Workspace, error) {
 	if stdout == nil || stderr == nil {
 		return nil, fmt.Errorf("workspace.Create: stdout and stderr writers required")
 	}
@@ -188,6 +237,12 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 	// the name (if missing), allocates a port, and inserts a row with
 	// status=setting_up. After this returns, OTHER processes can see the
 	// workspace exists and won't pick the same port.
+	//
+	// nameWasEmpty captures whether the caller passed "" before namegen
+	// runs — used downstream to flag the workspace as auto-named, which
+	// in turn drives the briefing's rename directive.
+	nameWasEmpty := name == ""
+
 	var ws state.Workspace
 	err := m.Store.WithLock(func(s *state.State) error {
 		// If no name supplied, generate one. Skip names already in state.
@@ -255,20 +310,42 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		// matches typical git/repo conventions) but tmux.SafeName for the
 		// tmux session name (must NOT contain dots or colons, which are
 		// tmux's target-syntax separators).
-		safeBranch := git.Sanitize(name)
-		wsPath := filepath.Join(m.workspacesDir(), safeBranch)
-		session := tmux.SafeName(m.Cfg.Project) + "-" + tmux.SafeName(safeBranch)
+		// Branch defaults to the workspace name (the v0 "branch ==
+		// name" rule). canopy new --pr / --branch override this so the
+		// local branch matches the PR head or the user-supplied name.
+		branch := name
+		if opts.Branch != "" {
+			branch = opts.Branch
+		}
+		safeName := git.Sanitize(name)
+		wsPath := filepath.Join(m.workspacesDir(), safeName)
+		// Tmux session keys off the workspace NAME (canonical canopy
+		// identifier), not the branch — same workspace dir maps to one
+		// tmux session even if the branch is renamed later.
+		session := tmux.SafeName(m.Cfg.Project) + "-" + tmux.SafeName(safeName)
+
+		// Default SourceKind to "fresh" so v0.6+ rows always carry an
+		// explicit kind (older "fresh" was implicit). SourceContext
+		// stays whatever the caller passed; empty for fresh/branch,
+		// non-empty for pr/issue.
+		sourceKind := opts.SourceKind
+		if sourceKind == "" {
+			sourceKind = "fresh"
+		}
 
 		ws = state.Workspace{
-			Project:     m.Cfg.Project,     // legacy basename, still written for backward compat
-			ProjectRoot: m.Cfg.ProjectRoot, // v2 authoritative key
-			Name:        name,
-			Branch:      name,
-			Path:        wsPath,
-			TmuxSession: session,
-			Port:        p,
-			Status:      state.StatusSettingUp,
-			CreatedAt:   time.Now().UTC(),
+			Project:           m.Cfg.Project,     // legacy basename, still written for backward compat
+			ProjectRoot:       m.Cfg.ProjectRoot, // v2 authoritative key
+			Name:              name,
+			Branch:            branch,
+			Path:              wsPath,
+			TmuxSession:       session,
+			Port:              p,
+			Status:            state.StatusSettingUp,
+			CreatedAt:         time.Now().UTC(),
+			SourceKind:        sourceKind,
+			SourceContext:     opts.SourceContext,
+			NameAutoGenerated: nameWasEmpty,
 		}
 		return s.Add(ws)
 	})
@@ -286,13 +363,16 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 	// the buffer feeds the auto-hint registry.
 	var capturedStderr bytes.Buffer
 	teedStderr := io.MultiWriter(stderr, &capturedStderr)
-	setupErr := m.runSetup(ctx, &ws, stdout, teedStderr)
+	setupErr := m.runSetup(ctx, &ws, opts, stdout, teedStderr)
 	if setupErr != nil {
 		_ = m.markBroken(&ws, setupErr, capturedStderr.Bytes())
 		return &ws, setupErr
 	}
 
-	// Phase 3: flip to ready under the lock.
+	// Phase 3: flip to ready under the lock + bump AgentLaunchCount
+	// (the agent pane was just spawned in buildSession's runSetup).
+	// AgentLaunchCount drives the v0.6 hybrid briefing strategy:
+	// count==0 → fresh briefing; count>0 → delta-only on the next launch.
 	err = m.Store.WithLock(func(s *state.State) error {
 		row, err := s.Find(ws.ProjectRoot, ws.Name)
 		if err != nil {
@@ -300,6 +380,7 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		}
 		row.Status = state.StatusReady
 		row.LastError = ""
+		row.AgentLaunchCount++
 		ws = *row
 		return nil
 	})
@@ -307,14 +388,20 @@ func (m *Manager) Create(ctx context.Context, name string, stdout, stderr io.Wri
 		return nil, fmt.Errorf("workspace.Create: finalize: %w", err)
 	}
 
-	log.Info("workspace.create.ready", "name", ws.Name)
+	log.Info("workspace.create.ready", "name", ws.Name, "agent_launch_count", ws.AgentLaunchCount)
 	return &ws, nil
 }
 
 // runSetup executes the slow lifecycle steps: git worktree add,
 // scripts.setup, and the 4-pane tmux session build. Any failure propagates
 // up to Create which marks the workspace broken.
-func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, stderr io.Writer) error {
+//
+// opts threads source-variant routing into the worktree creation:
+// when opts.StartPoint is set we use that ref instead of origin/<default>,
+// and when opts.CreateBranch is false we check out the existing branch
+// (no -b) so callers can resurrect a remote branch into a workspace
+// without forking a new local branch off it.
+func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, opts CreateOptions, stdout, stderr io.Writer) error {
 	// Ensure parent dir exists. git worktree add creates the leaf dir
 	// itself but won't mkdir intermediate parents.
 	parent := filepath.Dir(ws.Path)
@@ -322,26 +409,52 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, stdout, std
 		return fmt.Errorf("workspace.runSetup: mkdir %s: %w", parent, err)
 	}
 
-	// 1. git worktree add. We base the new branch on origin/<default> so
-	// new workspaces start from the latest pushed code, not a stale local
-	// HEAD. Best-effort fetch first; both fetch and default-branch
-	// detection failures fall through to using local HEAD as the start
-	// point (preserving the old behavior for repos with no remote).
-	startPoint := ""
-	if defaultBranch, err := git.DetectDefaultBranch(ctx, m.Cfg.ProjectRoot); err == nil {
-		if ferr := git.Fetch(ctx, m.Cfg.ProjectRoot, "origin"); ferr != nil {
-			// Fetch failed (offline, auth, etc.). The remote ref might still
-			// exist locally from an earlier fetch; use it anyway.
-			log.Warn("workspace.create.fetch-failed", "err", ferr)
-			fmt.Fprintf(stderr, "warning: git fetch origin failed: %v\n", ferr)
-			fmt.Fprintf(stderr, "  proceeding with the local copy of origin/%s\n", defaultBranch)
+	// 1. git worktree add. Two cases:
+	//
+	//   - Fresh workspace (opts.StartPoint == ""): branch off
+	//     origin/<default> so new workspaces start from the latest
+	//     pushed code. Fetch first (best-effort); fall through to
+	//     local HEAD if both fetch and default-branch detection fail.
+	//   - Source-flag workspace (opts.StartPoint != ""): use the
+	//     caller-supplied ref. canopy new --pr passes "canopy/pr-<num>"
+	//     (a local fetched ref); --branch passes "origin/<name>" or the
+	//     local branch name.
+	startPoint := opts.StartPoint
+	createNewBranch := opts.CreateBranch
+	if startPoint == "" {
+		// Fresh path. Default to origin/<default>; fall through on miss.
+		if defaultBranch, err := git.DetectDefaultBranch(ctx, m.Cfg.ProjectRoot); err == nil {
+			if ferr := git.Fetch(ctx, m.Cfg.ProjectRoot, "origin"); ferr != nil {
+				log.Warn("workspace.create.fetch-failed", "err", ferr)
+				fmt.Fprintf(stderr, "warning: git fetch origin failed: %v\n", ferr)
+				fmt.Fprintf(stderr, "  proceeding with the local copy of origin/%s\n", defaultBranch)
+			}
+			startPoint = "origin/" + defaultBranch
 		}
-		startPoint = "origin/" + defaultBranch
+		// Fresh workspaces always create a new branch (the workspace
+		// name == branch name); zero-value opts.CreateBranch was false
+		// historically, but that's the wrong default for the legacy
+		// path. Force true here.
+		createNewBranch = true
+		if startPoint != "" {
+			fmt.Fprintf(stdout, "Basing %s on %s\n", ws.Branch, startPoint)
+		}
+	} else {
 		fmt.Fprintf(stdout, "Basing %s on %s\n", ws.Branch, startPoint)
 	}
 
-	if err := git.Add(ctx, m.Cfg.ProjectRoot, ws.Branch, ws.Path, startPoint); err != nil {
-		return fmt.Errorf("workspace.runSetup: git: %w", err)
+	if createNewBranch {
+		if err := git.Add(ctx, m.Cfg.ProjectRoot, ws.Branch, ws.Path, startPoint); err != nil {
+			return fmt.Errorf("workspace.runSetup: git: %w", err)
+		}
+	} else {
+		// Check out an existing branch into the worktree (no -b).
+		// startPoint here is already a branch ref (origin/<name> or a
+		// local branch); git.AddExisting wraps `git worktree add <path>
+		// <branch>`.
+		if err := git.AddExisting(ctx, m.Cfg.ProjectRoot, startPoint, ws.Path); err != nil {
+			return fmt.Errorf("workspace.runSetup: git: %w", err)
+		}
 	}
 
 	// 2 + 3: setup script + tmux session. Extracted so RetrySetup can
@@ -510,11 +623,152 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, "", tmux.SplitVertical, 15); err != nil {
 		return err
 	}
-	// Claude, ~30% of the top pane's width on the right.
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive("claude"), tmux.SplitHorizontal, 30); err != nil {
+	// Agent pane, ~30% of the top pane's width on the right. Uses
+	// canopy.json's agent.type to pick the launcher (claude by default;
+	// codex/opencode/aider supported); briefing is built from workspace
+	// state + canopy lifecycle conventions and handed to the agent
+	// inline (claude/codex), via temp file (aider), or via AGENTS.md
+	// in the worktree (opencode).
+	agentCmd, err := m.agentPaneCmd(ws, false /* fresh: AgentLaunchCount==0 */)
+	if err != nil {
+		return fmt.Errorf("workspace.buildSession: agent pane: %w", err)
+	}
+	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
 		return err
 	}
 	return nil
+}
+
+// agentPaneCmd assembles the shell command for the workspace's agent
+// pane. resume=false means "fresh launch" (AgentLaunchCount==0 path —
+// full briefing); resume=true means "resurrect" (hybrid strategy —
+// hints-only delta or no briefing flag if no hints active).
+//
+// Sequence:
+//
+//  1. Resolve the launcher from canopy.json's agent.type
+//     (default "claude"). Returns ErrUnknownAgent for typos.
+//  2. Verify the agent binary is on PATH. Surfaces a clean error with
+//     install hint instead of a cryptic shell failure inside the pane.
+//  3. Build the briefing string via agent.BuildBriefing (handles the
+//     hybrid fresh-vs-resume strategy).
+//  4. Write briefing to a temp file (or skip if empty — happens on
+//     resume + no active hints; the launcher then drops the briefing
+//     flag entirely).
+//  5. Build the shell command via launcher.PlanLaunch, prepending any
+//     PreRun (e.g., the cp-to-AGENTS.md for opencode).
+//
+// Detector hints are read once at this call's time. Future detector
+// state changes between this call and the agent actually launching are
+// not reflected — that's acceptable; the agent gets a fresh briefing
+// on every relaunch.
+func (m *Manager) agentPaneCmd(ws *state.Workspace, resume bool) (string, error) {
+	launcher, err := agent.Resolve(m.Cfg.Agent.Type)
+	if err != nil {
+		// Typo in canopy.json's agent.type — fail loud. This is a
+		// config error, not an environment gap; we don't want to
+		// silently fall back when the user wrote "cluade" instead
+		// of "claude".
+		return "", err
+	}
+	if err := launcher.VerifyInstalled(); err != nil {
+		// Binary not on PATH — degrade gracefully. The user gets a
+		// shell in the agent pane with an install hint so they
+		// know what's missing. Workspace creation continues; the
+		// other 3 panes (nvim / server / shell) work normally.
+		//
+		// Why not fail: a fresh canopy install with no agents yet
+		// installed should still produce working workspaces. Hard
+		// failure here would block the whole onboarding path on a
+		// secondary feature. The hint in the pane keeps the missing
+		// dependency visible without making it a blocker.
+		log.Warn("agent.binary-missing", "type", m.Cfg.Agent.Type, "err", err)
+		return agentFallbackShell(launcher.Cmd, err), nil
+	}
+
+	// Detector hints. RunFast is the cheap-only set (rename + shipped);
+	// pr_status is excluded here because shelling to gh during workspace
+	// creation is the wrong place for that latency. The next reconcile /
+	// TUI refresh will pick it up.
+	hints := lifecycle.RunFast(context.Background(), *ws)
+
+	briefing := agent.BuildBriefing(*ws, m.Cfg, hints)
+
+	// Write briefing to a temp file. Empty briefing → empty path → the
+	// launcher drops the flag entirely (handled in PlanLaunch).
+	briefingPath := ""
+	if briefing != "" {
+		path, err := writeBriefingTemp(briefing, ws.Name)
+		if err != nil {
+			return "", fmt.Errorf("write briefing temp file: %w", err)
+		}
+		briefingPath = path
+	}
+
+	plan := launcher.PlanLaunch(briefingPath, resume, ws.Path)
+	cmd := plan.ShellCommand
+	if plan.PreRun != "" {
+		cmd = plan.PreRun + " && " + cmd
+	}
+	return cmd, nil
+}
+
+// agentFallbackShell returns the command to run in the agent pane
+// when the configured agent binary isn't on PATH. Prints a short
+// hint identifying what's missing, then drops into the user's
+// default shell so the pane stays usable. The user can install
+// the agent and `canopy switch` to relaunch with the real agent.
+//
+// Format: a single shell line that echoes the hint, prints a
+// blank line, then exec's $SHELL. exec replaces the wrapper so
+// the pane behaves like a regular shell after the hint scrolls
+// off-screen.
+func agentFallbackShell(cmdName string, lookupErr error) string {
+	hint := fmt.Sprintf(
+		"agent %q not on PATH — falling back to a shell. %v",
+		cmdName, lookupErr)
+	// Single-quote the message so embedded $ / backticks don't
+	// expand. Escape any internal single-quotes via the standard
+	// '\'' POSIX trick.
+	quoted := "'" + strings.ReplaceAll(hint, "'", `'\''`) + "'"
+	return fmt.Sprintf(`echo %s; echo; exec "${SHELL:-/bin/sh}"`, quoted)
+}
+
+// writeBriefingTemp writes the briefing string to a temp file under
+// ~/.canopy/tmp/. Returns the absolute path. The temp file persists
+// after the agent reads it (the agent might re-read mid-session); we
+// rely on system tmp cleanup to evict eventually.
+//
+// Filename pattern: agent-briefing-<workspace>-<random>.md so a `ls
+// ~/.canopy/tmp/` shows which workspace each briefing belongs to.
+func writeBriefingTemp(briefing, workspaceName string) (string, error) {
+	tmpDir := filepath.Join(canopyHomeOrFallback(), "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return "", err
+	}
+	pattern := "agent-briefing-" + workspaceName + "-*.md"
+	f, err := os.CreateTemp(tmpDir, pattern)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(briefing); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// canopyHomeOrFallback returns ~/.canopy or os.TempDir() as a last
+// resort. canopy.Manager already has CanopyHome on it, but this helper
+// is called from agentPaneCmd which has access to *Manager — refactor:
+// take the manager. Simpler.
+func canopyHomeOrFallback() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return os.TempDir()
+	}
+	return filepath.Join(home, ".canopy")
 }
 
 // keepAlive wraps a shell command so that when the command exits (cleanly
@@ -648,12 +902,13 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		return nil, fmt.Errorf("workspace.Resurrect(%s): workspace dir missing at %s", name, wsCopy.Path)
 	}
 
-	// Rebuild the same tdl-style 3-pane layout as buildSession. Claude
-	// pane uses `claude --continue || claude` so the prior conversation
-	// resumes when one exists; otherwise (no conversation yet for this
-	// dir) we silently fall back to a fresh claude. Without the fallback
-	// the user sees a confusing "no conversation found to continue"
-	// before the keep-alive drops them to a shell.
+	// Rebuild the same tdl-style 3-pane layout as buildSession. The
+	// agent pane uses agentPaneCmd with resume=true: launcher's Resume
+	// argv is selected (e.g., claude --continue ...), and the briefing
+	// follows the hybrid strategy — hints-only delta when active hints
+	// exist, no --append-system-prompt at all when none. The agent's
+	// conversation history is preserved by the agent itself
+	// (claude --continue resumes; aider --restore-chat-history; etc).
 	env := hooks.WorkspaceEnv(wsCopy.Path, m.Cfg.ProjectRoot, wsCopy.Port)
 	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim ."), env...); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
@@ -661,11 +916,18 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {
 		return nil, err
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("claude --continue || claude"), tmux.SplitHorizontal, 30); err != nil {
+	agentCmd, err := m.agentPaneCmd(&wsCopy, true /* resume */)
+	if err != nil {
+		return nil, fmt.Errorf("workspace.Resurrect: agent pane: %w", err)
+	}
+	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
 		return nil, err
 	}
 
-	// Flip status to ready.
+	// Flip status to ready + bump AgentLaunchCount. The agent pane was
+	// just respawned with the resume launcher; next time we resurrect,
+	// the briefing strategy will see count>1 and emit a delta-only
+	// briefing.
 	err = m.Store.WithLock(func(s *state.State) error {
 		row, err := s.Find(m.Cfg.ProjectRoot, name)
 		if err != nil {
@@ -673,6 +935,7 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		}
 		row.Status = state.StatusReady
 		row.LastError = ""
+		row.AgentLaunchCount++
 		wsCopy = *row
 		return nil
 	})

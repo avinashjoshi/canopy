@@ -82,6 +82,128 @@ func TestSave_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestSave_RoundTrip_v06Fields verifies the v0.6 additions
+// (AgentLaunchCount, SourceKind) survive a Save → Load round-trip and
+// preserve omitempty behavior for zero values.
+func TestSave_RoundTrip_v06Fields(t *testing.T) {
+	t.Parallel()
+	store, err := state.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	original := &state.State{
+		SchemaVersion: state.SchemaVersion,
+		Workspaces: []state.Workspace{
+			{
+				Project:          "cravd",
+				ProjectRoot:      "/home/avi/Work/cravd",
+				Name:             "review-pr-142",
+				Branch:           "feat/oauth",
+				Path:             "/home/avi/.canopy/workspaces/cravd/review-pr-142",
+				TmuxSession:      "cravd-review-pr-142",
+				Port:             3010,
+				Status:           state.StatusReady,
+				CreatedAt:        time.Now().UTC().Round(time.Second),
+				AgentLaunchCount: 3,
+				SourceKind:       "pr",
+			},
+			{
+				// Workspace with zero-value v0.6 fields — should omit
+				// from JSON via omitempty so we don't bloat existing
+				// state.json files for users who haven't created
+				// anything via the new flags.
+				Project:     "canopy",
+				ProjectRoot: "/home/avi/Work/canopy",
+				Name:        "fresh-falcon",
+				Branch:      "fresh-falcon",
+				Path:        "/home/avi/.canopy/workspaces/canopy/fresh-falcon",
+				TmuxSession: "canopy-fresh-falcon",
+				Port:        4000,
+				Status:      state.StatusSettingUp,
+				CreatedAt:   time.Now().UTC().Round(time.Second),
+				// AgentLaunchCount: 0 (omitempty kicks in)
+				// SourceKind: "" (omitempty kicks in)
+			},
+		},
+	}
+	if err := store.Save(original); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Workspaces) != 2 {
+		t.Fatalf("loaded len = %d; want 2", len(loaded.Workspaces))
+	}
+
+	// Workspace[0]: v0.6 fields populated, must survive round-trip.
+	got := loaded.Workspaces[0]
+	if got.AgentLaunchCount != 3 {
+		t.Errorf("AgentLaunchCount = %d; want 3", got.AgentLaunchCount)
+	}
+	if got.SourceKind != "pr" {
+		t.Errorf("SourceKind = %q; want %q", got.SourceKind, "pr")
+	}
+
+	// Workspace[1]: zero values, must NOT appear in serialized JSON
+	// (omitempty). Reading them back gives zero values either way, so
+	// we verify by inspecting the on-disk file.
+	got2 := loaded.Workspaces[1]
+	if got2.AgentLaunchCount != 0 {
+		t.Errorf("AgentLaunchCount on fresh = %d; want 0", got2.AgentLaunchCount)
+	}
+	if got2.SourceKind != "" {
+		t.Errorf("SourceKind on fresh = %q; want empty", got2.SourceKind)
+	}
+
+	// Verify the on-disk JSON omits zero-value v0.6 fields. Reading
+	// state.json's bytes and grepping for the field names is the
+	// honest way to confirm omitempty is doing its job.
+	raw, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	rawStr := string(raw)
+
+	// Workspace[0] has both fields set, so they MUST appear.
+	if !contains(rawStr, "agent_launch_count") {
+		t.Errorf("expected agent_launch_count to appear in state.json for populated workspace; got:\n%s", rawStr)
+	}
+	if !contains(rawStr, "source_kind") {
+		t.Errorf("expected source_kind to appear in state.json for populated workspace; got:\n%s", rawStr)
+	}
+	// Workspace[1]'s zero values should NOT appear; counting occurrences
+	// of the field tags should match the populated count (just one).
+	if got := count(rawStr, "agent_launch_count"); got != 1 {
+		t.Errorf("agent_launch_count appeared %d times; want 1 (only populated workspace)", got)
+	}
+	if got := count(rawStr, "source_kind"); got != 1 {
+		t.Errorf("source_kind appeared %d times; want 1 (only populated workspace)", got)
+	}
+}
+
+// contains is a tiny helper to keep the round-trip test readable without
+// pulling in strings.* into the test file.
+func contains(haystack, needle string) bool {
+	return count(haystack, needle) > 0
+}
+
+// count returns the number of occurrences of needle in haystack. Used to
+// verify omitempty serialization (1 occurrence = only the populated
+// workspace; 0 = neither).
+func count(haystack, needle string) int {
+	n := 0
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			n++
+		}
+	}
+	return n
+}
+
 // TestSave_AtomicRename verifies the tmpfile+rename pattern: a state.json
 // that would crash mid-write leaves either the old contents or the new,
 // never half-written JSON. We can't easily simulate a crash mid-write, but

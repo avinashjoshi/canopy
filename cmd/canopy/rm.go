@@ -9,19 +9,30 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// rmFlags holds parsed --yes (skip confirmation prompt).
+// rmFlags holds parsed --yes (skip confirmation prompt) and --force
+// (bypass v0.6 safety pre-flight checks).
 var rmFlags struct {
-	yes bool
+	yes   bool
+	force bool
 }
 
 // rmCmd returns the `canopy rm <name>` cobra subcommand.
 //
 // Removal runs scripts.archive (DB drop, server kill), kills the tmux
-// session, removes the git worktree (with --force; we accept that the
-// user explicitly asked for removal), and drops the state row.
+// session, removes the git worktree, deletes the branch, and drops the
+// state row.
 //
-// By default rmCmd prompts for confirmation. --yes (or -y) skips it for
-// scripting.
+// v0.6 adds a smart pre-flight safety check: refuses to proceed when
+// the workspace has uncommitted changes, unpushed commits, or an open
+// PR. The check protects against the "I just rm'd uncommitted work"
+// moment. --force bypasses the check entirely (CI / scripted use);
+// --yes only skips the confirmation prompt and DOES run the safety
+// check (so scripts that pipe `yes` still get protection).
+//
+// Edge: workspace in `orphaned` status (worktree dir gone) gracefully
+// degrades — the safety check warns it can't verify uncommitted state
+// and proceeds to confirm prompt, never blocks rm because the diagnostic
+// itself failed.
 func rmCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rm <name>",
@@ -38,6 +49,32 @@ func rmCmd() *cobra.Command {
 			ws, err := mgr.Find(ctx, name)
 			if err != nil {
 				return err
+			}
+
+			// v0.6 safety pre-flight: refuse on hanging work unless --force.
+			//
+			// Delegates to mgr.SafetyPreflight which lives in the workspace
+			// package — same code path as the TUI's 'd' delete flow, so
+			// both surfaces refuse on the same conditions.
+			//
+			// On orphaned workspaces (worktree dir missing), the check
+			// returns nil (no hangs detected) plus a debug-log line; we
+			// don't block rm just because the diagnostic itself failed.
+			if !rmFlags.force {
+				hangs, err := mgr.SafetyPreflight(ctx, name)
+				if err != nil {
+					return err
+				}
+				if len(hangs) > 0 {
+					fmt.Fprintf(cmd.OutOrStdout(),
+						"Refusing to remove %q — hanging work detected:\n", name)
+					for _, h := range hangs {
+						fmt.Fprintf(cmd.OutOrStdout(), "  • %s\n", h)
+					}
+					fmt.Fprintf(cmd.OutOrStdout(),
+						"\nResolve the issues above, or pass --force to bypass.\n")
+					return fmt.Errorf("workspace %q has hanging work; use --force to bypass", name)
+				}
 			}
 
 			if !rmFlags.yes {
@@ -61,7 +98,8 @@ func rmCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVarP(&rmFlags.yes, "yes", "y", false, "skip confirmation prompt")
+	cmd.Flags().BoolVarP(&rmFlags.yes, "yes", "y", false, "skip confirmation prompt (does NOT skip safety check)")
+	cmd.Flags().BoolVar(&rmFlags.force, "force", false, "bypass v0.6 safety check (uncommitted/unpushed/open-PR)")
 	return cmd
 }
 

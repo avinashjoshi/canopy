@@ -40,8 +40,13 @@ import (
 // are optional; supplying nil makes the corresponding key a no-op.
 type Options struct {
 	// OnActivate fires when the user presses enter on a row. The parent
-	// returns a tea.Cmd (typically tea.ExecProcess for a tmux attach,
-	// or a status-line update for a non-attachable row). nil is allowed.
+	// returns a tea.Cmd (typically tea.ExecProcess for a tmux attach, or
+	// a status-line update for a non-attachable row). nil is allowed.
+	//
+	// Hints (rename / shipped / pr_status) decorate the row visually
+	// but do NOT change enter's dispatch — attach is always the
+	// behavior. Close-out is left as a manual `canopy rm` step so the
+	// user retains full control over destructive actions.
 	OnActivate func(state.GlobalRow) tea.Cmd
 
 	// OnGoToProject fires when the user presses 'o' (for "open project").
@@ -170,6 +175,25 @@ func (m Model) Rows() []state.GlobalRow {
 	return m.rows
 }
 
+// UpdateRowHints replaces the Hints slice for the row matching
+// (project, name). Used by the parent's two-phase refresh: rows render
+// immediately with no badges, then per-row lifecycle detector results
+// arrive as separate messages and merge in via this method.
+//
+// Identifier is (project, name) rather than slice index because rows
+// can be reordered or removed between dispatch and arrival (e.g. a
+// concurrent reconcile drops an orphan workspace mid-flight). Returns
+// silently if no matching row exists — late-arriving hints for a now-
+// gone workspace are dropped on the floor.
+func (m *Model) UpdateRowHints(project, name string, hints []state.Hint) {
+	for i := range m.rows {
+		if m.rows[i].Project == project && m.rows[i].Name == name {
+			m.rows[i].Hints = hints
+			return
+		}
+	}
+}
+
 // CursorRow returns the row currently under the cursor, or zero value +
 // false if the list is empty. Parents that need to act on selection
 // outside an enter keystroke (e.g. a 'd' delete from the parent's keymap)
@@ -274,13 +298,33 @@ func (m Model) renderTable() string {
 		badge := badgeFor(r.Alive)
 		statusCell := statusStyleFor(r.Status).Render(fmt.Sprintf("%-*s", colStatus, r.Status))
 		// Two-space indent under the project header so rows visually nest.
-		line := fmt.Sprintf("    %s  %-*s  %-*s  %s  %*s",
+		// Branch is emphasized (the renamed-intent name) when it differs
+		// from the workspace name. When they match (fresh workspace,
+		// branch hasn't been renamed yet), the branch column dims so
+		// the duplicate doesn't visually shout. Subtle distinction —
+		// the user sees at a glance which workspaces have been "named"
+		// vs which still wear their auto-generated label.
+		branchDisplay := fmt.Sprintf("%-*s", colBranch, r.Branch)
+		if r.Branch == r.Name {
+			branchDisplay = subtleHelper().Render(branchDisplay)
+		} else if r.Branch != "" && r.Branch != "—" {
+			branchDisplay = renamedBranchStyle().Render(branchDisplay)
+		}
+		line := fmt.Sprintf("    %s  %-*s  %s  %s  %*s",
 			badge,
 			colName, r.Name,
-			colBranch, r.Branch,
+			branchDisplay,
 			statusCell,
 			colPort, port,
 		)
+		// Append v0.6 hint badges (rename / shipped / pr_status) to the
+		// right of the row. Subtle styling so they decorate without
+		// stealing focus from the workspace's primary fields. Badges
+		// only appear when the corresponding detector fired; rows with
+		// no active hints render exactly as before.
+		if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
+			line += "  " + hintBadges
+		}
 		if i == m.cursor {
 			line = selectionStyle().Render(line)
 		}
@@ -288,6 +332,96 @@ func (m Model) renderTable() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// RenderHintBadges produces the short-form badge text appended to a row
+// when detector hints are active. Returns "" when no hints — the caller
+// appends nothing in that case, keeping rows visually identical to v0.5
+// for workspaces without active lifecycle signals.
+//
+// Exported so the project-mode TUI (internal/ui/view.go) can render the
+// same badges next to its own table rows. Both surfaces should produce
+// identical badge output for the same hints.
+//
+// Badge precedence: PR status wins over the local "shipped" detector
+// when both fire for the same workspace. The local-shipped signal only
+// proves "branch is in main" — for repos with PRs that's "merged",
+// which is one step before "shipped." PR state is the authoritative
+// signal; the shipped badge serves as the local-only fallback for
+// purely-local workflows where no PR exists.
+//
+// Badge mapping (kept short to fit on a single row):
+//
+//	rename_suggested  →  ↻ rename
+//	pr_status (open)             →  PR open
+//	pr_status (approved)         →  PR approved
+//	pr_status (changes-requested)→  PR changes
+//	pr_status (merged)           →  ✓ PR merged
+//	pr_status (closed)           →  PR closed
+//	shipped (no PR)              →  ✓ shipped (local)
+//
+// Multiple hints surface as space-separated badges; order is rename →
+// pr_status / shipped so the "what next action" badge stays rightmost.
+func RenderHintBadges(hints []state.Hint) string {
+	if len(hints) == 0 {
+		return ""
+	}
+	hasPR := false
+	for _, h := range hints {
+		if h.Kind == "pr_status" {
+			hasPR = true
+			break
+		}
+	}
+	parts := make([]string, 0, len(hints))
+	// Render rename first so it sits left of the lifecycle-state badge.
+	for _, h := range hints {
+		if h.Kind == "rename_suggested" {
+			parts = append(parts, hintRenameStyle().Render("↻ rename"))
+		}
+	}
+	// Then the lifecycle-state badge: PR if present, shipped fallback
+	// otherwise.
+	for _, h := range hints {
+		switch h.Kind {
+		case "pr_status":
+			parts = append(parts, prBadge(h.Message))
+		case "shipped":
+			if hasPR {
+				continue // PR state wins; suppress the local fallback
+			}
+			parts = append(parts, hintShippedStyle().Render("✓ shipped (local)"))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// prBadge formats the pr_status hint into a short, color-coded label.
+// State is parsed from the hint's message (the detector controls both
+// the format and the renderer, so keyword matching is a closed system).
+//
+// Colors:
+//   - merged       → green bold (the "done" state)
+//   - approved     → cyan       (positive but not yet merged)
+//   - open         → cyan       (informational, no action implied)
+//   - changes      → orange     (attention needed)
+//   - closed       → gray       (PR didn't ship)
+func prBadge(message string) string {
+	switch {
+	case strings.Contains(message, "merged"):
+		return hintShippedStyle().Render("✓ PR merged")
+	case strings.Contains(message, "approved"):
+		return hintPRStyle().Render("PR approved")
+	case strings.Contains(message, "changes requested"):
+		return hintRenameStyle().Render("PR changes")
+	case strings.Contains(message, "closed"):
+		return subtleHelper().Render("PR closed")
+	case strings.Contains(message, "open"):
+		return hintPRStyle().Render("PR open")
+	}
+	// Unknown state (forward-compat for new gh review states):
+	// fall back to a generic badge.
+	return hintPRStyle().Render("PR")
 }
 
 // emptyState is the table-area copy when there are no rows. Parents
@@ -344,10 +478,6 @@ func maxInt(a, b int) int {
 // parent (which would create a cycle since internal/ui imports
 // projectlist).
 
-func headerStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-}
-
 // projectHeaderStyle is the project-name banner above each group. Bold +
 // pale-violet so the name stands out as a section header without competing
 // with the alive/dead badges below it.
@@ -355,6 +485,31 @@ func projectHeaderStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("99")).
 		Bold(true)
+}
+
+// hintRenameStyle: amber/orange — "your attention is wanted but it's
+// not destructive."
+func hintRenameStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+}
+
+// renamedBranchStyle: subtle white/bold — emphasizes the branch when
+// it differs from the workspace name (i.e., the agent or user has
+// renamed it to reflect feature intent). Visible at a glance which
+// workspaces have been "named" vs which still wear their auto-generated
+// namegen label.
+func renamedBranchStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("253")).Bold(true)
+}
+
+// hintShippedStyle: green — "this is good, ready to close out."
+func hintShippedStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
+}
+
+// hintPRStyle: cyan — informational, not urgent.
+func hintPRStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 }
 
 func subtleHelper() lipgloss.Style {

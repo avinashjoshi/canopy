@@ -178,3 +178,112 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("WriteFile %s: %v", path, err)
 	}
 }
+
+// TestLoad_AgentDefaults: a canopy.json without an `agent` block must
+// load cleanly and Agent.Type must default to "claude". This is the
+// backwards-compat path: every existing canopy.json from v0.5 and earlier
+// has no agent block, and they all need to keep working.
+func TestLoad_AgentDefaults(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "canopy.json"), validJSON)
+
+	cfg, err := config.DiscoverAndLoad(dir)
+	if err != nil {
+		t.Fatalf("DiscoverAndLoad: %v", err)
+	}
+	if cfg.Agent.Type != "claude" {
+		t.Errorf("Agent.Type default = %q; want %q (backwards-compat)", cfg.Agent.Type, "claude")
+	}
+	if cfg.Agent.Briefing != "" {
+		t.Errorf("Agent.Briefing should be empty by default; got %q", cfg.Agent.Briefing)
+	}
+	if cfg.Agent.BriefingFile != "" {
+		t.Errorf("Agent.BriefingFile should be empty by default; got %q", cfg.Agent.BriefingFile)
+	}
+}
+
+// TestLoad_AgentExplicit: a canopy.json that DOES set the agent block
+// must round-trip its values (type / briefing / briefing_file).
+func TestLoad_AgentExplicit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configJSON := `{
+  "scripts": {
+    "setup": "bin/canopy-setup",
+    "run": "bin/dev",
+    "archive": "bin/canopy-archive"
+  },
+  "agent": {
+    "type": "opencode",
+    "briefing": "Project uses Rails 7. Run RSpec for tests.",
+    "briefing_file": "docs/AGENT_BRIEFING.md"
+  }
+}`
+	writeFile(t, filepath.Join(dir, "canopy.json"), configJSON)
+
+	cfg, err := config.DiscoverAndLoad(dir)
+	if err != nil {
+		t.Fatalf("DiscoverAndLoad: %v", err)
+	}
+	if cfg.Agent.Type != "opencode" {
+		t.Errorf("Agent.Type = %q; want %q", cfg.Agent.Type, "opencode")
+	}
+	if cfg.Agent.Briefing == "" {
+		t.Errorf("Agent.Briefing should be populated")
+	}
+	if cfg.Agent.BriefingFile != "docs/AGENT_BRIEFING.md" {
+		t.Errorf("Agent.BriefingFile = %q; want %q", cfg.Agent.BriefingFile, "docs/AGENT_BRIEFING.md")
+	}
+	// Both Briefing AND BriefingFile set: validate() warns at log level
+	// but doesn't error. Test only verifies no error here; the warning
+	// goes to slog and is hard to assert in a unit test.
+}
+
+// TestLoad_AgentEmptyBlock: an explicitly-empty agent block (`"agent": {}`)
+// behaves the same as omitting the block — Type defaults to "claude".
+func TestLoad_AgentEmptyBlock(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configJSON := `{
+  "scripts": {"setup": "", "run": "", "archive": ""},
+  "agent": {}
+}`
+	writeFile(t, filepath.Join(dir, "canopy.json"), configJSON)
+
+	cfg, err := config.DiscoverAndLoad(dir)
+	if err != nil {
+		t.Fatalf("DiscoverAndLoad: %v", err)
+	}
+	if cfg.Agent.Type != "claude" {
+		t.Errorf("Agent.Type for empty block = %q; want %q", cfg.Agent.Type, "claude")
+	}
+}
+
+// TestLoad_ScriptsAgentOverride: scripts.agent (the power-user override
+// path) round-trips alongside the agent block.
+func TestLoad_ScriptsAgentOverride(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configJSON := `{
+  "scripts": {
+    "setup": "bin/canopy-setup",
+    "run": "bin/dev",
+    "archive": "bin/canopy-archive",
+    "agent": "bin/my-agent-launcher"
+  },
+  "agent": {"type": "claude"}
+}`
+	writeFile(t, filepath.Join(dir, "canopy.json"), configJSON)
+
+	cfg, err := config.DiscoverAndLoad(dir)
+	if err != nil {
+		t.Fatalf("DiscoverAndLoad: %v", err)
+	}
+	if cfg.Scripts.Agent != "bin/my-agent-launcher" {
+		t.Errorf("Scripts.Agent = %q; want %q", cfg.Scripts.Agent, "bin/my-agent-launcher")
+	}
+	if cfg.Agent.Type != "claude" {
+		t.Errorf("Agent.Type = %q; want %q", cfg.Agent.Type, "claude")
+	}
+}
