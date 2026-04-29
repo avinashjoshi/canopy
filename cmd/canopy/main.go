@@ -82,6 +82,11 @@ func main() {
 	root.AddCommand(reconcileCmd())
 	root.AddCommand(mainCmd())
 	root.AddCommand(retryCmd())
+	root.AddCommand(newPopupCmd())
+	root.AddCommand(newPopupInnerCmd())
+	root.AddCommand(newStatuslineCmd())
+	root.AddCommand(newInstallCmd())
+	root.AddCommand(newRunCmd())
 
 	if err := root.Execute(); err != nil {
 		// cobra has already printed the error; just exit non-zero.

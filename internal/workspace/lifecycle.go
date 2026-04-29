@@ -514,7 +514,7 @@ func (m *Manager) runSetupHooksOnly(ctx context.Context, ws *state.Workspace, st
 // status flips to ready and last_error is cleared. On failure, the
 // status stays broken with last_error updated to reflect the new
 // failure (the retry replaces, not appends, the error chain).
-func (m *Manager) RetrySetup(ctx context.Context, name string, stdout, stderr io.Writer) (*state.Workspace, error) {
+func (m *Manager) RetrySetup(ctx context.Context, name string, force bool, stdout, stderr io.Writer) (*state.Workspace, error) {
 	if stdout == nil || stderr == nil {
 		return nil, fmt.Errorf("workspace.RetrySetup: stdout and stderr writers required")
 	}
@@ -527,7 +527,27 @@ func (m *Manager) RetrySetup(ctx context.Context, name string, stdout, stderr io
 		if err != nil {
 			return fmt.Errorf("workspace.RetrySetup(%s): %w", name, ErrWorkspaceNotFound)
 		}
-		if row.Status != state.StatusBroken {
+		// setting_up always refuses, regardless of force. Two concurrent
+		// setup hooks on the same worktree would race over the dir, the
+		// port, and the agent briefing file. Always wait for the in-flight
+		// setup to finish before retrying.
+		if row.Status == state.StatusSettingUp {
+			return fmt.Errorf("workspace.RetrySetup(%s): another setup is in progress (status=setting_up); wait for it to finish",
+				name)
+		}
+		// orphaned always refuses, regardless of force. The dir doesn't
+		// exist; setup has nothing to run against. Right verb is canopy rm
+		// to drop the row, then canopy new to recreate.
+		if row.Status == state.StatusOrphaned {
+			return fmt.Errorf("workspace.RetrySetup(%s): workspace is orphaned (no on-disk dir); run canopy rm",
+				name)
+		}
+		// broken is the unconditional retry path (the v0 contract). Other
+		// statuses (ready, stopped) require force=true — re-running setup
+		// on a healthy workspace can be destructive depending on what
+		// scripts.setup does (DB drops, port reservations, agent briefing
+		// files, etc.). The user has to opt in.
+		if row.Status != state.StatusBroken && !force {
 			return fmt.Errorf("workspace.RetrySetup(%s) in status %q: %w",
 				name, row.Status, ErrCannotRetry)
 		}

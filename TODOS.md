@@ -632,3 +632,182 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go behind the user's existing tmux prefix (`<prefix>-c`, `<prefix>-?`, `<prefix>-s` for switch, etc.). Onboarding asks: "Your tmux prefix is `C-b`/`C-a`/other?" and writes the snippet accordingly. Never overwrite an existing user-bound key — detect via `tmux list-keys` parse and skip with a warning.
 
 **Depends on / blocked by:** v0 (TUI exists, landed). v0.5 global splash + project listing (landed in ancient-hornet 2026-04-28). v0.6 detector framework (in flight) for the status segment's `[hints]` portion. The popup's first-launch render = the v0.5 splash; subsequent renders = the v0.5 global TUI's project list.
+
+**v0.7 partial implementation:** the popup launcher and read-only status bar pieces of this v1 vision are scoped into v0.7 as `canopy popup` and `canopy statusline --format=current`. After codex review, scope was narrowed: cheatsheet pane, popup verb handoff, and the auto-installer are deferred to v0.8 (see CEO plan 2026-04-28-persistent-sidebar-tui.md and the new entries below). The v1 TODO stays as the long-term umbrella; v0.7 is the first ship of the pattern.
+
+---
+
+## v0.8 — `canopy session` (pinned-reach dedicated tmux session)
+
+**What:** A subcommand that creates or attaches to a dedicated tmux session named with a reserved prefix (likely `canopy-hub-<project>`) running the existing global TUI in pane 0. Bound to `<prefix> G` in the user's tmux config, the chord flips the current tmux client to the canopy session. From canopy, picking a workspace fires `tmux switch-client -t <workspace-session>`. Picking nothing and re-pressing the chord flips back to the previous client (`tmux switch-client -l`).
+
+**Why:** v0.7 ships the popup (ephemeral, tap-and-gone). The popup is universal but it covers your work for the duration of the pick. A dedicated session gives you "always-running, one chord away, from any tmux session" — the universal-tmux equivalent of Conductor's always-on window. After dogfooding the popup, this is the next layer if "I want canopy *running* somewhere I can flip to" turns out to be a real recurring need.
+
+**Pros:** Cross-session reach (works from any tmux session). canopy state stays warm (no cold-start on each invocation). Pairs cleanly with the v0.7 popup — popup is the "quick switch", session is the "pinned dashboard". Universal across every OS canopy targets.
+
+**Cons:** Reserved-prefix naming convention to design (avoid collision with existing `<project>-<workspace>` and `<project>-main` patterns). Lifecycle questions: when does the session die? Multi-client semantics. Adds a startup path the install command needs to handle.
+
+**Context:** Triggered by the persistent-sidebar-tui CEO review on 2026-04-28. Scope was narrowed from "popup + session + statusline + 5 enhancements" to "popup + read-only statusline" after codex outside-voice review showed the session work alone has substantial design surface (T5: naming collision; T3: attach-vs-switch-client confusion). Ship after v0.7 popup has been used for ~2 weeks of dogfood — the popup-vs-session decision should be made on lived evidence, not hypotheticals.
+
+**Depends on / blocked by:** v0.7 popup landed.
+
+---
+
+## v0.8 — `canopy install tmux` (idempotent ~/.tmux.conf writer)
+
+**What:** A subcommand that writes canopy's tmux integration (popup keybind, statusline interpolation, future session keybind) into `~/.tmux.conf` between `# canopy:start` / `# canopy:end` marker comments. Idempotent re-runs replace the block in place. Backup at `~/.tmux.conf.canopy-backup-<timestamp>`. Supports `--uninstall` to remove the block. Refuses if tmux < 3.2 with a clear message. Detects pre-existing user binds for the same keys and asks before overriding.
+
+**Why:** v0.7 ships the integration as a docs snippet the user pastes into their tmux.conf manually. That works for canopy's first-handful-of-users phase. As soon as multiple people are running canopy, "did you remember to source-file your tmux.conf" becomes the most common bug report. An installer fixes the discovery cliff.
+
+**Pros:** Solves the discovery problem. Pairs with future `canopy install hypr-sidebar` and other per-WM installers — establishes the pattern. Makes onboarding a one-liner: `canopy init && canopy install tmux`.
+
+**Cons:** Codex flagged this as the highest-risk feature in the original v0.7 plan. Doing it correctly means handling: TPM (`run -b 'plugins/...'`) and `source-file` includes, format/comment preservation, duplicate-block detection, conflicting bind detection, optional auto-`tmux source-file` reload. ~200+ LOC done robustly, not the ~50 LOC the original plan estimated. Easily a week of CC time on its own.
+
+**Context:** Original v0.7 cherry-pick; deferred to v0.8 after codex outside-voice review. The v1 in-session-overlay TODO above references "canopy ships a tmux config snippet" — this is that snippet, productized.
+
+**Depends on / blocked by:** v0.7 popup + statusline landed (so we know what to install).
+
+---
+
+## Future — Sidebar pane mode (`canopy --sidebar`)
+
+**What:** A canopy mode that runs in a narrow vertical tmux pane (~25 cols), designed to live alongside the user's working pane(s) in the same tmux session. User splits the pane themselves (or via canopy install). Toggle key collapses the pane to 0 cols and back. Visible-alongside-your-work view — closest to the literal "Conductor sidebar" mental model.
+
+**Why:** During the persistent-sidebar-tui CEO review, this was one of three candidate shapes (α). Avi chose to defer it after concluding "visible-alongside isn't a deal-breaker." If after v0.7 popup + v0.8 session dogfood there's still a recurring "I want canopy and my editor on screen at the same time" itch, this is the answer.
+
+**Pros:** Literal sidebar feel. Works inside one tmux session without leaving it. Universal across every OS canopy targets.
+
+**Cons:** Per-session — the sidebar pane lives in one tmux session at a time. Doesn't compose with `canopy session` (which is cross-session). Requires user-side tmux split-window choreography or a canopy-managed split. Discovery cliff unless paired with `canopy install tmux`.
+
+**Context:** Deferred during the persistent-sidebar-tui review (2026-04-28) after Avi confirmed visible-alongside isn't a deal-breaker. Ship only if v0.7 + v0.8 dogfood reveals the felt-experience gap.
+
+**Depends on / blocked by:** v0.7 popup landed; v0.8 dogfood signal.
+
+---
+
+## v0.8 — PR status in `canopy statusline`
+
+**What:** Extend `canopy statusline --format=current` to surface PR state alongside workspace name/status/port. Concrete shape: `canopy: silent-falcon ●ready :40010 PR #42 ⚠conflict` (or `✓clean`, `…draft`, `⏳ci-running`, `✗ci-failed`, `✓merged`).
+
+**Why:** Today the statusline tells you what workspace you're in and that it's healthy locally. It doesn't tell you whether you can ship — PR conflict, CI red, draft state, merged-and-forgotten. Surfacing PR state in the always-visible glance widget closes the "did I check that PR yet?" gap that bites every solo dev with multiple in-flight PRs.
+
+**Pros:** Reuses the v0.6 detector framework (`pr_status` Hint kind already exists; the global TUI renders it). Composes with the existing statusline format machinery. Concrete, scoped.
+
+**Cons:** Detector calls `gh pr view` which is a network round-trip — naively running it on every `status-interval` (15s) burns rate limit and adds 200-500ms latency to the statusline. Needs a cache (likely `~/.canopy/pr-status-cache.json` with TTL) and a background refresh strategy (probably the v0.6 lifecycle reconcile loop, which already pulls hints).
+
+**Context:** Surfaced during v0.7 dogfood on 2026-04-29. User's request: "the statusline can be similar to the other one we have which also shows the PR status. we should have good PR statuses like conflict." Implementation needs: (1) wire statusline to the lifecycle detector framework's PR hints; (2) define a glyph mapping for PR states (conflict/clean/draft/ci-pass/ci-fail/merged); (3) cache results so tmux's 15s refresh doesn't hammer GitHub; (4) `--format=current` stays single-line — multi-line statusline is its own can of worms.
+
+**Depends on / blocked by:** v0.7 popup + statusline landed; v0.6 detector framework already shipped. No blockers.
+
+---
+
+## v0.8 — Canopy actions from tmux key binds (Claude-driven)
+
+**What:** Tmux keybinds (managed by `canopy install tmux`) that pipe canned prompts into the active workspace's claude pane via `tmux send-keys`. Concrete examples: `<prefix>M` = "merge this PR" (sends to claude), `<prefix>F` = "fix the failing CI", `<prefix>X` = "explain what broke." Each binding identifies the workspace (parse `tmux display-message -p '#S'`), looks up the claude pane (the `claude` pane in canopy's standard layout), sends the prompt + Enter.
+
+**Why:** Avi's daily flow: see PR conflict in status bar → wants to ask claude to resolve. Today: switch to claude pane, type "merge this PR for me", enter. Two extra keystrokes minimum, plus context switch. With this: `<prefix>M`, claude starts working in the background, you stay where you are. The killer latency reduction for the agent-in-a-pane workflow.
+
+**Pros:** Composes cleanly with v0.7 popup + statusline (same managed tmux block). Each binding is ~10 LOC of `tmux send-keys`. Configurable: ship a default set, let users add their own via `canopy.json` (similar to scripts.run).
+
+**Cons:** Coupling to canopy's standard pane layout (claude is the second pane). Layout drift breaks the bindings. Send-keys to a wrong pane during workspace switches is a real risk — need to verify the workspace AND the pane name before sending. Prompt injection vector if canned prompts include workspace names or branch names without escaping.
+
+**Context:** Surfaced during v0.7 dogfood on 2026-04-29 alongside the always-on keybind bar (which is the v1 umbrella). This is the smaller, action-oriented half: just the bindings, not the always-visible help bar. Ships independently.
+
+**Depends on / blocked by:** v0.7 popup + canopy install tmux landed. v0.6 agent-pane stability (claude pane name is stable across canopy versions).
+
+---
+
+## v0.9 — Session-naming refactor: session = project, window = workspace
+
+**What:** Restructure tmux session/window topology. Today: every workspace is its own tmux session named `<project>-<workspace>` (e.g., `cravd-misty-aspen`, `canopy-silent-falcon`). Proposed: one tmux session per project named `<project>`, each workspace is a window named `<workspace>` (or `<workspace>:<branch>` if they differ). `canopy main` becomes the project session's first window.
+
+**Why:** As workspace count grows, `tmux ls` becomes a wall of `<project>-<workspace>` rows. Grouping windows under project sessions matches mental model ("I'm in the cravd project, switching between its workspaces") and lets users use tmux's window navigation (`<prefix>n/p`) for same-project workspace switching.
+
+**Pros:** Cleaner `tmux ls`. Tighter mental model. tmux native window navigation works for intra-project switching. Status bar's `#W` (window name) becomes load-bearing identity, freeing `#S` (session name) to identify the project. Avi's request: "the session name can be the project name and the session tab can be the workspace name + branch name (if different)."
+
+**Cons:** *Major* refactor:
+  1. **`canopy popup` switch model breaks.** Today: `tmux switch-client -t <workspace-session>`. Tomorrow: `switch-client -t <project> + select-window -t :<workspace>`. Two-step dance, more places to fail.
+  2. **Per-workspace env vars are session-level today** (CANOPY_PORT, CANOPY_WORKSPACE_PATH inherited by all panes). Window-level env is supported but has different inheritance semantics. Audit every CANOPY_* consumer.
+  3. **`canopy main` overlaps awkwardly.** Today: separate session. Tomorrow: a window inside the project session — but is it window 0 (special) or just a regular window? What happens when the user has no workspaces yet?
+  4. **Migration story.** Existing users' tmux state (live sessions named `<project>-<workspace>`) doesn't auto-migrate. Either a one-shot `canopy migrate-tmux-naming` verb, or accept that v0.9 invalidates resurrection until the user rebuilds.
+  5. **`canopy.json` env-injection model needs review.** Hooks set CANOPY_* via session env; window-level requires either pane-level injection or window-env (newer tmux feature).
+  6. **Statusline `current` lookup breaks** — today `tmux display-message -p '#S'` returns the workspace identifier; tomorrow `#S` returns the project name and `#W` returns the workspace.
+
+**Context:** Surfaced during v0.7 dogfood on 2026-04-29. User's request was concrete: "the session name can be the project name and the session tab can be the workspace name + branch name (if different)." Has a "scrap it and do this instead" smell that warrants its own /plan-ceo-review and /plan-eng-review pass before any code changes — it's an architectural one-way door (every consumer of the naming convention has to migrate together). Recommendation: do it once, do it right, with a real migration story for existing users.
+
+**Depends on / blocked by:** v0.7 + v0.8 dogfood signal that the cleaner topology is worth the migration cost. CEO+eng review of the trade-off table above.
+
+---
+
+## Future — Always-on keybind bar (TurboC++ style)
+
+**What:** Extension of the existing v1 in-session-overlay TODO above. Specifically: a row in tmux's status-left or status-bottom showing the active canopy keybinds in real time, like TurboC++'s `F1 Help · F2 Save · F3 Open ...` bar. Updates contextually: in a workspace with PR conflict, the bar shows `M merge · F fix-ci · X explain`. Outside any canopy session, the bar is empty.
+
+**Why:** Discoverability. Users forget `<prefix>g` opens the popup; they DEFINITELY forget `<prefix>M` asks claude to merge. An always-visible bar is the canonical fix. Pairs with the v0.8 Claude-driven actions (above) — actions are useless if users don't remember the bindings.
+
+**Pros:** Solves discoverability for every keybind canopy ships. Users learn by glancing, not by reading docs. Composes with the existing v1 in-session-overlay TODO (same surface, this defines the content).
+
+**Cons:** Vertical real estate is precious — the bar competes with the user's existing status-left/status-bottom content. Need an opt-in (`canopy install tmux --with-keybind-bar` or similar). Contextual keybinds require the statusline to know the current workspace's state (PR status, broken-ness, etc.) which doubles down on the v0.8 PR-status detector wiring.
+
+**Context:** Avi's request on 2026-04-29: "thats why i was thinking of the turboc++ like statusbar that is always ready for keybindings... i'm sure theres a good easy way to do this." The "easy way" is a fair instinct — tmux's `status-format` is a genuinely powerful templating language and most of the work is content design, not implementation. But the design surface (which keybinds to surface? how to handle context-sensitivity? what about the user's existing status content?) is real.
+
+**Depends on / blocked by:** v0.8 PR-status detector (so the bar can be contextual). v0.8 Claude-driven actions (so there's something worth surfacing).
+
+---
+
+## v0.8 — TUI unification: one model, three contexts (PRIORITY)
+
+**What:** Collapse canopy's three TUI flows into one. Today there are three separate Bubbletea models and three invocation paths:
+
+```
+                        Today                                   v0.8 unified
+  ────────────────────────────────────────────────────────────────────────────
+  canopy (in project)    → Model           (project TUI)        → unified TUI
+  canopy (outside)       → GlobalModel     (global TUI)         → unified TUI
+  canopy popup           → GlobalModel     (popup mode)         → unified TUI
+                          via popup-inner   in display-popup        same code
+```
+
+The unified TUI is what the popup currently shows: Local + Global tabs, fuzzy search, status glyphs, n/d/R verbs. Attach behavior auto-adjusts to context (switch-client when inside tmux, attach when not — already abstracted via `attachVerbForCurrentEnv`). Popup-vs-not is just a presentation detail (display-popup hosts canopy directly; no separate `popup` subcommand).
+
+**Why:** Avi's call on 2026-04-29 after dogfooding v0.7: "making things unify is the most important thing next... I don't think we will need a separate popup — I want to prioritize that. The sidebar is not very critical! Like the main TUI can be same as the popup."
+
+The current three-model split was an artifact of incremental development:
+- Model (project TUI) shipped first; scoped to one project; has destructive verbs.
+- GlobalModel shipped in v0.5 for cross-project read-only view; deliberately read-only to keep the v0.5 scope tight.
+- Popup mode bolted onto GlobalModel via AsPopup() during v0.7.
+
+The v0.5 boundary ("global is read-only, project owns destructive") made sense before tabs existed. Now that the popup has Local/Global tabs and the popup body is the most-used canopy surface, that boundary is friction: users hit `o` to "open project" because they want destructive verbs, but the resulting project TUI is a different model with a different layout (different header, different keymap, no tabs), causing the screens-feel-different bug Avi reported.
+
+**Pros:**
+
+1. **One mental model.** Whatever invocation path the user takes, the screen is the same. Tab switches scope; everything else is identical.
+2. **Eliminates the popup-mode coupling.** popup-inner can disappear; tmux's `bind g display-popup -E "canopy"` is enough. Less code, less surface area to test.
+3. **`o` becomes redundant** in popup mode (no separate project view to open). Saves a keybind for something more useful.
+4. **Destructive verbs (n/d/R) work everywhere.** Currently locked behind `o`; after unification they work directly on Local-tab rows. Force-retry-on-non-broken already shipped → confirmation modal in TUI for that becomes natural.
+5. **Routing simplifies.** main.go's routeRoot becomes "always launch the unified TUI; pre-select Local tab if in a project, Global otherwise." No project-vs-global branch.
+6. **The popup-attach exit-7 signal can be simplified** or removed — the unified TUI inside display-popup handles attach itself; no nested canopy spawn needed for `o`.
+
+**Cons:**
+
+1. **Real refactor.** The Model and GlobalModel today have different field sets, different state messages, different render paths. Unifying means picking one as the base and porting the other's features in. ~600-800 LOC of careful work + thorough testing.
+2. **v0.5 read-only boundary disappears.** Currently the global TUI is intentionally safe — no destructive ops across projects. Unification means n/d/R work on Local tab rows from any invocation. Need to think about: what does `n` (new workspace) do when the cursor is on a different project's row vs current? Probably: only enabled on Local tab rows, since `n` requires canopy.json context.
+3. **Popup keymap might grow.** Today the popup is intentionally minimal (arrow + enter + tab + / + q). Adding n/d/R to popup mode is fine but raises the visual noise. May want a "popup-mode" rendering toggle that hides destructive keys on cramped popup geometry.
+4. **Tests need rework.** ~30 popup-mode tests (TestPopup* in model_global_test.go) will need rewriting since they're scoped to GlobalModel.
+5. **Project TUI's specific layout may be missed.** The project TUI today has a project-name header, single-table layout. Some users might prefer that for their daily project work. The unified TUI's tab bar adds a row of chrome that's "useless" when you're 99%-of-the-time on Local tab. Mitigate: maybe the tab bar collapses to a single line when only one tab has rows, or hide tab bar entirely when invoked from project (`canopy --no-global` flag, or just default Local without showing the bar when only Local has data).
+
+**Context:** Surfaced during 2026-04-29 dogfood after Avi noticed pressing `o` on a project loaded "a fully different screen" (different layout, no tab bar, different help line). The visual jolt confirmed the three-model split is leaking into UX. Avi's prioritization: "making things unify is the most important thing next" — this comes BEFORE PR-status statusline, Claude keybind actions, and session-naming refactor in the v0.8 backlog.
+
+**Implementation sketch (rough — needs CEO+eng review before code):**
+
+1. **Pick the merge target.** Likely `GlobalModel` becomes the base (it already has tabs, search, popup mode wiring). Migrate `Model`'s features onto it: project-scoped workspace creation flow (n), removal (d), retry (R), busy/streaming UI for long-running ops, hint badges, etc.
+2. **Tab semantics:** Local tab pre-selected when invoked from inside a project (canopy.json walk-up succeeds); Global pre-selected otherwise. Single-tab fast path: if Local has rows AND Global is identical (no other projects), suppress the tab bar.
+3. **Verb scoping:** n/d/R work on the cursor row regardless of tab. Validation: `n` needs the cursor row's project (Local context) — if cursor is on a Global-only row in a different project, prompt or refuse.
+4. **Routing:** `routeRoot` always calls the unified TUI. Init splash for fresh repos stays separate.
+5. **Popup → no separate command:** `canopy popup` and `canopy popup-inner` can be deleted. Tmux config snippet becomes `bind g display-popup -E "canopy"`. The unified TUI detects display-popup hosting via... probably `$TMUX_PANE` shape (tmux popup panes have a different ID format) or a CANOPY_IN_POPUP env we set via the install command's display-popup invocation.
+6. **install tmux update:** rewrites the bind to use plain `canopy`, drops the popup-inner subcommand.
+7. **canopy.session future:** ships AFTER unification because the dedicated session also hosts the same unified TUI.
+
+**Estimated effort:** L (CC ~6-8 hours of design + implementation + testing). Worth a /plan-ceo-review and /plan-eng-review before implementation since this touches every TUI entry point.
+
+**Depends on / blocked by:** v0.7 popup + statusline + install tmux landed (this branch). No external blockers. Should ship before any v0.8 features that build on the TUI surface (PR statusline is fine in parallel; Claude keybind actions can wait).

@@ -1,0 +1,390 @@
+// Command canopy install tmux writes canopy's tmux integration (popup
+// keybind + statusline interpolation) into ~/.tmux.conf, between marker
+// comments so we can find our own block on re-runs.
+//
+// Idempotency is the load-bearing property: re-running must not duplicate
+// blocks, must not silently overwrite user edits, must surface clearly
+// when our block is already present.
+//
+// Out of scope for v0.7:
+//   - `--uninstall` (remove the block). Trivial follow-up if the install
+//     pattern catches on.
+//   - TPM / include awareness. The marker block makes intent obvious to
+//     anyone reading the file; mixing with TPM hasn't shown problems
+//     in dogfood yet.
+//   - User-bind conflict detection (warn if they had `bind g` already).
+//     Marker block isolates ours from theirs; users see the diff plainly.
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/oncactus/canopy/internal/clog"
+	"github.com/oncactus/canopy/internal/tmux"
+)
+
+const (
+	tmuxConfMarkerStart = "# canopy:start"
+	tmuxConfMarkerEnd   = "# canopy:end"
+
+	// tmuxInstallMinVersion mirrors popupMinTmuxVersion. install must
+	// refuse to write bindings the user's tmux can't run, so the bar
+	// is the same: 3.2 (display-popup support).
+	tmuxInstallMinVersion = popupMinTmuxVersion
+)
+
+var installTmuxLog = clog.Pkg("install-tmux")
+
+// newInstallCmd is the parent group for `canopy install <target>`. v0.7
+// ships one target (tmux); future targets (hypr-sidebar, etc.) plug in
+// via AddCommand.
+func newInstallCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install canopy integrations into your environment.",
+		Long:  `Run "canopy install tmux" to wire canopy popup + statusline into your tmux config.`,
+	}
+	cmd.AddCommand(newInstallTmuxCmd())
+	return cmd
+}
+
+func newInstallTmuxCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "tmux",
+		Short: "Add canopy popup + statusline bindings to ~/.tmux.conf.",
+		Long: `Writes a managed block to ~/.tmux.conf between marker comments:
+
+  # canopy:start ...
+  bind g run-shell "canopy popup"
+  set -ag status-right " #(canopy statusline --format=current) "
+  # canopy:end
+
+Idempotent. Backs up ~/.tmux.conf to ~/.tmux.conf.canopy-backup-<timestamp>
+before writing. Refuses if the marker block already exists; pass --force
+to replace it in place.
+
+Requires tmux 3.2+ (display-popup support).
+`,
+		// Allow inside tmux: this command writes a config file, doesn't
+		// manipulate tmux server state. Users naturally invoke it from
+		// inside their working tmux session.
+		Annotations: map[string]string{allowInTmuxAnnotation: "true"},
+		RunE:        runInstallTmux,
+	}
+	cmd.Flags().Bool("force", false, "replace existing canopy block if present (default: refuse and exit)")
+	cmd.Flags().Bool("dry-run", false, "show what would be written without modifying ~/.tmux.conf")
+	return cmd
+}
+
+func runInstallTmux(cmd *cobra.Command, _ []string) error {
+	force, _ := cmd.Flags().GetBool("force")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	out := cmd.OutOrStdout()
+
+	// Refuse on pre-3.2 tmux. Writing display-popup bindings to a tmux
+	// that doesn't understand them turns the user's status bar into an
+	// error message every refresh.
+	t := tmux.New()
+	ver, err := t.Version(cmd.Context())
+	if err != nil {
+		return fmt.Errorf("install tmux: tmux version check failed: %w", err)
+	}
+	ok, err := tmux.CompareVersions(ver, tmuxInstallMinVersion)
+	if err != nil {
+		return fmt.Errorf("install tmux: cannot parse tmux version %q: %w", ver, err)
+	}
+	if !ok {
+		return fmt.Errorf(
+			"install tmux: requires tmux %s+ (display-popup support).\n"+
+				"  You have tmux %s. Upgrade tmux first.",
+			tmuxInstallMinVersion, ver)
+	}
+
+	confPath, err := tmuxConfPath()
+	if err != nil {
+		return err
+	}
+
+	// Read current contents (empty if missing).
+	existing, err := readTmuxConf(confPath)
+	if err != nil {
+		return fmt.Errorf("install tmux: read %s: %w", confPath, err)
+	}
+
+	state := detectCanopyBlock(existing)
+	switch state {
+	case canopyBlockMultiple:
+		return fmt.Errorf(
+			"install tmux: %s contains multiple canopy:start/end blocks.\n"+
+				"  Hand-edit to a single block and re-run, or pass --force to overwrite all.",
+			confPath)
+
+	case canopyBlockMalformed:
+		return fmt.Errorf(
+			"install tmux: %s has a canopy:start without matching canopy:end (or vice versa).\n"+
+				"  Hand-edit to fix the markers, or pass --force to overwrite.",
+			confPath)
+
+	case canopyBlockPresent:
+		if !force {
+			fmt.Fprintf(out,
+				"canopy block already present in %s. Re-run with --force to replace it.\n",
+				confPath)
+			return nil
+		}
+		// Fall through to replace.
+	}
+
+	newConf := applyCanopyBlock(existing, canopyBlockBody())
+
+	if dryRun {
+		fmt.Fprintf(out, "[dry-run] would write %d bytes to %s\n", len(newConf), confPath)
+		fmt.Fprintln(out, "[dry-run] new canopy block:")
+		fmt.Fprintln(out, canopyBlockBody())
+		return nil
+	}
+
+	// Backup BEFORE any write. Skip if the file didn't exist (nothing
+	// to back up — a missing tmux.conf is a valid first-run state).
+	backupPath := ""
+	if existing != "" {
+		backupPath, err = backupTmuxConf(confPath, existing)
+		if err != nil {
+			return fmt.Errorf("install tmux: backup: %w", err)
+		}
+	}
+
+	// Atomic write: tempfile + rename.
+	if err := atomicWriteFile(confPath, []byte(newConf), 0o644); err != nil {
+		return fmt.Errorf("install tmux: write %s: %w", confPath, err)
+	}
+
+	installTmuxLog.Info("install_tmux.success",
+		"path", confPath, "backup", backupPath, "force", force, "tmux_version", ver)
+
+	fmt.Fprintf(out, "Wrote canopy block to %s.\n", confPath)
+	if backupPath != "" {
+		fmt.Fprintf(out, "Backup saved to %s.\n", backupPath)
+	}
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Apply now without restarting tmux:")
+	fmt.Fprintln(out, "  tmux source-file ~/.tmux.conf")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Then press <prefix>g to open the canopy popup. The statusline shows")
+	fmt.Fprintln(out, "the current workspace when you're attached to a canopy-managed session.")
+	return nil
+}
+
+type canopyBlockState int
+
+const (
+	canopyBlockAbsent canopyBlockState = iota
+	canopyBlockPresent
+	canopyBlockMultiple  // >1 start markers — operator hand-edit territory
+	canopyBlockMalformed // start without end, or vice versa
+)
+
+// detectCanopyBlock classifies the current state of marker comments in
+// the user's tmux.conf. The matrix:
+//
+//	0 start, 0 end       → Absent
+//	1 start, 1 end       → Present (good case)
+//	2+ starts, anything  → Multiple (operator edit needed)
+//	N starts, M ends, N≠M → Malformed (count mismatch)
+func detectCanopyBlock(content string) canopyBlockState {
+	starts := strings.Count(content, tmuxConfMarkerStart)
+	ends := strings.Count(content, tmuxConfMarkerEnd)
+	switch {
+	case starts == 0 && ends == 0:
+		return canopyBlockAbsent
+	case starts == 1 && ends == 1:
+		return canopyBlockPresent
+	case starts > 1:
+		return canopyBlockMultiple
+	default:
+		return canopyBlockMalformed
+	}
+}
+
+// canopyBlockBody is the literal text we write between markers. The
+// canopy binary path is resolved from os.Executable() so the bindings
+// always point at the binary that ran the install — meaning dogfood
+// builds (./canopy or /tmp/canopy-foo) write their own path, and
+// installed builds (~/.local/bin/canopy) write theirs. Re-run
+// `canopy install tmux --force` from the new binary to swap.
+//
+// Reload safety: tmux's `set -ag` (append) accumulates on every
+// source-file invocation — running `tmux source-file ~/.tmux.conf`
+// twice would put two canopy statusline segments in status-right.
+// The block uses `run-shell` + sed to strip any pre-existing canopy
+// statusline segment BEFORE appending, so reloads are idempotent.
+// The strip pattern matches any `#(...statusline...)` segment regardless
+// of binary path, which also handles the "old install left a stale
+// entry pointing at a different binary" case.
+func canopyBlockBody() string {
+	bin := canopyBinForBlock()
+	return tmuxConfMarkerStart + ` (managed by ` + "`canopy install tmux`" + ` — edit only outside markers)
+# Default keybind:
+#   <prefix>g  open the canopy popup (workspace switcher).
+#
+# canopy run is shipped as a subcommand but NOT keybound by default —
+# the right shape (popup vs send-keys vs spawn-pane) is still being
+# explored. Bind manually if you want it; e.g.:
+#   bind X display-popup -E -d "#{pane_current_path}" "canopy run"
+bind g run-shell "` + bin + ` popup"
+# Statusline: strip any pre-existing canopy segment, then append fresh.
+# The strip+append pattern keeps reloads idempotent (set -ag alone would
+# accumulate duplicates on every source-file invocation). Pattern is
+# anchored on "canopy" so unrelated statusline tools (e.g., a hypothetical
+# user-installed #(my-statusline-tool) segment) survive untouched.
+run-shell 'tmux set -gq status-right "$(tmux show -gv status-right | sed -E "s| *#\([^)]*canopy[^)]*statusline[^)]*\)||g")"'
+set -ag status-right " #(` + bin + ` statusline --format=current) "
+` + tmuxConfMarkerEnd
+}
+
+// canopyBinForBlock returns the binary path to embed in the generated
+// tmux config. Resolved from os.Executable() so each install points at
+// itself. Falls back to bare "canopy" (PATH-resolved at tmux runtime)
+// if executable resolution fails — a graceful degradation that matches
+// the v0.7 plan's manual snippet.
+func canopyBinForBlock() string {
+	bin, err := selfBinaryPath()
+	if err != nil || bin == "" {
+		return "canopy"
+	}
+	return bin
+}
+
+// applyCanopyBlock returns existing with the canopy block applied. If a
+// block is present (single, well-formed), it's replaced in place; if
+// absent, the new block is appended (with a separating blank line if
+// the file is non-empty).
+//
+// Multiple-blocks and malformed states are operator-hand-edit territory
+// and shouldn't reach this function — callers gate on detectCanopyBlock.
+func applyCanopyBlock(existing, block string) string {
+	state := detectCanopyBlock(existing)
+	switch state {
+	case canopyBlockAbsent:
+		return appendCanopyBlock(existing, block)
+	case canopyBlockPresent:
+		return replaceCanopyBlock(existing, block)
+	}
+	// Defense in depth: shouldn't be reached; preserve existing as-is
+	// rather than scribble over a malformed file.
+	return existing
+}
+
+func appendCanopyBlock(existing, block string) string {
+	if existing == "" {
+		return block + "\n"
+	}
+	// Ensure exactly one blank line between user content and our block.
+	trimmed := strings.TrimRight(existing, "\n")
+	return trimmed + "\n\n" + block + "\n"
+}
+
+func replaceCanopyBlock(existing, block string) string {
+	startIdx := strings.Index(existing, tmuxConfMarkerStart)
+	endIdx := strings.Index(existing, tmuxConfMarkerEnd)
+	if startIdx < 0 || endIdx < 0 || endIdx < startIdx {
+		// Inconsistent with detectCanopyBlock contract; bail safely.
+		return existing
+	}
+	// Find end-of-line for the end marker so we replace the full line.
+	endOfBlock := endIdx + len(tmuxConfMarkerEnd)
+	for endOfBlock < len(existing) && existing[endOfBlock] != '\n' {
+		endOfBlock++
+	}
+	return existing[:startIdx] + block + existing[endOfBlock:]
+}
+
+// tmuxConfPath returns the canonical ~/.tmux.conf path. We do NOT honor
+// $XDG_CONFIG_HOME / ~/.config/tmux/tmux.conf yet — most tmux setups in
+// the wild use ~/.tmux.conf, and our marker block lets the user wire it
+// in elsewhere with `source-file` if they prefer XDG layout.
+func tmuxConfPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("install tmux: home dir: %w", err)
+	}
+	return filepath.Join(home, ".tmux.conf"), nil
+}
+
+func readTmuxConf(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// backupTmuxConf writes content to ~/.tmux.conf.canopy-backup-<RFC3339-ish>.
+// Returns the backup path on success. Timestamp is local-time formatted
+// for human readability (matches the rest of canopy's filename conventions).
+func backupTmuxConf(confPath, content string) (string, error) {
+	stamp := time.Now().Format("20060102-150405")
+	backupPath := confPath + ".canopy-backup-" + stamp
+	if err := os.WriteFile(backupPath, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write backup %s: %w", backupPath, err)
+	}
+	return backupPath, nil
+}
+
+// atomicWriteFile writes data to path via tempfile + rename, so a crash
+// mid-write can't leave a half-written tmux.conf that breaks tmux. POSIX
+// guarantees rename(2) is atomic within the same filesystem; we put the
+// tempfile next to the target to stay on one fs.
+//
+// Symlink handling: if path is a symlink (common for stow/chezmoi
+// users with ~/.tmux.conf -> ~/dotfiles/tmux.conf), follow the link
+// and write to the resolved target. Without this, os.Rename would
+// replace the symlink itself with the new file, severing the user's
+// dotfile-management setup.
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	if resolved, err := os.Readlink(path); err == nil {
+		// path is a symlink — write to its target instead. Resolve
+		// relative symlinks against the symlink's directory.
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(filepath.Dir(path), resolved)
+		}
+		path = resolved
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmux.conf.canopy-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
+}
