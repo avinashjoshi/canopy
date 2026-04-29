@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -95,6 +96,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the direct ready-status path.
 		return m, attachCmd(m.mgr, msg.session)
 
+	case createStartedMsg:
+		// First dispatch from createCmd. Kick off the streaming +
+		// completion cmds as a batch — both run concurrently.
+		return m, tea.Batch(progressTickCmd(msg.buf), waitDoneCmd(msg.done))
+
+	case progressTickMsg:
+		// Live streaming output during a Create. Append the new
+		// chunk and schedule the next tick — unless the create
+		// already finished (busyDone is true), in which case stop
+		// ticking. The final flush happens in createDoneMsg below
+		// so trailing output isn't lost between the last tick and
+		// the goroutine's exit.
+		if msg.chunk != "" {
+			m.busyOutput += msg.chunk
+		}
+		if m.busyDone || m.mode != busyMode {
+			return m, nil
+		}
+		return m, progressTickCmd(msg.buf)
+
 	case createDoneMsg:
 		// Workspace creation finished. On success we auto-attach to the
 		// new workspace's tmux session — that's what the user pressed `n`
@@ -104,7 +125,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dismisses back to the list (handleBusyModeKey).
 		m.busyDone = true
 		m.busyErr = msg.err
-		m.busyOutput = msg.output
+		// Append any trailing output from the buffer drain that the
+		// final tick missed. m.busyOutput already contains everything
+		// streamed via progressTickMsg; msg.output is just the tail.
+		if msg.output != "" {
+			m.busyOutput += msg.output
+		}
 		if msg.err == nil && msg.tmuxSession != "" {
 			m.mode = listMode
 			m.busyOp = busyOpNone
@@ -1025,31 +1051,105 @@ func removeCmd(mgr *workspace.Manager, name string) tea.Cmd {
 	}
 }
 
-// createCmd kicks off Manager.Create asynchronously. spec drives the
-// source variant (zero spec = fresh workspace; populated spec =
-// pr/issue/branch). The gh shellouts + git fetches happen inside
-// ResolveSource, so the goroutine handles the whole "fetch then
-// setup" sequence without blocking the TUI. Captures the streamed
-// setup output into a single buffer; sends createDoneMsg back to
-// Update when finished.
+// createCmd kicks off Manager.Create asynchronously and streams its
+// stdout/stderr to the busy view as it runs. spec drives the source
+// variant (zero spec = fresh workspace; populated spec = pr/issue/
+// branch). The gh shellouts + git fetches happen inside ResolveSource,
+// then mgr.Create runs scripts.setup which is the slow, output-y
+// part — that's what the user wants to see scroll past in real time.
+//
+// Mechanism:
+//
+//   - A safeBuffer captures everything written to the
+//     stdout/stderr writers passed to mgr.Create.
+//   - Goroutine runs the actual work (resolve + create) and pushes
+//     the final result onto a `done` chan.
+//   - Returned tea.Batch has TWO cmds:
+//       1. progressTickCmd — re-fires every 150ms, drains the
+//          buffer, emits progressTickMsg with the new chunk. The
+//          tick re-schedules itself in Update until busyDone.
+//       2. waitDoneCmd — blocks reading from `done`, emits
+//          createDoneMsg when the goroutine finishes.
+//
+// Both cmds run concurrently under tea.Batch. Update appends ticks
+// to m.busyOutput live, then on createDoneMsg appends any final
+// bytes the last tick missed.
 func createCmd(mgr *workspace.Manager, name string, spec workspace.SourceSpec) tea.Cmd {
+	// Lazy spawn: the goroutine + buffer + chan are constructed
+	// inside the returned closure, NOT at createCmd's call site.
+	// That keeps the cmd value cheap to construct and lets unit
+	// tests inspect the returned cmd without accidentally kicking
+	// off real work against a nil-mgr fixture.
+	//
+	// Update sees createStartedMsg first and dispatches the
+	// streaming + done cmds via tea.Batch from there.
 	return func() tea.Msg {
-		var buf bytes.Buffer
-		ctx := context.Background()
-		opts, suggestedName, err := mgr.ResolveSource(ctx, spec)
-		if err != nil {
-			return createDoneMsg{output: buf.String(), err: err}
-		}
-		// Explicit name beats source-derived suggestion beats namegen.
-		if name == "" {
-			name = suggestedName
-		}
-		ws, err := mgr.Create(ctx, name, opts, &buf, &buf)
-		msg := createDoneMsg{output: buf.String(), err: err}
-		if err == nil && ws != nil {
-			msg.tmuxSession = ws.TmuxSession
-		}
-		return msg
+		buf := &safeBuffer{}
+		done := make(chan createDoneMsg, 1)
+		go func() {
+			ctx := context.Background()
+			opts, suggestedName, err := mgr.ResolveSource(ctx, spec)
+			if err != nil {
+				done <- createDoneMsg{output: buf.Drain(), err: err}
+				return
+			}
+			// Explicit name beats source-derived suggestion beats namegen.
+			if name == "" {
+				name = suggestedName
+			}
+			ws, err := mgr.Create(ctx, name, opts, buf, buf)
+			// Drain after Create returns so any trailing bytes
+			// (the last "Workspace ready" line, etc.) end up in
+			// the final createDoneMsg, not stranded in the buffer
+			// if the tick timing missed them.
+			msg := createDoneMsg{output: buf.Drain(), err: err}
+			if err == nil && ws != nil {
+				msg.tmuxSession = ws.TmuxSession
+			}
+			done <- msg
+		}()
+		return createStartedMsg{buf: buf, done: done}
+	}
+}
+
+// createStartedMsg is the bridge between createCmd's lazy spawn and
+// the streaming machinery. Update receives it once and dispatches
+// the per-tick + wait-done cmds as a batch. Carries the buffer +
+// done-chan so the dispatched cmds have what they need.
+type createStartedMsg struct {
+	buf  *safeBuffer
+	done <-chan createDoneMsg
+}
+
+// progressTickInterval controls how often the busy view refreshes
+// during a long-running create. 150ms is invisible to the eye for
+// streaming text and far below any practical script output rate;
+// shorter intervals just burn redraw cycles for no gain.
+const progressTickInterval = 150 * time.Millisecond
+
+// progressTickMsg fires every progressTickInterval while a Create is
+// in flight. Carries the freshly-drained chunk and a back-reference
+// to the buffer so Update can keep ticking without holding state.
+type progressTickMsg struct {
+	chunk string
+	buf   *safeBuffer
+}
+
+// progressTickCmd builds the tick command. The drain happens at
+// schedule time (inside the closure) so each tick fetches whatever
+// the goroutine has written between this tick and the previous one.
+func progressTickCmd(buf *safeBuffer) tea.Cmd {
+	return tea.Tick(progressTickInterval, func(time.Time) tea.Msg {
+		return progressTickMsg{chunk: buf.Drain(), buf: buf}
+	})
+}
+
+// waitDoneCmd blocks on the done channel and emits the createDoneMsg
+// when the goroutine finishes. Single-shot — only fires once per
+// create flow.
+func waitDoneCmd(done <-chan createDoneMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-done
 	}
 }
 

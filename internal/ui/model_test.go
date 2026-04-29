@@ -785,6 +785,80 @@ func TestFilterPRs_TitleSubstring(t *testing.T) {
 	}
 }
 
+// TestProgressTickMsg_AppendsToBusyOutput: streaming chunks from
+// the safeBuffer end up in m.busyOutput so the renderer can show
+// live output. Each tick adds the drained chunk to the running
+// total and schedules another tick (unless done).
+func TestProgressTickMsg_AppendsToBusyOutput(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOp = busyOpCreate
+
+	buf := &safeBuffer{}
+	model, cmd := m.Update(progressTickMsg{chunk: "Setting up...\n", buf: buf})
+	m = model.(*Model)
+
+	if !strings.Contains(m.busyOutput, "Setting up...") {
+		t.Errorf("chunk should be appended to busyOutput; got %q", m.busyOutput)
+	}
+	if cmd == nil {
+		t.Errorf("tick should re-schedule itself while not done")
+	}
+}
+
+// TestProgressTickMsg_StopsTickingWhenDone: once the create
+// completes (busyDone=true), the tick loop must stop. Otherwise we
+// burn redraws on a finished operation.
+func TestProgressTickMsg_StopsTickingWhenDone(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOp = busyOpCreate
+	m.busyDone = true
+
+	_, cmd := m.Update(progressTickMsg{chunk: "trailing\n", buf: &safeBuffer{}})
+	if cmd != nil {
+		t.Errorf("tick after done should NOT re-schedule; got cmd %T", cmd)
+	}
+}
+
+// TestProgressTickMsg_StopsTickingWhenLeftBusyMode: a stale tick
+// arriving after the user dismissed the busy view (e.g. on
+// successful auto-attach which flips mode back to listMode) must
+// not keep the tick loop alive in the wrong mode.
+func TestProgressTickMsg_StopsTickingWhenLeftBusyMode(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = listMode
+
+	_, cmd := m.Update(progressTickMsg{chunk: "", buf: &safeBuffer{}})
+	if cmd != nil {
+		t.Errorf("tick outside busyMode should be dropped; got cmd %T", cmd)
+	}
+}
+
+// TestSafeBuffer_DrainResets: the buffer accumulates writes and
+// hands the drained content back to the caller, then resets so
+// the next drain only returns NEW content. Without this contract,
+// each tick would include the entire history and the View would
+// show duplicated output.
+func TestSafeBuffer_DrainResets(t *testing.T) {
+	buf := &safeBuffer{}
+	buf.Write([]byte("line one\n"))
+	buf.Write([]byte("line two\n"))
+
+	got := buf.Drain()
+	if got != "line one\nline two\n" {
+		t.Errorf("first drain = %q; want both lines", got)
+	}
+	if next := buf.Drain(); next != "" {
+		t.Errorf("second drain should be empty; got %q", next)
+	}
+
+	buf.Write([]byte("line three\n"))
+	if next := buf.Drain(); next != "line three\n" {
+		t.Errorf("post-reset write should drain alone; got %q", next)
+	}
+}
+
 // errFakeCreate is a sentinel for the create-error test. Lives here
 // (not in the test func) so the literal stays readable.
 var errFakeCreate = fakeErr("setup failed")

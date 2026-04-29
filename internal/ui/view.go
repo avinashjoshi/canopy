@@ -672,9 +672,24 @@ func (m *Model) renderBusyView() string {
 	b.WriteString("\n\n")
 
 	if !m.busyDone {
-		b.WriteString(subtleStyle.Render("  Working — this may take a few seconds while scripts.setup runs."))
-		b.WriteString("\n\n")
-		b.WriteString(subtleStyle.Render("  (The TUI is responsive; canopy is doing the heavy lifting in a goroutine.)"))
+		// Live output: scripts.setup writes to a buffer that the
+		// progressTick drain into m.busyOutput every ~150ms. While
+		// the buffer is empty (very early, before scripts produce
+		// anything) we show the static hint; once output arrives it
+		// streams here as it would in a regular shell.
+		if m.busyOutput == "" {
+			b.WriteString(subtleStyle.Render("  Working — this may take a few seconds while scripts.setup runs."))
+			b.WriteString("\n\n")
+			b.WriteString(subtleStyle.Render("  (The TUI is responsive; canopy is doing the heavy lifting in a goroutine.)"))
+			return b.String()
+		}
+		// Tail the streaming output. lipgloss has no built-in tail
+		// helper; we just print everything and rely on terminal
+		// scrollback for long runs. Most scripts.setup output is
+		// short (~20-100 lines).
+		b.WriteString(m.busyOutput)
+		b.WriteString("\n")
+		b.WriteString(subtleStyle.Render("  ...running"))
 		return b.String()
 	}
 
