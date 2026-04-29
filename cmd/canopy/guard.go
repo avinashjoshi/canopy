@@ -41,6 +41,13 @@ func enforceNoNestedTmux(cmd *cobra.Command) error {
 	if os.Getenv(envAllowNested) == "1" {
 		return nil
 	}
+	// Popup-mode invocation: tmux's display-popup -E spawned us with
+	// CANOPY_IN_POPUP=1. We're legitimately inside tmux because tmux
+	// IS the host. The unified TUI handles attach via switch-client
+	// (not by launching a nested tmux session), so no nesting risk.
+	if os.Getenv("CANOPY_IN_POPUP") == "1" {
+		return nil
+	}
 	if cmd != nil && cmd.Annotations[allowInTmuxAnnotation] == "true" {
 		return nil
 	}

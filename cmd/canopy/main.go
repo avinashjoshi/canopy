@@ -42,6 +42,13 @@ func main() {
 			"and teardown scripts, and pairs each workspace with a 4-pane tmux\n" +
 			"session (nvim / claude / shell / server). One TUI lets you switch\n" +
 			"between workspaces and resurrect them after reboots.\n",
+		// Bare `canopy` (no subcommand) launches the unified TUI, which
+		// is safe to run from inside an existing tmux session — it
+		// uses tmux switch-client (not nested attach) for selecting a
+		// workspace, so no nesting risk. The guard still fires on
+		// destructive subcommands (new, rm, retry) which DO spawn or
+		// modify tmux sessions and shouldn't run nested.
+		Annotations: map[string]string{allowInTmuxAnnotation: "true"},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Guard first: if canopy is running inside an existing tmux
 			// session (and isn't an explicitly-allowed subcommand like
