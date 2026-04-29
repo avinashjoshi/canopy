@@ -29,72 +29,18 @@ import (
 	"github.com/oncactus/canopy/internal/lifecycle"
 	"github.com/oncactus/canopy/internal/state"
 	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/oncactus/canopy/internal/ui/projectlist"
 	"github.com/oncactus/canopy/internal/workspace"
 )
 
 var log = clog.Pkg("ui")
 
-// Row is the display shape for a single line in the list. Combines
-// regular workspace rows with the synthetic main-session row so the
-// View doesn't have to special-case at render time.
-//
-// Project + ProjectRoot are populated for every row (workspace and main).
-// In project-only mode (m.mgr non-nil, all rows belong to one project)
-// they're identical across rows. In global/popup mode (m.mgr nil OR
-// CANOPY_IN_POPUP=1) they distinguish cross-project rows so the unified
-// TUI can scope d/R to the right Manager and show the project name in
-// the confirm modal.
-type Row struct {
-	// Project is the project basename (filepath.Base(ProjectRoot)).
-	// Used in the cross-project confirm modal copy ("Delete <project>/<name>?").
-	Project string
-	// ProjectRoot is the canonical absolute path to the project's
-	// source repo. Authoritative project ID; matches state.Workspace.ProjectRoot
-	// and state.GlobalRow.ProjectRoot. Used by transientManagerFor to
-	// construct a Manager scoped to a different project than m.mgr's.
-	ProjectRoot string
-
-	IsMain      bool         // true for the synthetic (main) row
-	Name        string       // "(main)" or the workspace name
-	Branch      string       // "—" for main, the branch name otherwise
-	Path        string       // worktree path; empty for main / orphan rows
-	Status      state.Status // for main, the literal "main"; otherwise the workspace status
-	Port        int          // 0 means "no port to show" -> renders as "—"
-	TmuxSession string
-	Alive       bool // tmux session liveness, queried at refresh time
-	// LastErrorHint is the auto-detected diagnosis from
-	// workspace.Diagnose, populated only when Status==broken AND
-	// canopy recognized the failure signature. Rendered as a
-	// "hint:" line under the table when the cursor sits on this row.
-	LastErrorHint string
-	// Hints are the v0.6 lifecycle detector results (rename / shipped
-	// / pr_status). Loaded asynchronously in a second refresh phase
-	// so the table renders immediately without waiting for the gh
-	// shellout. Empty slice on first render; populated by rowHintsMsg
-	// after each per-row detector returns.
-	Hints []state.Hint
-}
-
-// rowFromGlobalRow converts a state.GlobalRow (used by cross-project
-// listings) into a ui.Row (the unified TUI's canonical row shape).
-// LastErrorHint isn't on GlobalRow today — for orphaned/broken rows the
-// global path doesn't auto-diagnose; the user gets to those workspaces
-// by running canopy from the project where the diagnose result lives.
-func rowFromGlobalRow(g state.GlobalRow) Row {
-	return Row{
-		Project:     g.Project,
-		ProjectRoot: g.ProjectRoot,
-		IsMain:      g.IsMain,
-		Name:        g.Name,
-		Branch:      g.Branch,
-		Path:        g.Path,
-		Status:      g.Status,
-		Port:        g.Port,
-		TmuxSession: g.TmuxSession,
-		Alive:       g.Alive,
-		Hints:       g.Hints,
-	}
-}
+// Row is a back-compat alias for state.GlobalRow. v0.8 unification
+// promoted state.GlobalRow to the canonical row shape (it's what the
+// projectlist sub-component renders) and ui.Row went away. Tests in
+// the package still write `ui.Row{...}` literals; the alias keeps
+// those compiling without rewriting every test.
+type Row = state.GlobalRow
 
 // viewMode tracks which screen the TUI is showing.
 //
@@ -185,8 +131,11 @@ type Model struct {
 	// in that case.
 	store *state.Store
 
-	rows   []Row
-	cursor int
+	// list is the embedded projectlist sub-component that owns row
+	// rendering + cursor state. The unified TUI delegates rendering
+	// to projectlist (the same sub-component the popup used in v0.7),
+	// matching the popup's grouped-by-project visual treatment.
+	list projectlist.Model
 
 	width  int
 	height int
@@ -255,8 +204,8 @@ type Model struct {
 
 	// allRows is the unfiltered row set (cross-project when mgr is nil
 	// or global tab is selected). The tab + searchQuery filter
-	// projects allRows down into rows for rendering.
-	allRows []Row
+	// projects allRows down to what list renders.
+	allRows []state.GlobalRow
 
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
@@ -333,8 +282,16 @@ func (m *Model) branchInWorkspace(branch string) (string, bool) {
 	if branch == "" {
 		return "", false
 	}
-	for _, r := range m.rows {
+	for _, r := range m.allRows {
 		if r.IsMain {
+			continue
+		}
+		// Project-context check: only match against rows in the current
+		// project's source repo. Cross-project branch collisions are
+		// not the same conflict (each project has its own git tree).
+		// Rows with empty ProjectRoot pass through (legacy project-mode
+		// rows + tests that don't set the field).
+		if m.mgr != nil && r.ProjectRoot != "" && r.ProjectRoot != m.mgr.Cfg.ProjectRoot {
 			continue
 		}
 		if r.Branch == branch {
@@ -388,7 +345,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 		projectName = mgr.Cfg.Project
 	}
 
-	return &Model{
+	m := &Model{
 		mgr:            mgr,
 		tc:             tc,
 		store:          store,
@@ -400,6 +357,14 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 		currentProject: currentProject,
 		tab:            defaultTab,
 	}
+	// projectlist owns row rendering + cursor. We supply nil callbacks
+	// because the unified TUI's bindings table dispatches activate /
+	// goToProject / refresh — projectlist's own keymap (up/down/enter)
+	// fires through Update but the activate path is handled by the
+	// parent's `enter` binding (actionAttach), not projectlist's
+	// OnActivate. SetRows happens after each refresh.
+	m.list = projectlist.New(projectlist.Options{})
+	return m
 }
 
 // RunUnified is the v0.8 public entry point used by cmd/canopy/route.go.
@@ -448,101 +413,47 @@ func (m *Model) Init() tea.Cmd {
 // rowsLoadedMsg is the result of a refresh. Carries the new rows or an
 // error; Update applies them to the Model.
 type rowsLoadedMsg struct {
-	rows []Row
+	rows []state.GlobalRow
 	err  error
 }
 
 // refreshCmd reconciles state, then loads workspaces + the main row.
 // Runs in a goroutine via tea.Cmd so the UI doesn't block on tmux/disk.
 //
-// Dual-path: project mode (mgr non-nil) uses mgr.List + Reconcile and
-// returns rows scoped to that one project. Global mode (mgr nil) uses
-// state.BuildGlobalRows and returns rows from every registered project.
-// Either way the rows are typed `[]Row` (state.GlobalRow converted via
-// rowFromGlobalRow when necessary) so the renderer doesn't fork.
+// Always uses state.BuildGlobalRows so the unified TUI's row data shape
+// is uniform across project and global invocations. When mgr is non-nil,
+// we run Reconcile first (which mutates state.json) so the freshly-built
+// rows reflect the latest stopped/ready transitions.
 func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		// Project mode: walk Manager's path. Reconcile + List + project's
-		// Project meta for the synthetic main row.
+		// Project-context lazy reconcile so stale ready→stopped before
+		// rows render. Errors are non-fatal; rows still build from the
+		// latest state we can load.
 		if mgr != nil {
 			if _, err := mgr.Reconcile(ctx); err != nil {
 				log.Warn("ui.refresh.reconcile-failed", "err", err)
 			}
-			workspaces, err := mgr.List(ctx)
-			if err != nil {
-				return rowsLoadedMsg{err: err}
-			}
-			st, err := mgr.Store.Load()
-			if err != nil {
-				return rowsLoadedMsg{err: err}
-			}
-
-			rows := []Row{}
-			mainSession := tmux.SafeName(mgr.Cfg.Project) + "-main"
-			alive, _ := tc.HasSession(ctx, mainSession)
-			r := Row{
-				Project:     mgr.Cfg.Project,
-				ProjectRoot: mgr.Cfg.ProjectRoot,
-				IsMain:      true,
-				Name:        "(main)",
-				Branch:      "—",
-				Status:      "main",
-				TmuxSession: mainSession,
-				Alive:       alive,
-			}
-			if meta, ok := st.Projects[mgr.Cfg.ProjectRoot]; ok {
-				r.Port = meta.PortBase
-			} else if meta, ok := st.Projects[mgr.Cfg.Project]; ok {
-				// Legacy v1 basename key.
-				r.Port = meta.PortBase
-			}
-			rows = append(rows, r)
-
-			for _, w := range workspaces {
-				alive, _ := tc.HasSession(ctx, w.TmuxSession)
-				rows = append(rows, Row{
-					Project:       mgr.Cfg.Project,
-					ProjectRoot:   mgr.Cfg.ProjectRoot,
-					IsMain:        false,
-					Name:          w.Name,
-					Branch:        w.Branch,
-					Path:          w.Path,
-					Status:        w.Status,
-					Port:          w.Port,
-					TmuxSession:   w.TmuxSession,
-					Alive:         alive,
-					LastErrorHint: w.LastErrorHint,
-				})
-			}
-			return rowsLoadedMsg{rows: rows}
 		}
 
-		// Global mode: no Manager. Pull rows from state.BuildGlobalRows
-		// (which scans every registered project) and convert. tc is the
-		// liveness probe BuildGlobalRows uses for the main rows; same
-		// interface as the project path so behavior matches.
 		st, err := store.Load()
 		if err != nil {
 			return rowsLoadedMsg{err: err}
 		}
-		globals := st.BuildGlobalRows(ctx, tc)
-		rows := make([]Row, 0, len(globals))
-		for _, g := range globals {
-			rows = append(rows, rowFromGlobalRow(g))
-		}
+		rows := st.BuildGlobalRows(ctx, tc)
 		return rowsLoadedMsg{rows: rows}
 	}
 }
 
 // rowHintsMsg carries a single workspace's lifecycle detector result.
-// Update merges it into the matching Row by Name. Identified by name
-// rather than slice index so a concurrent state mutation doesn't
-// strand the hint update on the wrong row.
+// Update merges it into projectlist via UpdateRowHints (keyed by
+// project + name so a concurrent reconcile that reordered rows doesn't
+// strand the hint update).
 type rowHintsMsg struct {
-	name  string
-	hints []state.Hint
+	project string
+	name    string
+	hints   []state.Hint
 }
 
 // loadRowHintsCmds returns a tea.Batch of per-row hint-loading cmds.
@@ -551,9 +462,8 @@ type rowHintsMsg struct {
 // concurrently, so cold-start gh latency parallelizes across rows.
 //
 // Skips main rows and rows with empty Path. Each row carries its own
-// ProjectRoot (set in refreshCmd) so the unified TUI's cross-project
-// rows load hints against the right project.
-func loadRowHintsCmds(rows []Row) tea.Cmd {
+// ProjectRoot so cross-project hint loading scopes correctly.
+func loadRowHintsCmds(rows []state.GlobalRow) tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(rows))
 	for _, r := range rows {
 		if r.IsMain || r.Path == "" {
@@ -569,8 +479,9 @@ func loadRowHintsCmds(rows []Row) tea.Cmd {
 				Status:      row.Status,
 			}
 			return rowHintsMsg{
-				name:  row.Name,
-				hints: lifecycle.RunFast(context.Background(), ws),
+				project: row.Project,
+				name:    row.Name,
+				hints:   lifecycle.RunFast(context.Background(), ws),
 			}
 		})
 	}

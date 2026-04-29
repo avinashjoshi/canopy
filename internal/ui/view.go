@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/oncactus/canopy/internal/ghx"
-	"github.com/oncactus/canopy/internal/ui/projectlist"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and
@@ -41,23 +41,16 @@ func (m *Model) View() string {
 	}
 
 	var b strings.Builder
-	// Title: in popup mode, no project subtitle (the tab bar shows it).
-	// In fullscreen, project subtitle when mgr is non-nil; "global" otherwise.
-	subtitle := m.projectName
-	if subtitle == "" {
-		subtitle = "global"
-	}
-	b.WriteString(titleStyle.Render("canopy") + " " + subtleStyle.Render(subtitle))
-	b.WriteString("\n")
+	// Title: just "canopy" — the tab bar tells the user what scope
+	// they're in (Local: <project> vs Global), so a project subtitle
+	// in the title would be redundant chrome.
+	b.WriteString(titleStyle.Render("canopy"))
+	b.WriteString("\n\n")
 
-	// v0.8 tab bar: always rendered, single-line in popup mode, two-line
-	// in fullscreen. Dimmed when one tab is empty.
-	b.WriteString("\n")
+	// Tab bar + search-line always at the top.
 	b.WriteString(m.renderTabBar())
-	if m.searchMode || m.searchQuery != "" {
-		b.WriteString("    ")
-		b.WriteString(m.renderSearchLine())
-	}
+	b.WriteString("    ")
+	b.WriteString(m.renderSearchLine())
 	b.WriteString("\n\n")
 
 	if m.err != nil {
@@ -65,33 +58,37 @@ func (m *Model) View() string {
 		b.WriteString("\n\n")
 	}
 
-	rows := m.filteredRows()
-	if len(rows) == 0 {
-		// Empty-tab onboarding text (D5 refinement). Local empty mostly
-		// means "you're outside any registered project"; Global empty
-		// means "canopy doesn't know about any projects yet."
+	// Empty-tab onboarding text. projectlist's own emptyState() shows
+	// when SetRows([]) — but we want context-specific text (Local vs
+	// Global), so we override here when filteredRows is empty.
+	if len(m.filteredRows()) == 0 {
 		if m.tab == tabLocal {
 			if m.currentProject == "" {
-				b.WriteString(subtleStyle.Render("You're not in a canopy project."))
-				b.WriteString("\n")
+				b.WriteString("  " + subtleStyle.Render("You're not in a canopy project."))
+				b.WriteString("\n  ")
 				b.WriteString(subtleStyle.Render("cd to a repo and run `canopy init` to get started."))
 			} else if m.searchQuery != "" {
-				b.WriteString(subtleStyle.Render(fmt.Sprintf("No matches for %q in this project.", m.searchQuery)))
+				b.WriteString("  " + subtleStyle.Render(fmt.Sprintf("No matches for %q in this project.", m.searchQuery)))
+			} else if m.mgr != nil {
+				b.WriteString("  " + subtleStyle.Render("No workspaces. Press 'n' to create one."))
 			} else {
-				b.WriteString(subtleStyle.Render("No workspaces. Press 'n' to create one, or 'q' to quit."))
+				b.WriteString("  " + subtleStyle.Render("No workspaces in this project."))
 			}
 		} else {
 			if m.searchQuery != "" {
-				b.WriteString(subtleStyle.Render(fmt.Sprintf("No matches for %q across any project.", m.searchQuery)))
+				b.WriteString("  " + subtleStyle.Render(fmt.Sprintf("No matches for %q across any project.", m.searchQuery)))
 			} else {
-				b.WriteString(subtleStyle.Render("No projects yet."))
-				b.WriteString("\n")
-				b.WriteString(subtleStyle.Render("Add another project: cd to its root and run `canopy init`."))
+				b.WriteString("  " + subtleStyle.Render("No projects yet."))
+				b.WriteString("\n  ")
+				b.WriteString(subtleStyle.Render("cd to a repo and run `canopy init` to register one."))
 			}
 		}
 		b.WriteString("\n\n")
 	} else {
-		b.WriteString(m.renderTable())
+		// Delegate to the projectlist sub-component for table render.
+		// Same look as the v0.7 popup — grouped by project, indented
+		// rows, hint badges per row, selected row highlighted.
+		b.WriteString(m.list.View())
 		b.WriteString("\n")
 		if hint := m.selectedHint(); hint != "" {
 			b.WriteString("  ")
@@ -177,14 +174,12 @@ func (m *Model) renderSearchLine() string {
 	return ""
 }
 
-// allRowsOrFallback returns m.allRows when populated, falling back to
-// m.rows for the brief startup window before the first refresh returns.
-// Used by tab-bar count rendering where allRows may not be set yet.
-func (m *Model) allRowsOrFallback() []Row {
-	if m.allRows != nil {
-		return m.allRows
-	}
-	return m.rows
+// allRowsOrFallback returns m.allRows; the back-compat fallback is
+// gone now that the unified TUI's refresh path always populates
+// allRows. Kept as a thin accessor so callers don't reach into
+// the field directly (decoupling internal storage from renderers).
+func (m *Model) allRowsOrFallback() []state.GlobalRow {
+	return m.allRows
 }
 
 // renderConfirmRetry renders the y/N gate for `R` on a non-broken
@@ -202,116 +197,10 @@ func (m *Model) renderConfirmRetry() string {
 	return b.String()
 }
 
-// renderTable draws the workspace list. tabwriter would simplify column
-// alignment but doesn't play with lipgloss styled cells, so we compute
-// widths manually. Five columns: TMUX badge, NAME, BRANCH, STATUS, PORT.
-// SESSION is dropped from the TUI table (visible enough via tmux's own
-// status bar after attach) to keep the line narrow.
-func (m *Model) renderTable() string {
-	// Use filteredRows so the table reflects active tab + search filter.
-	// Column widths derive from the visible set, not the full set, so a
-	// long-named cross-project row in the Global tab doesn't pad columns
-	// when the Local tab is active.
-	rows := m.filteredRows()
-
-	colProj, colName, colBranch, colStatus, colPort := 0, 4, 6, 6, 4
-	// Project column only renders when the current tab is Global AND
-	// rows span multiple projects (otherwise it's noise).
-	multiProject := m.tab == tabGlobal && hasMultipleProjects(rows)
-	if multiProject {
-		colProj = 7 // "PROJECT" header
-	}
-	for _, r := range rows {
-		if multiProject {
-			colProj = maxInt(colProj, len(r.Project))
-		}
-		colName = maxInt(colName, len(r.Name))
-		colBranch = maxInt(colBranch, len(r.Branch))
-		colStatus = maxInt(colStatus, len(string(r.Status)))
-		if r.Port > 0 {
-			colPort = maxInt(colPort, len(fmt.Sprintf("%d", r.Port)))
-		}
-	}
-
-	var header string
-	if multiProject {
-		header = fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %*s",
-			colProj, "PROJECT",
-			colName, "NAME",
-			colBranch, "BRANCH",
-			colStatus+2, "STATUS",
-			colPort, "PORT")
-	} else {
-		header = fmt.Sprintf("  %-*s  %-*s  %-*s  %*s",
-			colName, "NAME",
-			colBranch, "BRANCH",
-			colStatus+2, "STATUS",
-			colPort, "PORT")
-	}
-
-	var b strings.Builder
-	b.WriteString(subtleStyle.Render(header))
-	b.WriteString("\n")
-
-	for i, r := range rows {
-		port := "—"
-		if r.Port > 0 {
-			port = fmt.Sprintf("%d", r.Port)
-		}
-		badge := deadStyle.Render("○")
-		if r.Alive {
-			badge = aliveStyle.Render("●")
-		}
-		var line string
-		if multiProject {
-			line = fmt.Sprintf("%s %-*s  %-*s  %-*s  %s  %*s",
-				badge,
-				colProj, r.Project,
-				colName, r.Name,
-				colBranch, r.Branch,
-				statusCell(r.Status, colStatus),
-				colPort, port,
-			)
-		} else {
-			line = fmt.Sprintf("%s %-*s  %-*s  %s  %*s",
-				badge,
-				colName, r.Name,
-				colBranch, r.Branch,
-				statusCell(r.Status, colStatus),
-				colPort, port,
-			)
-		}
-		if hintBadges := projectlist.RenderHintBadges(r.Hints); hintBadges != "" {
-			line += "  " + hintBadges
-		}
-		if i == m.cursor {
-			line = selectedStyle.Render(line)
-		}
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-// hasMultipleProjects returns true if rows span more than one ProjectRoot.
-// Used by renderTable to decide whether to show a PROJECT column on the
-// Global tab — single-project rows would just repeat the same value.
-func hasMultipleProjects(rows []Row) bool {
-	seen := ""
-	for _, r := range rows {
-		if r.IsMain || r.ProjectRoot == "" {
-			continue
-		}
-		if seen == "" {
-			seen = r.ProjectRoot
-			continue
-		}
-		if r.ProjectRoot != seen {
-			return true
-		}
-	}
-	return false
-}
+// renderTable + hasMultipleProjects were the unified TUI's hand-rolled
+// table renderer. Removed in favor of the projectlist sub-component,
+// whose grouped-by-project layout matches the v0.7 popup look that
+// users built muscle memory around.
 
 // renderHelpLine is the one-line keybind cheat at the bottom of the
 // main view. Driven by the listModeBindings table — bindings whose
@@ -936,11 +825,10 @@ func (m *Model) renderHelp() string {
 // captured. Empty otherwise so the caller can skip the whole hint
 // line. Defensive against an empty rows slice.
 func (m *Model) selectedHint() string {
-	rows := m.filteredRows()
-	if len(rows) == 0 || m.cursor >= len(rows) {
+	r, ok := m.list.CursorRow()
+	if !ok {
 		return ""
 	}
-	r := rows[m.cursor]
 	if r.IsMain || r.Status != "broken" || r.LastErrorHint == "" {
 		return ""
 	}

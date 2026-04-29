@@ -23,48 +23,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// Reserve lines for title + tab bar + help + spacing. The exact
+		// reserve count isn't critical — projectlist truncates if it
+		// runs out of vertical space rather than overflowing the
+		// terminal.
+		reserve := 6
+		if m.inPopup {
+			reserve = 5 // single-line tab bar + tighter chrome
+		}
+		m.list.SetSize(msg.Width, msg.Height-reserve)
 		return m, nil
 
 	case rowsLoadedMsg:
-		// Refresh result. Apply rows; clamp the cursor if the list shrank.
+		// Refresh result. Apply rows to allRows + push the filtered
+		// (tab + search) subset to projectlist for rendering.
 		m.err = msg.err
 		if msg.rows != nil {
-			// Store unfiltered rows in allRows; m.rows is the
-			// back-compat alias that points at the same data so
-			// existing renderers / handlers that read m.rows during
-			// the merge window still work. Once everything migrates
-			// to filteredRows() the m.rows alias goes away.
 			m.allRows = msg.rows
-			m.rows = msg.rows
 		}
-		// Cursor clamp against the FILTERED set, not the raw rows —
-		// otherwise a populated Global tab with the cursor at row 47
-		// would point past the end of an empty Local tab after a
-		// tab-switch.
-		if filtered := m.filteredRows(); m.cursor >= len(filtered) {
-			m.cursor = max0(len(filtered) - 1)
-		}
-		// Phase 2: kick off per-row hint loaders in parallel. Each
-		// returns a rowHintsMsg as it completes. Skipped on error
-		// (no rows to decorate) and on empty lists.
-		if msg.err != nil || len(m.rows) == 0 {
+		m.list.SetRows(m.filteredRows())
+		// Phase 2: kick off per-row hint loaders in parallel.
+		if msg.err != nil || len(m.allRows) == 0 {
 			return m, nil
 		}
-		// Per-row ProjectRoot: every Row carries its own (set in refreshCmd
-		// for both project and global paths). Lets the unified TUI load
-		// hints across projects without a single-project assumption.
-		return m, loadRowHintsCmds(m.rows)
+		return m, loadRowHintsCmds(m.allRows)
 
 	case rowHintsMsg:
-		// Late-arriving lifecycle detector result. Find the row by
-		// name and merge the hints in. Silent no-op if the row is
-		// gone (e.g. concurrent rm).
-		for i := range m.rows {
-			if m.rows[i].Name == msg.name {
-				m.rows[i].Hints = msg.hints
-				break
-			}
-		}
+		// Late-arriving lifecycle detector result. Forward to
+		// projectlist's UpdateRowHints which merges by (project, name).
+		m.list.UpdateRowHints(msg.project, msg.name, msg.hints)
 		return m, nil
 
 	case prListLoadedMsg:
@@ -275,16 +262,17 @@ func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, refreshCmd(m.mgr, m.tc, m.store)
 }
 
-// actionTabSwitch flips Local ↔ Global. Cursor resets to top of the new
-// tab's filtered set so a long-list scroll position doesn't carry over
-// confusingly when the user is mentally context-switching.
+// actionTabSwitch flips Local ↔ Global. The new filtered set is pushed
+// to projectlist via SetRows; projectlist clamps its cursor automatically
+// so a long-list scroll position from the previous tab doesn't carry
+// over past the end of the new tab.
 func actionTabSwitch(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.tab == tabLocal {
 		m.tab = tabGlobal
 	} else {
 		m.tab = tabLocal
 	}
-	m.cursor = 0
+	m.list.SetRows(m.filteredRows())
 	return m, nil
 }
 
@@ -310,11 +298,10 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // project rows construct a transient Manager via managerForRow; same
 // path as the same-project case so the confirm modal copy is uniform.
 func actionDelete(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	rows := m.filteredRows()
-	if len(rows) == 0 {
+	row, ok := m.list.CursorRow()
+	if !ok {
 		return m, nil
 	}
-	row := rows[m.cursor]
 	if row.IsMain {
 		m.err = fmt.Errorf("can't delete the main session via canopy rm — use `tmux kill-session -t %s` if you want it gone",
 			row.TmuxSession)
@@ -342,11 +329,10 @@ func actionAttach(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // v0.8 (D3/CP1): non-broken triggers the y/N gate; broken still runs
 // setup directly. Cross-project goes through managerForRow.
 func actionRetry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	rows := m.filteredRows()
-	if len(rows) == 0 {
+	row, ok := m.list.CursorRow()
+	if !ok {
 		return m, nil
 	}
-	row := rows[m.cursor]
 	if row.IsMain {
 		return m, nil
 	}
@@ -369,40 +355,43 @@ func actionRetry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, retryCmdUI(mgr, row.Name)
 }
 
-func actionCursorUp(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.cursor > 0 {
-		m.cursor--
-	}
-	return m, nil
+// Cursor-nav actions forward to projectlist's Update so it can clamp
+// the cursor against its own row count. Bubbletea's Update returns
+// (Model, tea.Cmd); projectlist returns (Model value, tea.Cmd) so we
+// reassign m.list with the returned value.
+func actionCursorUp(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	next, cmd := m.list.Update(msg)
+	m.list = next
+	return m, cmd
 }
 
-func actionCursorDown(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.cursor < len(m.filteredRows())-1 {
-		m.cursor++
-	}
-	return m, nil
+func actionCursorDown(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	next, cmd := m.list.Update(msg)
+	m.list = next
+	return m, cmd
 }
 
-func actionCursorTop(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.cursor = 0
-	return m, nil
+func actionCursorTop(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	next, cmd := m.list.Update(msg)
+	m.list = next
+	return m, cmd
 }
 
-func actionCursorBottom(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.cursor = max0(len(m.filteredRows()) - 1)
-	return m, nil
+func actionCursorBottom(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	next, cmd := m.list.Update(msg)
+	m.list = next
+	return m, cmd
 }
 
 // handleSearchKey handles keystrokes while m.searchMode is true.
-// Routes to search-query mutation; refilter happens implicitly via the
-// next render (filteredRows() reads m.searchQuery on each call).
+// Each query mutation pushes a fresh filtered set to projectlist so
+// the user sees results live as they type.
 func (m *Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
-		// Esc clears the query and exits search mode.
 		m.searchMode = false
 		m.searchQuery = ""
-		m.cursor = 0
+		m.list.SetRows(m.filteredRows())
 		return m, nil
 	case tea.KeyEnter:
 		// Enter exits search mode keeping the query, so arrow nav
@@ -413,16 +402,16 @@ func (m *Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.searchQuery) > 0 {
 			runes := []rune(m.searchQuery)
 			m.searchQuery = string(runes[:len(runes)-1])
-			m.cursor = 0
+			m.list.SetRows(m.filteredRows())
 		}
 		return m, nil
 	case tea.KeyRunes:
 		m.searchQuery += string(msg.Runes)
-		m.cursor = 0
+		m.list.SetRows(m.filteredRows())
 		return m, nil
 	case tea.KeySpace:
 		m.searchQuery += " "
-		m.cursor = 0
+		m.list.SetRows(m.filteredRows())
 		return m, nil
 	}
 	return m, nil
@@ -437,13 +426,12 @@ func (m *Model) handleConfirmRetryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		// User confirmed. Build the busy view and dispatch.
-		rows := m.filteredRows()
-		if len(rows) == 0 || m.cursor >= len(rows) {
+		row, ok := m.list.CursorRow()
+		if !ok {
 			m.mode = listMode
 			m.retryTarget = ""
 			return m, nil
 		}
-		row := rows[m.cursor]
 		mgr, err := m.managerForRow(row)
 		if err != nil {
 			m.err = err
@@ -466,35 +454,17 @@ func (m *Model) handleConfirmRetryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// filteredRows projects m.allRows into the rows currently rendered, applying
-// the active tab filter and search query.
+// filteredRows projects m.allRows into the rows currently rendered,
+// applying the active tab filter and search query. Returns a slice of
+// state.GlobalRow that the projectlist component renders.
 //
-// In project mode (single-project rows from mgr.List), filtering by tabLocal
-// returns everything (Local == all rows). In global mode, tabLocal filters by
-// row.ProjectRoot == m.currentProject.
-//
-// Search is fzf-style subsequence match against name + project + branch.
-// Results are ordered by allRows insertion order — no fuzzy ranking; the
-// first match wins. Cheap (<100 rows), bounded.
-//
-// m.rows is kept as a back-compat alias in places that haven't been
-// migrated; the filter is the authoritative renderable set.
-func (m *Model) filteredRows() []Row {
-	src := m.allRows
-	if src == nil {
-		// Migration path: old refresh wrote to m.rows; until we flip
-		// every callsite, fall back so renders during the transition
-		// don't show empty.
-		src = m.rows
-	}
-	out := make([]Row, 0, len(src))
-	for _, r := range src {
-		// Tab filter: tabLocal includes a row when its ProjectRoot
-		// matches m.currentProject, OR when the row has no ProjectRoot
-		// at all (the v0.5-era project-mode refresh wrote rows without
-		// per-row Project/ProjectRoot — those rows pass the Local
-		// filter because they're inherently single-project). After full
-		// migration the unset case won't occur in production rows.
+// Tab filter: tabLocal includes rows whose ProjectRoot matches
+// m.currentProject. tabGlobal includes everything.
+// Search filter: fzf-style subsequence match against name + project +
+// branch. Empty query passes everything.
+func (m *Model) filteredRows() []state.GlobalRow {
+	out := make([]state.GlobalRow, 0, len(m.allRows))
+	for _, r := range m.allRows {
 		if m.tab == tabLocal && m.currentProject != "" &&
 			r.ProjectRoot != "" && r.ProjectRoot != m.currentProject {
 			continue
@@ -510,7 +480,7 @@ func (m *Model) filteredRows() []Row {
 // rowMatchesQuery returns true if the lowercased query is a subsequence
 // of the row's name, project, OR branch. fzf-style; lowercases the row
 // fields on each call (cheap relative to the search call rate).
-func rowMatchesQuery(r Row, query string) bool {
+func rowMatchesQuery(r state.GlobalRow, query string) bool {
 	q := lowerASCII(query)
 	return isSubseq(lowerASCII(r.Name), q) ||
 		isSubseq(lowerASCII(r.Project), q) ||
@@ -560,11 +530,10 @@ func max0(n int) int {
 // path as d/R. A stopped cross-project row resurrects via the transient
 // Manager.
 func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
-	rows := m.filteredRows()
-	if len(rows) == 0 || m.cursor >= len(rows) {
+	row, ok := m.list.CursorRow()
+	if !ok {
 		return m, nil
 	}
-	row := rows[m.cursor]
 	ctx := context.Background()
 
 	if row.IsMain {
@@ -617,10 +586,10 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 // tea.ExecProcess attach for fullscreen mode. Single source of truth
 // replacing the GlobalModel.popupSwitchAndQuit / Model.attachCmd split.
 //
-// On switch-client failure the model still quits (popup goes away) and
-// tmux's parent-client error message reaches the user via the host
-// session. Choosing quit-on-failure over hang-with-error matches the
-// v0.7 behavior the popup users have built muscle memory around.
+// Uses m.tc directly (always non-nil) rather than reaching into m.mgr.Tmux,
+// which would panic when invoked from outside any project (mgr nil).
+// The post-attach refresh is dispatched via m.store + m.tc rather than
+// the project-only mgr.Reconcile path so it works in both contexts.
 func (m *Model) attachOrSwitch(session string) tea.Cmd {
 	if m.inPopup {
 		return func() tea.Msg {
@@ -630,7 +599,20 @@ func (m *Model) attachOrSwitch(session string) tea.Cmd {
 			return tea.QuitMsg{}
 		}
 	}
-	return attachCmd(m.mgr, session)
+	// Fullscreen mode: tea.ExecProcess attach. Build the tmux command
+	// directly via the embedded tmux.Client; refresh on detach.
+	cmd, err := m.tc.AttachCmd(context.Background(), session)
+	if err != nil {
+		return func() tea.Msg { return rowsLoadedMsg{err: err} }
+	}
+	mgr, store, tc := m.mgr, m.store, m.tc
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			log.Warn("ui.attach.exec-failed", "session", session, "err", err)
+			return rowsLoadedMsg{err: fmt.Errorf("attach %s: %w", session, err)}
+		}
+		return refreshCmd(mgr, tc, store)()
+	})
 }
 
 // attachCmd dispatches tea.ExecProcess against tmux's attach command.
