@@ -1112,11 +1112,11 @@ func waitRetryDoneCmd(done <-chan retryDoneMsg) tea.Cmd {
 //   - Goroutine runs the actual work (resolve + create) and pushes
 //     the final result onto a `done` chan.
 //   - Returned tea.Batch has TWO cmds:
-//       1. progressTickCmd — re-fires every 150ms, drains the
-//          buffer, emits progressTickMsg with the new chunk. The
-//          tick re-schedules itself in Update until busyDone.
-//       2. waitDoneCmd — blocks reading from `done`, emits
-//          createDoneMsg when the goroutine finishes.
+//     1. progressTickCmd — re-fires every 150ms, drains the
+//     buffer, emits progressTickMsg with the new chunk. The
+//     tick re-schedules itself in Update until busyDone.
+//     2. waitDoneCmd — blocks reading from `done`, emits
+//     createDoneMsg when the goroutine finishes.
 //
 // Both cmds run concurrently under tea.Batch. Update appends ticks
 // to m.busyOutput live, then on createDoneMsg appends any final

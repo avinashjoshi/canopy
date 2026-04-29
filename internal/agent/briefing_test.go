@@ -199,10 +199,10 @@ func TestBuildBriefing_SourceKindBranch(t *testing.T) {
 // must NOT get pressured to rename.
 func TestBuildBriefing_RenameDirective_AppliedConditionally(t *testing.T) {
 	cases := []struct {
-		name             string
-		sourceKind       string
-		nameAuto         bool
-		wantRenameNudge  bool
+		name            string
+		sourceKind      string
+		nameAuto        bool
+		wantRenameNudge bool
 	}{
 		{"fresh + auto-name → nudge", "fresh", true, true},
 		{"fresh + user-name → no nudge", "fresh", false, false},

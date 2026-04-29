@@ -12,9 +12,11 @@ and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - GitHub Actions CI: unit + e2e test runs on push/PR.
 - `docs/landscape.md` — public-facing positioning ("where canopy fits").
 - ASCII header in README for terminal-native vibes.
+- Status badges now carry a 1-rune shape glyph (`…` setting_up, `⏸` stopped, `✗` broken, `!` orphaned) so the workspace state reads under protanopia and on monochrome terminals, not just by color. Healthy and main rows stay clean. The live `●`/`○` badge still conveys aliveness.
 
 ### Changed
 - README install section reorganized: explicit Linux / macOS / Windows (WSL2) one-liners; nvim called out as a hard requirement.
+- Design doc keymap (`docs/design/v0-canopy.md`) synced to the actual bindings: `g`/`G`/home/end for first/last, `R` for retry-broken, `b`/esc for back-to-global, `ctrl+c` quit. Added a one-liner about modal pickers in the new-workspace flow.
 
 ### Deprecated
 

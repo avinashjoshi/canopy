@@ -171,7 +171,7 @@ func TestSafeName(t *testing.T) {
 		{"tmp.X-feat", "tmp-X-feat"},
 		{"feature/oauth", "feature-oauth"},
 		{"feature: bug", "feature-bug"},
-		{"a..b", "a-b"},   // run of dots collapses
+		{"a..b", "a-b"}, // run of dots collapses
 		{"-leading", "leading"},
 		{"trailing-", "trailing"},
 		{"", ""},

@@ -165,10 +165,10 @@ func TestDetectShipped_NotMerged(t *testing.T) {
 //
 // Real-world shape:
 //
-//	          main
-//	   o────o────M
-//	    \      /
-//	     o────o   feature
+//	       main
+//	o────o────M
+//	 \      /
+//	  o────o   feature
 //
 // After this, HEAD (= feature tip) is reachable from origin/main (via
 // the merge commit's second parent), AND origin/main has commits past
@@ -349,7 +349,7 @@ func TestPRStatusCache_TTL(t *testing.T) {
 	// Pre-seed cache with a fake "no PR" entry.
 	prStatusMu.Lock()
 	prStatusCache["/fake/root|test-branch"] = prStatusEntry{
-		hint:     nil, // no PR
+		hint:     nil,                      // no PR
 		cachedAt: prStatusEntry{}.cachedAt, // zero-time, but we'll override TTL via the test
 	}
 	prStatusMu.Unlock()
