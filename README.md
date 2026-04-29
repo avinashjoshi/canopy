@@ -154,6 +154,34 @@ Workspaces live at `~/.canopy/workspaces/<project>/<name>` — canopy owns the s
 
 `canopy` with no args launches a Bubbletea TUI — the same workspace list with arrow-key navigation, `enter` to attach, `n` to create, `d` to delete (with confirmation), `?` for help. CLI subcommands work alongside it; both call into the same `workspace.Manager` underneath.
 
+### tmux integration (v0.7+)
+
+If you live in tmux, two extra subcommands turn canopy into an always-one-keystroke-away workspace switcher and a glanceable status widget. Both are inside-tmux-only.
+
+**One-shot install:**
+
+```bash
+canopy install tmux       # writes managed block to ~/.tmux.conf (with backup)
+tmux source-file ~/.tmux.conf
+```
+
+That's it. The installer is idempotent (refuses if already present; `--force` replaces in place), backs up `~/.tmux.conf` before any change, and writes a clearly-marked managed block so you can see what canopy added:
+
+```tmux
+# canopy:start (managed by `canopy install tmux` — edit only outside markers)
+bind g run-shell "canopy popup"
+set -ag status-right " #(canopy statusline --format=current) "
+# canopy:end
+```
+
+**What you get:**
+
+- **`canopy popup`** — `<prefix>g` opens the global TUI in a tmux floating popup. Two tabs: **Local** (current project's workspaces, the default if you launched from inside a project) and **Global** (everything). `Tab` switches tabs, `/` enters fuzzy search, `Enter` switches to the selected workspace. Requires tmux 3.2+.
+- **`canopy run`** — `<prefix>r` execs `scripts.run` (e.g. `bin/dev`) from the nearest `canopy.json` in a tmux popup. Inherits `CANOPY_PORT` and friends from the workspace tmux session. One keystroke instead of typing `bin/dev`.
+- **`canopy statusline --format=current`** — appended to `status-right`, shows `canopy: <name> <glyph> :<port>` when you're attached to a canopy workspace's tmux session, and empty otherwise. Errors never propagate to stdout — your status bar stays clean even if state.json is corrupt or canopy crashes.
+
+**Manual install** (if you prefer to keep your tmux config hand-curated): paste the block above into `~/.tmux.conf` and `source-file` it.
+
 ## Project structure
 
 ```
