@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -310,21 +309,11 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // switches to Local tab. The unified TUI now behaves as if it were
 // launched from inside that project's source repo.
 //
-// Shell-cd integration (lazygit-style): if the user's shell wrapper has
-// set $CANOPY_NEW_DIR_FILE before running canopy, the focused project's
-// root path is written to that file. The wrapper cds on canopy exit if
-// the file is non-empty:
-//
-//	canopy() {
-//	  export CANOPY_NEW_DIR_FILE=$(mktemp)
-//	  command canopy "$@"
-//	  [ -s "$CANOPY_NEW_DIR_FILE" ] && cd "$(cat $CANOPY_NEW_DIR_FILE)"
-//	  rm -f "$CANOPY_NEW_DIR_FILE"
-//	}
-//
-// Users without the wrapper see no change — the env var isn't set, the
-// write is skipped. Opt-in by installation: anyone who installed the
-// wrapper presumably wants the behavior.
+// Doesn't change the parent shell's cwd — that requires a shell wrapper
+// (lazygit-style env-var protocol) which canopy doesn't ship today
+// because the typical workflow uses `enter` on a project's main row to
+// switch tmux clients into that project's main session, which already
+// has shells in the project root.
 func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
 	if !ok || row.ProjectRoot == "" {
@@ -351,20 +340,6 @@ func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.projectName = cfg.Project
 	m.tab = tabLocal
 	m.list.SetRows(m.filteredRows())
-
-	// Shell-cd hand-off: if the user has the shell wrapper installed,
-	// $CANOPY_NEW_DIR_FILE is set to a path the wrapper will read on
-	// canopy exit. Write the focused project's root there. Errors are
-	// non-fatal — focus still applies; the user just doesn't get the
-	// cd. Logging lives in the warn() because the typical cause is
-	// "user has the env set but the file is in a directory they can't
-	// write to," which is debuggable.
-	if dirFile := os.Getenv("CANOPY_NEW_DIR_FILE"); dirFile != "" {
-		if werr := os.WriteFile(dirFile, []byte(row.ProjectRoot), 0o644); werr != nil {
-			log.Warn("ui.focus.cd_file_write_failed",
-				"path", dirFile, "err", werr.Error())
-		}
-	}
 	return m, nil
 }
 

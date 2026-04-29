@@ -54,11 +54,9 @@ func newInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install canopy integrations into your environment.",
-		Long: `Run "canopy install tmux" to wire canopy popup + statusline into your tmux config.
-Run "canopy install shell" to print a shell wrapper for cd-on-focus.`,
+		Long:  `Run "canopy install tmux" to wire canopy popup + statusline into your tmux config.`,
 	}
 	cmd.AddCommand(newInstallTmuxCmd())
-	cmd.AddCommand(newInstallShellCmd())
 	return cmd
 }
 
