@@ -35,18 +35,18 @@ var ErrUnknownAgent = errors.New("agent: unknown agent type")
 // briefing. Different agents have different conventions:
 //
 //   - BriefingInline:    pass the briefing text via a CLI flag value
-//                        (claude --append-system-prompt "...", codex --instructions "...").
-//                        Briefing is interpolated into the args slice
-//                        before exec.
+//     (claude --append-system-prompt "...", codex --instructions "...").
+//     Briefing is interpolated into the args slice
+//     before exec.
 //   - BriefingFile:      write the briefing to a temp file, pass the
-//                        path via a flag (aider --message-file <path>).
-//                        canopy creates the temp file and registers it
-//                        for cleanup after the agent exits.
+//     path via a flag (aider --message-file <path>).
+//     canopy creates the temp file and registers it
+//     for cleanup after the agent exits.
 //   - BriefingAgentsMd:  write the briefing to <worktree>/AGENTS.md
-//                        (opencode reads it natively from cwd). canopy
-//                        also adds AGENTS.md to .gitignore on init for
-//                        agents using this mode, so it doesn't leak into
-//                        the user's commits.
+//     (opencode reads it natively from cwd). canopy
+//     also adds AGENTS.md to .gitignore on init for
+//     agents using this mode, so it doesn't leak into
+//     the user's commits.
 //
 // New agents that need a different convention add a new mode here +
 // the dispatch arm in workspace/lifecycle.go's launcher invocation.
@@ -295,11 +295,11 @@ func (l Launcher) PlanLaunch(briefingPath string, resume bool, worktreePath stri
 }
 
 // shellQuote wraps a string in single quotes and escapes any embedded
-// single quotes via the standard '\'' trick. Safe for any string —
+// single quotes via the standard '\” trick. Safe for any string —
 // single-quoted POSIX shell strings have NO escape sequences except
 // for the close-quote-escape-quote-reopen pattern.
 //
-// Empty string becomes ''. Used when assembling shell commands from
+// Empty string becomes ”. Used when assembling shell commands from
 // trusted-but-arbitrary inputs (file paths, briefing paths).
 func shellQuote(s string) string {
 	if s == "" {

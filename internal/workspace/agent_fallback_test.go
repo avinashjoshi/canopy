@@ -33,7 +33,7 @@ func TestAgentFallbackShell_ExecsRealShell(t *testing.T) {
 
 // TestAgentFallbackShell_QuotesSafely: special chars in the error
 // message (single-quotes, backticks, $) must not break the shell
-// command. Tests the POSIX '\'' escape pattern in the quoted hint.
+// command. Tests the POSIX '\” escape pattern in the quoted hint.
 func TestAgentFallbackShell_QuotesSafely(t *testing.T) {
 	// Error message with characters that would break naive quoting.
 	tricky := errors.New(`exec failed; doesn't ` + "`fail`" + ` quietly`)

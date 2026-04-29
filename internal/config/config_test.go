@@ -126,8 +126,8 @@ func TestLoad_OptionalScripts(t *testing.T) {
 	cases := []string{
 		`{}`,
 		`{"scripts": {}}`,
-		`{"scripts": {"setup": "s"}}`,        // partial: only setup
-		`{"scripts": {"run": "bin/dev"}}`,    // partial: only run
+		`{"scripts": {"setup": "s"}}`,     // partial: only setup
+		`{"scripts": {"run": "bin/dev"}}`, // partial: only run
 		`{"scripts": {"setup": "s", "run": "r"}}`, // partial: no archive
 	}
 	for _, body := range cases {
