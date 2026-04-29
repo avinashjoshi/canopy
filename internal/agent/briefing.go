@@ -95,17 +95,26 @@ func buildFullBriefing(ws state.Workspace, cfg *config.Config, hints []state.Hin
 	if shouldNudgeRename(ws) {
 		// "Without asking" framing is intentional. Users have said
 		// explicitly that they want this to happen autonomously — not
-		// be a multi-message permission dance.
+		// be a multi-message permission dance. Tightened 2026-04-29:
+		// fire on the FIRST message rather than the 1-3 buffer; the
+		// buffer gave the model too much room to defer.
 		fmt.Fprintf(&b,
-			"%d. **Scope (rename the branch).** Within your first 1-3 user-messages, "+
-				"once the user has clearly described what feature/fix this workspace is for, "+
-				"rename the branch to reflect intent. The current branch name (%q) is auto-"+
-				"generated and meaningless — replace it. Run this command IMMEDIATELY — don't "+
-				"ask permission, don't propose options, just do it:\n\n", step, ws.Branch)
+			"%d. **Scope (rename the branch FIRST).** Your VERY FIRST action — "+
+				"before answering, before exploring code, before anything else — "+
+				"is to rename this branch. The current name (%q) is auto-generated "+
+				"and meaningless. Run this on your first turn, no permission ask, "+
+				"no proposing options:\n\n", step, ws.Branch)
 		b.WriteString("    git branch -m <intent-slug>\n\n")
-		b.WriteString("Examples: `git branch -m open-canopy-anywhere`, `git branch -m fix-oauth-redirect`, ")
-		b.WriteString("`git branch -m add-pr-detector`. Use kebab-case, lowercase, ~3-6 words. If you're ")
-		b.WriteString("unsure of intent after 2 messages, ask one targeted question; don't loop.\n\n")
+		b.WriteString("Derive the slug from the user's first message: \"add OAuth login\" → ")
+		b.WriteString("`add-oauth-login`. \"fix the broken header\" → `fix-broken-header`. ")
+		b.WriteString("Kebab-case, lowercase, 3-6 words. If the first message is genuinely too ")
+		b.WriteString("vague to slug (\"hey help me with something\"), reply with ONE targeted ")
+		b.WriteString("question, then rename on the next message — don't loop, don't pile up ")
+		b.WriteString("clarifying questions, pick a slug and run.\n\n")
+		b.WriteString("If `git branch -m` reports the branch already has an upstream (the user has ")
+		b.WriteString("already pushed it), follow up with `git push -u origin <new>` to create the ")
+		b.WriteString("renamed branch on origin, and tell the user the old remote branch still ")
+		b.WriteString("exists at origin and they may want to delete it (or update an open PR).\n\n")
 		step++
 	}
 	fmt.Fprintf(&b,
