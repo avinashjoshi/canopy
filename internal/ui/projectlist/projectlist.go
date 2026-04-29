@@ -299,52 +299,37 @@ func (m Model) renderTable() string {
 
 		var line string
 		if isSelected {
-			// Selected row strategy:
+			// Selected row: identical 4-space leading indent to
+			// non-selected rows (so columns don't shift left when
+			// the cursor moves), built as PLAIN text (no inner ANSI
+			// codes that would break selectionStyle's outer bg
+			// propagation), then wrapped uniformly with selection bg
+			// padded to terminal width.
 			//
-			//   1. Caret block — pre-styled in bright violet on the
-			//      selection bg. Stays its own ANSI segment so the
-			//      bold violet fg survives (it would be erased if
-			//      embedded inside selectionStyle.Render's outer wrap).
-			//   2. Content block — built as PLAIN text (no inner ANSI
-			//      that would break selectionStyle's bg propagation),
-			//      then run through selectionStyle.Width() to fill out
-			//      to the right edge with the bg.
-			//
-			// Concatenating the two gives: violet ▶ caret + grey-bg
-			// row content + grey-bg trailing pad → reads as one
-			// continuous highlighted row with a distinctly-colored
-			// caret on the left.
-			caretBlock := caretStyle().Render("▶  ")
-
+			// No caret/marker glyph — the bg highlight alone is the
+			// "this is selected" signal. Lazyworktree-style: cleaner,
+			// no jarring column shift, no extra glyph competing with
+			// the row content.
 			aliveDot := "○"
 			if r.Alive {
 				aliveDot = "●"
 			}
-			plainContent := fmt.Sprintf("%s  %-*s  %-*s  %s %-*s  %*s",
+			plainContent := fmt.Sprintf("    %s  %-*s  %s  %s  %*s",
 				aliveDot,
 				colName, r.Name,
-				colBranch, r.Branch,
-				statusGlyphFor(r.Status),
-				colStatus, r.Status,
+				fmt.Sprintf("%-*s", colBranch, r.Branch),
+				statusGlyphFor(r.Status)+" "+fmt.Sprintf("%-*s", colStatus, r.Status),
 				colPort, port,
 			)
-			// Hint badges: render via the normal RenderHintBadges
-			// (so the badge text matches what non-selected rows
-			// show) but strip ANSI so the selection-bg propagates
-			// uniformly across them. Color is the trade for clean
-			// row highlight; hint info is preserved verbatim.
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				plainContent += "  " + stripAnsi(hintBadges)
 			}
 
-			contentStyle := selectionStyle()
+			rowStyle := selectionStyle()
 			if m.width > 0 {
-				w := m.width - lipgloss.Width(caretBlock)
-				if w > 0 {
-					contentStyle = contentStyle.Width(w)
-				}
+				rowStyle = rowStyle.Width(m.width)
 			}
-			line = caretBlock + contentStyle.Render(plainContent)
+			line = rowStyle.Render(plainContent)
 		} else {
 			// Non-selected row: full per-column styling for visual
 			// density (status colors, dimmed branch on identity name,
@@ -371,17 +356,6 @@ func (m Model) renderTable() string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// caretStyle renders the `▶` selected-row indicator. Bright violet fg
-// against the selection bg (matches the body's bg so the caret reads
-// as part of the highlighted row, not floating in a gap). Bold so the
-// glyph carries visual weight independent of its color contrast.
-func caretStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color("99")).
-		Background(lipgloss.Color("237")).
-		Bold(true)
 }
 
 // stripAnsi removes ANSI SGR escape sequences from s. Used to flatten
