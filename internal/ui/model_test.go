@@ -369,27 +369,32 @@ func TestUpdate_CreateDoneOnErrorStaysInBusy(t *testing.T) {
 	}
 }
 
-// TestRenderHelpLine_TabSwitch: help line shows `tab switch-tab` and
-// `/ search` always. `n new` shows only on Local tab with non-nil mgr.
+// TestRenderHelpLine_TabSwitch: help line shows nav, tab, and search
+// keybinds always. `n` desc ("new") shows only on Local tab with
+// non-nil mgr.
+//
+// stripAnsi the rendered output so assertions don't couple to the
+// keybind-pill styling — these tests are about which BINDINGS appear,
+// not how they look.
 func TestRenderHelpLine_TabSwitch(t *testing.T) {
 	t.Run("Local tab with mgr → n shown", func(t *testing.T) {
 		m := newTestModel(false)
 		m.tab = tabLocal
-		out := m.renderHelpLine()
-		if !strings.Contains(out, "n new") {
-			t.Errorf("Local tab help missing 'n new': %q", out)
+		out := stripAnsi(m.renderHelpLine())
+		if !strings.Contains(out, "new") {
+			t.Errorf("Local tab help missing 'new' desc: %q", out)
 		}
-		if !strings.Contains(out, "tab switch-tab") {
-			t.Errorf("help line missing 'tab switch-tab': %q", out)
+		if !strings.Contains(out, "switch-tab") {
+			t.Errorf("help line missing 'switch-tab': %q", out)
 		}
 	})
 
 	t.Run("Global tab → n hidden", func(t *testing.T) {
 		m := newTestModel(false)
 		m.tab = tabGlobal
-		out := m.renderHelpLine()
-		if strings.Contains(out, "n new") {
-			t.Errorf("Global tab help should not show 'n new': %q", out)
+		out := stripAnsi(m.renderHelpLine())
+		if strings.Contains(out, "new") {
+			t.Errorf("Global tab help should not show 'new' desc: %q", out)
 		}
 	})
 
@@ -397,11 +402,34 @@ func TestRenderHelpLine_TabSwitch(t *testing.T) {
 		m := newTestModel(false)
 		m.mgr = nil
 		m.tab = tabLocal
-		out := m.renderHelpLine()
-		if strings.Contains(out, "n new") {
-			t.Errorf("nil mgr help should not show 'n new': %q", out)
+		out := stripAnsi(m.renderHelpLine())
+		if strings.Contains(out, "new") {
+			t.Errorf("nil mgr help should not show 'new' desc: %q", out)
 		}
 	})
+}
+
+// stripAnsi removes ANSI SGR escape sequences from s. Tiny inline impl
+// rather than pulling in a dep; canopy's help-line render only emits
+// SGR (\x1b[...m), no cursor-movement codes.
+func stripAnsi(s string) string {
+	var b strings.Builder
+	inEsc := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == 0x1b {
+			inEsc = true
+			continue
+		}
+		if inEsc {
+			if c == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // TestRowHintsMsg_MergesIntoMatchingRow: late-arriving lifecycle hints

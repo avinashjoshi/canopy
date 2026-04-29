@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/oncactus/canopy/internal/ghx"
 	"github.com/oncactus/canopy/internal/state"
 )
@@ -41,13 +43,17 @@ func (m *Model) View() string {
 	}
 
 	var b strings.Builder
-	// Title: just "canopy" — the tab bar tells the user what scope
-	// they're in (Local: <project> vs Global), so a project subtitle
-	// in the title would be redundant chrome.
-	b.WriteString(titleStyle.Render("canopy"))
+	// Top bar: brand pill ◆ canopy + scope pill (current focus or "global").
+	// Lazyworktree-flavored — the eye reads brand first, scope second,
+	// without a heavy title bar eating a full line of vertical space.
+	b.WriteString(brandPillStyle.Render("◆ canopy"))
+	b.WriteString(" ")
+	b.WriteString(scopePillStyle.Render(m.scopeLabel()))
 	b.WriteString("\n\n")
 
-	// Tab bar + search-line always at the top.
+	// Tab bar + search-line on the row below the top bar. Tabs are
+	// pill-styled (active = violet bg, inactive = grey bg) so they
+	// pop against the dark terminal even from a narrow popup.
 	b.WriteString(m.renderTabBar())
 	b.WriteString("    ")
 	b.WriteString(m.renderSearchLine())
@@ -105,10 +111,24 @@ func (m *Model) View() string {
 	return b.String()
 }
 
-// renderTabBar draws the Local/Global tab bar. Single-line in popup mode,
-// two-line in fullscreen. The active tab is bracketed; the inactive tab
-// is plain. An empty tab dims its label regardless of active/inactive
-// state — empty-tab dim is independent of popup-mode dim, both can apply.
+// scopeLabel returns the secondary top-bar pill text. Shows the current
+// project's basename when focused (Local context resolved); otherwise
+// "global" so the user knows the brand pill alone isn't promising
+// project context that doesn't exist.
+func (m *Model) scopeLabel() string {
+	if m.projectName != "" {
+		return "🖥 " + m.projectName
+	}
+	return "global"
+}
+
+// renderTabBar draws the Local/Global tab bar as styled pills with
+// per-tab row counts. Active tab uses the violet brand-color bg; inactive
+// uses a darker grey-bg pill so both read as buttons, not text.
+//
+// Row counts give the user a "how much is on each tab" glance without
+// switching: `[ Local: canopy 3 ] [ Global 17 ]`. Empty tabs render
+// without a count (zero is noise).
 func (m *Model) renderTabBar() string {
 	localCount := 0
 	globalCount := 0
@@ -121,10 +141,9 @@ func (m *Model) renderTabBar() string {
 
 	localLabel := "Local"
 	if m.currentProject != "" {
-		// Show the project name so the user knows what "Local" means in
-		// this invocation. Truncate aggressively for narrow popups.
+		// Show the project name so the user knows what "Local" means
+		// in this invocation. Truncate aggressively for narrow popups.
 		proj := m.currentProject
-		// filepath.Base would import filepath; cheap inline.
 		for i := len(proj) - 1; i >= 0; i-- {
 			if proj[i] == '/' {
 				proj = proj[i+1:]
@@ -137,27 +156,35 @@ func (m *Model) renderTabBar() string {
 		localLabel = "Local: " + proj
 	}
 
-	var local, global string
-	if m.tab == tabLocal {
-		if localCount == 0 {
-			local = activeTabStyle.Render("[ " + localLabel + " ]")
-			local = subtleStyle.Render(local)
-		} else {
-			local = activeTabStyle.Render("[ " + localLabel + " ]")
-		}
-		if globalCount == 0 {
-			global = subtleStyle.Render("  Global  ")
-		} else {
-			global = inactiveTabStyle.Render("  Global  ")
-		}
-	} else {
-		if localCount == 0 {
-			local = subtleStyle.Render("  " + localLabel + "  ")
-		} else {
-			local = inactiveTabStyle.Render("  " + localLabel + "  ")
-		}
-		global = activeTabStyle.Render("[ Global ]")
+	// Append row count when non-zero. Subtle but useful density signal.
+	if localCount > 0 {
+		localLabel = fmt.Sprintf("%s %d", localLabel, localCount)
 	}
+	globalLabel := "Global"
+	if globalCount > 0 {
+		globalLabel = fmt.Sprintf("Global %d", globalCount)
+	}
+
+	pillStyle := func(active, hasRows bool) lipgloss.Style {
+		switch {
+		case active && !hasRows:
+			// Active tab on an empty tab — dimmed active, still
+			// readable as "current selection" but de-emphasized
+			// because there's nothing here.
+			return activeTabStyle.Foreground(lipgloss.Color("250"))
+		case active:
+			return activeTabStyle
+		case !hasRows:
+			// Inactive empty — fully dimmed, the user shouldn't
+			// feel pulled to switch there.
+			return inactiveTabStyle.Foreground(lipgloss.Color("241"))
+		default:
+			return inactiveTabStyle
+		}
+	}
+
+	local := pillStyle(m.tab == tabLocal, localCount > 0).Render(localLabel)
+	global := pillStyle(m.tab == tabGlobal, globalCount > 0).Render(globalLabel)
 	return local + " " + global
 }
 
@@ -202,18 +229,17 @@ func (m *Model) renderConfirmRetry() string {
 // whose grouped-by-project layout matches the v0.7 popup look that
 // users built muscle memory around.
 
-// renderHelpLine is the one-line keybind cheat at the bottom of the
-// main view. Driven by the listModeBindings table — bindings whose
-// Available returns false are filtered out, so e.g. `n` disappears
-// from help when the user is on the Global tab without a Manager.
+// renderHelpLine is the bottom-bar keybind cheatsheet. Each binding
+// renders as `[key] desc` — key in inverted-bg pill, desc in subtle
+// text. Lazyworktree-flavored. Driven by listModeBindings + Available
+// predicates so e.g. `n` and `o` appear/disappear contextually.
 //
-// Format: each binding renders as "<keys> <help>" joined by a separator.
-// Up/down/g/G are folded into a single "↑/↓ navigate" entry — they're
-// muscle-memory keys whose individual help would just be noise.
+// Up/down/g/G fold into one nav entry; rendering each individually
+// would overflow narrow popups with little signal.
 func (m *Model) renderHelpLine() string {
-	parts := []string{"↑/↓ navigate"}
-	// Skip the four cursor-nav bindings (handled by the static
-	// "↑/↓ navigate" entry above) so we don't double-render them.
+	var parts []string
+	parts = append(parts, keyPillStyle.Render("↑/↓")+" "+subtleStyle.Render("nav"))
+
 	skip := map[string]bool{"up": true, "down": true, "g": true, "G": true}
 	for _, b := range listModeBindings {
 		if !b.IsAvailable(m) {
@@ -224,9 +250,9 @@ func (m *Model) renderHelpLine() string {
 			continue
 		}
 		h := b.K.Help()
-		parts = append(parts, h.Key+" "+h.Desc)
+		parts = append(parts, keyPillStyle.Render(h.Key)+" "+subtleStyle.Render(h.Desc))
 	}
-	return subtleStyle.Render(strings.Join(parts, "  ·  "))
+	return strings.Join(parts, "  ")
 }
 
 // renderNewPicker is step 1 of the new-workspace flow — the variant

@@ -66,15 +66,47 @@ var (
 	activeTabStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("231")). // bright white
-			Background(lipgloss.Color("62"))   // blue, matches title
+			Background(lipgloss.Color("99")).  // violet, matches brand pill
+			Padding(0, 1)
 
 	inactiveTabStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("241")) // muted grey
+				Foreground(lipgloss.Color("250")).
+				Background(lipgloss.Color("237")). // dark grey pill bg
+				Padding(0, 1)
 
 	searchActiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("231")).
 				Background(lipgloss.Color("236")).
 				Padding(0, 1)
+
+	// brandPillStyle is the top-bar "canopy" wordmark — bright violet
+	// background, bold white text, lazyworktree-flavored. The visual
+	// anchor: tells the user what app they're looking at without
+	// occupying a whole line of header chrome.
+	brandPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("231")).
+			Background(lipgloss.Color("99")).
+			Padding(0, 1)
+
+	// scopePillStyle is the secondary top-bar pill showing current
+	// focus (project basename or "global"). Darker than the brand pill
+	// so the eye reads brand first, then scope. Same padding so the
+	// two pills sit at the same visual weight side-by-side.
+	scopePillStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("250")).
+			Background(lipgloss.Color("237")).
+			Padding(0, 1)
+
+	// keyPillStyle is the inverted-bg style for the key part of help-
+	// line entries: `[Enter] attach`. Bright bg + dark fg makes the
+	// key read as "press this," then the description follows in
+	// subtle text. Lazyworktree's bottom bar pattern.
+	keyPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("231")).
+			Background(lipgloss.Color("238")).
+			Padding(0, 1)
 )
 
 // isSubseq returns true if needle's characters appear in haystack in
