@@ -29,6 +29,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/avinashjoshi/canopy/internal/agent"
@@ -657,10 +658,25 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 func (m *Manager) agentPaneCmd(ws *state.Workspace, resume bool) (string, error) {
 	launcher, err := agent.Resolve(m.Cfg.Agent.Type)
 	if err != nil {
+		// Typo in canopy.json's agent.type — fail loud. This is a
+		// config error, not an environment gap; we don't want to
+		// silently fall back when the user wrote "cluade" instead
+		// of "claude".
 		return "", err
 	}
 	if err := launcher.VerifyInstalled(); err != nil {
-		return "", err
+		// Binary not on PATH — degrade gracefully. The user gets a
+		// shell in the agent pane with an install hint so they
+		// know what's missing. Workspace creation continues; the
+		// other 3 panes (nvim / server / shell) work normally.
+		//
+		// Why not fail: a fresh canopy install with no agents yet
+		// installed should still produce working workspaces. Hard
+		// failure here would block the whole onboarding path on a
+		// secondary feature. The hint in the pane keeps the missing
+		// dependency visible without making it a blocker.
+		log.Warn("agent.binary-missing", "type", m.Cfg.Agent.Type, "err", err)
+		return agentFallbackShell(launcher.Cmd, err), nil
 	}
 
 	// Detector hints. RunFast is the cheap-only set (rename + shipped);
@@ -688,6 +704,27 @@ func (m *Manager) agentPaneCmd(ws *state.Workspace, resume bool) (string, error)
 		cmd = plan.PreRun + " && " + cmd
 	}
 	return cmd, nil
+}
+
+// agentFallbackShell returns the command to run in the agent pane
+// when the configured agent binary isn't on PATH. Prints a short
+// hint identifying what's missing, then drops into the user's
+// default shell so the pane stays usable. The user can install
+// the agent and `canopy switch` to relaunch with the real agent.
+//
+// Format: a single shell line that echoes the hint, prints a
+// blank line, then exec's $SHELL. exec replaces the wrapper so
+// the pane behaves like a regular shell after the hint scrolls
+// off-screen.
+func agentFallbackShell(cmdName string, lookupErr error) string {
+	hint := fmt.Sprintf(
+		"agent %q not on PATH — falling back to a shell. %v",
+		cmdName, lookupErr)
+	// Single-quote the message so embedded $ / backticks don't
+	// expand. Escape any internal single-quotes via the standard
+	// '\'' POSIX trick.
+	quoted := "'" + strings.ReplaceAll(hint, "'", `'\''`) + "'"
+	return fmt.Sprintf(`echo %s; echo; exec "${SHELL:-/bin/sh}"`, quoted)
 }
 
 // writeBriefingTemp writes the briefing string to a temp file under
