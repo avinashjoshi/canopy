@@ -103,6 +103,26 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 		// returns non-empty here, the match came from the workspace
 		// path-prefix lookup.
 		currentProject = workspace.ResolveCurrentProject(cwd, st)
+
+		// When the workspace-cwd resolver matched, load the project's
+		// canopy.json directly via LoadFrom (no walk-up) so we can
+		// construct a Manager. Without this, popup-mode launched from
+		// inside a workspace pane has m.mgr=nil and the `n` keybinding
+		// is hidden — breaking the muscle-memory case where the user
+		// pops the TUI to create a new workspace in the project they're
+		// already in.
+		if currentProject != "" {
+			pcfg, perr := config.LoadFrom(currentProject)
+			if perr == nil {
+				m, merr := workspace.New(pcfg)
+				if merr == nil {
+					mgr = m
+				}
+				// Manager construction failure is non-fatal — TUI
+				// still launches; n is just hidden until the user
+				// fixes the underlying state issue.
+			}
+		}
 	}
 
 	// Path 3: init splash gate. Only fire when the user has NO known
