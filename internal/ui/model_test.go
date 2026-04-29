@@ -835,6 +835,75 @@ func TestProgressTickMsg_StopsTickingWhenLeftBusyMode(t *testing.T) {
 	}
 }
 
+// TestRemoveStartedMsg_DispatchesStreamingBatch: receiving a
+// removeStartedMsg from the lazy-spawn path returns a tea.Batch that
+// contains both the progress tick and the wait-done cmd. Without
+// this dispatch the archive-script output wouldn't stream.
+func TestRemoveStartedMsg_DispatchesStreamingBatch(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+
+	buf := &safeBuffer{}
+	done := make(chan removeDoneMsg, 1)
+	_, cmd := m.Update(removeStartedMsg{buf: buf, done: done})
+
+	if cmd == nil {
+		t.Fatalf("removeStartedMsg should dispatch a streaming batch; got nil")
+	}
+}
+
+// TestRetryStartedMsg_DispatchesStreamingBatch: same shape for the
+// retry flow.
+func TestRetryStartedMsg_DispatchesStreamingBatch(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+
+	buf := &safeBuffer{}
+	done := make(chan retryDoneMsg, 1)
+	_, cmd := m.Update(retryStartedMsg{buf: buf, done: done})
+
+	if cmd == nil {
+		t.Fatalf("retryStartedMsg should dispatch a streaming batch; got nil")
+	}
+}
+
+// TestRemoveDone_AppendsTrailingOutput: removeDoneMsg appends the
+// final tail to busyOutput rather than overwriting. busyOutput
+// already contains the streamed archive script output via tick
+// messages; overwriting would erase it.
+func TestRemoveDone_AppendsTrailingOutput(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOutput = "archive ran on port 41010\n"
+
+	model, _ := m.Update(removeDoneMsg{output: "Removed.\n"})
+	m = model.(*Model)
+
+	if !strings.Contains(m.busyOutput, "archive ran on port 41010") {
+		t.Errorf("removeDoneMsg should preserve streamed output: %q", m.busyOutput)
+	}
+	if !strings.Contains(m.busyOutput, "Removed.") {
+		t.Errorf("removeDoneMsg should append trailing output: %q", m.busyOutput)
+	}
+}
+
+// TestRetryDone_AppendsTrailingOutput: same contract for retry.
+func TestRetryDone_AppendsTrailingOutput(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOutput = "setup running...\n"
+
+	model, _ := m.Update(retryDoneMsg{output: "setup OK\n"})
+	m = model.(*Model)
+
+	if !strings.Contains(m.busyOutput, "setup running...") {
+		t.Errorf("retryDoneMsg should preserve streamed output: %q", m.busyOutput)
+	}
+	if !strings.Contains(m.busyOutput, "setup OK") {
+		t.Errorf("retryDoneMsg should append trailing output: %q", m.busyOutput)
+	}
+}
+
 // TestSafeBuffer_DrainResets: the buffer accumulates writes and
 // hands the drained content back to the caller, then resets so
 // the next drain only returns NEW content. Without this contract,

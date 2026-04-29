@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -101,6 +100,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// completion cmds as a batch — both run concurrently.
 		return m, tea.Batch(progressTickCmd(msg.buf), waitDoneCmd(msg.done))
 
+	case removeStartedMsg:
+		return m, tea.Batch(progressTickCmd(msg.buf), waitRemoveDoneCmd(msg.done))
+
+	case retryStartedMsg:
+		return m, tea.Batch(progressTickCmd(msg.buf), waitRetryDoneCmd(msg.done))
+
 	case progressTickMsg:
 		// Live streaming output during a Create. Append the new
 		// chunk and schedule the next tick — unless the create
@@ -142,19 +147,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case removeDoneMsg:
-		// Workspace removal finished. Same shape as createDoneMsg —
-		// dismiss flips back to listMode and refreshes.
+		// Workspace removal finished. busyOutput already contains
+		// the streamed archive-script output via progressTickMsg;
+		// msg.output is just the trailing bytes that didn't make a
+		// tick. Append (not overwrite) to preserve the live stream.
 		m.busyDone = true
 		m.busyErr = msg.err
-		m.busyOutput = msg.output
+		if msg.output != "" {
+			m.busyOutput += msg.output
+		}
 		return m, nil
 
 	case retryDoneMsg:
-		// scripts.setup re-run finished. Same shape as the others;
-		// renderBusyView branches on busyOp to label success.
+		// scripts.setup re-run finished. Same shape: append the
+		// trailing chunk that the last tick missed; renderBusyView
+		// branches on busyOp to label success.
 		m.busyDone = true
 		m.busyErr = msg.err
-		m.busyOutput = msg.output
+		if msg.output != "" {
+			m.busyOutput += msg.output
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1028,27 +1040,62 @@ type retryDoneMsg struct {
 	err    error
 }
 
-// retryCmdUI kicks off Manager.RetrySetup asynchronously. Same shape as
-// createCmd / removeCmd: capture stdout+stderr to a buffer, send a
-// retryDoneMsg back to Update when finished. The "UI" suffix
-// disambiguates from cmd/canopy/retry.go's cobra retryCmd.
+// removeStartedMsg / retryStartedMsg are the lazy-spawn bridges for
+// the remove + retry flows, mirroring createStartedMsg. Update on
+// receipt: dispatch tea.Batch(progressTickCmd, waitXDoneCmd) so the
+// archive / setup output streams live just like Create.
+type removeStartedMsg struct {
+	buf  *safeBuffer
+	done <-chan removeDoneMsg
+}
+
+type retryStartedMsg struct {
+	buf  *safeBuffer
+	done <-chan retryDoneMsg
+}
+
+// retryCmdUI kicks off Manager.RetrySetup asynchronously and streams
+// its output via the same safeBuffer + progressTick pattern as
+// createCmd. The "UI" suffix disambiguates from cmd/canopy/retry.go's
+// cobra retryCmd.
 func retryCmdUI(mgr *workspace.Manager, name string) tea.Cmd {
 	return func() tea.Msg {
-		var buf bytes.Buffer
-		_, err := mgr.RetrySetup(context.Background(), name, &buf, &buf)
-		return retryDoneMsg{output: buf.String(), err: err}
+		buf := &safeBuffer{}
+		done := make(chan retryDoneMsg, 1)
+		go func() {
+			_, err := mgr.RetrySetup(context.Background(), name, buf, buf)
+			done <- retryDoneMsg{output: buf.Drain(), err: err}
+		}()
+		return retryStartedMsg{buf: buf, done: done}
 	}
 }
 
-// removeCmd kicks off Manager.Remove asynchronously. Captures the
-// archive script's stdout/stderr to a buffer; sends removeDoneMsg back
-// to Update when finished.
+// removeCmd kicks off Manager.Remove asynchronously and streams the
+// archive script's output via the same pattern as createCmd. Same
+// lazy-spawn shape so unit tests that inspect the cmd value don't
+// kick off real work.
 func removeCmd(mgr *workspace.Manager, name string) tea.Cmd {
 	return func() tea.Msg {
-		var buf bytes.Buffer
-		err := mgr.Remove(context.Background(), name, &buf, &buf)
-		return removeDoneMsg{output: buf.String(), err: err}
+		buf := &safeBuffer{}
+		done := make(chan removeDoneMsg, 1)
+		go func() {
+			err := mgr.Remove(context.Background(), name, buf, buf)
+			done <- removeDoneMsg{output: buf.Drain(), err: err}
+		}()
+		return removeStartedMsg{buf: buf, done: done}
 	}
+}
+
+// waitRemoveDoneCmd / waitRetryDoneCmd block on the respective done
+// chans and emit the corresponding done-msg. Per-channel-type
+// helpers because Go's chan types don't unify into a generic
+// waitDoneCmd without type parameters.
+func waitRemoveDoneCmd(done <-chan removeDoneMsg) tea.Cmd {
+	return func() tea.Msg { return <-done }
+}
+
+func waitRetryDoneCmd(done <-chan retryDoneMsg) tea.Cmd {
+	return func() tea.Msg { return <-done }
 }
 
 // createCmd kicks off Manager.Create asynchronously and streams its
