@@ -145,6 +145,36 @@ func isSubseq(haystack, needle string) bool {
 	return ni == len(needle)
 }
 
+// roundedPill renders content as a pill with rounded end-caps via the
+// powerline glyphs `` (left half-circle) and `` (right
+// half-circle). The cap glyphs are filled by their FOREGROUND color;
+// rendering them in the body's BG color makes them appear as continuous
+// extensions of the pill — the eye reads a single rounded shape, not a
+// glyph-bg-glyph sandwich.
+//
+// Requires a Nerd Font (Avi runs Ghostty + Iosevka Nerd Font per his
+// MEMORY.md). Falls back to vanilla square pills if the glyphs render
+// as tofu — the pill still works, just without the rounding.
+func roundedPill(content, fgColor, bgColor string) string {
+	cap := lipgloss.NewStyle().Foreground(lipgloss.Color(bgColor))
+	body := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(fgColor)).
+		Background(lipgloss.Color(bgColor)).
+		Bold(true)
+	return cap.Render("") + body.Render(content) + cap.Render("")
+}
+
+// roundedPillSubtle is the dimmer variant for inactive states.
+// Same shape as roundedPill but with bold off — the active/inactive
+// distinction is bg color + bold, both flipped here.
+func roundedPillSubtle(content, fgColor, bgColor string) string {
+	cap := lipgloss.NewStyle().Foreground(lipgloss.Color(bgColor))
+	body := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(fgColor)).
+		Background(lipgloss.Color(bgColor))
+	return cap.Render("") + body.Render(content) + cap.Render("")
+}
+
 // statusStyle returns the lipgloss style for a given workspace status.
 // Falls back to subtleStyle for unknown values + the synthetic "main"
 // status (rendered violet to match the title), so the table renders

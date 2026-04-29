@@ -5,8 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
-
 	"github.com/oncactus/canopy/internal/ghx"
 	"github.com/oncactus/canopy/internal/state"
 )
@@ -44,32 +42,18 @@ func (m *Model) View() string {
 
 	var b strings.Builder
 	// Top bar: brand pill ◆ canopy + scope pill (current focus or "global").
-	// Lazyworktree-flavored — the eye reads brand first, scope second,
-	// without a heavy title bar eating a full line of vertical space.
-	b.WriteString(brandPillStyle.Render("◆ canopy"))
+	// Both are rounded-end pills via powerline glyphs — the eye reads
+	// brand first, scope second, no heavy title bar eating a full line.
+	b.WriteString(roundedPill("◆ canopy", "231", "99"))      // bright white on violet
 	b.WriteString(" ")
-	b.WriteString(scopePillStyle.Render(m.scopeLabel()))
+	b.WriteString(roundedPillSubtle(m.scopeLabel(), "250", "237")) // grey on dark grey
 	b.WriteString("\n\n")
 
-	// Tab bar + search-line on the row below the top bar. Tabs are
-	// pill-styled (active = violet bg, inactive = grey bg) so they
-	// pop against the dark terminal even from a narrow popup.
+	// Tab bar + search-line on the row below the top bar.
 	b.WriteString(m.renderTabBar())
 	b.WriteString("    ")
 	b.WriteString(m.renderSearchLine())
-	b.WriteString("\n")
-
-	// Global-tab onboarding hint. Subtle reminder for "how do I add a
-	// project here?" — surfaces the path without needing the empty-
-	// state copy to fire (which only renders when zero rows match).
-	// Hidden on Local because there's no project-onboarding action
-	// from inside an existing project.
-	if m.tab == tabGlobal {
-		b.WriteString(subtleStyle.Render("    add a project: cd to its repo and run "))
-		b.WriteString(subtleStyle.Render("`canopy init`"))
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 
 	if m.err != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.err)))
@@ -119,6 +103,15 @@ func (m *Model) View() string {
 		}
 	}
 
+	// Onboarding hint sits right above the help line — the natural
+	// "next-action" zone of the screen. Global tab only because Local
+	// already implies an existing project. Future: when there's an
+	// `[a] add project` keybind, this becomes a keybind affordance
+	// instead of a CLI suggestion.
+	if m.tab == tabGlobal {
+		b.WriteString(subtleStyle.Render("  add a project: cd to its repo and run `canopy init`"))
+		b.WriteString("\n")
+	}
 	b.WriteString(m.renderHelpLine())
 	return b.String()
 }
@@ -167,21 +160,24 @@ func (m *Model) renderTabBar() string {
 		localLabel = "Local: " + proj
 	}
 
-	pillStyle := func(active, hasRows bool) lipgloss.Style {
+	// Pill colors: active = bright white on violet (matches brand pill);
+	// inactive = grey on dark grey. Empty tabs use a dimmer foreground
+	// so the user doesn't feel pulled to switch to nothing.
+	tabPill := func(label string, active, hasRows bool) string {
 		switch {
+		case active && hasRows:
+			return roundedPill(label, "231", "99")
 		case active && !hasRows:
-			return activeTabStyle.Foreground(lipgloss.Color("250"))
-		case active:
-			return activeTabStyle
-		case !hasRows:
-			return inactiveTabStyle.Foreground(lipgloss.Color("241"))
-		default:
-			return inactiveTabStyle
+			return roundedPill(label, "250", "99") // dimmed fg on active bg
+		case !active && hasRows:
+			return roundedPillSubtle(label, "250", "237")
+		default: // !active && !hasRows
+			return roundedPillSubtle(label, "241", "237")
 		}
 	}
 
-	local := pillStyle(m.tab == tabLocal, hasLocal).Render(localLabel)
-	global := pillStyle(m.tab == tabGlobal, hasGlobal).Render("Global")
+	local := tabPill(localLabel, m.tab == tabLocal, hasLocal)
+	global := tabPill("Global", m.tab == tabGlobal, hasGlobal)
 	return local + " " + global
 }
 

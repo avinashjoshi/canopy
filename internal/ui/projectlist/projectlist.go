@@ -295,43 +295,77 @@ func (m Model) renderTable() string {
 		if r.Port > 0 {
 			port = fmt.Sprintf("%d", r.Port)
 		}
-		badge := badgeFor(r.Alive)
-		statusCell := statusStyleFor(r.Status).Render(statusGlyphFor(r.Status) + " " + fmt.Sprintf("%-*s", colStatus, r.Status))
-		// Two-space indent under the project header so rows visually nest.
-		// Branch is emphasized (the renamed-intent name) when it differs
-		// from the workspace name. When they match (fresh workspace,
-		// branch hasn't been renamed yet), the branch column dims so
-		// the duplicate doesn't visually shout. Subtle distinction —
-		// the user sees at a glance which workspaces have been "named"
-		// vs which still wear their auto-generated label.
-		branchDisplay := fmt.Sprintf("%-*s", colBranch, r.Branch)
-		if r.Branch == r.Name {
-			branchDisplay = subtleHelper().Render(branchDisplay)
-		} else if r.Branch != "" && r.Branch != "—" {
-			branchDisplay = renamedBranchStyle().Render(branchDisplay)
+		isSelected := i == m.cursor
+
+		// Caret column — `❯` for hovered row, two spaces otherwise. Gives
+		// the user a clear visual anchor independent of bg highlighting
+		// (works on terminals with limited bg color support and reads
+		// even when the user's eye is mid-saccade away from the row).
+		caret := "  "
+		if isSelected {
+			caret = caretStyle().Render("❯ ")
 		}
-		line := fmt.Sprintf("    %s  %-*s  %s  %s  %*s",
-			badge,
-			colName, r.Name,
-			branchDisplay,
-			statusCell,
-			colPort, port,
-		)
-		// Append v0.6 hint badges (rename / shipped / pr_status) to the
-		// right of the row. Subtle styling so they decorate without
-		// stealing focus from the workspace's primary fields. Badges
-		// only appear when the corresponding detector fired; rows with
-		// no active hints render exactly as before.
-		if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
-			line += "  " + hintBadges
-		}
-		if i == m.cursor {
-			line = selectionStyle().Render(line)
+
+		// Selected rows render with a single uniform style so the bg
+		// highlight reads as a continuous row, not a checkerboard of
+		// per-component styled fragments. Non-selected rows keep the
+		// per-column styling for visual density (status colors,
+		// dimmed branch on identity-name, etc).
+		var line string
+		if isSelected {
+			line = fmt.Sprintf("%s%s  %-*s  %-*s  %s %-*s  %*s",
+				caret,
+				badgeFor(r.Alive),
+				colName, r.Name,
+				colBranch, r.Branch,
+				statusGlyphFor(r.Status),
+				colStatus, r.Status,
+				colPort, port,
+			)
+			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
+				line += "  " + hintBadges
+			}
+			// Pad the rendered line to the list's full width so the
+			// selection bg fills out to the right edge — the
+			// "this is the active row" signal reads clean. m.width
+			// is set by the parent's WindowSizeMsg via SetSize.
+			rowStyle := selectionStyle()
+			if m.width > 0 {
+				rowStyle = rowStyle.Width(m.width)
+			}
+			line = rowStyle.Render(line)
+		} else {
+			statusCell := statusStyleFor(r.Status).Render(statusGlyphFor(r.Status) + " " + fmt.Sprintf("%-*s", colStatus, r.Status))
+			branchDisplay := fmt.Sprintf("%-*s", colBranch, r.Branch)
+			if r.Branch == r.Name {
+				branchDisplay = subtleHelper().Render(branchDisplay)
+			} else if r.Branch != "" && r.Branch != "—" {
+				branchDisplay = renamedBranchStyle().Render(branchDisplay)
+			}
+			line = fmt.Sprintf("%s%s  %-*s  %s  %s  %*s",
+				caret,
+				badgeFor(r.Alive),
+				colName, r.Name,
+				branchDisplay,
+				statusCell,
+				colPort, port,
+			)
+			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
+				line += "  " + hintBadges
+			}
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// caretStyle renders the `❯` cursor indicator. Bright violet so it
+// pops against the dark terminal AND against the selection bg.
+func caretStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("99")).
+		Bold(true)
 }
 
 // RenderHintBadges produces the short-form badge text appended to a row
