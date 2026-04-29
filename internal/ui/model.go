@@ -23,6 +23,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
@@ -139,14 +140,20 @@ type Model struct {
 	// Step 2 (newFreshMode): nameInput captures the optional workspace
 	// name. Empty → namegen picks a random one.
 	//
-	// Step 2b/c (newPRMode, newIssueMode): TODO — added in a follow-up
-	// commit. Will reuse listInput as the number-or-filter field plus
-	// listCursor for keyboard selection of fetched items.
-	//
-	// Step 2d (newBranchMode): TODO — same pattern as PR/Issue but
-	// against `git branch -r` instead of gh.
+	// Step 2b/c (newPRMode, newIssueMode): list-with-filter pickers.
+	// listInput is the number-or-filter input; listCursor is the
+	// arrow-selected index into the (filtered) list. newPRs / newIssues
+	// hold the live data once the async loader returns.
 	newPickerCursor int
 	nameInput       textinput.Model
+
+	listInput   textinput.Model
+	listCursor  int
+	newLoading  bool
+	newLoadErr  error
+	newPRs      []ghx.PRSummary
+	newIssues   []ghx.IssueSummary
+	newBranches []string // local + remote branches; remote prefixed "origin/"
 
 	// Confirm-delete modal (mode == confirmDeleteMode).
 	deleteTarget string   // workspace name pending removal
@@ -181,11 +188,17 @@ func New(mgr *workspace.Manager) *Model {
 	ti.CharLimit = 60
 	ti.Width = 40
 
+	li := textinput.New()
+	li.Placeholder = "type to filter, or a number to fetch by ID"
+	li.CharLimit = 80
+	li.Width = 60
+
 	return &Model{
 		mgr:         mgr,
 		tc:          mgr.Tmux,
 		projectName: mgr.Cfg.Project,
 		nameInput:   ti,
+		listInput:   li,
 		mode:        listMode,
 		fromGlobal:  os.Getenv("CANOPY_FROM_GLOBAL") == "1",
 	}

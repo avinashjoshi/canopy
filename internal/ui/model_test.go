@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/workspace"
@@ -25,6 +27,7 @@ func newTestModel(fromGlobal bool) *Model {
 		tc:          tmux.WithSocket("canopy-test"),
 		projectName: "test-project",
 		nameInput:   textinput.New(),
+		listInput:   textinput.New(),
 		mode:        listMode,
 		fromGlobal:  fromGlobal,
 	}
@@ -409,17 +412,134 @@ func TestNewFresh_EscReturnsToPicker(t *testing.T) {
 }
 
 // TestNewSubMode_EscReturnsToPicker: from any of the to-be-built
-// sub-modals (PR / Issue / Branch placeholders), esc returns to the
-// picker. Locks in the back-one-step contract before the live
-// pickers land.
+// sub-modals (Issue / Branch placeholders), esc returns to the picker.
+// Locks in the back-one-step contract.
 func TestNewSubMode_EscReturnsToPicker(t *testing.T) {
-	for _, mode := range []viewMode{newPRMode, newIssueMode, newBranchMode} {
+	for _, mode := range []viewMode{newIssueMode, newBranchMode} {
 		m := newTestModel(false)
 		m.mode = mode
 		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 		if m.mode != newPickerMode {
 			t.Errorf("esc from %v should return to newPickerMode; got %v", mode, m.mode)
 		}
+	}
+}
+
+// TestNewPR_TypedNumberSubmits: the power-user fast path — type a
+// PR number into the filter, hit enter, get a workspace from that
+// PR. Doesn't require the list to have loaded; works even on a
+// cold cache.
+func TestNewPR_TypedNumberSubmits(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPRMode
+	m.listInput.SetValue("1234")
+
+	model, cmd := m.handleNewPRKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("enter on number should flip to busyMode; got %v", m.mode)
+	}
+	if !strings.Contains(m.busyTitle, "PR #1234") {
+		t.Errorf("busy title should mention PR #1234; got %q", m.busyTitle)
+	}
+	if cmd == nil {
+		t.Errorf("expected create cmd")
+	}
+}
+
+// TestNewPR_ArrowsThenEnter: recognition path — wait for the list
+// to load, arrow to a row, hit enter. The picker reads the row's
+// PR number and submits.
+func TestNewPR_ArrowsThenEnter(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPRMode
+	m.newPRs = []ghx.PRSummary{
+		{Number: 1185, Title: "Inbox improvements"},
+		{Number: 1182, Title: "Fix oauth"},
+	}
+
+	// Down once → cursor on #1182.
+	model, _ := m.handleNewPRKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = model.(*Model)
+	if m.listCursor != 1 {
+		t.Fatalf("listCursor = %d; want 1", m.listCursor)
+	}
+
+	model, cmd := m.handleNewPRKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("enter on row should flip to busyMode; got %v", m.mode)
+	}
+	if !strings.Contains(m.busyTitle, "PR #1182") {
+		t.Errorf("busy title should reference selected row's PR; got %q", m.busyTitle)
+	}
+	if cmd == nil {
+		t.Errorf("expected create cmd")
+	}
+}
+
+// TestNewPR_LoadedMsgPopulatesList: prListLoadedMsg from the async
+// loader populates m.newPRs and clears the loading flag. View can
+// then render the list.
+func TestNewPR_LoadedMsgPopulatesList(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPRMode
+	m.newLoading = true
+
+	prs := []ghx.PRSummary{{Number: 42, Title: "Test"}}
+	model, _ := m.Update(prListLoadedMsg{prs: prs})
+	m = model.(*Model)
+
+	if m.newLoading {
+		t.Errorf("newLoading should be false after msg")
+	}
+	if len(m.newPRs) != 1 || m.newPRs[0].Number != 42 {
+		t.Errorf("newPRs not populated; got %+v", m.newPRs)
+	}
+}
+
+// TestNewPR_LoadedMsgWithError: error in the loader surfaces as
+// newLoadErr, list stays empty. View renders the error banner.
+func TestNewPR_LoadedMsgWithError(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPRMode
+	m.newLoading = true
+
+	model, _ := m.Update(prListLoadedMsg{err: fmt.Errorf("gh missing")})
+	m = model.(*Model)
+
+	if m.newLoading {
+		t.Errorf("newLoading should be false after msg")
+	}
+	if m.newLoadErr == nil {
+		t.Errorf("newLoadErr should be set on failure")
+	}
+}
+
+// TestFilterPRs_NumericPrefix: typing "11" matches all PRs whose
+// number starts with 11 — the "I half-remember the number" path.
+func TestFilterPRs_NumericPrefix(t *testing.T) {
+	prs := []ghx.PRSummary{
+		{Number: 1185, Title: "A"},
+		{Number: 1182, Title: "B"},
+		{Number: 999, Title: "C"},
+	}
+	got := filterPRs(prs, "11")
+	if len(got) != 2 {
+		t.Fatalf("got %d, want 2 (1185 + 1182)", len(got))
+	}
+}
+
+// TestFilterPRs_TitleSubstring: non-numeric input matches title +
+// author case-insensitively.
+func TestFilterPRs_TitleSubstring(t *testing.T) {
+	prs := []ghx.PRSummary{
+		{Number: 1, Title: "Inbox improvements"},
+		{Number: 2, Title: "Fix oauth"},
+	}
+	got := filterPRs(prs, "INBOX")
+	if len(got) != 1 || got[0].Number != 1 {
+		t.Errorf("expected single match for INBOX; got %+v", got)
 	}
 }
 

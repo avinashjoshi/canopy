@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
@@ -48,6 +51,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
+		return m, nil
+
+	case prListLoadedMsg:
+		// PR picker's async loader returned. Stage the results so
+		// the View renderer can show the list + clear the loading
+		// indicator. Stale arrival (user already left newPRMode)
+		// is a no-op except for the ignored merge — won't cause a
+		// re-render of the wrong screen because m.mode gates
+		// renderNewPR.
+		m.newLoading = false
+		if msg.err != nil {
+			m.newLoadErr = msg.err
+			return m, nil
+		}
+		m.newPRs = msg.prs
+		m.listCursor = 0
 		return m, nil
 
 	case attachAfterMsg:
@@ -97,9 +116,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// In any new-flow sub-mode that owns a textinput, route non-key
 	// messages (cursor blink ticks, etc.) through the active input.
-	if m.mode == newFreshMode {
+	switch m.mode {
+	case newFreshMode:
 		var cmd tea.Cmd
 		m.nameInput, cmd = m.nameInput.Update(msg)
+		return m, cmd
+	case newPRMode, newIssueMode, newBranchMode:
+		var cmd tea.Cmd
+		m.listInput, cmd = m.listInput.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -124,9 +148,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNewPickerKey(msg)
 	case newFreshMode:
 		return m.handleNewFreshKey(msg)
-	case newPRMode, newIssueMode, newBranchMode:
-		// Placeholder: until the per-variant sub-modal lands in a
-		// follow-up commit, esc returns to the picker. Any other key
+	case newPRMode:
+		return m.handleNewPRKey(msg)
+	case newIssueMode, newBranchMode:
+		// Placeholder: until these per-variant sub-modals land in
+		// follow-up commits, esc returns to the picker. Any other key
 		// is a no-op so a stray keystroke can't escape into listMode.
 		if msg.String() == "esc" {
 			m.openNewPicker()
@@ -404,8 +430,7 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 'f' is an alias if the user thinks "fresh".
 		return m.openNewFresh(), textinputBlink()
 	case "p":
-		m.mode = newPRMode
-		return m, nil
+		return m, m.openNewPR()
 	case "i":
 		m.mode = newIssueMode
 		return m, nil
@@ -430,7 +455,7 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case 0:
 			return m.openNewFresh(), textinputBlink()
 		case 1:
-			m.mode = newPRMode
+			return m, m.openNewPR()
 		case 2:
 			m.mode = newIssueMode
 		case 3:
@@ -481,6 +506,127 @@ func (m *Model) handleNewFreshKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.nameInput, cmd = m.nameInput.Update(msg)
 	return m, cmd
+}
+
+// openNewPR transitions to the PR picker sub-modal and kicks off the
+// async loader. The loader returns prListLoadedMsg; until it arrives,
+// the renderer shows a "Loading PRs..." state.
+func (m *Model) openNewPR() tea.Cmd {
+	m.mode = newPRMode
+	m.listInput.Reset()
+	m.listInput.Placeholder = "type a PR number, or arrow to a row below"
+	m.listInput.Focus()
+	m.listCursor = 0
+	m.newLoading = true
+	m.newLoadErr = nil
+	m.newPRs = nil
+	return tea.Batch(textinputBlink(), loadPRsCmd(m.mgr.Cfg.ProjectRoot))
+}
+
+// prListLoadedMsg carries the result of an async ghx.ListPRs call.
+// Update on receipt: clear loading, populate newPRs, surface any
+// error inline.
+type prListLoadedMsg struct {
+	prs []ghx.PRSummary
+	err error
+}
+
+// loadPRsCmd dispatches ghx.ListPRs in a goroutine. Limit 20 keeps
+// the picker scannable; users with > 20 open PRs can still type the
+// number directly.
+func loadPRsCmd(projectRoot string) tea.Cmd {
+	return func() tea.Msg {
+		prs, err := ghx.ListPRs(context.Background(), projectRoot, 20)
+		return prListLoadedMsg{prs: prs, err: err}
+	}
+}
+
+// handleNewPRKey is the keymap for the PR picker sub-modal. Two
+// dispatch shapes:
+//
+//   - User types a number: enter creates a workspace from PR #<num>
+//     directly (works even when the list is empty / unloaded — covers
+//     the "I know the number, just go" power-user path).
+//   - User arrows into the loaded list: enter creates from the
+//     selected PR (recognition path — see the PR title before
+//     committing).
+//
+// Esc returns to the picker (back-one-step).
+func (m *Model) handleNewPRKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.openNewPicker()
+		return m, nil
+
+	case "up", "ctrl+k":
+		// Arrow nav on the list. Doesn't consume the textinput's
+		// own up-arrow (we don't bind that in textinput) so users
+		// can scan without losing typed-in number.
+		if m.listCursor > 0 {
+			m.listCursor--
+		}
+		return m, nil
+	case "down", "ctrl+j":
+		if m.listCursor < len(m.newPRs)-1 {
+			m.listCursor++
+		}
+		return m, nil
+
+	case "enter":
+		// Two paths: typed-number wins if the input parses as an
+		// integer. Otherwise, fall back to the cursor's selection.
+		if num, ok := parsePositiveInt(m.listInput.Value()); ok {
+			return m.submitNewPR(num)
+		}
+		if len(m.newPRs) > 0 && m.listCursor < len(m.newPRs) {
+			return m.submitNewPR(m.newPRs[m.listCursor].Number)
+		}
+		// Nothing typed, no list — surface a hint.
+		m.newLoadErr = fmt.Errorf("type a PR number or wait for the list to load")
+		return m, nil
+	}
+
+	// Forward to textinput. Reset cursor when filter changes so
+	// the highlighted row doesn't drift past the visible list.
+	prevValue := m.listInput.Value()
+	var cmd tea.Cmd
+	m.listInput, cmd = m.listInput.Update(msg)
+	if m.listInput.Value() != prevValue {
+		m.listCursor = 0
+		m.newLoadErr = nil
+	}
+	return m, cmd
+}
+
+// submitNewPR is the shared "go fetch this PR and create the
+// workspace" path used by both enter-with-number and enter-on-row.
+// Flips to busyMode and dispatches the existing createCmd; the
+// resolver does the gh + git fetch in the goroutine.
+func (m *Model) submitNewPR(num int) (tea.Model, tea.Cmd) {
+	spec := workspace.SourceSpec{PR: num}
+	m.busyOp = busyOpCreate
+	m.busyTitle = newBusyTitle("", spec)
+	m.busyDone = false
+	m.busyOutput = ""
+	m.busyErr = nil
+	m.mode = busyMode
+	m.listInput.Blur()
+	return m, createCmd(m.mgr, "", spec)
+}
+
+// parsePositiveInt is the shared "is this a PR/issue number" check
+// for the picker enter handlers. Returns (n, true) only for integers
+// > 0; "0" / "-1" / "abc" / "" all return (_, false).
+func parsePositiveInt(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // newBusyTitle picks the busy-mode title shown while a Create

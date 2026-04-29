@@ -18,6 +18,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 )
@@ -89,6 +91,138 @@ func FetchPR(ctx context.Context, projectRoot string, num int) (*PR, error) {
 		return nil, fmt.Errorf("FetchPR(%d): parse: %w", num, err)
 	}
 	return &pr, nil
+}
+
+// PRSummary is the subset of fields the new-workspace picker needs
+// per PR. Smaller than PR (no body, no fork-detection fields) so
+// `gh pr list` returns quickly even on big repos.
+type PRSummary struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	HeadRefName string `json:"headRefName"`
+}
+
+// IssueSummary mirrors PRSummary for issues.
+type IssueSummary struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
+// listCache memoizes ListPRs / ListIssues for 60s per (projectRoot,
+// kind). `gh pr list` typically runs ~500ms on a warm cache, ~1s
+// cold; caching for 60s makes the picker feel instant on re-open
+// without significantly staling the data.
+//
+// Mutex-protected map; sync.Map would be overkill at this size
+// (one entry per project per kind).
+var (
+	listCacheMu  sync.Mutex
+	listCacheMap = map[string]listCacheEntry{}
+)
+
+type listCacheEntry struct {
+	prs    []PRSummary
+	issues []IssueSummary
+	at     time.Time
+}
+
+const listCacheTTL = 60 * time.Second
+
+// ListPRs returns up to `limit` open PRs in the repo at projectRoot,
+// most-recent first. Results are cached 60s per project so the TUI
+// picker feels instant on repeated opens.
+//
+// Returns ErrUnavailable if gh is missing. Returns an empty slice
+// (not an error) when the repo has no open PRs — callers render an
+// empty-state hint rather than treating it as failure.
+func ListPRs(ctx context.Context, projectRoot string, limit int) ([]PRSummary, error) {
+	if !Available() {
+		return nil, ErrUnavailable
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	cacheKey := "pr|" + projectRoot
+	listCacheMu.Lock()
+	if e, ok := listCacheMap[cacheKey]; ok && time.Since(e.at) < listCacheTTL {
+		out := append([]PRSummary(nil), e.prs...)
+		listCacheMu.Unlock()
+		return out, nil
+	}
+	listCacheMu.Unlock()
+
+	out, err := runGH(ctx, projectRoot, "pr", "list",
+		"--state", "open",
+		"--limit", strconv.Itoa(limit),
+		"--json", "number,title,author,headRefName")
+	if err != nil {
+		log.Debug("ghx.ListPRs.failed", "err", err)
+		return nil, fmt.Errorf("ListPRs: %w", err)
+	}
+	var prs []PRSummary
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, fmt.Errorf("ListPRs: parse: %w", err)
+	}
+
+	listCacheMu.Lock()
+	listCacheMap[cacheKey] = listCacheEntry{prs: prs, at: time.Now()}
+	listCacheMu.Unlock()
+
+	return prs, nil
+}
+
+// ListIssues returns up to `limit` open issues. Same shape and
+// caching policy as ListPRs.
+func ListIssues(ctx context.Context, projectRoot string, limit int) ([]IssueSummary, error) {
+	if !Available() {
+		return nil, ErrUnavailable
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	cacheKey := "issue|" + projectRoot
+	listCacheMu.Lock()
+	if e, ok := listCacheMap[cacheKey]; ok && time.Since(e.at) < listCacheTTL {
+		out := append([]IssueSummary(nil), e.issues...)
+		listCacheMu.Unlock()
+		return out, nil
+	}
+	listCacheMu.Unlock()
+
+	out, err := runGH(ctx, projectRoot, "issue", "list",
+		"--state", "open",
+		"--limit", strconv.Itoa(limit),
+		"--json", "number,title,author")
+	if err != nil {
+		log.Debug("ghx.ListIssues.failed", "err", err)
+		return nil, fmt.Errorf("ListIssues: %w", err)
+	}
+	var issues []IssueSummary
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("ListIssues: parse: %w", err)
+	}
+
+	listCacheMu.Lock()
+	listCacheMap[cacheKey] = listCacheEntry{issues: issues, at: time.Now()}
+	listCacheMu.Unlock()
+
+	return issues, nil
+}
+
+// ResetListCache wipes the PR/Issue list cache. Exposed for tests
+// and for a future "force refresh" key in the picker.
+func ResetListCache() {
+	listCacheMu.Lock()
+	listCacheMap = map[string]listCacheEntry{}
+	listCacheMu.Unlock()
 }
 
 // FetchIssue reads issue metadata via `gh issue view <num>`. Same

@@ -2,8 +2,10 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
 )
 
@@ -23,7 +25,7 @@ func (m *Model) View() string {
 	case newFreshMode:
 		return m.renderNewFresh()
 	case newPRMode:
-		return m.renderNewComingSoon("From a pull request", "p")
+		return m.renderNewPR()
 	case newIssueMode:
 		return m.renderNewComingSoon("From an issue", "i")
 	case newBranchMode:
@@ -218,6 +220,135 @@ func (m *Model) renderNewFresh() string {
 	b.WriteString("\n\n")
 	b.WriteString(subtleStyle.Render("  enter to create  ·  esc to back"))
 	return b.String()
+}
+
+// renderNewPR is step 2b — the PR picker. Layout:
+//
+//	canopy new · pull request
+//
+//	  PR number or filter:
+//	  [_______________________]
+//
+//	  ● #1185  pdx91   Inbox improvements
+//	    #1182  jess    Fix oauth redirect
+//	    #1180  sam     Add export endpoint
+//
+//	  enter to check out · ↑/↓ pick · esc to back
+//
+// Three states: loading (spinner-ish hint), error (gh missing /
+// network failed), populated (list with cursor). Even with empty
+// list the user can type a number directly — that's the power-user
+// fast path.
+func (m *Model) renderNewPR() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· pull request"))
+	b.WriteString("\n\n")
+
+	b.WriteString("  PR number or filter:\n  ")
+	b.WriteString(m.listInput.View())
+	b.WriteString("\n\n")
+
+	switch {
+	case m.newLoading && len(m.newPRs) == 0:
+		b.WriteString(subtleStyle.Render("  Loading PRs from gh..."))
+		b.WriteString("\n")
+	case m.newLoadErr != nil:
+		b.WriteString("  ")
+		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.newLoadErr)))
+		b.WriteString("\n")
+	case len(m.newPRs) == 0:
+		b.WriteString(subtleStyle.Render("  No open PRs found. Type a number to fetch any PR by ID."))
+		b.WriteString("\n")
+	default:
+		filtered := filterPRs(m.newPRs, m.listInput.Value())
+		if len(filtered) == 0 {
+			b.WriteString(subtleStyle.Render("  No PRs match. Type a number to fetch by ID."))
+			b.WriteString("\n")
+		} else {
+			cursor := m.listCursor
+			if cursor >= len(filtered) {
+				cursor = len(filtered) - 1
+			}
+			for i, pr := range filtered {
+				marker := "    "
+				if i == cursor {
+					marker = "  ● "
+				}
+				line := fmt.Sprintf("%s#%-5d %-12s %s",
+					marker, pr.Number, truncateRight(pr.Author.Login, 12), pr.Title)
+				if i == cursor {
+					b.WriteString(selectedStyle.Render(line))
+				} else {
+					b.WriteString(line)
+				}
+				b.WriteString("\n")
+			}
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render(
+		"  enter to check out  ·  ↑/↓ pick row  ·  esc back"))
+	return b.String()
+}
+
+// filterPRs narrows the loaded list when the user types in the
+// filter field. Three match modes (in priority order):
+//
+//   - Numeric: the input is a number, so match the PR number prefix
+//     (typing "11" matches #11, #1185, #1182). Useful for power
+//     users who half-remember a PR number.
+//   - Substring: case-insensitive match against title + author.
+//
+// Returns the same slice unfiltered when the input is empty.
+func filterPRs(prs []ghx.PRSummary, filter string) []ghx.PRSummary {
+	filter = strings.TrimSpace(filter)
+	if filter == "" {
+		return prs
+	}
+	out := make([]ghx.PRSummary, 0, len(prs))
+	if _, isNum := parsePositiveIntForView(filter); isNum {
+		for _, pr := range prs {
+			if strings.HasPrefix(strconv.Itoa(pr.Number), filter) {
+				out = append(out, pr)
+			}
+		}
+		return out
+	}
+	lower := strings.ToLower(filter)
+	for _, pr := range prs {
+		if strings.Contains(strings.ToLower(pr.Title), lower) ||
+			strings.Contains(strings.ToLower(pr.Author.Login), lower) {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+// parsePositiveIntForView mirrors parsePositiveInt in update.go.
+// Duplicated here to avoid a view→update package edge; tiny helper.
+func parsePositiveIntForView(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// truncateRight clips a string to width with no ellipsis. Used in
+// fixed-column rows where ellipsis would visually compete with
+// other markers (cursor `●`, etc.).
+func truncateRight(s string, width int) string {
+	if len(s) <= width {
+		return s
+	}
+	return s[:width]
 }
 
 // renderNewComingSoon is the placeholder for the PR / Issue / Branch
