@@ -83,10 +83,12 @@ func (m *Model) renderTable() string {
 		}
 	}
 
+	// statusCell adds 2 visible chars (glyph + space) over colStatus —
+	// pad the STATUS header by the same amount to keep PORT aligned.
 	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %*s",
 		colName, "NAME",
 		colBranch, "BRANCH",
-		colStatus, "STATUS",
+		colStatus+2, "STATUS",
 		colPort, "PORT")
 
 	var b strings.Builder
@@ -102,12 +104,11 @@ func (m *Model) renderTable() string {
 		if r.Alive {
 			badge = aliveStyle.Render("●")
 		}
-		statusCell := statusStyle(r.Status).Render(fmt.Sprintf("%-*s", colStatus, r.Status))
 		line := fmt.Sprintf("%s %-*s  %-*s  %s  %*s",
 			badge,
 			colName, r.Name,
 			colBranch, r.Branch,
-			statusCell,
+			statusCell(r.Status, colStatus),
 			colPort, port,
 		)
 		// Append v0.6 lifecycle hint badges (rename / shipped /
@@ -613,7 +614,6 @@ func branchHasOriginInline(branches []string, bare string) bool {
 	}
 	return false
 }
-
 
 // renderConfirmDelete is the modal shown before tearing down a workspace.
 //

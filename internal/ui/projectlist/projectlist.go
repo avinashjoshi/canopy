@@ -296,7 +296,7 @@ func (m Model) renderTable() string {
 			port = fmt.Sprintf("%d", r.Port)
 		}
 		badge := badgeFor(r.Alive)
-		statusCell := statusStyleFor(r.Status).Render(fmt.Sprintf("%-*s", colStatus, r.Status))
+		statusCell := statusStyleFor(r.Status).Render(statusGlyphFor(r.Status) + " " + fmt.Sprintf("%-*s", colStatus, r.Status))
 		// Two-space indent under the project header so rows visually nest.
 		// Branch is emphasized (the renamed-intent name) when it differs
 		// from the workspace name. When they match (fresh workspace,
@@ -539,6 +539,25 @@ func badgeFor(alive bool) string {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Render("●")
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("○")
+}
+
+// statusGlyphFor returns a 1-rune shape prefix for a status, providing a
+// non-color signal so status reads correctly under protanopia and on
+// monochrome terminals. Mirrors render.statusGlyph in the parent ui pkg —
+// duplicated rather than imported because projectlist intentionally
+// stands alone for reuse from `canopy ls --all` and other future surfaces.
+func statusGlyphFor(s state.Status) string {
+	switch s {
+	case state.StatusSettingUp:
+		return "…"
+	case state.StatusStopped:
+		return "⏸"
+	case state.StatusBroken:
+		return "✗"
+	case state.StatusOrphaned:
+		return "!"
+	}
+	return " "
 }
 
 func statusStyleFor(s state.Status) lipgloss.Style {

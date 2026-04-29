@@ -288,13 +288,26 @@ These are the parts that will eat a session if approached naively:
 
 ```
 ↑/↓ or j/k    — move selection
-enter         — attach to tmux session for selected worktree
-n             — new worktree (modal: pick project, branch name)
-d             — delete worktree (confirm)
+g / home      — jump to first row
+G / end       — jump to last row
+enter         — attach to tmux session for selected workspace
+n             — new workspace (modal: pick variant, then name/PR/issue/branch)
+d             — delete workspace (confirm)
 r             — refresh (reconcile state)
+R             — retry setup for a `broken` workspace
+b / esc       — back to global mode (when in a project)
 ?             — help overlay
-q             — quit (TUI; tmux sessions persist)
+q / ctrl+c    — quit (TUI; tmux sessions persist)
 ```
+
+Modal pickers (new-workspace flow) use `↑/↓`, `ctrl+j`/`ctrl+k`, and `enter`
+to navigate; `esc` walks back one step.
+
+The keymap grew slightly past the original v0 sketch — `g/G/home/end` for
+list-jumping, `R` for retry, `b` for back-to-global — but every addition
+earned its key. The taste filter ("would this make canopy feel like Orca?")
+still holds: every binding does one thing, no chords, no modes outside the
+new-workspace picker.
 
 ### Subcommands (scripting underneath)
 

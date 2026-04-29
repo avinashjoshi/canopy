@@ -92,10 +92,33 @@ func liveBadge(alive bool) string {
 	return deadStyle.Render("○")
 }
 
-// statusCell renders a status string padded to the given width and styled
-// per its semantic color. Used by both project and global table renderers.
+// statusGlyph returns a 1-rune shape prefix for a status, providing a
+// non-color signal so the status reads correctly under protanopia and on
+// monochrome terminals. Healthy states (ready, main) get a space — the
+// live badge column already conveys aliveness, no need for extra chrome.
+//
+// Glyph choices: `…` (in progress), `⏸` (paused), `✗` (failed),
+// `!` (alert — matches the design doc's orphaned-row spec).
+func statusGlyph(s state.Status) string {
+	switch s {
+	case state.StatusSettingUp:
+		return "…"
+	case state.StatusStopped:
+		return "⏸"
+	case state.StatusBroken:
+		return "✗"
+	case state.StatusOrphaned:
+		return "!"
+	}
+	return " "
+}
+
+// statusCell renders a status with a shape glyph, padded to the given
+// width, and styled per its semantic color. The glyph adds 2 chars of
+// visible width (glyph + space) on top of the name column. Used by
+// both project and global table renderers.
 func statusCell(status state.Status, width int) string {
-	return statusStyle(status).Render(fmt.Sprintf("%-*s", width, status))
+	return statusStyle(status).Render(statusGlyph(status) + " " + fmt.Sprintf("%-*s", width, status))
 }
 
 // portCell formats a port for display: zero is rendered as "—" (the
