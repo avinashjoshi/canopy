@@ -358,7 +358,7 @@ func TestRetry_HappyPath(t *testing.T) {
 	// Retry.
 	stdout.Reset()
 	stderr.Reset()
-	revived, err := mgr.RetrySetup(ctx, "fix-me", &stdout, &stderr)
+	revived, err := mgr.RetrySetup(ctx, "fix-me", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("RetrySetup: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
@@ -387,7 +387,7 @@ func TestRetry_StillFailing(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	ws, err := mgr.RetrySetup(ctx, "still-broken", &stdout, &stderr)
+	ws, err := mgr.RetrySetup(ctx, "still-broken", false, &stdout, &stderr)
 	if !errors.Is(err, workspace.ErrSetupFailed) {
 		t.Errorf("retry on still-broken script: got %v; want ErrSetupFailed", err)
 	}
@@ -407,9 +407,31 @@ func TestRetry_WrongStatus(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, err := mgr.RetrySetup(ctx, "ready-ws", &stdout, &stderr)
+	_, err := mgr.RetrySetup(ctx, "ready-ws", false, &stdout, &stderr)
 	if !errors.Is(err, workspace.ErrCannotRetry) {
 		t.Errorf("retry on ready workspace: got %v; want ErrCannotRetry", err)
+	}
+}
+
+// TestRetry_ForceOnReady: retry on a ready workspace with force=true
+// is allowed; setup re-runs without error and status stays ready.
+func TestRetry_ForceOnReady(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ctx := context.Background()
+	if _, err := mgr.Create(ctx, "ready-force", workspace.CreateOptions{}, &stdout, &stderr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// force=true should accept ready and re-run setup.
+	revived, err := mgr.RetrySetup(ctx, "ready-force", true, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("RetrySetup(force=true) on ready: got err %v\nstderr: %s", err, stderr.String())
+	}
+	if revived.Status != state.StatusReady {
+		t.Errorf("status after force-retry: got %q, want ready", revived.Status)
 	}
 }
 
@@ -419,7 +441,7 @@ func TestRetry_NotFound(t *testing.T) {
 	mgr, _ := fixture(t)
 
 	var stdout, stderr bytes.Buffer
-	_, err := mgr.RetrySetup(context.Background(), "never-existed", &stdout, &stderr)
+	_, err := mgr.RetrySetup(context.Background(), "never-existed", false, &stdout, &stderr)
 	if !errors.Is(err, workspace.ErrWorkspaceNotFound) {
 		t.Errorf("retry on missing name: got %v; want ErrWorkspaceNotFound", err)
 	}

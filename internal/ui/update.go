@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -94,6 +95,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Resurrection completed, now attach. Same exec-process flow as
 		// the direct ready-status path.
 		return m, attachCmd(m.mgr, msg.session)
+
+	case popupAttachedMsg:
+		// Project TUI was hosted in a canopy popup AND the user just
+		// attached. Flip the flag and quit; ui.Run sees the flag and
+		// exits with code 7, which the popup-inner catches and uses to
+		// close the popup. Without this, attaching from project TUI in
+		// popup leaves the popup open requiring an extra q press.
+		m.attachedFromPopup = true
+		return m, tea.Quit
 
 	case createStartedMsg:
 		// First dispatch from createCmd. Kick off the streaming +
@@ -422,6 +432,15 @@ func attachCmd(mgr *workspace.Manager, session string) tea.Cmd {
 			log.Warn("ui.attach.exec-failed", "session", session, "err", err)
 			return rowsLoadedMsg{err: fmt.Errorf("attach %s: %w", session, err)}
 		}
+		// Popup-mode handoff: when this project TUI was hosted in a
+		// canopy popup (CANOPY_FROM_POPUP=1), a successful attach is
+		// also a signal to close the popup. Return popupAttachedMsg
+		// instead of refreshing — Update flips a flag on the Model and
+		// quits, then ui.Run sees the flag and exits with code 7
+		// (caught by the popup-inner's tea.ExecProcess onExit).
+		if os.Getenv("CANOPY_FROM_POPUP") == "1" {
+			return popupAttachedMsg{}
+		}
 		// Detach completed cleanly; refresh rows so any state changes
 		// during the session (rare but possible if the user ran canopy
 		// commands inside a pane) show up.
@@ -452,6 +471,14 @@ func resurrectAndAttachCmd(mgr *workspace.Manager, name string) tea.Cmd {
 type attachAfterMsg struct {
 	session string
 }
+
+// popupAttachedMsg signals that the project TUI was launched from a
+// canopy popup (CANOPY_FROM_POPUP=1) AND the user just attached to a
+// workspace successfully. Update flips Model.attachedFromPopup and
+// returns tea.Quit; ui.Run reads the flag and exits with code 7,
+// which the parent popup-inner process catches and uses to close the
+// popup automatically.
+type popupAttachedMsg struct{}
 
 // openNewPicker resets state and opens the variant picker. Called
 // from the listMode 'n' keypress and from sub-modal esc handlers
@@ -1063,7 +1090,12 @@ func retryCmdUI(mgr *workspace.Manager, name string) tea.Cmd {
 		buf := &safeBuffer{}
 		done := make(chan retryDoneMsg, 1)
 		go func() {
-			_, err := mgr.RetrySetup(context.Background(), name, buf, buf)
+			// TUI retry stays gated on broken (force=false). Force-retry
+			// for ready/stopped is intentionally CLI-only for now —
+			// running setup on a healthy workspace can be destructive
+			// and warrants the explicit --force flag rather than a TUI
+			// keypress. v0.8 may add a confirmation modal in the TUI.
+			_, err := mgr.RetrySetup(context.Background(), name, false, buf, buf)
 			done <- retryDoneMsg{output: buf.Drain(), err: err}
 		}()
 		return retryStartedMsg{buf: buf, done: done}

@@ -177,6 +177,23 @@ type Model struct {
 	// they just quit the inner program; the outer global TUI's
 	// ExecProcess onExit refreshes and re-renders.
 	fromGlobal bool
+
+	// fromPopup is true when the project TUI is hosted INSIDE the canopy
+	// popup (model_global.go's popup-mode goToProject sets
+	// CANOPY_FROM_POPUP=1). When true, attaching to a workspace must
+	// also signal the parent popup to close — otherwise the user is
+	// left with a popup window showing project TUI on top of a host
+	// session that already switched to the workspace, requiring an
+	// extra `q` to dismiss the popup. The signal is exit code 7 from
+	// ui.Run (see attachedFromPopup below).
+	fromPopup bool
+
+	// attachedFromPopup is set by Update's popupAttachedMsg handler
+	// after a successful attach in popup mode. Read by ui.Run to exit
+	// the canopy process with code 7 — the popup-attach signal honored
+	// by GlobalModel.goToProject's tea.ExecProcess onExit, which
+	// triggers tea.Quit on the popup-inner program.
+	attachedFromPopup bool
 }
 
 // branchInWorkspace reports whether a branch name is currently
@@ -226,17 +243,36 @@ func New(mgr *workspace.Manager) *Model {
 		listInput:   li,
 		mode:        listMode,
 		fromGlobal:  os.Getenv("CANOPY_FROM_GLOBAL") == "1",
+		fromPopup:   os.Getenv("CANOPY_FROM_POPUP") == "1",
 	}
 }
 
 // Run is the public entry point. It builds a Model, hands it to a
 // Bubbletea program, and blocks until the user quits. Returns whatever
 // error the program surfaced (or nil on a clean quit).
+//
+// When the project TUI was launched from the canopy popup AND the user
+// attached to a workspace from inside it, Run exits the process with
+// code 7 — the popup-attach signal. The outer popup-inner program's
+// tea.ExecProcess onExit catches the non-zero exit, recognizes code 7
+// as "user attached on my behalf," and quits itself, closing the
+// display-popup. Without this, attaching from project-TUI-in-popup
+// leaves the popup open requiring a second q.
+//
+// os.Exit is safe here: Bubbletea's p.Run has already returned, which
+// means the alt-screen has been restored and the terminal is in a
+// usable state. We're past the point where deferred cleanup matters.
 func Run(mgr *workspace.Manager) error {
 	m := New(mgr)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	_, err := p.Run()
-	return err
+	finalModel, err := p.Run()
+	if err != nil {
+		return err
+	}
+	if pm, ok := finalModel.(*Model); ok && pm.attachedFromPopup {
+		os.Exit(7)
+	}
+	return nil
 }
 
 // Init implements tea.Model. Returns the initial command — load the

@@ -70,6 +70,57 @@ func TestNew_ReadsFromGlobalEnv(t *testing.T) {
 	})
 }
 
+// TestNew_ReadsFromPopupEnv: CANOPY_FROM_POPUP=1 sets fromPopup=true,
+// anything else → false. Mirrors fromGlobal — strict equality keeps
+// the contract narrow.
+func TestNew_ReadsFromPopupEnv(t *testing.T) {
+	mgr := &workspace.Manager{
+		Cfg:  &config.Config{Project: "test-project"},
+		Tmux: tmux.WithSocket("canopy-test"),
+	}
+	t.Setenv("CANOPY_FROM_POPUP", "1")
+	if m := New(mgr); !m.fromPopup {
+		t.Errorf("fromPopup = false; want true when CANOPY_FROM_POPUP=1")
+	}
+	t.Setenv("CANOPY_FROM_POPUP", "")
+	if m := New(mgr); m.fromPopup {
+		t.Errorf("fromPopup = true; want false when env unset")
+	}
+}
+
+// TestUpdate_PopupAttachedMsg_FlipsFlagAndQuits: receiving
+// popupAttachedMsg sets attachedFromPopup=true on the model AND
+// returns tea.Quit. The attachedFromPopup flag is what ui.Run checks
+// to exit with code 7 (the popup-attach signal). Without this test,
+// a refactor that drops the flag would leave the popup hanging open
+// after attach.
+func TestUpdate_PopupAttachedMsg_FlipsFlagAndQuits(t *testing.T) {
+	mgr := &workspace.Manager{
+		Cfg:  &config.Config{Project: "test-project"},
+		Tmux: tmux.WithSocket("canopy-test"),
+	}
+	m := New(mgr)
+	if m.attachedFromPopup {
+		t.Fatal("setup: attachedFromPopup should start false")
+	}
+
+	model, cmd := m.Update(popupAttachedMsg{})
+	updated, ok := model.(*Model)
+	if !ok {
+		t.Fatalf("Update returned %T, want *Model", model)
+	}
+	if !updated.attachedFromPopup {
+		t.Error("attachedFromPopup not flipped to true")
+	}
+	if cmd == nil {
+		t.Fatal("Update returned nil cmd; want tea.Quit")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("popupAttachedMsg cmd produced %T, want tea.QuitMsg", msg)
+	}
+}
+
 // TestHandleKey_BackToGlobal: 'b' and 'esc' quit the project TUI when
 // fromGlobal=true (the global TUI re-renders after ExecProcess returns).
 // When fromGlobal=false, both keys are no-ops — outside the global-launch
