@@ -284,7 +284,8 @@ func (c *Client) Kill(ctx context.Context, name string) error {
 // error and does NOT exec — the canopy process stays alive and can
 // surface the error to the user.
 func (c *Client) Attach(ctx context.Context, name string) error {
-	log.Info("tmux.attach", "name", name)
+	verb := attachVerbForCurrentEnv()
+	log.Info("tmux.attach", "name", name, "verb", verb)
 
 	exists, err := c.HasSession(ctx, name)
 	if err != nil {
@@ -300,7 +301,7 @@ func (c *Client) Attach(ctx context.Context, name string) error {
 	}
 
 	args := []string{"tmux"}
-	args = append(args, c.args("attach", "-t", name)...)
+	args = append(args, c.args(verb, "-t", name)...)
 	return syscall.Exec(tmuxPath, args, os.Environ())
 }
 
@@ -321,7 +322,30 @@ func (c *Client) AttachCmd(ctx context.Context, name string) (*exec.Cmd, error) 
 	if !exists {
 		return nil, fmt.Errorf("tmux.AttachCmd(%s): %w", name, ErrSessionNotFound)
 	}
-	return exec.CommandContext(ctx, "tmux", c.args("attach", "-t", name)...), nil
+	return exec.CommandContext(ctx, "tmux", c.args(attachVerbForCurrentEnv(), "-t", name)...), nil
+}
+
+// attachVerbForCurrentEnv returns the right tmux verb for "make this
+// client follow that session," chosen by whether the calling process
+// is itself inside a tmux client (TMUX env set):
+//
+//   - Inside tmux  → "switch-client" (the calling tmux client switches
+//                   to the target session). `attach` would fail with
+//                   "sessions should be nested with care" or similar.
+//
+//   - Outside tmux → "attach" (a fresh tmux client attaches to the
+//                   target). switch-client requires an existing client
+//                   to switch.
+//
+// This handles popup mode (popup pty IS a tmux client) and any future
+// nested invocation. The CLI subcommands that today are gated by
+// enforceNoNestedTmux still benefit if a user opts into nesting via
+// CANOPY_ALLOW_NESTED.
+func attachVerbForCurrentEnv() string {
+	if os.Getenv("TMUX") != "" {
+		return "switch-client"
+	}
+	return "attach"
 }
 
 // KillServer shuts down the tmux server bound to this client's socket.
