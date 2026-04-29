@@ -79,6 +79,23 @@ var (
 				Background(lipgloss.Color("236")).
 				Padding(0, 1)
 
+	// searchLabelStyle is the bright "🔍 SEARCH" pill that anchors the
+	// active search input. Bold + brand violet bg so it's unmistakable
+	// the user is in capture mode.
+	searchLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("231")).
+				Background(lipgloss.Color("99")).
+				Padding(0, 1)
+
+	// searchInputStyle is the typed-query area following the SEARCH
+	// label. Slightly dimmer bg so the label pops as the focal point
+	// but the query stays clearly readable.
+	searchInputStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("231")).
+				Background(lipgloss.Color("237")).
+				Padding(0, 1)
+
 	// brandPillStyle is the top-bar "canopy" wordmark — bright violet
 	// background, bold white text, lazyworktree-flavored. The visual
 	// anchor: tells the user what app they're looking at without

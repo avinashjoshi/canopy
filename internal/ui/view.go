@@ -57,7 +57,19 @@ func (m *Model) View() string {
 	b.WriteString(m.renderTabBar())
 	b.WriteString("    ")
 	b.WriteString(m.renderSearchLine())
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+
+	// Global-tab onboarding hint. Subtle reminder for "how do I add a
+	// project here?" — surfaces the path without needing the empty-
+	// state copy to fire (which only renders when zero rows match).
+	// Hidden on Local because there's no project-onboarding action
+	// from inside an existing project.
+	if m.tab == tabGlobal {
+		b.WriteString(subtleStyle.Render("    add a project: cd to its repo and run "))
+		b.WriteString(subtleStyle.Render("`canopy init`"))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	if m.err != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.err)))
@@ -122,20 +134,19 @@ func (m *Model) scopeLabel() string {
 	return "global"
 }
 
-// renderTabBar draws the Local/Global tab bar as styled pills with
-// per-tab row counts. Active tab uses the violet brand-color bg; inactive
-// uses a darker grey-bg pill so both read as buttons, not text.
+// renderTabBar draws the Local/Global tab bar as styled pills. Active
+// tab uses the violet brand-color bg; inactive uses a darker grey-bg
+// pill so both read as buttons, not text.
 //
-// Row counts give the user a "how much is on each tab" glance without
-// switching: `[ Local: canopy 3 ] [ Global 17 ]`. Empty tabs render
-// without a count (zero is noise).
+// Empty tabs (no rows under the active filter) render dimmed so the
+// user doesn't feel pulled to switch to a tab with nothing there.
 func (m *Model) renderTabBar() string {
-	localCount := 0
-	globalCount := 0
+	hasLocal := false
+	hasGlobal := false
 	for _, r := range m.allRowsOrFallback() {
-		globalCount++
+		hasGlobal = true
 		if m.currentProject != "" && r.ProjectRoot == m.currentProject {
-			localCount++
+			hasLocal = true
 		}
 	}
 
@@ -156,47 +167,50 @@ func (m *Model) renderTabBar() string {
 		localLabel = "Local: " + proj
 	}
 
-	// Append row count when non-zero. Subtle but useful density signal.
-	if localCount > 0 {
-		localLabel = fmt.Sprintf("%s %d", localLabel, localCount)
-	}
-	globalLabel := "Global"
-	if globalCount > 0 {
-		globalLabel = fmt.Sprintf("Global %d", globalCount)
-	}
-
 	pillStyle := func(active, hasRows bool) lipgloss.Style {
 		switch {
 		case active && !hasRows:
-			// Active tab on an empty tab — dimmed active, still
-			// readable as "current selection" but de-emphasized
-			// because there's nothing here.
 			return activeTabStyle.Foreground(lipgloss.Color("250"))
 		case active:
 			return activeTabStyle
 		case !hasRows:
-			// Inactive empty — fully dimmed, the user shouldn't
-			// feel pulled to switch there.
 			return inactiveTabStyle.Foreground(lipgloss.Color("241"))
 		default:
 			return inactiveTabStyle
 		}
 	}
 
-	local := pillStyle(m.tab == tabLocal, localCount > 0).Render(localLabel)
-	global := pillStyle(m.tab == tabGlobal, globalCount > 0).Render(globalLabel)
+	local := pillStyle(m.tab == tabLocal, hasLocal).Render(localLabel)
+	global := pillStyle(m.tab == tabGlobal, hasGlobal).Render("Global")
 	return local + " " + global
 }
 
-// renderSearchLine returns the search input box (when in search mode) or
-// a static "filter: ..." indicator when a query is active but the user
-// has exited search mode.
+// renderSearchLine returns the search input pill (when in search mode)
+// or a persistent-filter indicator when a query is set but the user has
+// exited search mode.
+//
+// Three visual states:
+//   - active search:  `[🔍 SEARCH] foo█`         (bright; cursor blink)
+//   - persistent filter: `🔍 foo` + esc-to-clear hint (subtle)
+//   - no search:      empty                     (the help line shows / shortcut)
 func (m *Model) renderSearchLine() string {
 	if m.searchMode {
-		return searchActiveStyle.Render("/" + m.searchQuery + "█")
+		// Active mode: bright label pill + visible query + cursor.
+		// Cursor is `▏` (a thin vertical bar) — reads as a real
+		// blinking caret on most terminals and doesn't look like
+		// a content character the way `█` could.
+		label := searchLabelStyle.Render("🔍 SEARCH")
+		body := searchInputStyle.Render(" " + m.searchQuery + "▏")
+		return label + body
 	}
 	if m.searchQuery != "" {
-		return subtleStyle.Render("filter: " + m.searchQuery + "  (esc to clear)")
+		// Persistent filter — the user typed a query then exited
+		// search mode (Enter). Show what's filtering AND how to
+		// clear, both in dim text so they don't compete with the
+		// table content.
+		return subtleStyle.Render("🔍 ") +
+			subtleStyle.Render(m.searchQuery) +
+			subtleStyle.Render("  (esc to clear)")
 	}
 	return ""
 }
