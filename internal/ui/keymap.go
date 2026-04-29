@@ -107,6 +107,11 @@ var listModeBindings = []Binding{
 		Action:    actionNewWorkspace,
 	},
 	{
+		K:         key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "focus project")),
+		Available: availableFocusProject,
+		Action:    actionFocusProject,
+	},
+	{
 		K:      key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
 		Action: actionDelete,
 	},
@@ -138,6 +143,25 @@ var listModeBindings = []Binding{
 // on the cursor row's project.
 func availableNewWorkspace(m *Model) bool {
 	return m.mgr != nil && m.tab == tabLocal
+}
+
+// availableFocusProject is the Available predicate for `o`. Only
+// meaningful on the Global tab (Local already IS the current project's
+// scope; pressing o there would be a no-op). Hidden when the cursor
+// row's ProjectRoot equals the current focus, since refocusing onto
+// the same project is also a no-op.
+func availableFocusProject(m *Model) bool {
+	if m.tab != tabGlobal {
+		return false
+	}
+	row, ok := m.list.CursorRow()
+	if !ok {
+		return false
+	}
+	if row.ProjectRoot == "" {
+		return false
+	}
+	return row.ProjectRoot != m.currentProject
 }
 
 // availableShortHelp returns the bindings that pass IsAvailable, in

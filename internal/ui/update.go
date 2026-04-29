@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/oncactus/canopy/internal/config"
 	"github.com/oncactus/canopy/internal/ghx"
 	"github.com/oncactus/canopy/internal/git"
 	"github.com/oncactus/canopy/internal/state"
@@ -300,6 +301,44 @@ func actionSearchEntry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Available before dispatching).
 func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.openNewPicker()
+	return m, nil
+}
+
+// actionFocusProject "loads into" the cursor row's project: sets it as
+// the current context, constructs its Manager (so `n` becomes available),
+// switches to Local tab. The unified TUI now behaves as if it were
+// launched from inside that project's source repo.
+//
+// Doesn't change the parent shell's cwd — that requires shell
+// integration (a wrapper alias that sources the cd) which is out of
+// scope here. The TUI is the focus context, not the shell. Press `o`
+// again from a different Global-tab row to refocus.
+func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	row, ok := m.list.CursorRow()
+	if !ok || row.ProjectRoot == "" {
+		return m, nil
+	}
+	cfg, err := config.LoadFrom(row.ProjectRoot)
+	if err != nil {
+		m.err = fmt.Errorf("focus %s: %w", row.Project, err)
+		return m, nil
+	}
+	mgr, err := workspace.New(cfg)
+	if err != nil {
+		// Don't fail loudly — focus still works for read + cross-project
+		// d/R via the transient-Manager path. Just `n` stays unavailable
+		// until the user fixes the underlying state issue.
+		m.err = fmt.Errorf("focus %s (read-only — Manager construction failed: %v)",
+			row.Project, err)
+		m.mgr = nil
+	} else {
+		m.mgr = mgr
+		m.err = nil
+	}
+	m.currentProject = row.ProjectRoot
+	m.projectName = cfg.Project
+	m.tab = tabLocal
+	m.list.SetRows(m.filteredRows())
 	return m, nil
 }
 
