@@ -71,6 +71,30 @@ func TestEnforceNoNestedTmux(t *testing.T) {
 		}
 	})
 
+	t.Run("CANOPY_IN_POPUP=1 -> allow (popup-mode bypass)", func(t *testing.T) {
+		// v0.8 unification: tmux's display-popup -E spawns canopy with
+		// CANOPY_IN_POPUP=1 in env. We're legitimately inside tmux
+		// because tmux IS the host; the unified TUI uses switch-client
+		// (not nested attach) so no nesting risk. Bypass must fire even
+		// without an annotation and even without the legacy escape hatch.
+		t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+		t.Setenv(envAllowNested, "")
+		t.Setenv("CANOPY_IN_POPUP", "1")
+		if err := enforceNoNestedTmux(&cobra.Command{Use: "canopy"}); err != nil {
+			t.Errorf("CANOPY_IN_POPUP=1 should bypass guard; got %v", err)
+		}
+	})
+
+	t.Run("CANOPY_IN_POPUP=other -> still refuse (strict eq)", func(t *testing.T) {
+		// Strict "1" check — any other value means not-popup-mode.
+		t.Setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+		t.Setenv(envAllowNested, "")
+		t.Setenv("CANOPY_IN_POPUP", "true")
+		if err := enforceNoNestedTmux(&cobra.Command{Use: "canopy"}); err == nil {
+			t.Error("CANOPY_IN_POPUP=true (not 1) should NOT bypass; got nil error")
+		}
+	})
+
 	t.Run("nil cmd -> still safe", func(t *testing.T) {
 		t.Setenv("TMUX", "")
 		if err := enforceNoNestedTmux(nil); err != nil {

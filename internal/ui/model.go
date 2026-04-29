@@ -169,8 +169,17 @@ type Model struct {
 	newBranches []string // local + remote branches; remote prefixed "origin/"
 
 	// Confirm-delete modal (mode == confirmDeleteMode).
-	deleteTarget string   // workspace name pending removal
-	deleteHangs  []string // v0.6 safety check results — populated when 'd' is pressed; non-empty triggers the force-required path in renderConfirmDelete + handleConfirmDeleteKey
+	deleteTarget string // workspace name pending removal
+	// deleteTargetRoot scopes deleteTarget to a specific project. Without
+	// this, `handleConfirmDeleteKey.resolveTargetMgr` would match by Name
+	// only — and on the Global tab, two projects each with a workspace
+	// named "foo" would be ambiguous: a refresh between modal-open and
+	// confirm could re-order rows so the FIRST `foo` in filteredRows is
+	// project B's even though the user pressed d on project A's. Storing
+	// the project root snapshots the user's intent and forces an exact
+	// (Project, Name) match at confirm time.
+	deleteTargetRoot string
+	deleteHangs      []string // v0.6 safety check results — populated when 'd' is pressed; non-empty triggers the force-required path in renderConfirmDelete + handleConfirmDeleteKey
 
 	// Long-running operation in progress (mode == busyMode). Reused by
 	// Create, Remove, and Retry flows.

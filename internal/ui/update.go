@@ -364,6 +364,7 @@ func actionDelete(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	hangs, _ := mgr.SafetyPreflight(context.Background(), row.Name)
 	m.mode = confirmDeleteMode
 	m.deleteTarget = row.Name
+	m.deleteTargetRoot = row.ProjectRoot
 	m.deleteHangs = hangs
 	return m, nil
 }
@@ -1229,20 +1230,33 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	hasHangs := len(m.deleteHangs) > 0
 
 	// Resolve the target row's Manager (may be transient for cross-project
-	// rows on Global tab). Looked up once per key event so an
-	// out-from-under-us state mutation surfaces as a clean error not a
-	// crash. Failures abort the modal and surface in m.err.
+	// rows on Global tab). Match against BOTH ProjectRoot AND Name —
+	// matching by Name alone would let two projects with same-named
+	// workspaces ("foo") confuse the modal: a refresh between modal-open
+	// and confirm could put project B's "foo" at the position project
+	// A's "foo" was at, leading to deleting the wrong workspace. Store
+	// + match the (Project, Name) pair to snapshot the user's intent at
+	// modal-open time and survive any reordering.
+	//
+	// Backward-compat: if deleteTargetRoot is empty (modal opened by an
+	// older code path before the field was added), fall through to the
+	// name-only match — losing exactness for legacy paths but avoiding
+	// a hard cancel mid-upgrade.
 	resolveTargetMgr := func() (*workspace.Manager, bool) {
 		rows := m.filteredRows()
 		for _, r := range rows {
-			if r.Name == m.deleteTarget {
-				mgr, err := m.managerForRow(r)
-				if err != nil {
-					m.err = err
-					return nil, false
-				}
-				return mgr, true
+			if r.Name != m.deleteTarget {
+				continue
 			}
+			if m.deleteTargetRoot != "" && r.ProjectRoot != m.deleteTargetRoot {
+				continue
+			}
+			mgr, err := m.managerForRow(r)
+			if err != nil {
+				m.err = err
+				return nil, false
+			}
+			return mgr, true
 		}
 		// Row went away between modal open and confirm — treat as cancel.
 		return nil, false
@@ -1254,6 +1268,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			m.mode = listMode
 			m.deleteTarget = ""
+		m.deleteTargetRoot = ""
 			m.deleteHangs = nil
 			return m, nil
 		}
@@ -1265,6 +1280,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.busyOutput = ""
 		m.busyErr = nil
 		m.deleteTarget = ""
+		m.deleteTargetRoot = ""
 		m.deleteHangs = nil
 		return m, removeCmd(mgr, name)
 	}
@@ -1275,6 +1291,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			m.mode = listMode
 			m.deleteTarget = ""
+		m.deleteTargetRoot = ""
 			m.deleteHangs = nil
 			return m, nil
 		}
@@ -1286,6 +1303,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.busyOutput = ""
 		m.busyErr = nil
 		m.deleteTarget = ""
+		m.deleteTargetRoot = ""
 		m.deleteHangs = nil
 		return m, removeCmd(mgr, name)
 	}
@@ -1294,6 +1312,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// when hangs are present).
 	m.mode = listMode
 	m.deleteTarget = ""
+		m.deleteTargetRoot = ""
 	m.deleteHangs = nil
 	return m, nil
 }

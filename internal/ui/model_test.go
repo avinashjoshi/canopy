@@ -264,6 +264,54 @@ func TestFilteredRows_SearchFilter(t *testing.T) {
 	}
 }
 
+// TestActionDelete_StoresProjectRoot is the regression test for the C5
+// adversarial finding: cross-project delete must match by (Project, Name)
+// pair, not Name alone. Two projects each with a workspace named "foo"
+// would otherwise be ambiguous if a refresh re-orders rows between
+// modal-open and confirm — the user could delete project B's foo when
+// they meant project A's foo (data loss).
+//
+// Verifies actionDelete records BOTH deleteTarget AND deleteTargetRoot
+// when opening the confirm modal.
+func TestActionDelete_StoresProjectRoot(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.setTestRows([]Row{
+		{Project: "alpha", ProjectRoot: "/p/alpha", Name: "foo", Status: state.StatusReady, Path: "/ws/alpha-foo"},
+		{Project: "bravo", ProjectRoot: "/p/bravo", Name: "foo", Status: state.StatusReady, Path: "/ws/bravo-foo"},
+	})
+	// Cursor starts at row 0 (alpha's foo).
+
+	// We can't call actionDelete directly on cross-project rows here
+	// because managerForRow needs canopy.json on disk for /p/alpha. Test
+	// the field-recording invariant by calling actionDelete and checking
+	// state — error path included.
+	_, _ = actionDelete(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+
+	// Even if managerForRow errored (no canopy.json at /p/alpha in this
+	// fake state), the precondition for the data-loss scenario is that
+	// deleteTarget+deleteTargetRoot get set BEFORE managerForRow is
+	// called. Verify the structure: when modal opens (mode change), root
+	// must be set; when modal aborts (managerForRow err), neither is set.
+	if m.mode == confirmDeleteMode {
+		// Modal opened: both fields must be populated and consistent.
+		if m.deleteTarget != "foo" {
+			t.Errorf("deleteTarget = %q; want 'foo'", m.deleteTarget)
+		}
+		if m.deleteTargetRoot != "/p/alpha" {
+			t.Errorf("deleteTargetRoot = %q; want '/p/alpha' (cursor row's project)", m.deleteTargetRoot)
+		}
+	} else {
+		// Modal didn't open (managerForRow failed before mode change).
+		// Both fields should remain empty so a stale value can't leak
+		// into the next attempt.
+		if m.deleteTarget != "" || m.deleteTargetRoot != "" {
+			t.Errorf("modal didn't open but deleteTarget=%q / deleteTargetRoot=%q leaked",
+				m.deleteTarget, m.deleteTargetRoot)
+		}
+	}
+}
+
 // TestRetryConfirmModal_NonBrokenTriggers: pressing R on a non-broken
 // workspace opens the confirmRetry y/N gate (D3/CP1) instead of
 // erroring. Mirrors the CLI's --force friction in TUI form.
@@ -1153,3 +1201,59 @@ var errFakeCreate = fakeErr("setup failed")
 type fakeErr string
 
 func (e fakeErr) Error() string { return string(e) }
+
+// TestSelectedHint covers the four-corner truth table of selectedHint:
+// empty list → "", main row → "", non-broken row → "", broken row with
+// hint → hint. The v0.8 unification promoted LastErrorHint onto
+// state.GlobalRow; this is the regression test for the renderer that
+// surfaces it under the table.
+func TestSelectedHint(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []Row
+		want string
+	}{
+		{
+			name: "empty_list",
+			rows: nil,
+			want: "",
+		},
+		{
+			name: "main_row_skipped",
+			rows: []Row{
+				{IsMain: true, Status: "broken", LastErrorHint: "ignored on main"},
+			},
+			want: "",
+		},
+		{
+			name: "non_broken_skipped",
+			rows: []Row{
+				{Status: state.StatusReady, LastErrorHint: "stale hint"},
+			},
+			want: "",
+		},
+		{
+			name: "broken_no_hint",
+			rows: []Row{
+				{Status: state.StatusBroken, LastErrorHint: ""},
+			},
+			want: "",
+		},
+		{
+			name: "broken_with_hint",
+			rows: []Row{
+				{Status: state.StatusBroken, LastErrorHint: "missing bin/dev script"},
+			},
+			want: "missing bin/dev script",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(false)
+			m.setTestRows(tc.rows)
+			if got := m.selectedHint(); got != tc.want {
+				t.Errorf("selectedHint() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}

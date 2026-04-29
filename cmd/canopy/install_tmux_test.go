@@ -358,6 +358,70 @@ func TestRunInstallTmux_dryRunNoWrite(t *testing.T) {
 	}
 }
 
+// TestShellQuote covers the POSIX-safe quoter that wraps the canopy
+// binary path before it's embedded in the tmux display-popup command
+// body. Bare-safe paths skip wrapping (cleaner generated config); paths
+// with shell metacharacters get single-quoted with embedded single
+// quotes escaped via the '\'' idiom.
+func TestShellQuote(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Bare-safe: no wrapping.
+		{"canopy", "canopy"},
+		{"/usr/local/bin/canopy", "/usr/local/bin/canopy"},
+		{"/tmp/canopy-ss", "/tmp/canopy-ss"},
+		{"./canopy", "./canopy"},
+		{"v0.8.0+rc1", "v0.8.0+rc1"},
+		// Non-bare-safe: single-quote wrap.
+		{"", "''"},
+		{"/path with space/canopy", "'/path with space/canopy'"},
+		{"/has$dollar/canopy", "'/has$dollar/canopy'"},
+		{"/has*glob/canopy", "'/has*glob/canopy'"},
+		// Embedded single quote: the '\'' escape.
+		{"/it's/canopy", `'/it'\''s/canopy'`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := shellQuote(tc.in); got != tc.want {
+				t.Errorf("shellQuote(%q) = %q; want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsShellSafeBare covers the bare-quoting predicate. Hits both
+// branches of every conditional in the alnum/punct allowlist.
+func TestIsShellSafeBare(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"", false}, // empty is not bare-safe (we wrap to '')
+		{"canopy", true},
+		{"CANOPY", true},
+		{"canopy123", true},
+		{"/usr/bin/canopy", true},
+		{"hyphen-name_under.dot+plus", true},
+		// Disallowed chars.
+		{"with space", false},
+		{"with$dollar", false},
+		{"with*glob", false},
+		{"with'quote", false},
+		{"with\"dquote", false},
+		{"with;semi", false},
+		{"with`tick", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := isShellSafeBare(tc.in); got != tc.want {
+				t.Errorf("isShellSafeBare(%q) = %v; want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestAtomicWriteFile_basic exercises the tempfile+rename helper.
 func TestAtomicWriteFile_basic(t *testing.T) {
 	dir := t.TempDir()

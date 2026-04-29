@@ -190,6 +190,61 @@ func TestBuildGlobalRows_LegacyV1Workspace(t *testing.T) {
 	}
 }
 
+// TestBuildGlobalRows_LastErrorHintPropagates: a broken workspace's
+// LastErrorHint must ride through to its GlobalRow so the unified TUI's
+// hint banner can render the diagnosis. v0.8 promoted this field onto
+// GlobalRow during the unification; without propagation, cross-project
+// broken rows in the Global tab silently lose their diagnosis text.
+func TestBuildGlobalRows_LastErrorHintPropagates(t *testing.T) {
+	s := &State{
+		Projects: map[string]ProjectMeta{
+			"/a/cravd": {Root: "/a/cravd", PortBase: 3000},
+		},
+		Workspaces: []Workspace{
+			{
+				ProjectRoot: "/a/cravd", Project: "cravd",
+				Name: "broken-ws", TmuxSession: "cravd-broken-ws",
+				Status: StatusBroken, Port: 3000,
+				LastErrorHint: "missing bin/dev script",
+			},
+			{
+				ProjectRoot: "/a/cravd", Project: "cravd",
+				Name: "ready-ws", TmuxSession: "cravd-ready-ws",
+				Status: StatusReady, Port: 3001,
+				LastErrorHint: "", // empty, must stay empty on row
+			},
+		},
+	}
+	rows := s.BuildGlobalRows(context.Background(), &fakeProbe{})
+
+	// rows[0] is main, rows[1] and rows[2] are workspace rows (sorted by name).
+	var brokenRow, readyRow GlobalRow
+	for _, r := range rows {
+		if r.IsMain {
+			continue
+		}
+		if r.Name == "broken-ws" {
+			brokenRow = r
+		}
+		if r.Name == "ready-ws" {
+			readyRow = r
+		}
+	}
+	if brokenRow.LastErrorHint != "missing bin/dev script" {
+		t.Errorf("broken-ws LastErrorHint = %q; want %q",
+			brokenRow.LastErrorHint, "missing bin/dev script")
+	}
+	if readyRow.LastErrorHint != "" {
+		t.Errorf("ready-ws LastErrorHint = %q; want empty",
+			readyRow.LastErrorHint)
+	}
+	// Main row never carries a LastErrorHint (no associated workspace).
+	if rows[0].LastErrorHint != "" {
+		t.Errorf("main row LastErrorHint = %q; want empty",
+			rows[0].LastErrorHint)
+	}
+}
+
 // TestSafeMainSessionName covers the basename → tmux session name
 // transformation, mostly to lock in that we don't accidentally diverge
 // from internal/tmux.SafeName for typical inputs.
