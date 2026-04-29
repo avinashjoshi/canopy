@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
@@ -66,6 +67,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.newPRs = msg.prs
+		m.listCursor = 0
+		return m, nil
+
+	case issueListLoadedMsg:
+		m.newLoading = false
+		if msg.err != nil {
+			m.newLoadErr = msg.err
+			return m, nil
+		}
+		m.newIssues = msg.issues
+		m.listCursor = 0
+		return m, nil
+
+	case branchListLoadedMsg:
+		m.newLoading = false
+		if msg.err != nil {
+			m.newLoadErr = msg.err
+			return m, nil
+		}
+		m.newBranches = msg.branches
 		m.listCursor = 0
 		return m, nil
 
@@ -150,14 +171,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNewFreshKey(msg)
 	case newPRMode:
 		return m.handleNewPRKey(msg)
-	case newIssueMode, newBranchMode:
-		// Placeholder: until these per-variant sub-modals land in
-		// follow-up commits, esc returns to the picker. Any other key
-		// is a no-op so a stray keystroke can't escape into listMode.
-		if msg.String() == "esc" {
-			m.openNewPicker()
-		}
-		return m, nil
+	case newIssueMode:
+		return m.handleNewIssueKey(msg)
+	case newBranchMode:
+		return m.handleNewBranchKey(msg)
 	case confirmDeleteMode:
 		return m.handleConfirmDeleteKey(msg)
 	case busyMode:
@@ -432,11 +449,9 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		return m, m.openNewPR()
 	case "i":
-		m.mode = newIssueMode
-		return m, nil
+		return m, m.openNewIssue()
 	case "b":
-		m.mode = newBranchMode
-		return m, nil
+		return m, m.openNewBranch()
 
 	// Arrow nav for keyboard-discovery users.
 	case "up", "k":
@@ -457,9 +472,9 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case 1:
 			return m, m.openNewPR()
 		case 2:
-			m.mode = newIssueMode
+			return m, m.openNewIssue()
 		case 3:
-			m.mode = newBranchMode
+			return m, m.openNewBranch()
 		}
 		return m, nil
 	}
@@ -612,6 +627,233 @@ func (m *Model) submitNewPR(num int) (tea.Model, tea.Cmd) {
 	m.mode = busyMode
 	m.listInput.Blur()
 	return m, createCmd(m.mgr, "", spec)
+}
+
+// openNewIssue is the issue-picker analog of openNewPR. Same shape,
+// different data type: ghx.IssueSummary instead of PRSummary.
+func (m *Model) openNewIssue() tea.Cmd {
+	m.mode = newIssueMode
+	m.listInput.Reset()
+	m.listInput.Placeholder = "type an issue number, or arrow to a row below"
+	m.listInput.Focus()
+	m.listCursor = 0
+	m.newLoading = true
+	m.newLoadErr = nil
+	m.newIssues = nil
+	return tea.Batch(textinputBlink(), loadIssuesCmd(m.mgr.Cfg.ProjectRoot))
+}
+
+// issueListLoadedMsg is the issue analog of prListLoadedMsg.
+type issueListLoadedMsg struct {
+	issues []ghx.IssueSummary
+	err    error
+}
+
+// loadIssuesCmd dispatches ghx.ListIssues in a goroutine.
+func loadIssuesCmd(projectRoot string) tea.Cmd {
+	return func() tea.Msg {
+		issues, err := ghx.ListIssues(context.Background(), projectRoot, 20)
+		return issueListLoadedMsg{issues: issues, err: err}
+	}
+}
+
+// handleNewIssueKey mirrors handleNewPRKey for issues. Two enter
+// dispatch shapes: typed-number → fetch by ID; arrow-then-enter →
+// use cursor's selection. Esc returns to picker.
+func (m *Model) handleNewIssueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.openNewPicker()
+		return m, nil
+
+	case "up", "ctrl+k":
+		if m.listCursor > 0 {
+			m.listCursor--
+		}
+		return m, nil
+	case "down", "ctrl+j":
+		if m.listCursor < len(m.newIssues)-1 {
+			m.listCursor++
+		}
+		return m, nil
+
+	case "enter":
+		if num, ok := parsePositiveInt(m.listInput.Value()); ok {
+			return m.submitNewIssue(num)
+		}
+		if len(m.newIssues) > 0 && m.listCursor < len(m.newIssues) {
+			return m.submitNewIssue(m.newIssues[m.listCursor].Number)
+		}
+		m.newLoadErr = fmt.Errorf("type an issue number or wait for the list to load")
+		return m, nil
+	}
+
+	prev := m.listInput.Value()
+	var cmd tea.Cmd
+	m.listInput, cmd = m.listInput.Update(msg)
+	if m.listInput.Value() != prev {
+		m.listCursor = 0
+		m.newLoadErr = nil
+	}
+	return m, cmd
+}
+
+// submitNewIssue is the shared "go fetch this issue and create the
+// workspace" path. Same shape as submitNewPR.
+func (m *Model) submitNewIssue(num int) (tea.Model, tea.Cmd) {
+	spec := workspace.SourceSpec{Issue: num}
+	m.busyOp = busyOpCreate
+	m.busyTitle = newBusyTitle("", spec)
+	m.busyDone = false
+	m.busyOutput = ""
+	m.busyErr = nil
+	m.mode = busyMode
+	m.listInput.Blur()
+	return m, createCmd(m.mgr, "", spec)
+}
+
+// openNewBranch is the branch-picker analog. Doesn't need gh —
+// `git for-each-ref` is fast enough that we can load synchronously
+// in the open path. Loading state is kept for parity with PR/issue
+// pickers and to handle the (rare) slow-disk case.
+func (m *Model) openNewBranch() tea.Cmd {
+	m.mode = newBranchMode
+	m.listInput.Reset()
+	m.listInput.Placeholder = "type to filter, e.g. `feat`"
+	m.listInput.Focus()
+	m.listCursor = 0
+	m.newLoading = true
+	m.newLoadErr = nil
+	m.newBranches = nil
+	return tea.Batch(textinputBlink(), loadBranchesCmd(m.mgr.Cfg.ProjectRoot))
+}
+
+// branchListLoadedMsg carries the result of an async git
+// for-each-ref. Same shape as the PR/issue load messages.
+type branchListLoadedMsg struct {
+	branches []string
+	err      error
+}
+
+// loadBranchesCmd dispatches git.ListBranches in a goroutine. Even
+// though git is fast, putting it in a goroutine keeps the open
+// path consistent (bubbletea Cmd → Msg) and avoids blocking the
+// initial render.
+func loadBranchesCmd(projectRoot string) tea.Cmd {
+	return func() tea.Msg {
+		branches, err := git.ListBranches(context.Background(), projectRoot)
+		return branchListLoadedMsg{branches: branches, err: err}
+	}
+}
+
+// handleNewBranchKey is the keymap for the branch picker. Filter
+// behavior matches PR/issue pickers (case-insensitive substring),
+// but enter takes a STRING (the branch name) instead of a number.
+// No "type by name and submit" fast path because branch names can
+// contain slashes that conflict with the filter — the user is
+// expected to filter then pick.
+func (m *Model) handleNewBranchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.openNewPicker()
+		return m, nil
+
+	case "up", "ctrl+k":
+		if m.listCursor > 0 {
+			m.listCursor--
+		}
+		return m, nil
+	case "down", "ctrl+j":
+		// Bound by the filtered length, not the raw length, so the
+		// cursor doesn't drift past visible rows.
+		if m.listCursor < len(filterBranches(m.newBranches, m.listInput.Value()))-1 {
+			m.listCursor++
+		}
+		return m, nil
+
+	case "enter":
+		filtered := filterBranches(m.newBranches, m.listInput.Value())
+		if len(filtered) == 0 {
+			m.newLoadErr = fmt.Errorf("no branches match — adjust filter or check your remote")
+			return m, nil
+		}
+		idx := m.listCursor
+		if idx >= len(filtered) {
+			idx = len(filtered) - 1
+		}
+		// Strip the "origin/" prefix if present so the resolver's
+		// origin-vs-local logic sees a bare branch name. The branch
+		// resolver already handles both routes; passing the bare
+		// name is the unambiguous form.
+		ref := filtered[idx]
+		bare := strings.TrimPrefix(ref, "origin/")
+		// AllowLocal flips on when the picked entry is a local-only
+		// branch (no origin/<name> alongside it). Detect that by
+		// checking whether the matching origin/<bare> exists in the
+		// list.
+		spec := workspace.SourceSpec{Branch: bare}
+		if !strings.HasPrefix(ref, "origin/") {
+			// Local-only entry. The resolver requires --allow-local
+			// when the branch isn't on origin.
+			if !branchHasOrigin(m.newBranches, bare) {
+				spec.AllowLocal = true
+			}
+		}
+		return m.submitNewBranch(spec)
+	}
+
+	prev := m.listInput.Value()
+	var cmd tea.Cmd
+	m.listInput, cmd = m.listInput.Update(msg)
+	if m.listInput.Value() != prev {
+		m.listCursor = 0
+		m.newLoadErr = nil
+	}
+	return m, cmd
+}
+
+// submitNewBranch flips to busyMode with a SourceSpec for the
+// chosen branch. Allows the SourceSpec to carry AllowLocal for
+// local-only branches.
+func (m *Model) submitNewBranch(spec workspace.SourceSpec) (tea.Model, tea.Cmd) {
+	m.busyOp = busyOpCreate
+	m.busyTitle = newBusyTitle("", spec)
+	m.busyDone = false
+	m.busyOutput = ""
+	m.busyErr = nil
+	m.mode = busyMode
+	m.listInput.Blur()
+	return m, createCmd(m.mgr, "", spec)
+}
+
+// branchHasOrigin returns true when the ListBranches output contains
+// "origin/<bare>" alongside the local "<bare>". Used by the branch
+// picker to decide whether AllowLocal should be set on the spec.
+func branchHasOrigin(branches []string, bare string) bool {
+	target := "origin/" + bare
+	for _, b := range branches {
+		if b == target {
+			return true
+		}
+	}
+	return false
+}
+
+// filterBranches narrows the loaded branch list. Case-insensitive
+// substring match against the full ref (so "origin/feat" can match
+// "origin/feat/oauth" and a typed "feat" matches both local + remote).
+func filterBranches(branches []string, filter string) []string {
+	filter = strings.TrimSpace(strings.ToLower(filter))
+	if filter == "" {
+		return branches
+	}
+	out := make([]string, 0, len(branches))
+	for _, b := range branches {
+		if strings.Contains(strings.ToLower(b), filter) {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // parsePositiveInt is the shared "is this a PR/issue number" check

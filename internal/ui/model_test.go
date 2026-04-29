@@ -411,17 +411,121 @@ func TestNewFresh_EscReturnsToPicker(t *testing.T) {
 	}
 }
 
-// TestNewSubMode_EscReturnsToPicker: from any of the to-be-built
-// sub-modals (Issue / Branch placeholders), esc returns to the picker.
-// Locks in the back-one-step contract.
-func TestNewSubMode_EscReturnsToPicker(t *testing.T) {
-	for _, mode := range []viewMode{newIssueMode, newBranchMode} {
-		m := newTestModel(false)
-		m.mode = mode
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-		if m.mode != newPickerMode {
-			t.Errorf("esc from %v should return to newPickerMode; got %v", mode, m.mode)
-		}
+// TestNewIssue_TypedNumberSubmits: same fast path as PR — typed
+// number → submit, no list-load wait.
+func TestNewIssue_TypedNumberSubmits(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newIssueMode
+	m.listInput.SetValue("42")
+
+	model, cmd := m.handleNewIssueKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("expected busyMode; got %v", m.mode)
+	}
+	if !strings.Contains(m.busyTitle, "issue #42") {
+		t.Errorf("busy title should mention issue #42; got %q", m.busyTitle)
+	}
+	if cmd == nil {
+		t.Errorf("expected create cmd")
+	}
+}
+
+// TestNewIssue_ArrowsThenEnter: recognition path — load fixture
+// issues, arrow to row, enter.
+func TestNewIssue_ArrowsThenEnter(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newIssueMode
+	m.newIssues = []ghx.IssueSummary{
+		{Number: 17, Title: "Add feature"},
+		{Number: 18, Title: "Fix bug"},
+	}
+
+	model, _ := m.handleNewIssueKey(tea.KeyMsg{Type: tea.KeyDown})
+	m = model.(*Model)
+	model, _ = m.handleNewIssueKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if !strings.Contains(m.busyTitle, "issue #18") {
+		t.Errorf("expected #18 in busy title; got %q", m.busyTitle)
+	}
+}
+
+// TestNewBranch_FilterAndPick: load remote+local branches, filter
+// down to one, hit enter. The picked branch goes into a SourceSpec.
+func TestNewBranch_FilterAndPick(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newBranchMode
+	m.newBranches = []string{
+		"main",
+		"origin/main",
+		"origin/feat/oauth",
+		"origin/feat/billing",
+	}
+	m.listInput.SetValue("oauth")
+
+	model, cmd := m.handleNewBranchKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("expected busyMode; got %v", m.mode)
+	}
+	if !strings.Contains(m.busyTitle, "feat/oauth") {
+		t.Errorf("busy title should mention feat/oauth; got %q", m.busyTitle)
+	}
+	if cmd == nil {
+		t.Errorf("expected create cmd")
+	}
+}
+
+// TestNewBranch_LocalOnlyFlipsAllowLocal: a branch that exists only
+// locally (no origin/<name>) submits with AllowLocal=true so the
+// resolver doesn't reject it. Required for the workflow where the
+// user has a local-only branch from before they pushed it.
+func TestNewBranch_LocalOnlyFlipsAllowLocal(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newBranchMode
+	m.newBranches = []string{
+		"main",
+		"origin/main",
+		"local-experiment", // local only
+	}
+	m.listInput.SetValue("local-experiment")
+
+	// Capture the SourceSpec via spying on submitNewBranch isn't
+	// straightforward without a mock; instead, verify the flow
+	// reaches busyMode. The AllowLocal logic is small enough to
+	// test directly via branchHasOrigin (separate test below).
+	model, _ := m.handleNewBranchKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("expected busyMode; got %v", m.mode)
+	}
+}
+
+// TestBranchHasOrigin: helper that decides AllowLocal.
+func TestBranchHasOrigin(t *testing.T) {
+	branches := []string{"main", "origin/main", "feat/x", "origin/feat/x"}
+	if !branchHasOrigin(branches, "main") {
+		t.Errorf("main has origin counterpart; should return true")
+	}
+	if !branchHasOrigin(branches, "feat/x") {
+		t.Errorf("feat/x has origin counterpart; should return true")
+	}
+	if branchHasOrigin(branches, "local-only") {
+		t.Errorf("local-only has no origin; should return false")
+	}
+}
+
+// TestFilterBranches_Substring: case-insensitive substring match,
+// works across local + remote prefix.
+func TestFilterBranches_Substring(t *testing.T) {
+	branches := []string{"main", "origin/main", "origin/feat/oauth", "origin/feat/billing"}
+	got := filterBranches(branches, "FEAT")
+	if len(got) != 2 {
+		t.Errorf("expected 2 matches for 'FEAT'; got %d", len(got))
+	}
+	got = filterBranches(branches, "main")
+	if len(got) != 2 {
+		t.Errorf("expected main + origin/main; got %d", len(got))
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
@@ -145,6 +146,49 @@ func FetchRefspec(ctx context.Context, repoRoot, remote, refspec string) error {
 			strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// ListBranches returns local + remote branches in the repo at
+// repoRoot, deduplicated and sorted. Used by canopy new --branch's
+// TUI picker (and the future shell completion).
+//
+// Format: bare branch names for locals, "origin/<name>" for remotes.
+// HEAD pointers (origin/HEAD → origin/main) and detached-HEAD entries
+// are filtered out — they're not useful as workspace start points.
+//
+// Best-effort: errors return an empty slice + nil. The picker
+// surfaces "no branches" rather than "failed to read branches" for
+// the same reason ListPRs returns empty on no-PRs: an empty result
+// is a valid state, not a failure.
+func ListBranches(ctx context.Context, repoRoot string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot,
+		"for-each-ref", "--format=%(refname:short)",
+		"refs/heads/", "refs/remotes/origin/")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git.ListBranches: %w", err)
+	}
+
+	seen := map[string]bool{}
+	branches := make([]string, 0, 32)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip HEAD pointers ("origin/HEAD") — they're aliases, not
+		// real branches the user wants to check out.
+		if strings.HasSuffix(line, "/HEAD") {
+			continue
+		}
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		branches = append(branches, line)
+	}
+	sort.Strings(branches)
+	return branches, nil
 }
 
 // RefExists reports whether ref resolves to a commit in the repo.

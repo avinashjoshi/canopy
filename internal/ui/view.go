@@ -27,9 +27,9 @@ func (m *Model) View() string {
 	case newPRMode:
 		return m.renderNewPR()
 	case newIssueMode:
-		return m.renderNewComingSoon("From an issue", "i")
+		return m.renderNewIssue()
 	case newBranchMode:
-		return m.renderNewComingSoon("From a branch", "b")
+		return m.renderNewBranch()
 	case confirmDeleteMode:
 		return m.renderConfirmDelete()
 	case busyMode:
@@ -351,33 +351,170 @@ func truncateRight(s string, width int) string {
 	return s[:width]
 }
 
-// renderNewComingSoon is the placeholder for the PR / Issue / Branch
-// sub-modals while they're being built out. Tells the user the path
-// they picked is coming, and that they can use the CLI flag in the
-// meantime. Removed once the live-list pickers ship.
-func (m *Model) renderNewComingSoon(label, key string) string {
+// renderNewIssue mirrors renderNewPR for the issue picker. Same
+// layout and state-switch logic; different data type rendered.
+func (m *Model) renderNewIssue() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("canopy new"))
 	b.WriteString(" ")
-	b.WriteString(subtleStyle.Render("· " + label))
+	b.WriteString(subtleStyle.Render("· issue"))
 	b.WriteString("\n\n")
-	b.WriteString("  This picker is being built — coming in the next commit.\n")
-	b.WriteString("  In the meantime, the CLI flag works:\n\n")
-	switch key {
-	case "p":
-		b.WriteString("    ")
-		b.WriteString(brokenStyle.Render("canopy new --pr <num>"))
-	case "i":
-		b.WriteString("    ")
-		b.WriteString(brokenStyle.Render("canopy new --issue <num>"))
-	case "b":
-		b.WriteString("    ")
-		b.WriteString(brokenStyle.Render("canopy new --branch <name>"))
+
+	b.WriteString("  Issue number or filter:\n  ")
+	b.WriteString(m.listInput.View())
+	b.WriteString("\n\n")
+
+	switch {
+	case m.newLoading && len(m.newIssues) == 0:
+		b.WriteString(subtleStyle.Render("  Loading issues from gh..."))
+		b.WriteString("\n")
+	case m.newLoadErr != nil:
+		b.WriteString("  ")
+		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.newLoadErr)))
+		b.WriteString("\n")
+	case len(m.newIssues) == 0:
+		b.WriteString(subtleStyle.Render("  No open issues found. Type a number to fetch any issue by ID."))
+		b.WriteString("\n")
+	default:
+		filtered := filterIssues(m.newIssues, m.listInput.Value())
+		if len(filtered) == 0 {
+			b.WriteString(subtleStyle.Render("  No issues match. Type a number to fetch by ID."))
+			b.WriteString("\n")
+		} else {
+			cursor := m.listCursor
+			if cursor >= len(filtered) {
+				cursor = len(filtered) - 1
+			}
+			for i, iss := range filtered {
+				marker := "    "
+				if i == cursor {
+					marker = "  ● "
+				}
+				line := fmt.Sprintf("%s#%-5d %-12s %s",
+					marker, iss.Number, truncateRight(iss.Author.Login, 12), iss.Title)
+				if i == cursor {
+					b.WriteString(selectedStyle.Render(line))
+				} else {
+					b.WriteString(line)
+				}
+				b.WriteString("\n")
+			}
+		}
 	}
-	b.WriteString("\n\n")
-	b.WriteString(subtleStyle.Render("  esc to back"))
+
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render(
+		"  enter to use issue  ·  ↑/↓ pick row  ·  esc back"))
 	return b.String()
 }
+
+// filterIssues mirrors filterPRs but for issues. Same numeric-prefix
+// + substring split.
+func filterIssues(issues []ghx.IssueSummary, filter string) []ghx.IssueSummary {
+	filter = strings.TrimSpace(filter)
+	if filter == "" {
+		return issues
+	}
+	out := make([]ghx.IssueSummary, 0, len(issues))
+	if _, isNum := parsePositiveIntForView(filter); isNum {
+		for _, iss := range issues {
+			if strings.HasPrefix(strconv.Itoa(iss.Number), filter) {
+				out = append(out, iss)
+			}
+		}
+		return out
+	}
+	lower := strings.ToLower(filter)
+	for _, iss := range issues {
+		if strings.Contains(strings.ToLower(iss.Title), lower) ||
+			strings.Contains(strings.ToLower(iss.Author.Login), lower) {
+			out = append(out, iss)
+		}
+	}
+	return out
+}
+
+// renderNewBranch is step 2d — the branch picker. Different from
+// PR/issue: branches don't have numeric IDs, so the "type number"
+// fast-path is gone. Filter + arrow-pick is the only flow. Local-
+// only branches get a "(local only)" tag so the user knows they're
+// using the --allow-local-equivalent path.
+func (m *Model) renderNewBranch() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· branch"))
+	b.WriteString("\n\n")
+
+	b.WriteString("  Filter:\n  ")
+	b.WriteString(m.listInput.View())
+	b.WriteString("\n\n")
+
+	switch {
+	case m.newLoading && len(m.newBranches) == 0:
+		b.WriteString(subtleStyle.Render("  Reading branches..."))
+		b.WriteString("\n")
+	case m.newLoadErr != nil:
+		b.WriteString("  ")
+		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.newLoadErr)))
+		b.WriteString("\n")
+	case len(m.newBranches) == 0:
+		b.WriteString(subtleStyle.Render("  No branches found in this repo."))
+		b.WriteString("\n")
+	default:
+		filtered := filterBranches(m.newBranches, m.listInput.Value())
+		if len(filtered) == 0 {
+			b.WriteString(subtleStyle.Render("  No branches match the filter."))
+			b.WriteString("\n")
+		} else {
+			cursor := m.listCursor
+			if cursor >= len(filtered) {
+				cursor = len(filtered) - 1
+			}
+			for i, ref := range filtered {
+				marker := "    "
+				if i == cursor {
+					marker = "  ● "
+				}
+				suffix := ""
+				// Tag local-only branches so the user knows the
+				// distinction. Hidden when origin/<bare> is also
+				// present (the matching pair gets shown twice as
+				// "branch" + "origin/branch", but only the local
+				// gets the suffix).
+				if !strings.HasPrefix(ref, "origin/") &&
+					!branchHasOriginInline(m.newBranches, ref) {
+					suffix = subtleStyle.Render("  (local only)")
+				}
+				line := marker + ref + suffix
+				if i == cursor {
+					line = selectedStyle.Render(marker+ref) + suffix
+				}
+				b.WriteString(line)
+				b.WriteString("\n")
+			}
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render(
+		"  enter to check out  ·  ↑/↓ pick row  ·  esc back"))
+	return b.String()
+}
+
+// branchHasOriginInline mirrors update.go's branchHasOrigin for the
+// view layer. View doesn't import update, so we duplicate this tiny
+// helper rather than create a shared package edge for one function.
+func branchHasOriginInline(branches []string, bare string) bool {
+	target := "origin/" + bare
+	for _, b := range branches {
+		if b == target {
+			return true
+		}
+	}
+	return false
+}
+
 
 // renderConfirmDelete is the modal shown before tearing down a workspace.
 //
