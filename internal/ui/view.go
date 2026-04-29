@@ -222,6 +222,68 @@ func (m *Model) renderNewFresh() string {
 	return b.String()
 }
 
+// pickerVisibleRows returns how many list rows fit in the picker
+// modal given the terminal height. Reserves a fixed budget for
+// chrome (title, blank line, filter label + input, blank, footer,
+// scroll-hint lines, margins). When height is unknown (zero —
+// before the first WindowSizeMsg arrives) returns a sensible
+// default so the picker still renders.
+func (m *Model) pickerVisibleRows() int {
+	const chrome = 9 // 8 lines of title/input/footer + 1 line slack
+	const minVisible = 5
+	if m.height <= 0 {
+		return 15 // pre-WindowSize fallback
+	}
+	v := m.height - chrome
+	if v < minVisible {
+		return minVisible
+	}
+	return v
+}
+
+// pickerWindow clamps a cursor + total length into a (top, end)
+// range that holds the cursor in the visible window. Pure function
+// so each renderer can inline it without state-tracking. Returns
+// indices into the FULL filtered list; the renderer slices it.
+//
+// Behavior: the cursor sits anywhere in the window. When it crosses
+// the bottom edge, the window scrolls so cursor is the LAST visible
+// row. When it crosses the top edge (back-arrow into hidden rows),
+// cursor becomes the FIRST visible row. This is the standard
+// "cursor stays visible, list scrolls" pattern from lazygit/k9s.
+func pickerWindow(cursor, total, visible int) (int, int) {
+	if total <= visible {
+		return 0, total
+	}
+	top := cursor - visible + 1
+	if top < 0 {
+		top = 0
+	}
+	if top > total-visible {
+		top = total - visible
+	}
+	return top, top + visible
+}
+
+// renderScrollHint emits a one-line "↑ N more above" / "↓ N more
+// below" indicator so the user knows the list extends past what's
+// rendered. Empty string when the whole list fits.
+func renderScrollHint(top, end, total int) string {
+	if total <= end-top {
+		return ""
+	}
+	above := top
+	below := total - end
+	parts := []string{}
+	if above > 0 {
+		parts = append(parts, fmt.Sprintf("↑ %d more above", above))
+	}
+	if below > 0 {
+		parts = append(parts, fmt.Sprintf("↓ %d more below", below))
+	}
+	return subtleStyle.Render("  " + strings.Join(parts, "  ·  "))
+}
+
 // renderNewPR is step 2b — the PR picker. Layout:
 //
 //	canopy new · pull request
@@ -271,18 +333,35 @@ func (m *Model) renderNewPR() string {
 			if cursor >= len(filtered) {
 				cursor = len(filtered) - 1
 			}
-			for i, pr := range filtered {
+			top, end := pickerWindow(cursor, len(filtered), m.pickerVisibleRows())
+			for i := top; i < end; i++ {
+				pr := filtered[i]
 				marker := "    "
 				if i == cursor {
 					marker = "  ● "
 				}
-				line := fmt.Sprintf("%s#%-5d %-12s %s",
+				// Lookup the workspace (if any) currently holding
+				// this PR's branch so the row can be tagged "in
+				// <ws>". Recognition cue: don't try to re-create
+				// what's already a workspace.
+				wsName, taken := m.branchInWorkspace(pr.HeadRefName)
+				core := fmt.Sprintf("%s#%-5d %-12s %s",
 					marker, pr.Number, truncateRight(pr.Author.Login, 12), pr.Title)
-				if i == cursor {
-					b.WriteString(selectedStyle.Render(line))
-				} else {
-					b.WriteString(line)
+				suffix := ""
+				if taken {
+					suffix = subtleStyle.Render("  (in workspace " + wsName + ")")
+					core = subtleStyle.Render(core)
 				}
+				if i == cursor && !taken {
+					b.WriteString(selectedStyle.Render(core))
+				} else {
+					b.WriteString(core)
+				}
+				b.WriteString(suffix)
+				b.WriteString("\n")
+			}
+			if hint := renderScrollHint(top, end, len(filtered)); hint != "" {
+				b.WriteString(hint)
 				b.WriteString("\n")
 			}
 		}
@@ -385,7 +464,9 @@ func (m *Model) renderNewIssue() string {
 			if cursor >= len(filtered) {
 				cursor = len(filtered) - 1
 			}
-			for i, iss := range filtered {
+			top, end := pickerWindow(cursor, len(filtered), m.pickerVisibleRows())
+			for i := top; i < end; i++ {
+				iss := filtered[i]
 				marker := "    "
 				if i == cursor {
 					marker = "  ● "
@@ -397,6 +478,10 @@ func (m *Model) renderNewIssue() string {
 				} else {
 					b.WriteString(line)
 				}
+				b.WriteString("\n")
+			}
+			if hint := renderScrollHint(top, end, len(filtered)); hint != "" {
+				b.WriteString(hint)
 				b.WriteString("\n")
 			}
 		}
@@ -471,26 +556,40 @@ func (m *Model) renderNewBranch() string {
 			if cursor >= len(filtered) {
 				cursor = len(filtered) - 1
 			}
-			for i, ref := range filtered {
+			top, end := pickerWindow(cursor, len(filtered), m.pickerVisibleRows())
+			for i := top; i < end; i++ {
+				ref := filtered[i]
 				marker := "    "
 				if i == cursor {
 					marker = "  ● "
 				}
+				// Strip "origin/" for the workspace-conflict
+				// lookup so a remote-tracking ref that points at
+				// the same logical branch as a local checkout
+				// still shows the "in workspace X" tag.
+				bare := strings.TrimPrefix(ref, "origin/")
+				wsName, taken := m.branchInWorkspace(bare)
+
 				suffix := ""
-				// Tag local-only branches so the user knows the
-				// distinction. Hidden when origin/<bare> is also
-				// present (the matching pair gets shown twice as
-				// "branch" + "origin/branch", but only the local
-				// gets the suffix).
-				if !strings.HasPrefix(ref, "origin/") &&
-					!branchHasOriginInline(m.newBranches, ref) {
+				core := marker + ref
+				switch {
+				case taken:
+					suffix = subtleStyle.Render("  (in workspace " + wsName + ")")
+					core = subtleStyle.Render(core)
+				case !strings.HasPrefix(ref, "origin/") &&
+					!branchHasOriginInline(m.newBranches, ref):
+					// Local-only branch — keep the existing tag.
 					suffix = subtleStyle.Render("  (local only)")
 				}
-				line := marker + ref + suffix
-				if i == cursor {
-					line = selectedStyle.Render(marker+ref) + suffix
+				if i == cursor && !taken {
+					core = selectedStyle.Render(marker + ref)
 				}
-				b.WriteString(line)
+				b.WriteString(core)
+				b.WriteString(suffix)
+				b.WriteString("\n")
+			}
+			if hint := renderScrollHint(top, end, len(filtered)); hint != "" {
+				b.WriteString(hint)
 				b.WriteString("\n")
 			}
 		}

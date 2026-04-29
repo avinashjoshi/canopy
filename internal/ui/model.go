@@ -179,6 +179,31 @@ type Model struct {
 	fromGlobal bool
 }
 
+// branchInWorkspace reports whether a branch name is currently
+// checked out by an existing canopy workspace in this project. Used
+// by the PR + branch pickers to tag conflicting rows so the user
+// doesn't try to create a duplicate (which would fail at git-
+// worktree-add time anyway with a confusing error).
+//
+// Match is exact-string. Caller is responsible for normalizing the
+// branch name (stripping "origin/" prefix etc.) before passing it
+// in. The main row is excluded — its branch is "—" sentinel and
+// shouldn't shadow real workspaces.
+func (m *Model) branchInWorkspace(branch string) (string, bool) {
+	if branch == "" {
+		return "", false
+	}
+	for _, r := range m.rows {
+		if r.IsMain {
+			continue
+		}
+		if r.Branch == branch {
+			return r.Name, true
+		}
+	}
+	return "", false
+}
+
 // New constructs a Model. The caller must already have a workspace.Manager
 // (loaded via cmd/canopy's loadManager helper). Initial rows are empty;
 // the first tea.Cmd returned by Init() loads them.

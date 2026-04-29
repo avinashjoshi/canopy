@@ -515,6 +515,144 @@ func TestBranchHasOrigin(t *testing.T) {
 	}
 }
 
+// TestPickerWindow_FitsInVisible: when the list is shorter than
+// the visible window, return the full range (no scroll).
+func TestPickerWindow_FitsInVisible(t *testing.T) {
+	top, end := pickerWindow(3, 5, 10)
+	if top != 0 || end != 5 {
+		t.Errorf("expected (0,5); got (%d,%d)", top, end)
+	}
+}
+
+// TestPickerWindow_CursorTopOfWindow: cursor at index 0 — window
+// starts at 0, regardless of list length.
+func TestPickerWindow_CursorTopOfWindow(t *testing.T) {
+	top, end := pickerWindow(0, 100, 10)
+	if top != 0 || end != 10 {
+		t.Errorf("expected (0,10); got (%d,%d)", top, end)
+	}
+}
+
+// TestPickerWindow_CursorBottomOfWindow: cursor below the visible
+// height — window scrolls so cursor is the LAST visible row.
+func TestPickerWindow_CursorBottomOfWindow(t *testing.T) {
+	// Cursor at 50 in a 100-item list with 10 visible rows.
+	// Window should be [41, 51) so cursor at 50 is the last visible.
+	top, end := pickerWindow(50, 100, 10)
+	if top != 41 || end != 51 {
+		t.Errorf("expected (41,51); got (%d,%d)", top, end)
+	}
+}
+
+// TestPickerWindow_CursorAtListEnd: cursor at the last item — window
+// is the bottom slice, not past-the-end.
+func TestPickerWindow_CursorAtListEnd(t *testing.T) {
+	top, end := pickerWindow(99, 100, 10)
+	if top != 90 || end != 100 {
+		t.Errorf("expected (90,100); got (%d,%d)", top, end)
+	}
+}
+
+// TestBranchInWorkspace_Match: a row whose Branch matches an
+// existing workspace returns the workspace name + true.
+func TestBranchInWorkspace_Match(t *testing.T) {
+	m := newTestModel(false)
+	m.rows = []Row{
+		{IsMain: true, Name: "(main)", Branch: "—"},
+		{Name: "pr-1185", Branch: "pdx91/inbox-improvements"},
+		{Name: "soft-fox", Branch: "feat/oauth"},
+	}
+	wsName, taken := m.branchInWorkspace("feat/oauth")
+	if !taken || wsName != "soft-fox" {
+		t.Errorf("expected (soft-fox, true); got (%q, %v)", wsName, taken)
+	}
+}
+
+// TestBranchInWorkspace_NoMatch: branch with no matching workspace
+// returns false. Empty branch string also returns false (defensive).
+func TestBranchInWorkspace_NoMatch(t *testing.T) {
+	m := newTestModel(false)
+	m.rows = []Row{{Name: "soft-fox", Branch: "feat/oauth"}}
+	if _, taken := m.branchInWorkspace("other-branch"); taken {
+		t.Errorf("non-matching branch should return false")
+	}
+	if _, taken := m.branchInWorkspace(""); taken {
+		t.Errorf("empty branch should return false")
+	}
+}
+
+// TestBranchInWorkspace_SkipsMain: the synthetic main row has
+// Branch="—" which must not match anything (defensive against a
+// hypothetical workspace literally named "—").
+func TestBranchInWorkspace_SkipsMain(t *testing.T) {
+	m := newTestModel(false)
+	m.rows = []Row{{IsMain: true, Branch: "—"}}
+	if _, taken := m.branchInWorkspace("—"); taken {
+		t.Errorf("main row should be excluded from branch-conflict check")
+	}
+}
+
+// TestRenderNewBranch_TagsTakenBranches: rendering the branch picker
+// includes a "(in workspace X)" tag on rows whose bare branch name
+// matches an existing workspace. Verifies the visual cue lands.
+func TestRenderNewBranch_TagsTakenBranches(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newBranchMode
+	m.rows = []Row{{Name: "pr-1185", Branch: "pdx91/inbox-improvements"}}
+	m.newBranches = []string{
+		"main",
+		"origin/pdx91/inbox-improvements",
+		"pdx91/inbox-improvements",
+		"origin/feat/x",
+	}
+	out := m.renderNewBranch()
+	if !strings.Contains(out, "in workspace pr-1185") {
+		t.Errorf("taken-branch tag missing from picker:\n%s", out)
+	}
+}
+
+// TestRenderNewPR_TagsTakenPRs: rendering the PR picker tags rows
+// whose head branch is already in a workspace. PRs with HeadRefName
+// matching an existing workspace's branch get the dim treatment.
+func TestRenderNewPR_TagsTakenPRs(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPRMode
+	m.rows = []Row{{Name: "pr-1185", Branch: "pdx91/inbox-improvements"}}
+	m.newPRs = []ghx.PRSummary{
+		{Number: 1185, Title: "Inbox", HeadRefName: "pdx91/inbox-improvements"},
+		{Number: 1182, Title: "Auth", HeadRefName: "feat/oauth"},
+	}
+	out := m.renderNewPR()
+	if !strings.Contains(out, "in workspace pr-1185") {
+		t.Errorf("taken-PR tag missing from picker:\n%s", out)
+	}
+}
+
+// TestPickerCursor_BoundedByFilteredLength: cursor-down stops at the
+// filtered length, not the raw list length. Without this bound the
+// cursor could drift into invisible rows after a filter narrows the
+// list.
+func TestPickerCursor_BoundedByFilteredLength(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPRMode
+	m.newPRs = []ghx.PRSummary{
+		{Number: 1, Title: "match"},
+		{Number: 2, Title: "no"},
+		{Number: 3, Title: "match also"},
+	}
+	m.listInput.SetValue("match") // filters to 2 rows
+
+	// Press down twice — should land at index 1 (last filtered) and
+	// stay there on subsequent presses.
+	for i := 0; i < 5; i++ {
+		model, _ := m.handleNewPRKey(tea.KeyMsg{Type: tea.KeyDown})
+		m = model.(*Model)
+	}
+	if m.listCursor != 1 {
+		t.Errorf("cursor should be bounded at 1 (filter has 2 rows); got %d", m.listCursor)
+	}
+}
+
 // TestFilterBranches_Substring: case-insensitive substring match,
 // works across local + remote prefix.
 func TestFilterBranches_Substring(t *testing.T) {

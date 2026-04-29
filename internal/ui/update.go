@@ -582,19 +582,23 @@ func (m *Model) handleNewPRKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "down", "ctrl+j":
-		if m.listCursor < len(m.newPRs)-1 {
+		// Bound by FILTERED length so the cursor can't drift past
+		// what's visible in the picker.
+		if m.listCursor < len(filterPRs(m.newPRs, m.listInput.Value()))-1 {
 			m.listCursor++
 		}
 		return m, nil
 
 	case "enter":
 		// Two paths: typed-number wins if the input parses as an
-		// integer. Otherwise, fall back to the cursor's selection.
+		// integer. Otherwise, fall back to the cursor's selection
+		// in the FILTERED list.
 		if num, ok := parsePositiveInt(m.listInput.Value()); ok {
 			return m.submitNewPR(num)
 		}
-		if len(m.newPRs) > 0 && m.listCursor < len(m.newPRs) {
-			return m.submitNewPR(m.newPRs[m.listCursor].Number)
+		filtered := filterPRs(m.newPRs, m.listInput.Value())
+		if len(filtered) > 0 && m.listCursor < len(filtered) {
+			return m.submitNewPR(filtered[m.listCursor].Number)
 		}
 		// Nothing typed, no list — surface a hint.
 		m.newLoadErr = fmt.Errorf("type a PR number or wait for the list to load")
@@ -672,7 +676,7 @@ func (m *Model) handleNewIssueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "down", "ctrl+j":
-		if m.listCursor < len(m.newIssues)-1 {
+		if m.listCursor < len(filterIssues(m.newIssues, m.listInput.Value()))-1 {
 			m.listCursor++
 		}
 		return m, nil
@@ -681,8 +685,9 @@ func (m *Model) handleNewIssueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if num, ok := parsePositiveInt(m.listInput.Value()); ok {
 			return m.submitNewIssue(num)
 		}
-		if len(m.newIssues) > 0 && m.listCursor < len(m.newIssues) {
-			return m.submitNewIssue(m.newIssues[m.listCursor].Number)
+		filtered := filterIssues(m.newIssues, m.listInput.Value())
+		if len(filtered) > 0 && m.listCursor < len(filtered) {
+			return m.submitNewIssue(filtered[m.listCursor].Number)
 		}
 		m.newLoadErr = fmt.Errorf("type an issue number or wait for the list to load")
 		return m, nil
