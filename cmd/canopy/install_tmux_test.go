@@ -101,8 +101,8 @@ func TestApplyCanopyBlock_replacesExisting(t *testing.T) {
 	if strings.Contains(out, "old-bind") {
 		t.Errorf("old block content survived replacement: %s", out)
 	}
-	if !strings.Contains(out, "bind g run-shell") {
-		t.Errorf("new block content missing: %s", out)
+	if !strings.Contains(out, "bind g display-popup") {
+		t.Errorf("new block content missing display-popup bind: %s", out)
 	}
 	if !strings.Contains(out, "set -g mouse on") {
 		t.Errorf("user content before block lost: %s", out)
@@ -112,28 +112,34 @@ func TestApplyCanopyBlock_replacesExisting(t *testing.T) {
 	}
 }
 
-// TestCanopyBlockBody_popupBindOnly: the generated block must include
-// the popup bind (g) and MUST NOT bind 'r' (collides with rename-window
-// in many configs) or 'D' (the canopy-run binding was dropped pending
-// design exploration of the right shape).
-func TestCanopyBlockBody_popupBindOnly(t *testing.T) {
+// TestCanopyBlockBody_popupBindShape: the generated block must include
+// the v0.8 unified-TUI popup bind (display-popup -E with -d
+// "#{pane_current_path}" and CANOPY_IN_POPUP=1 in env), and MUST NOT
+// bind 'r' (collides with rename-window in many configs) or 'D' (the
+// canopy-run binding was dropped pending design exploration). Also
+// REGRESSION-CRIT: must NOT bind via the legacy "popup" subcommand,
+// which is gone after unification.
+func TestCanopyBlockBody_popupBindShape(t *testing.T) {
 	body := canopyBlockBody()
 
-	if !strings.Contains(body, "bind g run-shell") {
-		t.Errorf("block missing 'bind g run-shell' (canopy popup keybind):\n%s", body)
+	if !strings.Contains(body, "bind g display-popup") {
+		t.Errorf("block missing 'bind g display-popup' (v0.8 unified TUI keybind):\n%s", body)
 	}
-	if !strings.Contains(body, " popup") {
-		t.Errorf("block missing 'popup' subcommand reference:\n%s", body)
+	if !strings.Contains(body, `-d "#{pane_current_path}"`) {
+		t.Errorf("block missing -d \"#{pane_current_path}\" (load-bearing for Local-tab cwd resolution):\n%s", body)
 	}
-	// Defensive: the block must NOT bind lowercase r (collides with
-	// tmux's common rename-window binding). Catches the regression
-	// where v0.7.1 first shipped lowercase r and broke users' configs.
+	if !strings.Contains(body, "CANOPY_IN_POPUP=1") {
+		t.Errorf("block missing CANOPY_IN_POPUP=1 env (popup-mode rendering toggle):\n%s", body)
+	}
+	if strings.Contains(body, "popup-inner") {
+		t.Errorf("block references deleted popup-inner subcommand:\n%s", body)
+	}
+	if strings.Contains(body, `bind g run-shell`) {
+		t.Errorf("block uses legacy run-shell shape; should be display-popup -E:\n%s", body)
+	}
 	if strings.Contains(body, "bind r ") {
 		t.Errorf("block must NOT bind 'r' (collides with rename-window):\n%s", body)
 	}
-	// canopy run keybind is intentionally NOT in the default block —
-	// the user wants to revisit shape (popup vs send-keys vs pane) in
-	// a separate PR. Block must NOT bind D for now.
 	if strings.Contains(body, "bind D ") {
 		t.Errorf("block must NOT bind 'D' (canopy run keybind deferred):\n%s", body)
 	}
@@ -175,15 +181,14 @@ func TestRunInstallTmux_freshFile(t *testing.T) {
 	if !strings.Contains(body, tmuxConfMarkerStart) {
 		t.Errorf("written file missing start marker:\n%s", body)
 	}
-	if !strings.Contains(body, "bind g run-shell") {
-		t.Errorf("written file missing popup keybind:\n%s", body)
+	if !strings.Contains(body, "bind g display-popup") {
+		t.Errorf("written file missing display-popup keybind:\n%s", body)
+	}
+	if !strings.Contains(body, "CANOPY_IN_POPUP=1") {
+		t.Errorf("written file missing CANOPY_IN_POPUP=1 env:\n%s", body)
 	}
 	// Binary path is resolved at install time from os.Executable() so
-	// the path embedded varies per test run (it's the test harness's
-	// path). Match on the subcommand names instead.
-	if !strings.Contains(body, " popup\"") {
-		t.Errorf("written file missing 'popup' subcommand reference:\n%s", body)
-	}
+	// the path embedded varies per test run.
 	if !strings.Contains(body, " statusline --format=current") {
 		t.Errorf("written file missing 'statusline' subcommand reference:\n%s", body)
 	}
@@ -309,8 +314,8 @@ func TestRunInstallTmux_forceReplaces(t *testing.T) {
 	if strings.Contains(body, "old-binding") {
 		t.Errorf("old block content survived --force: %s", body)
 	}
-	if !strings.Contains(body, " popup\"") {
-		t.Errorf("new block missing after --force: %s", body)
+	if !strings.Contains(body, "bind g display-popup") {
+		t.Errorf("new v0.8 unified-TUI block missing after --force: %s", body)
 	}
 	// Surrounding user content preserved.
 	if !strings.Contains(body, "set -g mouse on") || !strings.Contains(body, "set -g status-bg blue") {

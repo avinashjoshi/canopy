@@ -1,22 +1,18 @@
 // Routing for the no-subcommand `canopy` invocation.
 //
-// `canopy` (no args) is context-sensitive in v0.5+:
+// v0.8 unification: there is now ONE TUI program for every canopy
+// invocation. The routing decision is much simpler than v0.5-v0.7:
 //
-//	1. Inside a canopy project (canopy.json discoverable up the tree)
-//	   → today's project-scoped Bubbletea TUI (workspace.Manager + ui.Run).
+//	1. Fresh git repo with no canopy.json → InitSplashModel
+//	   ("press i to canopy init"). On 'i', runInit fires synchronously.
 //
-//	2. Inside a git repo with no canopy.json
-//	   → InitSplashModel ("press i to canopy init"). On 'i', the splash
-//	     exits and we run runInit synchronously so its output prints to
-//	     the user's normal terminal post-altscreen.
+//	2. Everything else (in-project, outside-any-project, popup) →
+//	   the unified TUI via ui.RunUnified. Pre-selected tab + Local-row
+//	   filter is computed from cwd via workspace.ResolveCurrentProject.
 //
-//	3. Anywhere else (home dir, /tmp, etc.)
-//	   → GlobalModel: read-only cross-project view. Lists every workspace
-//	     and every alive `<project>-main` session canopy knows about.
-//
-// The dispatch function below stays small on purpose. Each branch hands
-// off to a self-contained Run* in the appropriate package; this file is
-// the routing table.
+// The popup keybind in tmux invokes `canopy` directly (no popup-inner
+// subcommand). CANOPY_IN_POPUP=1 set by `display-popup -E` flips
+// rendering to popup mode.
 
 package main
 
@@ -36,76 +32,76 @@ import (
 	"github.com/oncactus/canopy/internal/workspace"
 )
 
-// routeRoot picks which Bubbletea Model to run based on the cwd's
-// project + git state. Called from main.go's RunE when the user invokes
-// `canopy` with no subcommand.
-//
-// Errors from config.DiscoverAndLoad that aren't ErrNotFound (permission
-// denied, parse failure) bubble up unchanged so the user sees the real
-// problem. Errors from git.IsRepo are demoted to "not a repo" because
-// the routing concern is binary: if we can't confirm a repo, treat as
-// "no fresh-repo splash" and fall through to global mode.
+// routeRoot picks between the init splash (fresh git repo, no
+// canopy.json) and the unified TUI. Called from main.go's RunE when the
+// user invokes `canopy` with no subcommand.
 func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 	cfg, cfgErr := config.DiscoverAndLoad(cwd)
 
-	switch {
-	case cfgErr == nil:
-		// Inside a canopy project. Build the Manager (which runs the
-		// v1→v2 migration + basename-collision gate inside) and hand
-		// off to today's project TUI.
-		mgr, err := workspace.New(cfg)
-		if err != nil {
-			return err
-		}
-		return ui.Run(mgr)
-
-	case errors.Is(cfgErr, config.ErrNotFound):
-		// No canopy.json found up the tree. Decide: fresh git repo
-		// (init splash) or somewhere else (global TUI).
+	// Fresh-git-repo splash: no canopy.json AND we're inside a git repo.
+	// Pre-empts the unified TUI because the user has nothing to list yet —
+	// the right action is to `canopy init`.
+	if errors.Is(cfgErr, config.ErrNotFound) {
 		isRepo, _ := git.IsRepo(ctx, cwd)
 		if isRepo {
 			return runInitSplashFlow(cwd, stdout)
 		}
-		return runGlobalFlow()
-
-	default:
+	} else if cfgErr != nil && !errors.Is(cfgErr, config.ErrNotFound) {
 		// Real error walking up (permission denied, malformed canopy.json
 		// somewhere mid-tree). Surface as-is.
 		return cfgErr
 	}
+
+	// Build store + tmux client; both work whether or not we're in a
+	// project.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("unified TUI: home dir: %w", err)
+	}
+	store, err := state.NewStore(filepath.Join(home, ".canopy"))
+	if err != nil {
+		return err
+	}
+	tc := tmux.New()
+
+	// Optional Manager: present when cwd has a canopy.json walk-up.
+	var mgr *workspace.Manager
+	if cfg != nil {
+		mgr, err = workspace.New(cfg)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Resolve "current project" for the Local tab filter. When mgr is
+	// non-nil this is just cfg.ProjectRoot. When mgr is nil (popup
+	// outside any project, or canopy from a non-project dir), use the
+	// workspace-cwd resolver so popup-from-inside-a-workspace correctly
+	// pre-selects the workspace's project.
+	currentProject := ""
+	if cfg != nil {
+		currentProject = cfg.ProjectRoot
+	} else {
+		// Best-effort: state load errors are non-fatal here, the
+		// resolver tolerates nil state and returns "" (Global tab
+		// pre-selected).
+		st, _ := store.Load()
+		currentProject = workspace.ResolveCurrentProject(cwd, st)
+	}
+
+	return ui.RunUnified(mgr, store, tc, currentProject)
 }
 
 // runInitSplashFlow shows the init prompt. If the user opts in, this
 // function runs `canopy init` against cwd synchronously (same code path
-// the standalone `canopy init` command uses). Output prints to stdout
-// after the Bubbletea program exits altscreen, so it looks identical to
-// running `canopy init` directly.
+// the standalone `canopy init` command uses).
 func runInitSplashFlow(cwd string, stdout io.Writer) error {
 	didInit, err := ui.RunInitSplash(cwd)
 	if err != nil {
 		return fmt.Errorf("init splash: %w", err)
 	}
 	if !didInit {
-		return nil // user dismissed
+		return nil
 	}
-	// User pressed 'i' — run init with the same defaults as the standalone
-	// command. We deliberately don't auto-launch the project TUI after
-	// init succeeds; the next-steps block tells the user what to do, and
-	// they re-run `canopy` to enter the project view. One re-keystroke
-	// is fine, and it keeps this routing function simple.
 	return runInit(cwd, initOptions{}, stdout)
-}
-
-// runGlobalFlow opens GlobalModel against state.json. No canopy.json,
-// no Manager — global mode reads state directly.
-func runGlobalFlow() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("global: home dir: %w", err)
-	}
-	store, err := state.NewStore(filepath.Join(home, ".canopy"))
-	if err != nil {
-		return err
-	}
-	return ui.RunGlobal(store, tmux.New())
 }

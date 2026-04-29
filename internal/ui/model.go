@@ -17,12 +17,14 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/oncactus/canopy/internal/clog"
+	"github.com/oncactus/canopy/internal/config"
 	"github.com/oncactus/canopy/internal/ghx"
 	"github.com/oncactus/canopy/internal/lifecycle"
 	"github.com/oncactus/canopy/internal/state"
@@ -35,7 +37,23 @@ var log = clog.Pkg("ui")
 // Row is the display shape for a single line in the list. Combines
 // regular workspace rows with the synthetic main-session row so the
 // View doesn't have to special-case at render time.
+//
+// Project + ProjectRoot are populated for every row (workspace and main).
+// In project-only mode (m.mgr non-nil, all rows belong to one project)
+// they're identical across rows. In global/popup mode (m.mgr nil OR
+// CANOPY_IN_POPUP=1) they distinguish cross-project rows so the unified
+// TUI can scope d/R to the right Manager and show the project name in
+// the confirm modal.
 type Row struct {
+	// Project is the project basename (filepath.Base(ProjectRoot)).
+	// Used in the cross-project confirm modal copy ("Delete <project>/<name>?").
+	Project string
+	// ProjectRoot is the canonical absolute path to the project's
+	// source repo. Authoritative project ID; matches state.Workspace.ProjectRoot
+	// and state.GlobalRow.ProjectRoot. Used by transientManagerFor to
+	// construct a Manager scoped to a different project than m.mgr's.
+	ProjectRoot string
+
 	IsMain      bool         // true for the synthetic (main) row
 	Name        string       // "(main)" or the workspace name
 	Branch      string       // "—" for main, the branch name otherwise
@@ -55,6 +73,27 @@ type Row struct {
 	// shellout. Empty slice on first render; populated by rowHintsMsg
 	// after each per-row detector returns.
 	Hints []state.Hint
+}
+
+// rowFromGlobalRow converts a state.GlobalRow (used by cross-project
+// listings) into a ui.Row (the unified TUI's canonical row shape).
+// LastErrorHint isn't on GlobalRow today — for orphaned/broken rows the
+// global path doesn't auto-diagnose; the user gets to those workspaces
+// by running canopy from the project where the diagnose result lives.
+func rowFromGlobalRow(g state.GlobalRow) Row {
+	return Row{
+		Project:     g.Project,
+		ProjectRoot: g.ProjectRoot,
+		IsMain:      g.IsMain,
+		Name:        g.Name,
+		Branch:      g.Branch,
+		Path:        g.Path,
+		Status:      g.Status,
+		Port:        g.Port,
+		TmuxSession: g.TmuxSession,
+		Alive:       g.Alive,
+		Hints:       g.Hints,
+	}
 }
 
 // viewMode tracks which screen the TUI is showing.
@@ -87,6 +126,12 @@ const (
 	newIssueMode
 	newBranchMode
 	confirmDeleteMode
+	// confirmRetryMode is the y/N gate for `R` on a non-broken workspace
+	// (D3/CP1). Mirrors the CLI's `canopy retry --force` friction so a
+	// muscle-memory R-press doesn't accidentally re-run scripts.setup on
+	// a healthy workspace and clobber whatever state setup mutates
+	// (db reseed, env regen, etc.).
+	confirmRetryMode
 	busyMode
 )
 
@@ -115,11 +160,30 @@ const (
 	busyOpRetry
 )
 
-// Model is the Bubbletea state. Constructed via New(), updated via
-// Update(), rendered via View().
+// Model is the Bubbletea state. Constructed via New() (project mode,
+// mgr non-nil) or NewUnified() (mgr-optional, used for popup + global
+// invocations). Updated via Update(), rendered via View().
+//
+// v0.8 unification: the same Model serves three contexts — project TUI
+// (mgr non-nil, single-project rows), global TUI (mgr nil, cross-project
+// rows), and popup mode (CANOPY_IN_POPUP=1, single-line tab bar +
+// switch-client attach). The viewMode + popup* fields drive the runtime
+// dispatch.
 type Model struct {
+	// mgr is the current-project Manager. Non-nil when canopy was
+	// invoked from inside a project (cwd has canopy.json walk-up).
+	// Nil when invoked outside any project (global TUI startup) —
+	// rows still populate from state.BuildGlobalRows, but the `n`
+	// keybind is hidden and Local tab shows onboarding text.
 	mgr *workspace.Manager
 	tc  *tmux.Client
+
+	// store is the state.Store the unified model uses for cross-project
+	// row aggregation (state.BuildGlobalRows) and transient Manager
+	// construction (cross-project d/R). Always set, even when mgr is
+	// non-nil — mgr.Store and store point to the same on-disk file
+	// in that case.
+	store *state.Store
 
 	rows   []Row
 	cursor int
@@ -170,30 +234,89 @@ type Model struct {
 	// Loaded once at startup, used in title rendering.
 	projectName string
 
-	// fromGlobal is true when this project TUI was launched from the
-	// cross-project global view (model_global.go's goToProject sets the
-	// CANOPY_FROM_GLOBAL=1 env var on the re-execed canopy). When true,
-	// the listMode keymap accepts `b`/`esc` as a "back to global" key —
-	// they just quit the inner program; the outer global TUI's
-	// ExecProcess onExit refreshes and re-renders.
-	fromGlobal bool
+	// ─── v0.8 unification fields ─────────────────────────────────────
+	// inPopup is true when CANOPY_IN_POPUP=1 was set by the tmux
+	// display-popup -E invocation. Toggles single-line tab bar,
+	// switch-client attach (via tea.QuitMsg after tmux switch-client),
+	// and the compact help line. Determined once at New time and
+	// immutable for the program's lifetime.
+	inPopup bool
 
-	// fromPopup is true when the project TUI is hosted INSIDE the canopy
-	// popup (model_global.go's popup-mode goToProject sets
-	// CANOPY_FROM_POPUP=1). When true, attaching to a workspace must
-	// also signal the parent popup to close — otherwise the user is
-	// left with a popup window showing project TUI on top of a host
-	// session that already switched to the workspace, requiring an
-	// extra `q` to dismiss the popup. The signal is exit code 7 from
-	// ui.Run (see attachedFromPopup below).
-	fromPopup bool
+	// currentProject is the canonical ProjectRoot that the Local tab
+	// filters to. Resolved at startup via workspace.ResolveCurrentProject.
+	// Empty when the user is outside any registered project — Local tab
+	// is then shown but empty (with onboarding text).
+	currentProject string
 
-	// attachedFromPopup is set by Update's popupAttachedMsg handler
-	// after a successful attach in popup mode. Read by ui.Run to exit
-	// the canopy process with code 7 — the popup-attach signal honored
-	// by GlobalModel.goToProject's tea.ExecProcess onExit, which
-	// triggers tea.Quit on the popup-inner program.
-	attachedFromPopup bool
+	// tab tracks which top-level tab is active. tabLocal filters to
+	// rows whose ProjectRoot matches currentProject; tabGlobal shows
+	// every row from state.BuildGlobalRows.
+	tab tabKind
+
+	// allRows is the unfiltered row set (cross-project when mgr is nil
+	// or global tab is selected). The tab + searchQuery filter
+	// projects allRows down into rows for rendering.
+	allRows []Row
+
+	// searchMode is true while the user is typing in the fuzzy-search
+	// box (entered via /). Captures keystrokes into searchQuery
+	// instead of forwarding to the listMode keymap.
+	searchMode bool
+	// searchQuery is the current fuzzy-search filter string. Empty
+	// means no filter. Subsequence match (fzf-style) against
+	// row name + project + branch.
+	searchQuery string
+
+	// confirmRetryNonBroken triggers a y/N modal before R re-runs
+	// scripts.setup on a non-broken workspace (D3/CP1). Mirrors the
+	// CLI's --force friction. The pending row name is held in
+	// retryTarget; the modal is the busyMode parent waiting for input.
+	retryTarget string
+}
+
+// tabKind identifies which top-level tab is active in the unified TUI.
+type tabKind int
+
+const (
+	// tabLocal shows only rows whose ProjectRoot matches m.currentProject.
+	// Pre-selected when canopy was invoked from inside a project; the
+	// "scope is what I'm working on right now" view.
+	tabLocal tabKind = iota
+	// tabGlobal shows every workspace canopy knows about across all
+	// projects. Pre-selected when canopy was invoked from outside any
+	// project; the "give me everything" view.
+	tabGlobal
+)
+
+// managerForRow returns a *workspace.Manager scoped to the row's project.
+// When the row's ProjectRoot matches the current Manager's project root,
+// returns m.mgr directly (no construction cost). When the row is in a
+// different project (cross-project d/R from the Global tab), constructs
+// a transient Manager via config.LoadFrom + workspace.New.
+//
+// Returns an error when the row's canopy.json is missing/parse-broke or
+// Manager construction fails. Caller surfaces via m.err so the user
+// sees a status-line hint instead of a panic.
+//
+// Why no caching: per-action canopy.json reads are <1ms; caching would
+// add staleness bugs (project's canopy.json edited mid-session) for
+// negligible perf gain. Boring choice.
+func (m *Model) managerForRow(row Row) (*workspace.Manager, error) {
+	if m.mgr != nil && row.ProjectRoot == m.mgr.Cfg.ProjectRoot {
+		return m.mgr, nil
+	}
+	if row.ProjectRoot == "" {
+		return nil, fmt.Errorf("row %q has no ProjectRoot — can't resolve project Manager", row.Name)
+	}
+	cfg, err := config.LoadFrom(row.ProjectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("project config unavailable at %s: %w", row.ProjectRoot, err)
+	}
+	mgr, err := workspace.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("manager construction failed for %s: %w", cfg.Project, err)
+	}
+	return mgr, nil
 }
 
 // branchInWorkspace reports whether a branch name is currently
@@ -221,10 +344,28 @@ func (m *Model) branchInWorkspace(branch string) (string, bool) {
 	return "", false
 }
 
-// New constructs a Model. The caller must already have a workspace.Manager
-// (loaded via cmd/canopy's loadManager helper). Initial rows are empty;
-// the first tea.Cmd returned by Init() loads them.
+// New constructs a project-mode Model. mgr is required. Used by the
+// project TUI entry path (when canopy.json walk-up succeeds).
+//
+// Wraps NewUnified with the project-mode defaults: tabLocal pre-selected,
+// currentProject = mgr.Cfg.ProjectRoot.
 func New(mgr *workspace.Manager) *Model {
+	return NewUnified(mgr, mgr.Store, mgr.Tmux, mgr.Cfg.ProjectRoot)
+}
+
+// NewUnified is the v0.8 unified-TUI constructor. Single entry point for
+// every canopy invocation: project, global, popup. mgr is optional —
+// nil when the user invoked canopy from outside any registered project
+// or from a popup whose host pane isn't in a known project.
+//
+// currentProject is the canonical ProjectRoot for the Local tab filter
+// (resolved upstream by workspace.ResolveCurrentProject); empty disables
+// Local-tab filtering.
+//
+// Popup-mode rendering is detected via CANOPY_IN_POPUP=1 (set by the
+// tmux display-popup -E invocation in install_tmux.go). Single source of
+// truth: the env var is what flips chrome from fullscreen to popup.
+func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject string) *Model {
 	ti := textinput.New()
 	ti.Placeholder = "leave blank for a random name"
 	ti.CharLimit = 60
@@ -235,50 +376,73 @@ func New(mgr *workspace.Manager) *Model {
 	li.CharLimit = 80
 	li.Width = 60
 
+	// Tab pre-selection: Local when the user has a current project
+	// context, Global otherwise. The user can tab away on either side.
+	defaultTab := tabLocal
+	if currentProject == "" {
+		defaultTab = tabGlobal
+	}
+
+	projectName := ""
+	if mgr != nil {
+		projectName = mgr.Cfg.Project
+	}
+
 	return &Model{
-		mgr:         mgr,
-		tc:          mgr.Tmux,
-		projectName: mgr.Cfg.Project,
-		nameInput:   ti,
-		listInput:   li,
-		mode:        listMode,
-		fromGlobal:  os.Getenv("CANOPY_FROM_GLOBAL") == "1",
-		fromPopup:   os.Getenv("CANOPY_FROM_POPUP") == "1",
+		mgr:            mgr,
+		tc:             tc,
+		store:          store,
+		projectName:    projectName,
+		nameInput:      ti,
+		listInput:      li,
+		mode:           listMode,
+		inPopup:        os.Getenv("CANOPY_IN_POPUP") == "1",
+		currentProject: currentProject,
+		tab:            defaultTab,
 	}
 }
 
-// Run is the public entry point. It builds a Model, hands it to a
-// Bubbletea program, and blocks until the user quits. Returns whatever
-// error the program surfaced (or nil on a clean quit).
+// RunUnified is the v0.8 public entry point used by cmd/canopy/route.go.
+// Single bubbletea program for every canopy invocation: project, global,
+// popup. mgr is optional — nil when invoked from outside a registered
+// project. currentProject is the resolved Local-tab filter root.
 //
-// When the project TUI was launched from the canopy popup AND the user
-// attached to a workspace from inside it, Run exits the process with
-// code 7 — the popup-attach signal. The outer popup-inner program's
-// tea.ExecProcess onExit catches the non-zero exit, recognizes code 7
-// as "user attached on my behalf," and quits itself, closing the
-// display-popup. Without this, attaching from project-TUI-in-popup
-// leaves the popup open requiring a second q.
+// In popup mode (CANOPY_IN_POPUP=1) we omit MouseCellMotion since the
+// popup is keyboard-driven and mouse handling adds latency.
+func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject string) error {
+	m := NewUnified(mgr, store, tc, currentProject)
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if !m.inPopup {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+	p := tea.NewProgram(m, opts...)
+	_, err := p.Run()
+	return err
+}
+
+// Run is the legacy project-mode entry point. RunUnified is the v0.8
+// unified entry; Run is preserved as a thin wrapper for any external
+// callers (none today) and the e2e tests in the workspace package.
 //
-// os.Exit is safe here: Bubbletea's p.Run has already returned, which
-// means the alt-screen has been restored and the terminal is in a
-// usable state. We're past the point where deferred cleanup matters.
+// Pre-v0.8 Run had an exit-7 signal channel for the popup-from-project
+// nested-canopy flow. That flow is gone — popup hosts the unified TUI
+// directly, no nested spawn — so this is now a straightforward Bubbletea
+// run-loop wrapper.
 func Run(mgr *workspace.Manager) error {
 	m := New(mgr)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	finalModel, err := p.Run()
-	if err != nil {
-		return err
-	}
-	if pm, ok := finalModel.(*Model); ok && pm.attachedFromPopup {
-		os.Exit(7)
-	}
-	return nil
+	_, err := p.Run()
+	return err
 }
 
 // Init implements tea.Model. Returns the initial command — load the
-// workspace list as soon as the program starts.
+// workspace list as soon as the program starts. The refresh path is
+// dual: when mgr is non-nil it uses mgr.List + mgr.Reconcile (project
+// mode); when nil it falls back to state.BuildGlobalRows (global +
+// popup-without-project mode). Either way the result lands in
+// m.allRows; tab + search filtering happens on every render.
 func (m *Model) Init() tea.Cmd {
-	return refreshCmd(m.mgr, m.tc)
+	return refreshCmd(m.mgr, m.tc, m.store)
 }
 
 // rowsLoadedMsg is the result of a refresh. Carries the new rows or an
@@ -290,68 +454,83 @@ type rowsLoadedMsg struct {
 
 // refreshCmd reconciles state, then loads workspaces + the main row.
 // Runs in a goroutine via tea.Cmd so the UI doesn't block on tmux/disk.
-func refreshCmd(mgr *workspace.Manager, tc *tmux.Client) tea.Cmd {
+//
+// Dual-path: project mode (mgr non-nil) uses mgr.List + Reconcile and
+// returns rows scoped to that one project. Global mode (mgr nil) uses
+// state.BuildGlobalRows and returns rows from every registered project.
+// Either way the rows are typed `[]Row` (state.GlobalRow converted via
+// rowFromGlobalRow when necessary) so the renderer doesn't fork.
+func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		// Lazy reconcile so stale ready -> stopped before we render.
-		// Errors here are non-fatal; we continue with the latest state
-		// we can load.
-		if _, err := mgr.Reconcile(ctx); err != nil {
-			log.Warn("ui.refresh.reconcile-failed", "err", err)
+		// Project mode: walk Manager's path. Reconcile + List + project's
+		// Project meta for the synthetic main row.
+		if mgr != nil {
+			if _, err := mgr.Reconcile(ctx); err != nil {
+				log.Warn("ui.refresh.reconcile-failed", "err", err)
+			}
+			workspaces, err := mgr.List(ctx)
+			if err != nil {
+				return rowsLoadedMsg{err: err}
+			}
+			st, err := mgr.Store.Load()
+			if err != nil {
+				return rowsLoadedMsg{err: err}
+			}
+
+			rows := []Row{}
+			mainSession := tmux.SafeName(mgr.Cfg.Project) + "-main"
+			alive, _ := tc.HasSession(ctx, mainSession)
+			r := Row{
+				Project:     mgr.Cfg.Project,
+				ProjectRoot: mgr.Cfg.ProjectRoot,
+				IsMain:      true,
+				Name:        "(main)",
+				Branch:      "—",
+				Status:      "main",
+				TmuxSession: mainSession,
+				Alive:       alive,
+			}
+			if meta, ok := st.Projects[mgr.Cfg.ProjectRoot]; ok {
+				r.Port = meta.PortBase
+			} else if meta, ok := st.Projects[mgr.Cfg.Project]; ok {
+				// Legacy v1 basename key.
+				r.Port = meta.PortBase
+			}
+			rows = append(rows, r)
+
+			for _, w := range workspaces {
+				alive, _ := tc.HasSession(ctx, w.TmuxSession)
+				rows = append(rows, Row{
+					Project:       mgr.Cfg.Project,
+					ProjectRoot:   mgr.Cfg.ProjectRoot,
+					IsMain:        false,
+					Name:          w.Name,
+					Branch:        w.Branch,
+					Path:          w.Path,
+					Status:        w.Status,
+					Port:          w.Port,
+					TmuxSession:   w.TmuxSession,
+					Alive:         alive,
+					LastErrorHint: w.LastErrorHint,
+				})
+			}
+			return rowsLoadedMsg{rows: rows}
 		}
 
-		workspaces, err := mgr.List(ctx)
+		// Global mode: no Manager. Pull rows from state.BuildGlobalRows
+		// (which scans every registered project) and convert. tc is the
+		// liveness probe BuildGlobalRows uses for the main rows; same
+		// interface as the project path so behavior matches.
+		st, err := store.Load()
 		if err != nil {
 			return rowsLoadedMsg{err: err}
 		}
-
-		// Load full state once for the main-row port lookup.
-		st, err := mgr.Store.Load()
-		if err != nil {
-			return rowsLoadedMsg{err: err}
-		}
-
-		rows := []Row{}
-
-		// Main row (synthetic) — always present so the user can see
-		// the project has a main concept and reach for `canopy main`
-		// even when no session is active. Alive reflects whether the
-		// tmux session is currently up; the activate handler decides
-		// what enter does (attach if alive, "run canopy main" hint
-		// otherwise).
-		mainSession := tmux.SafeName(mgr.Cfg.Project) + "-main"
-		alive, _ := tc.HasSession(ctx, mainSession)
-		r := Row{
-			IsMain:      true,
-			Name:        "(main)",
-			Branch:      "—",
-			Status:      "main", // not one of the 5 workspace states
-			TmuxSession: mainSession,
-			Alive:       alive,
-		}
-		if meta, ok := st.Projects[mgr.Cfg.Project]; ok {
-			// ProjectRoot key — matches BuildGlobalRows. The basename
-			// key path (legacy) is also tolerated by st.Projects
-			// readers, so this lookup works for v1 and v2 state.
-			r.Port = meta.PortBase
-		}
-		rows = append(rows, r)
-
-		// Workspace rows.
-		for _, w := range workspaces {
-			alive, _ := tc.HasSession(ctx, w.TmuxSession)
-			rows = append(rows, Row{
-				IsMain:        false,
-				Name:          w.Name,
-				Branch:        w.Branch,
-				Path:          w.Path,
-				Status:        w.Status,
-				Port:          w.Port,
-				TmuxSession:   w.TmuxSession,
-				Alive:         alive,
-				LastErrorHint: w.LastErrorHint,
-			})
+		globals := st.BuildGlobalRows(ctx, tc)
+		rows := make([]Row, 0, len(globals))
+		for _, g := range globals {
+			rows = append(rows, rowFromGlobalRow(g))
 		}
 		return rowsLoadedMsg{rows: rows}
 	}
@@ -371,9 +550,10 @@ type rowHintsMsg struct {
 // and emits a rowHintsMsg when done. tea.Batch dispatches them
 // concurrently, so cold-start gh latency parallelizes across rows.
 //
-// Skips main rows and rows with empty Path. Mirror of GlobalModel's
-// loadHintsCmds — same shape, same rationale, two-phase rendering.
-func loadRowHintsCmds(rows []Row, projectRoot string) tea.Cmd {
+// Skips main rows and rows with empty Path. Each row carries its own
+// ProjectRoot (set in refreshCmd) so the unified TUI's cross-project
+// rows load hints against the right project.
+func loadRowHintsCmds(rows []Row) tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(rows))
 	for _, r := range rows {
 		if r.IsMain || r.Path == "" {
@@ -385,7 +565,7 @@ func loadRowHintsCmds(rows []Row, projectRoot string) tea.Cmd {
 				Name:        row.Name,
 				Branch:      row.Branch,
 				Path:        row.Path,
-				ProjectRoot: projectRoot,
+				ProjectRoot: row.ProjectRoot,
 				Status:      row.Status,
 			}
 			return rowHintsMsg{

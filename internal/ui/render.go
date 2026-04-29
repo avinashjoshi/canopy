@@ -58,7 +58,43 @@ var (
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).
 			Padding(0, 1)
+
+	// activeTabStyle, inactiveTabStyle, searchActiveStyle drive the
+	// unified TUI's tab bar + search-line chrome. Defined as vars not
+	// consts so lipgloss.Style methods (which return new Styles) chain
+	// cleanly.
+	activeTabStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("231")). // bright white
+			Background(lipgloss.Color("62"))   // blue, matches title
+
+	inactiveTabStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("241")) // muted grey
+
+	searchActiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("231")).
+				Background(lipgloss.Color("236")).
+				Padding(0, 1)
 )
+
+// isSubseq returns true if needle's characters appear in haystack in
+// order (not necessarily contiguous). Both are expected to be already
+// lowercased by the caller. fzf-style matching for the unified TUI's
+// fuzzy search; bounded performance (canopy expects <100 rows so the
+// O(N*M) comparison cost is trivial).
+func isSubseq(haystack, needle string) bool {
+	if needle == "" {
+		return true
+	}
+	hi, ni := 0, 0
+	for hi < len(haystack) && ni < len(needle) {
+		if haystack[hi] == needle[ni] {
+			ni++
+		}
+		hi++
+	}
+	return ni == len(needle)
+}
 
 // statusStyle returns the lipgloss style for a given workspace status.
 // Falls back to subtleStyle for unknown values + the synthetic "main"

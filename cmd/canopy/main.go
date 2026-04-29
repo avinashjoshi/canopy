@@ -82,8 +82,9 @@ func main() {
 	root.AddCommand(reconcileCmd())
 	root.AddCommand(mainCmd())
 	root.AddCommand(retryCmd())
-	root.AddCommand(newPopupCmd())
-	root.AddCommand(newPopupInnerCmd())
+	// popup + popup-inner removed in v0.8 (TUI unification): tmux
+	// invokes `canopy` directly via display-popup -E with
+	// CANOPY_IN_POPUP=1 in the env. See cmd/canopy/install_tmux.go.
 	root.AddCommand(newStatuslineCmd())
 	root.AddCommand(newInstallCmd())
 	root.AddCommand(newRunCmd())
