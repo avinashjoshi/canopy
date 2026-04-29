@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/avinashjoshi/canopy/internal/settings"
+	"github.com/oncactus/canopy/internal/settings"
 )
 
 // TestLoad_Missing covers the no-config-file case: must return defaults

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/avinashjoshi/canopy/internal/clog"
-	"github.com/avinashjoshi/canopy/internal/port"
-	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/clog"
+	"github.com/oncactus/canopy/internal/port"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 func TestMain(m *testing.M) {

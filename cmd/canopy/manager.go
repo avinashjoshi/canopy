@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/avinashjoshi/canopy/internal/config"
-	"github.com/avinashjoshi/canopy/internal/workspace"
+	"github.com/oncactus/canopy/internal/config"
+	"github.com/oncactus/canopy/internal/workspace"
 )
 
 // loadManager is the shared entry point for every subcommand that needs

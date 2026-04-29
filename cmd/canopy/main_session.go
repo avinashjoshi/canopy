@@ -8,11 +8,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/avinashjoshi/canopy/internal/hooks"
-	"github.com/avinashjoshi/canopy/internal/settings"
-	"github.com/avinashjoshi/canopy/internal/state"
-	"github.com/avinashjoshi/canopy/internal/tmux"
-	"github.com/avinashjoshi/canopy/internal/workspace"
+	"github.com/oncactus/canopy/internal/hooks"
+	"github.com/oncactus/canopy/internal/settings"
+	"github.com/oncactus/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/oncactus/canopy/internal/workspace"
 )
 
 // mainCmd returns the `canopy main` cobra subcommand.

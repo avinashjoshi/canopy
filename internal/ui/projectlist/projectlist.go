@@ -33,7 +33,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // Options is the parent's wiring for a projectlist Model. All callbacks

@@ -28,12 +28,12 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/avinashjoshi/canopy/internal/config"
-	"github.com/avinashjoshi/canopy/internal/git"
-	"github.com/avinashjoshi/canopy/internal/state"
-	"github.com/avinashjoshi/canopy/internal/tmux"
-	"github.com/avinashjoshi/canopy/internal/ui"
-	"github.com/avinashjoshi/canopy/internal/workspace"
+	"github.com/oncactus/canopy/internal/config"
+	"github.com/oncactus/canopy/internal/git"
+	"github.com/oncactus/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/oncactus/canopy/internal/ui"
+	"github.com/oncactus/canopy/internal/workspace"
 )
 
 // routeRoot picks which Bubbletea Model to run based on the cwd's

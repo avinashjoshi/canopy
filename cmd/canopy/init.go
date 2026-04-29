@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // initOptions are the user-facing flags that govern runInit's behavior.

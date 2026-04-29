@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // sampleRows builds a small deterministic []state.GlobalRow for tests

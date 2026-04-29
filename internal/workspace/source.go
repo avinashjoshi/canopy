@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/avinashjoshi/canopy/internal/ghx"
-	"github.com/avinashjoshi/canopy/internal/git"
+	"github.com/oncactus/canopy/internal/ghx"
+	"github.com/oncactus/canopy/internal/git"
 )
 
 // SourceSpec is the parsed-input form of canopy new's source-variant

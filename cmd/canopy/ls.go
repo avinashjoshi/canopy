@@ -12,9 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/avinashjoshi/canopy/internal/config"
-	"github.com/avinashjoshi/canopy/internal/state"
-	"github.com/avinashjoshi/canopy/internal/tmux"
+	"github.com/oncactus/canopy/internal/config"
+	"github.com/oncactus/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/tmux"
 )
 
 var lsFlags struct {

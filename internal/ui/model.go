@@ -22,12 +22,12 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/avinashjoshi/canopy/internal/clog"
-	"github.com/avinashjoshi/canopy/internal/ghx"
-	"github.com/avinashjoshi/canopy/internal/lifecycle"
-	"github.com/avinashjoshi/canopy/internal/state"
-	"github.com/avinashjoshi/canopy/internal/tmux"
-	"github.com/avinashjoshi/canopy/internal/workspace"
+	"github.com/oncactus/canopy/internal/clog"
+	"github.com/oncactus/canopy/internal/ghx"
+	"github.com/oncactus/canopy/internal/lifecycle"
+	"github.com/oncactus/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/oncactus/canopy/internal/workspace"
 )
 
 var log = clog.Pkg("ui")

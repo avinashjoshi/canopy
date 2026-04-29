@@ -9,9 +9,9 @@
                          |_|    |___/
 ```
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/avinashjoshi/canopy.svg)](https://pkg.go.dev/github.com/avinashjoshi/canopy)
-[![Go Report Card](https://goreportcard.com/badge/github.com/avinashjoshi/canopy)](https://goreportcard.com/report/github.com/avinashjoshi/canopy)
-[![Tests](https://github.com/avinashjoshi/canopy/actions/workflows/test.yml/badge.svg)](https://github.com/avinashjoshi/canopy/actions/workflows/test.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/oncactus/canopy.svg)](https://pkg.go.dev/github.com/oncactus/canopy)
+[![Go Report Card](https://goreportcard.com/badge/github.com/oncactus/canopy)](https://goreportcard.com/report/github.com/oncactus/canopy)
+[![Tests](https://github.com/oncactus/canopy/actions/workflows/test.yml/badge.svg)](https://github.com/oncactus/canopy/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **TUI for managing git worktrees with paired tmux sessions and per-project setup hooks.**
@@ -39,13 +39,13 @@ Optional but recommended:
 **Arch / CachyOS / Omarchy:**
 ```bash
 sudo pacman -S git tmux neovim go
-go install github.com/avinashjoshi/canopy/cmd/canopy@latest
+go install github.com/oncactus/canopy/cmd/canopy@latest
 ```
 
 **Debian / Ubuntu:**
 ```bash
 sudo apt install git tmux neovim golang
-go install github.com/avinashjoshi/canopy/cmd/canopy@latest
+go install github.com/oncactus/canopy/cmd/canopy@latest
 ```
 
 ### macOS
@@ -53,7 +53,7 @@ go install github.com/avinashjoshi/canopy/cmd/canopy@latest
 Homebrew handles all dependencies:
 ```bash
 brew install git tmux neovim go
-go install github.com/avinashjoshi/canopy/cmd/canopy@latest
+go install github.com/oncactus/canopy/cmd/canopy@latest
 ```
 
 ### Windows
@@ -72,7 +72,7 @@ Reboot, finish the Linux user setup, then inside the WSL shell follow the Debian
 If you want to track `main` or hack on canopy:
 
 ```bash
-git clone https://github.com/avinashjoshi/canopy.git
+git clone https://github.com/oncactus/canopy.git
 cd canopy
 make install        # builds ./canopy and copies to ~/.local/bin
 canopy --help

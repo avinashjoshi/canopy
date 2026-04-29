@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // prStatusCacheTTL is how long a pr_status detector result stays cached

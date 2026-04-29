@@ -10,10 +10,10 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/avinashjoshi/canopy/internal/ghx"
-	"github.com/avinashjoshi/canopy/internal/git"
-	"github.com/avinashjoshi/canopy/internal/state"
-	"github.com/avinashjoshi/canopy/internal/workspace"
+	"github.com/oncactus/canopy/internal/ghx"
+	"github.com/oncactus/canopy/internal/git"
+	"github.com/oncactus/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/workspace"
 )
 
 // Update implements tea.Model. Routes incoming messages to focused

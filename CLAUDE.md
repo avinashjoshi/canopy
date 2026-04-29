@@ -65,7 +65,7 @@ Dependency direction is leaf-up: `cmd` and `ui` depend on `workspace`; `workspac
 - stdlib `log/slog`, JSON output, append to `~/.canopy/log/canopy.log`.
 - INFO default, DEBUG with `--debug`.
 - Every package opens with `var log = clog.Pkg("<pkgname>")` then uses `log.Info("...", "key", val)` with structured fields.
-- Import: `import "github.com/avinashjoshi/canopy/internal/clog"`.
+- Import: `import "github.com/oncactus/canopy/internal/clog"`.
 
 ## Workspace state machine
 

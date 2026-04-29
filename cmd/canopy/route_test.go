@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/oncactus/canopy/internal/config"
 )
 
 // routeRoot is hard to test end-to-end (each branch launches a Bubbletea

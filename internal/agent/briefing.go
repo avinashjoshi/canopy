@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/avinashjoshi/canopy/internal/config"
-	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/config"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // BuildBriefing assembles the canopy briefing string for an agent launch.

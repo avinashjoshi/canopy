@@ -66,5 +66,5 @@ cycle):
   `docs/migrate-from-conductor.md`, `docs/troubleshooting.md`,
   `docs/architecture.md`, `docs/design/v0-canopy.md`.
 
-[Unreleased]: https://github.com/avinashjoshi/canopy/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/avinashjoshi/canopy/releases/tag/v0.1.0
+[Unreleased]: https://github.com/oncactus/canopy/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/oncactus/canopy/releases/tag/v0.1.0

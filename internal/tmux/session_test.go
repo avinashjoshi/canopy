@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/avinashjoshi/canopy/internal/clog"
-	"github.com/avinashjoshi/canopy/internal/tmux"
+	"github.com/oncactus/canopy/internal/clog"
+	"github.com/oncactus/canopy/internal/tmux"
 )
 
 // testSocket is the named tmux socket all tests share. tmux's server-per-socket

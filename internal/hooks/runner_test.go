@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/avinashjoshi/canopy/internal/clog"
-	"github.com/avinashjoshi/canopy/internal/hooks"
+	"github.com/oncactus/canopy/internal/clog"
+	"github.com/oncactus/canopy/internal/hooks"
 )
 
 func TestMain(m *testing.M) {

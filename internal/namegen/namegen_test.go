@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/avinashjoshi/canopy/internal/namegen"
+	"github.com/oncactus/canopy/internal/namegen"
 )
 
 // TestGenerate covers the basic shape: returns "adj-noun", both halves

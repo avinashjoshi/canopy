@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/avinashjoshi/canopy/internal/ghx"
-	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
+	"github.com/oncactus/canopy/internal/ghx"
+	"github.com/oncactus/canopy/internal/ui/projectlist"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and

@@ -11,12 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/avinashjoshi/canopy/internal/clog"
-	"github.com/avinashjoshi/canopy/internal/config"
-	"github.com/avinashjoshi/canopy/internal/settings"
-	"github.com/avinashjoshi/canopy/internal/state"
-	"github.com/avinashjoshi/canopy/internal/tmux"
-	"github.com/avinashjoshi/canopy/internal/workspace"
+	"github.com/oncactus/canopy/internal/clog"
+	"github.com/oncactus/canopy/internal/config"
+	"github.com/oncactus/canopy/internal/settings"
+	"github.com/oncactus/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/oncactus/canopy/internal/workspace"
 )
 
 func TestMain(m *testing.M) {

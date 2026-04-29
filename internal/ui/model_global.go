@@ -24,11 +24,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/avinashjoshi/canopy/internal/git"
-	"github.com/avinashjoshi/canopy/internal/lifecycle"
-	"github.com/avinashjoshi/canopy/internal/state"
-	"github.com/avinashjoshi/canopy/internal/tmux"
-	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
+	"github.com/oncactus/canopy/internal/git"
+	"github.com/oncactus/canopy/internal/lifecycle"
+	"github.com/oncactus/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/oncactus/canopy/internal/ui/projectlist"
 )
 
 // Compile-time check that GlobalModel satisfies tea.Model.

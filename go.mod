@@ -1,4 +1,4 @@
-module github.com/avinashjoshi/canopy
+module github.com/oncactus/canopy
 
 go 1.26.2
 

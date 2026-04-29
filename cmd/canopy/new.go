@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/avinashjoshi/canopy/internal/workspace"
+	"github.com/oncactus/canopy/internal/workspace"
 )
 
 // newWorkspaceFlags holds parsed CLI flags. Package-level so they're

@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/oncactus/canopy/internal/clog"
 )
 
 var log = clog.Pkg("ghx")

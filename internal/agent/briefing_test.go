@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/avinashjoshi/canopy/internal/config"
-	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/config"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // fixtureWorkspace returns a populated state.Workspace for tests.
