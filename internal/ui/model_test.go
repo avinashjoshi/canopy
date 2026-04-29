@@ -25,7 +25,6 @@ func newTestModel(fromGlobal bool) *Model {
 		tc:          tmux.WithSocket("canopy-test"),
 		projectName: "test-project",
 		nameInput:   textinput.New(),
-		sourceInput: textinput.New(),
 		mode:        listMode,
 		fromGlobal:  fromGlobal,
 	}
@@ -296,101 +295,94 @@ func TestRenderTable_NoHintsNoBadges(t *testing.T) {
 	}
 }
 
-// TestNewModal_TabCyclesFocus: tab/shift-tab move focus between the
-// name and source inputs. Verifies the contract the modal renderer
-// depends on (focus marker + which input receives keystrokes).
-func TestNewModal_TabCyclesFocus(t *testing.T) {
-	m := newTestModel(false)
-	m.mode = newMode
-	m.newFocusIdx = 0
-	m.nameInput.Focus()
-
-	// Tab → focus moves to source.
-	model, _ := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyTab})
-	m = model.(*Model)
-	if m.newFocusIdx != 1 {
-		t.Errorf("after tab: focusIdx = %d; want 1", m.newFocusIdx)
+// TestNewPicker_LetterShortcuts: each variant key dispatches directly
+// to the right sub-modal. Recognition over recall — the user sees the
+// letter inline with the option and presses it.
+func TestNewPicker_LetterShortcuts(t *testing.T) {
+	cases := []struct {
+		key      string
+		wantMode viewMode
+	}{
+		{"n", newFreshMode},
+		{"f", newFreshMode}, // alias
+		{"p", newPRMode},
+		{"i", newIssueMode},
+		{"b", newBranchMode},
 	}
-	// Shift-tab → back to name.
-	model, _ = m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyShiftTab})
-	m = model.(*Model)
-	if m.newFocusIdx != 0 {
-		t.Errorf("after shift-tab: focusIdx = %d; want 0", m.newFocusIdx)
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			m := newTestModel(false)
+			m.openNewPicker()
+
+			model, _ := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+			m = model.(*Model)
+			if m.mode != tc.wantMode {
+				t.Errorf("key %q: mode = %v; want %v", tc.key, m.mode, tc.wantMode)
+			}
+		})
 	}
 }
 
-// TestNewModal_EscCancels: esc closes the modal without dispatching
-// a create cmd. The user's typed-in name/source isn't preserved
-// across cancel — opening 'n' again starts fresh.
-func TestNewModal_EscCancels(t *testing.T) {
+// TestNewPicker_ArrowsThenEnter: keyboard-discovery flow — arrow
+// down to the desired option, hit enter. Equivalent to pressing the
+// letter directly.
+func TestNewPicker_ArrowsThenEnter(t *testing.T) {
 	m := newTestModel(false)
-	m.mode = newMode
-	m.nameInput.SetValue("foo")
-	m.sourceInput.SetValue("pr 42")
+	m.openNewPicker()
 
-	model, cmd := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyEsc})
+	// Down twice → cursor on issue (index 2).
+	for i := 0; i < 2; i++ {
+		model, _ := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+		m = model.(*Model)
+	}
+	if m.newPickerCursor != 2 {
+		t.Fatalf("cursor = %d; want 2", m.newPickerCursor)
+	}
+
+	model, _ := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != newIssueMode {
+		t.Errorf("enter on cursor=2 should open newIssueMode; got %v", m.mode)
+	}
+}
+
+// TestNewPicker_EscReturnsToList: esc on the picker steps back to
+// listMode (one level up). q is suppressed inside the picker so the
+// user can't accidentally quit canopy mid-flow.
+func TestNewPicker_EscReturnsToList(t *testing.T) {
+	m := newTestModel(false)
+	m.openNewPicker()
+
+	model, _ := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyEsc})
 	m = model.(*Model)
 	if m.mode != listMode {
-		t.Errorf("esc should return to listMode; got %v", m.mode)
+		t.Errorf("esc on picker should return to listMode; got %v", m.mode)
 	}
+}
+
+// TestNewPicker_QSuppressed: pressing 'q' inside the picker is a
+// no-op (won't quit canopy). User has to esc back to listMode first
+// to quit. Protects against fat-fingered exits in the middle of a
+// flow.
+func TestNewPicker_QSuppressed(t *testing.T) {
+	m := newTestModel(false)
+	m.openNewPicker()
+
+	_, cmd := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd != nil {
-		t.Errorf("esc should not produce a cmd; got %T", cmd)
+		t.Errorf("q in picker should be a no-op; got cmd %T", cmd)
 	}
 }
 
-// TestNewModal_EnterParsesSource: a populated source spec parses,
-// the modal flips to busyMode, and the busy title reflects the
-// source variant. Doesn't actually run create (no live mgr) — the
-// returned cmd is the goroutine that would, if executed.
-func TestNewModal_EnterParsesSource(t *testing.T) {
+// TestNewFresh_EnterCreates: in fresh sub-modal, enter submits with
+// the typed name and flips to busyMode. Empty name passes through
+// to namegen via Manager.Create.
+func TestNewFresh_EnterCreates(t *testing.T) {
 	m := newTestModel(false)
-	m.mode = newMode
-	m.sourceInput.SetValue("pr 1234")
-
-	model, cmd := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyEnter})
-	m = model.(*Model)
-	if m.mode != busyMode {
-		t.Errorf("enter on valid spec should flip to busyMode; got %v", m.mode)
-	}
-	if !strings.Contains(m.busyTitle, "PR #1234") {
-		t.Errorf("busy title should mention PR #1234; got %q", m.busyTitle)
-	}
-	if cmd == nil {
-		t.Errorf("expected create cmd; got nil")
-	}
-}
-
-// TestNewModal_EnterInvalidSourceShowsError: a malformed source
-// keeps the modal open and surfaces the parse error inline. The
-// user can fix and re-submit without losing their typed-in name.
-func TestNewModal_EnterInvalidSourceShowsError(t *testing.T) {
-	m := newTestModel(false)
-	m.mode = newMode
-	m.nameInput.SetValue("preserved-name")
-	m.sourceInput.SetValue("wat 5") // unknown kind
-
-	model, _ := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyEnter})
-	m = model.(*Model)
-	if m.mode != newMode {
-		t.Errorf("invalid spec should keep modal open; got mode %v", m.mode)
-	}
-	if m.newSpecErr == nil {
-		t.Errorf("expected newSpecErr to be set on parse failure")
-	}
-	if m.nameInput.Value() != "preserved-name" {
-		t.Errorf("name should be preserved across failed submit; got %q", m.nameInput.Value())
-	}
-}
-
-// TestNewModal_EnterEmptySpec: empty source field = fresh workspace.
-// Same shape as canopy new with no flags.
-func TestNewModal_EnterEmptySpec(t *testing.T) {
-	m := newTestModel(false)
-	m.mode = newMode
+	m.openNewFresh()
 	m.nameInput.SetValue("fresh-one")
-	// sourceInput intentionally left empty
 
-	model, cmd := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyEnter})
+	model, cmd := m.handleNewFreshKey(tea.KeyMsg{Type: tea.KeyEnter})
 	m = model.(*Model)
 	if m.mode != busyMode {
 		t.Errorf("expected busyMode; got %v", m.mode)
@@ -399,7 +391,35 @@ func TestNewModal_EnterEmptySpec(t *testing.T) {
 		t.Errorf("expected create cmd")
 	}
 	if !strings.Contains(m.busyTitle, "fresh-one") {
-		t.Errorf("busy title should mention name on fresh path; got %q", m.busyTitle)
+		t.Errorf("busy title should mention name; got %q", m.busyTitle)
+	}
+}
+
+// TestNewFresh_EscReturnsToPicker: esc in fresh sub-modal goes back
+// one step (to the picker, not all the way to listMode).
+func TestNewFresh_EscReturnsToPicker(t *testing.T) {
+	m := newTestModel(false)
+	m.openNewFresh()
+
+	model, _ := m.handleNewFreshKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = model.(*Model)
+	if m.mode != newPickerMode {
+		t.Errorf("esc on fresh sub-modal should return to picker; got %v", m.mode)
+	}
+}
+
+// TestNewSubMode_EscReturnsToPicker: from any of the to-be-built
+// sub-modals (PR / Issue / Branch placeholders), esc returns to the
+// picker. Locks in the back-one-step contract before the live
+// pickers land.
+func TestNewSubMode_EscReturnsToPicker(t *testing.T) {
+	for _, mode := range []viewMode{newPRMode, newIssueMode, newBranchMode} {
+		m := newTestModel(false)
+		m.mode = mode
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		if m.mode != newPickerMode {
+			t.Errorf("esc from %v should return to newPickerMode; got %v", mode, m.mode)
+		}
 	}
 }
 

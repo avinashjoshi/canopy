@@ -56,18 +56,49 @@ type Row struct {
 	Hints []state.Hint
 }
 
-// viewMode tracks which screen the TUI is showing. listMode is the
-// default table; newMode is the new-workspace text input;
+// viewMode tracks which screen the TUI is showing.
+//
+// listMode is the default table.
+//
+// The new-workspace flow is a two-step picker (canopy convention,
+// lazygit-flavored):
+//
+//   - newPickerMode: variant chooser. Single-key shortcuts pick a
+//     branch direction (Fresh / PR / Issue / Branch). Self-evident,
+//     no syntax to recall.
+//   - newFreshMode: name input for the "blank workspace" path.
+//   - newPRMode / newIssueMode / newBranchMode: per-variant sub-modals
+//     that load live data (gh / git) and let the user pick from a
+//     filtered list.
+//
+// Esc steps back one level; from a sub-modal back to the picker, from
+// the picker back to listMode. Never exits canopy outright.
+//
 // confirmDeleteMode is the y/N prompt before tearing down a workspace;
 // busyMode is the wait/output screen during a long-running operation.
 type viewMode int
 
 const (
 	listMode viewMode = iota
-	newMode
+	newPickerMode
+	newFreshMode
+	newPRMode
+	newIssueMode
+	newBranchMode
 	confirmDeleteMode
 	busyMode
 )
+
+// inNewFlow reports whether the current mode is any step of the
+// new-workspace flow. Used by Update to route messages to the right
+// per-mode handler without listing all five constants every time.
+func (m viewMode) inNewFlow() bool {
+	return m == newPickerMode ||
+		m == newFreshMode ||
+		m == newPRMode ||
+		m == newIssueMode ||
+		m == newBranchMode
+}
 
 // busyOpKind identifies which long-running operation is currently in
 // busyMode. The View uses this to render the right success message
@@ -100,24 +131,22 @@ type Model struct {
 	showHelp bool
 	err      error // last operational error to surface; cleared on next refresh
 
-	// New-workspace modal (mode == newMode).
+	// New-workspace flow state.
 	//
-	// Two text inputs: workspace name (optional) and source spec
-	// (optional, parsed via workspace.ParseSourceSpec). Tab/shift-tab
-	// cycles focus between them; enter on either submits.
+	// Step 1 (newPickerMode): newPickerCursor selects which variant
+	// to launch. 0..3 maps to fresh / pr / issue / branch.
 	//
-	// newFocusIdx: 0 = name, 1 = source. Mirrors the focus a typical
-	// tab-modal expects so users hitting tab from the name field land
-	// on source.
-	nameInput   textinput.Model
-	sourceInput textinput.Model
-	newFocusIdx int
-
-	// newSpecErr surfaces source-spec parse errors from the most
-	// recent submit attempt back into renderNewModal as a one-line
-	// hint under the inputs. Cleared on every keystroke so the user
-	// sees feedback only for their most recent enter.
-	newSpecErr error
+	// Step 2 (newFreshMode): nameInput captures the optional workspace
+	// name. Empty → namegen picks a random one.
+	//
+	// Step 2b/c (newPRMode, newIssueMode): TODO — added in a follow-up
+	// commit. Will reuse listInput as the number-or-filter field plus
+	// listCursor for keyboard selection of fetched items.
+	//
+	// Step 2d (newBranchMode): TODO — same pattern as PR/Issue but
+	// against `git branch -r` instead of gh.
+	newPickerCursor int
+	nameInput       textinput.Model
 
 	// Confirm-delete modal (mode == confirmDeleteMode).
 	deleteTarget string   // workspace name pending removal
@@ -152,17 +181,11 @@ func New(mgr *workspace.Manager) *Model {
 	ti.CharLimit = 60
 	ti.Width = 40
 
-	si := textinput.New()
-	si.Placeholder = "blank for fresh, or `pr 1234` / `issue 42` / `branch feat/x`"
-	si.CharLimit = 120
-	si.Width = 60
-
 	return &Model{
 		mgr:         mgr,
 		tc:          mgr.Tmux,
 		projectName: mgr.Cfg.Project,
 		nameInput:   ti,
-		sourceInput: si,
 		mode:        listMode,
 		fromGlobal:  os.Getenv("CANOPY_FROM_GLOBAL") == "1",
 	}

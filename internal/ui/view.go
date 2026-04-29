@@ -18,8 +18,16 @@ func (m *Model) View() string {
 		return m.renderHelp()
 	}
 	switch m.mode {
-	case newMode:
-		return m.renderNewModal()
+	case newPickerMode:
+		return m.renderNewPicker()
+	case newFreshMode:
+		return m.renderNewFresh()
+	case newPRMode:
+		return m.renderNewComingSoon("From a pull request", "p")
+	case newIssueMode:
+		return m.renderNewComingSoon("From an issue", "i")
+	case newBranchMode:
+		return m.renderNewComingSoon("From a branch", "b")
 	case confirmDeleteMode:
 		return m.renderConfirmDelete()
 	case busyMode:
@@ -135,50 +143,109 @@ func (m *Model) renderHelpLine() string {
 	return subtleStyle.Render(strings.Join(keys, "  ·  "))
 }
 
-// renderNewModal is the new-workspace prompt. Two fields (name +
-// source spec); the focused one gets a `>` indicator so the user can
-// tell which receives keystrokes. Tab cycles. Enter submits. Esc
-// cancels.
-func (m *Model) renderNewModal() string {
+// renderNewPicker is step 1 of the new-workspace flow — the variant
+// picker. Each option carries a single-letter shortcut printed in
+// brackets so the user sees "press p for pull request" without
+// having to read a footer. Arrow nav is a discoverable alternative
+// for keyboard-only users who scan before they act.
+//
+// Self-evident over self-explanatory: the user shouldn't have to
+// read the footer to know what to do. The bracketed letters
+// telegraph the entire keymap inline with the options.
+func (m *Model) renderNewPicker() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("canopy new") + " " + subtleStyle.Render(m.projectName))
 	b.WriteString("\n\n")
+	b.WriteString("  How do you want to start?\n\n")
 
-	// Field 1: workspace name.
-	b.WriteString(focusMarker(m.newFocusIdx == 0))
-	b.WriteString("Workspace name (leave blank for a random one):")
-	b.WriteString("\n  ")
-	b.WriteString(m.nameInput.View())
-	b.WriteString("\n\n")
-
-	// Field 2: source spec.
-	b.WriteString(focusMarker(m.newFocusIdx == 1))
-	b.WriteString("Source (leave blank for fresh; or `pr <num>` / `issue <num>` / `branch <name>`):")
-	b.WriteString("\n  ")
-	b.WriteString(m.sourceInput.View())
-	b.WriteString("\n")
-
-	// One-line parse-error hint, only when the most recent submit
-	// failed validation.
-	if m.newSpecErr != nil {
-		b.WriteString("\n  ")
-		b.WriteString(errorStyle.Render(fmt.Sprintf("source: %v", m.newSpecErr)))
-		b.WriteString("\n")
+	for i, opt := range newPickerOptions {
+		cursor := "    "
+		if i == m.newPickerCursor {
+			cursor = "  > "
+		}
+		// Letter shortcut + label, then a dim description on the
+		// next line. Two-line entries give the picker breathing
+		// room and let the description carry the "why this option"
+		// without bloating the headline.
+		b.WriteString(cursor)
+		b.WriteString(brokenStyle.Render("[" + opt.key + "] "))
+		if i == m.newPickerCursor {
+			b.WriteString(selectedStyle.Render(opt.label))
+		} else {
+			b.WriteString(opt.label)
+		}
+		b.WriteString("\n        ")
+		b.WriteString(subtleStyle.Render(opt.description))
+		b.WriteString("\n\n")
 	}
 
-	b.WriteString("\n")
-	b.WriteString(subtleStyle.Render("  tab to switch field  ·  enter to create  ·  esc to cancel"))
+	b.WriteString(subtleStyle.Render(
+		"  press a letter  ·  ↑/↓ then enter  ·  esc back"))
 	return b.String()
 }
 
-// focusMarker returns the two-char prefix shown to the left of each
-// modal field — `>` when focused, two spaces otherwise. Subtle
-// indicator that doesn't compete with the textinput's own cursor.
-func focusMarker(focused bool) string {
-	if focused {
-		return brokenStyle.Render("> ")
+// newPickerOption is one row in the variant picker. Order in the
+// slice = visual order = cursor index. Adding a 5th option requires
+// updating newPickerOptionCount in update.go.
+type newPickerOption struct {
+	key         string // single-letter shortcut
+	label       string // headline shown next to the cursor
+	description string // dim one-liner under the label
+}
+
+// newPickerOptions is the canonical list of source variants.
+// Mirrors workspace.SourceSpec — one row per variant so adding a
+// new SourceKind means adding a row here, a case in update.go's
+// dispatch, and a renderer below.
+var newPickerOptions = []newPickerOption{
+	{"n", "Fresh workspace", "random name, branch off main"},
+	{"p", "From a pull request", "check out a PR's branch (uses gh)"},
+	{"i", "From an issue", "implement work from an issue (uses gh)"},
+	{"b", "From a branch", "check out an existing branch"},
+}
+
+// renderNewFresh is step 2a — name input for the fresh-workspace
+// path. Same shape as the v0 modal that the picker replaced; this
+// is the simple/common case that most `n` presses end at.
+func (m *Model) renderNewFresh() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· fresh"))
+	b.WriteString("\n\n")
+	b.WriteString("  Workspace name (leave blank for a random one):\n\n  ")
+	b.WriteString(m.nameInput.View())
+	b.WriteString("\n\n")
+	b.WriteString(subtleStyle.Render("  enter to create  ·  esc to back"))
+	return b.String()
+}
+
+// renderNewComingSoon is the placeholder for the PR / Issue / Branch
+// sub-modals while they're being built out. Tells the user the path
+// they picked is coming, and that they can use the CLI flag in the
+// meantime. Removed once the live-list pickers ship.
+func (m *Model) renderNewComingSoon(label, key string) string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· " + label))
+	b.WriteString("\n\n")
+	b.WriteString("  This picker is being built — coming in the next commit.\n")
+	b.WriteString("  In the meantime, the CLI flag works:\n\n")
+	switch key {
+	case "p":
+		b.WriteString("    ")
+		b.WriteString(brokenStyle.Render("canopy new --pr <num>"))
+	case "i":
+		b.WriteString("    ")
+		b.WriteString(brokenStyle.Render("canopy new --issue <num>"))
+	case "b":
+		b.WriteString("    ")
+		b.WriteString(brokenStyle.Render("canopy new --branch <name>"))
 	}
-	return "  "
+	b.WriteString("\n\n")
+	b.WriteString(subtleStyle.Render("  esc to back"))
+	return b.String()
 }
 
 // renderConfirmDelete is the modal shown before tearing down a workspace.

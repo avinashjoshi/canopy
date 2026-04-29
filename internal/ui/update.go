@@ -95,17 +95,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 
-	// In newMode, route non-handled messages (mostly textinput-internal
-	// like cursor blink ticks) through the FOCUSED input. Both inputs
-	// receive the message but only the focused one acts on it; this
-	// matches the bubbles textinput contract.
-	if m.mode == newMode {
+	// In any new-flow sub-mode that owns a textinput, route non-key
+	// messages (cursor blink ticks, etc.) through the active input.
+	if m.mode == newFreshMode {
 		var cmd tea.Cmd
-		if m.newFocusIdx == 0 {
-			m.nameInput, cmd = m.nameInput.Update(msg)
-		} else {
-			m.sourceInput, cmd = m.sourceInput.Update(msg)
-		}
+		m.nameInput, cmd = m.nameInput.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -126,8 +120,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Mode-specific handling first.
 	switch m.mode {
-	case newMode:
-		return m.handleNewModeKey(msg)
+	case newPickerMode:
+		return m.handleNewPickerKey(msg)
+	case newFreshMode:
+		return m.handleNewFreshKey(msg)
+	case newPRMode, newIssueMode, newBranchMode:
+		// Placeholder: until the per-variant sub-modal lands in a
+		// follow-up commit, esc returns to the picker. Any other key
+		// is a no-op so a stray keystroke can't escape into listMode.
+		if msg.String() == "esc" {
+			m.openNewPicker()
+		}
+		return m, nil
 	case confirmDeleteMode:
 		return m.handleConfirmDeleteKey(msg)
 	case busyMode:
@@ -160,18 +164,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, refreshCmd(m.mgr, m.tc)
 
 	case "n":
-		// Open the new-workspace modal. Reset both inputs each time so
-		// a previous attempt doesn't leak into the fresh prompt.
-		// Focus starts on the name field (most common case: type a
-		// name and hit enter).
-		m.mode = newMode
-		m.nameInput.Reset()
-		m.sourceInput.Reset()
-		m.newFocusIdx = 0
-		m.newSpecErr = nil
-		m.nameInput.Focus()
-		m.sourceInput.Blur()
-		return m, textinputBlink()
+		// Open the new-workspace flow. Step 1 is the variant picker —
+		// pick fresh / pr / issue / branch via single keystroke.
+		m.openNewPicker()
+		return m, nil
 
 	case "d":
 		// Open the confirm-delete modal for the selected row. Refuses
@@ -376,37 +372,103 @@ type attachAfterMsg struct {
 	session string
 }
 
-// handleNewModeKey is the keymap while the new-workspace modal is
-// open. Two inputs (name + source spec); tab/shift-tab cycles focus
-// between them. Esc cancels. Enter submits — parses the source spec
-// first, surfaces a parse error inline if invalid (so the user can
-// fix without leaving the modal). Empty source means a fresh
-// workspace, same as canopy new with no flags.
-func (m *Model) handleNewModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// openNewPicker resets state and opens the variant picker. Called
+// from the listMode 'n' keypress and from sub-modal esc handlers
+// (back-one-step). Idempotent; safe to call from any mode.
+func (m *Model) openNewPicker() {
+	m.mode = newPickerMode
+	m.newPickerCursor = 0
+	m.nameInput.Reset()
+	m.nameInput.Blur()
+}
+
+// handleNewPickerKey is the keymap for the variant picker (step 1
+// of the new-workspace flow). Single-letter shortcuts launch each
+// sub-modal directly; arrow-then-enter is the keyboard-discoverable
+// alternative for users who scan before they type.
+//
+// Esc returns to listMode (one step back). q is suppressed here so
+// the user can't accidentally quit canopy from inside the picker;
+// they have to esc back first. ctrl+c is the global escape hatch.
+func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.mode = listMode
-		m.nameInput.Blur()
-		m.sourceInput.Blur()
-		m.newSpecErr = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+
+	// Single-key shortcuts — launch the corresponding sub-modal.
+	case "n", "f":
+		// 'n' = "new (fresh)" — same letter as the keymap, no surprise.
+		// 'f' is an alias if the user thinks "fresh".
+		return m.openNewFresh(), textinputBlink()
+	case "p":
+		m.mode = newPRMode
+		return m, nil
+	case "i":
+		m.mode = newIssueMode
+		return m, nil
+	case "b":
+		m.mode = newBranchMode
 		return m, nil
 
-	case "tab", "down":
-		m.toggleNewFocus(1)
-		return m, nil
-	case "shift+tab", "up":
-		m.toggleNewFocus(-1)
-		return m, nil
-
-	case "enter":
-		// Parse the source spec first so a typo doesn't cost the
-		// user their typed-in name.
-		spec, err := workspace.ParseSourceSpec(m.sourceInput.Value())
-		if err != nil {
-			m.newSpecErr = err
-			return m, nil
+	// Arrow nav for keyboard-discovery users.
+	case "up", "k":
+		if m.newPickerCursor > 0 {
+			m.newPickerCursor--
 		}
+		return m, nil
+	case "down", "j":
+		if m.newPickerCursor < newPickerOptionCount-1 {
+			m.newPickerCursor++
+		}
+		return m, nil
+	case "enter":
+		// Same dispatch as the letter shortcuts, just keyed off cursor.
+		switch m.newPickerCursor {
+		case 0:
+			return m.openNewFresh(), textinputBlink()
+		case 1:
+			m.mode = newPRMode
+		case 2:
+			m.mode = newIssueMode
+		case 3:
+			m.mode = newBranchMode
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// newPickerOptionCount is the number of options in the variant
+// picker. Used to bound cursor nav. Update if newPickerOption is
+// extended.
+const newPickerOptionCount = 4
+
+// openNewFresh prepares the fresh-workspace sub-modal (step 2a).
+// Reused by the picker's 'n'/'f'/enter-on-Fresh dispatch and any
+// future direct-entry shortcut. Returns the model so the caller can
+// chain the textinputBlink cmd.
+func (m *Model) openNewFresh() *Model {
+	m.mode = newFreshMode
+	m.nameInput.Reset()
+	m.nameInput.Focus()
+	return m
+}
+
+// handleNewFreshKey is the keymap for the fresh-workspace name input
+// (step 2a). Esc steps back to the picker. Enter submits with the
+// typed name (or empty → namegen). Anything else falls through to
+// the textinput.
+func (m *Model) handleNewFreshKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.openNewPicker()
+		return m, nil
+	case "enter":
 		name := m.nameInput.Value()
+		spec := workspace.SourceSpec{} // fresh = zero spec
 		m.busyOp = busyOpCreate
 		m.busyTitle = newBusyTitle(name, spec)
 		m.busyDone = false
@@ -414,42 +476,18 @@ func (m *Model) handleNewModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.busyErr = nil
 		m.mode = busyMode
 		m.nameInput.Blur()
-		m.sourceInput.Blur()
-		m.newSpecErr = nil
 		return m, createCmd(m.mgr, name, spec)
 	}
-
-	// Forward to the focused textinput for character handling.
-	// Clear the spec-error on any keystroke so the inline hint is
-	// only sticky for ONE failed enter (not every redraw afterward).
-	m.newSpecErr = nil
 	var cmd tea.Cmd
-	if m.newFocusIdx == 0 {
-		m.nameInput, cmd = m.nameInput.Update(msg)
-	} else {
-		m.sourceInput, cmd = m.sourceInput.Update(msg)
-	}
+	m.nameInput, cmd = m.nameInput.Update(msg)
 	return m, cmd
-}
-
-// toggleNewFocus flips focus between the name (0) and source (1)
-// inputs. delta is +1 for tab, -1 for shift-tab; we wrap mod-2.
-func (m *Model) toggleNewFocus(delta int) {
-	m.newFocusIdx = (m.newFocusIdx + delta + 2) % 2
-	if m.newFocusIdx == 0 {
-		m.nameInput.Focus()
-		m.sourceInput.Blur()
-	} else {
-		m.nameInput.Blur()
-		m.sourceInput.Focus()
-	}
 }
 
 // newBusyTitle picks the busy-mode title shown while a Create
 // operation is in flight. Customized per source variant so the user
-// sees "Fetching PR #1234 ..." instead of a generic spinner — useful
-// because the gh + git fetch can take a few seconds before scripts.setup
-// even starts.
+// sees "Checking out PR #1234..." instead of a generic spinner —
+// useful because the gh + git fetch can take a few seconds before
+// scripts.setup even starts.
 func newBusyTitle(name string, spec workspace.SourceSpec) string {
 	switch {
 	case spec.PR > 0:
