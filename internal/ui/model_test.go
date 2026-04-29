@@ -119,9 +119,16 @@ func TestHandleKey_TabSwitch(t *testing.T) {
 // no-op when the user is on the Global tab — n requires a current-project
 // Manager because it walks up canopy.json from cwd. The asymmetry with
 // d/R (which work cross-project) is documented in the unification plan.
+//
+// E1 follow-on: with the bindings-table refactor, an unavailable binding
+// doesn't fire its Action AT ALL — no err set, no mode change, completely
+// silent. This is cleaner than the v0.7 "set m.err with a hint" approach
+// because the help line already hides the key, so a user who types `n`
+// on the Global tab sees nothing happen, which matches the visual cue.
 func TestHandleKey_NDisabledOnGlobalTab(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabGlobal
+	m.mgr = nil // Global mode: no current-project Manager
 	m.allRows = []Row{
 		{Project: "other", ProjectRoot: "/some/other", Name: "ws-1", Status: state.StatusReady},
 	}
@@ -134,8 +141,39 @@ func TestHandleKey_NDisabledOnGlobalTab(t *testing.T) {
 	if cmd != nil {
 		t.Errorf("after n on Global tab: cmd != nil; want nil (no-op)")
 	}
-	if got.err == nil {
-		t.Errorf("expected status-line hint after n on Global tab; got nil err")
+	// Bindings table filters by Available before dispatch, so no err
+	// is set on disabled-key press. Visual cue (n missing from help)
+	// is the user-facing signal.
+}
+
+// TestAvailableNewWorkspace exercises the binding's Available predicate
+// directly. Both the help-line filter AND the dispatch gate read from
+// this; one source of truth for "is n usable right now."
+func TestAvailableNewWorkspace(t *testing.T) {
+	cases := []struct {
+		name string
+		mgr  bool
+		tab  tabKind
+		want bool
+	}{
+		{"mgr + Local → enabled", true, tabLocal, true},
+		{"mgr + Global → disabled (cross-project n is meaningless)", true, tabGlobal, false},
+		{"no mgr + Local → disabled (no canopy.json context)", false, tabLocal, false},
+		{"no mgr + Global → disabled", false, tabGlobal, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(false)
+			if !tc.mgr {
+				m.mgr = nil
+			}
+			m.tab = tc.tab
+			got := availableNewWorkspace(m)
+			if got != tc.want {
+				t.Errorf("availableNewWorkspace(mgr=%v, tab=%v) = %v; want %v",
+					tc.mgr, tc.tab, got, tc.want)
+			}
+		})
 	}
 }
 

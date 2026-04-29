@@ -243,167 +243,153 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSearchKey(msg)
 	}
 
-	// listMode keymap.
-	switch msg.String() {
-	case "q", "ctrl+c":
-		return m, tea.Quit
-
-	case "?":
-		m.showHelp = true
-		return m, nil
-
-	case "r":
-		// Manual refresh. Same flow as the initial load.
-		return m, refreshCmd(m.mgr, m.tc, m.store)
-
-	case "tab":
-		// Switch tab Local ↔ Global. The next refresh applies the new
-		// filter via filteredRows(); rows themselves are unchanged.
-		// Tab is a no-op when m.allRows isn't loaded yet (very first
-		// frame before refresh returns).
-		if m.tab == tabLocal {
-			m.tab = tabGlobal
-		} else {
-			m.tab = tabLocal
+	// listMode keymap: iterate the bindings table; first match-and-
+	// available fires its Action. Order matches listModeBindings —
+	// no shadowing concerns because the bindings have disjoint Keys
+	// (k.Matches is exact-match per binding, not a regex).
+	for _, b := range listModeBindings {
+		if b.Matches(msg, m) {
+			return b.Action(m, msg)
 		}
-		// Reset cursor to top of the new tab's filtered set so a
-		// long-list scroll position doesn't carry over confusingly.
-		m.cursor = 0
-		return m, nil
-
-	case "/":
-		// Enter fuzzy-search mode. The next keystroke is captured into
-		// searchQuery via handleSearchKey.
-		m.searchMode = true
-		m.searchQuery = ""
-		return m, nil
-
-	case "n":
-		// Open the new-workspace flow. Local-tab-only because `n`
-		// requires a current-project Manager (canopy.json walk-up). On
-		// the Global tab this binding is hidden from help via its
-		// rendered availability state; if a user types `n` anyway we
-		// surface a status-line hint pointing at how to enable it.
-		if m.mgr == nil {
-			m.err = fmt.Errorf("`n` (new workspace) is only available when canopy is invoked from inside a project — cd to a repo first")
-			return m, nil
-		}
-		if m.tab != tabLocal {
-			m.err = fmt.Errorf("`n` (new workspace) only works on the Local tab — press tab to switch, or cd to that project's repo first")
-			return m, nil
-		}
-		m.openNewPicker()
-		return m, nil
-
-	case "d":
-		// Open the confirm-delete modal for the selected row. Refuses
-		// to delete the synthetic main row (canopy main is ephemeral —
-		// kill the tmux session externally if you want it gone).
-		//
-		// v0.6: run the workspace safety preflight before showing the
-		// modal. When hangs are detected (uncommitted/unpushed/open-PR),
-		// the modal renders the list and requires a capital F to force,
-		// matching the CLI's `canopy rm --force` semantics. When clean,
-		// the modal shows today's normal y/N prompt.
-		//
-		// v0.8: works on cross-project rows (Global tab) by constructing
-		// a transient Manager scoped to the row's ProjectRoot. The
-		// confirm modal renders the project name as the safety net.
-		rows := m.filteredRows()
-		if len(rows) == 0 {
-			return m, nil
-		}
-		row := rows[m.cursor]
-		if row.IsMain {
-			m.err = fmt.Errorf("can't delete the main session via canopy rm — use `tmux kill-session -t %s` if you want it gone",
-				row.TmuxSession)
-			return m, nil
-		}
-		mgr, err := m.managerForRow(row)
-		if err != nil {
-			m.err = err
-			return m, nil
-		}
-		// SafetyPreflight returns nil hangs for orphan workspaces (worktree
-		// dir gone) — degrade gracefully. Errors are non-fatal; we proceed
-		// with no hangs and let Remove handle the not-found case if state
-		// diverged.
-		hangs, _ := mgr.SafetyPreflight(context.Background(), row.Name)
-		m.mode = confirmDeleteMode
-		m.deleteTarget = row.Name
-		m.deleteHangs = hangs
-		return m, nil
-
-	case "enter":
-		// Attach to the selected workspace. Resurrects first if the
-		// workspace is in `stopped` state. The handoff happens via
-		// tea.ExecProcess: tmux takes over the terminal, the user
-		// detaches with prefix-d, control returns here, refreshCmd
-		// updates the rendered status.
-		return m.attachSelected()
-
-	case "R":
-		// Retry scripts.setup. Capital R so it doesn't collide with
-		// lowercase r (refresh).
-		//
-		// v0.6 behavior: only allowed on broken status; non-broken
-		// errored loudly because re-running setup on a healthy workspace
-		// can clobber state (db reseed, env regen) — the CLI gates this
-		// behind --force.
-		//
-		// v0.8 (D3/CP1): on non-broken rows, prompt y/N confirm modal
-		// instead of erroring. Same friction as --force, but the path
-		// exists: confirm to proceed, abort to back out. Cross-project
-		// rows go through the same managerForRow path d uses.
-		rows := m.filteredRows()
-		if len(rows) == 0 {
-			return m, nil
-		}
-		row := rows[m.cursor]
-		if row.IsMain {
-			return m, nil
-		}
-		if _, err := m.managerForRow(row); err != nil {
-			m.err = err
-			return m, nil
-		}
-		if row.Status != state.StatusBroken {
-			// D3/CP1: open the y/N confirm gate.
-			m.mode = confirmRetryMode
-			m.retryTarget = row.Name
-			return m, nil
-		}
-		// Already broken — no friction, run setup directly.
-		mgr, _ := m.managerForRow(row) // already validated above
-		m.mode = busyMode
-		m.busyOp = busyOpRetry
-		m.busyTitle = fmt.Sprintf("Retrying setup for %q...", row.Name)
-		m.busyDone = false
-		m.busyOutput = ""
-		m.busyErr = nil
-		return m, retryCmdUI(mgr, row.Name)
-
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-		return m, nil
-
-	case "down", "j":
-		if m.cursor < len(m.filteredRows())-1 {
-			m.cursor++
-		}
-		return m, nil
-
-	case "g", "home":
-		m.cursor = 0
-		return m, nil
-
-	case "G", "end":
-		m.cursor = max0(len(m.filteredRows()) - 1)
-		return m, nil
 	}
 
+	return m, nil
+}
+
+// ─── listMode action handlers ──────────────────────────────────────
+// Each handler is the body that used to live inline in handleKey's
+// switch statement. Extracted as named functions so the keymap.go
+// bindings table can reference them as data. Same return shape
+// (tea.Model, tea.Cmd) as the Bubbletea Update contract.
+
+func actionQuit(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return m, tea.Quit
+}
+
+func actionHelpToggle(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.showHelp = true
+	return m, nil
+}
+
+func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return m, refreshCmd(m.mgr, m.tc, m.store)
+}
+
+// actionTabSwitch flips Local ↔ Global. Cursor resets to top of the new
+// tab's filtered set so a long-list scroll position doesn't carry over
+// confusingly when the user is mentally context-switching.
+func actionTabSwitch(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.tab == tabLocal {
+		m.tab = tabGlobal
+	} else {
+		m.tab = tabLocal
+	}
+	m.cursor = 0
+	return m, nil
+}
+
+// actionSearchEntry enters fuzzy-search mode. Subsequent keystrokes are
+// captured into searchQuery via handleSearchKey (which the search-mode
+// bypass at the top of handleKey routes to).
+func actionSearchEntry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.searchMode = true
+	m.searchQuery = ""
+	return m, nil
+}
+
+// actionNewWorkspace opens the new-workspace variant picker. Gated by
+// availableNewWorkspace (mgr non-nil + Local tab) — if the user types `n`
+// while disabled, this Action never fires (the bindings table filters by
+// Available before dispatching).
+func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.openNewPicker()
+	return m, nil
+}
+
+// actionDelete opens the confirm-delete modal for the cursor row. Cross-
+// project rows construct a transient Manager via managerForRow; same
+// path as the same-project case so the confirm modal copy is uniform.
+func actionDelete(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	rows := m.filteredRows()
+	if len(rows) == 0 {
+		return m, nil
+	}
+	row := rows[m.cursor]
+	if row.IsMain {
+		m.err = fmt.Errorf("can't delete the main session via canopy rm — use `tmux kill-session -t %s` if you want it gone",
+			row.TmuxSession)
+		return m, nil
+	}
+	mgr, err := m.managerForRow(row)
+	if err != nil {
+		m.err = err
+		return m, nil
+	}
+	hangs, _ := mgr.SafetyPreflight(context.Background(), row.Name)
+	m.mode = confirmDeleteMode
+	m.deleteTarget = row.Name
+	m.deleteHangs = hangs
+	return m, nil
+}
+
+// actionAttach is the enter-key flow. Resurrects stopped workspaces
+// first; popup-mode uses switch-client + tea.Quit instead of attach.
+func actionAttach(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return m.attachSelected()
+}
+
+// actionRetry handles `R`. v0.6: only ran on broken (no friction).
+// v0.8 (D3/CP1): non-broken triggers the y/N gate; broken still runs
+// setup directly. Cross-project goes through managerForRow.
+func actionRetry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	rows := m.filteredRows()
+	if len(rows) == 0 {
+		return m, nil
+	}
+	row := rows[m.cursor]
+	if row.IsMain {
+		return m, nil
+	}
+	if _, err := m.managerForRow(row); err != nil {
+		m.err = err
+		return m, nil
+	}
+	if row.Status != state.StatusBroken {
+		m.mode = confirmRetryMode
+		m.retryTarget = row.Name
+		return m, nil
+	}
+	mgr, _ := m.managerForRow(row) // already validated above
+	m.mode = busyMode
+	m.busyOp = busyOpRetry
+	m.busyTitle = fmt.Sprintf("Retrying setup for %q...", row.Name)
+	m.busyDone = false
+	m.busyOutput = ""
+	m.busyErr = nil
+	return m, retryCmdUI(mgr, row.Name)
+}
+
+func actionCursorUp(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.cursor > 0 {
+		m.cursor--
+	}
+	return m, nil
+}
+
+func actionCursorDown(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.cursor < len(m.filteredRows())-1 {
+		m.cursor++
+	}
+	return m, nil
+}
+
+func actionCursorTop(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.cursor = 0
+	return m, nil
+}
+
+func actionCursorBottom(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.cursor = max0(len(m.filteredRows()) - 1)
 	return m, nil
 }
 

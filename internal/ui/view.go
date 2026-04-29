@@ -314,23 +314,30 @@ func hasMultipleProjects(rows []Row) bool {
 }
 
 // renderHelpLine is the one-line keybind cheat at the bottom of the
-// main view. The full help (?) shows more.
+// main view. Driven by the listModeBindings table — bindings whose
+// Available returns false are filtered out, so e.g. `n` disappears
+// from help when the user is on the Global tab without a Manager.
+//
+// Format: each binding renders as "<keys> <help>" joined by a separator.
+// Up/down/g/G are folded into a single "↑/↓ navigate" entry — they're
+// muscle-memory keys whose individual help would just be noise.
 func (m *Model) renderHelpLine() string {
-	keys := []string{
-		"↑/↓ navigate",
-		"tab switch-tab",
-		"/ search",
-		"enter attach",
+	parts := []string{"↑/↓ navigate"}
+	// Skip the four cursor-nav bindings (handled by the static
+	// "↑/↓ navigate" entry above) so we don't double-render them.
+	skip := map[string]bool{"up": true, "down": true, "g": true, "G": true}
+	for _, b := range listModeBindings {
+		if !b.IsAvailable(m) {
+			continue
+		}
+		keys := b.K.Keys()
+		if len(keys) == 0 || skip[keys[0]] {
+			continue
+		}
+		h := b.K.Help()
+		parts = append(parts, h.Key+" "+h.Desc)
 	}
-	// `n` is hidden from the help line on the Global tab — it's a
-	// project-context binding (CP4 / D6 asymmetry: n requires a
-	// canopy.json walk-up, d/R don't).
-	if m.tab == tabLocal && m.mgr != nil {
-		keys = append(keys, "n new")
-	}
-	keys = append(keys, "d delete", "R retry", "r refresh")
-	keys = append(keys, "? help", "q quit")
-	return subtleStyle.Render(strings.Join(keys, "  ·  "))
+	return subtleStyle.Render(strings.Join(parts, "  ·  "))
 }
 
 // renderNewPicker is step 1 of the new-workspace flow — the variant
