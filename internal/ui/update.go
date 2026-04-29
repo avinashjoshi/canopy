@@ -49,9 +49,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, loadRowHintsCmds(m.allRows)
 
 	case rowHintsMsg:
-		// Late-arriving lifecycle detector result. Forward to
-		// projectlist's UpdateRowHints which merges by (project, name).
-		m.list.UpdateRowHints(msg.project, msg.name, msg.hints)
+		// Late-arriving lifecycle detector result. Merge into m.allRows
+		// (the source of truth) by (project, name) THEN re-push the
+		// filtered set to projectlist. Mutating only the projectlist's
+		// rows would lose hints on the next tab-switch or search-mutation
+		// SetRows call (which projects from m.allRows).
+		for i := range m.allRows {
+			if m.allRows[i].Project == msg.project && m.allRows[i].Name == msg.name {
+				m.allRows[i].Hints = msg.hints
+				break
+			}
+		}
+		m.list.SetRows(m.filteredRows())
 		return m, nil
 
 	case prListLoadedMsg:
