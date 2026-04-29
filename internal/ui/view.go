@@ -135,18 +135,50 @@ func (m *Model) renderHelpLine() string {
 	return subtleStyle.Render(strings.Join(keys, "  ·  "))
 }
 
-// renderNewModal is the new-workspace prompt. Shows the textinput plus
-// a one-line hint. Esc cancels, Enter submits.
+// renderNewModal is the new-workspace prompt. Two fields (name +
+// source spec); the focused one gets a `>` indicator so the user can
+// tell which receives keystrokes. Tab cycles. Enter submits. Esc
+// cancels.
 func (m *Model) renderNewModal() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("canopy new") + " " + subtleStyle.Render(m.projectName))
 	b.WriteString("\n\n")
-	b.WriteString("  Workspace name (leave blank for a random one):")
-	b.WriteString("\n\n  ")
+
+	// Field 1: workspace name.
+	b.WriteString(focusMarker(m.newFocusIdx == 0))
+	b.WriteString("Workspace name (leave blank for a random one):")
+	b.WriteString("\n  ")
 	b.WriteString(m.nameInput.View())
 	b.WriteString("\n\n")
-	b.WriteString(subtleStyle.Render("  enter to create  ·  esc to cancel"))
+
+	// Field 2: source spec.
+	b.WriteString(focusMarker(m.newFocusIdx == 1))
+	b.WriteString("Source (leave blank for fresh; or `pr <num>` / `issue <num>` / `branch <name>`):")
+	b.WriteString("\n  ")
+	b.WriteString(m.sourceInput.View())
+	b.WriteString("\n")
+
+	// One-line parse-error hint, only when the most recent submit
+	// failed validation.
+	if m.newSpecErr != nil {
+		b.WriteString("\n  ")
+		b.WriteString(errorStyle.Render(fmt.Sprintf("source: %v", m.newSpecErr)))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render("  tab to switch field  ·  enter to create  ·  esc to cancel"))
 	return b.String()
+}
+
+// focusMarker returns the two-char prefix shown to the left of each
+// modal field — `>` when focused, two spaces otherwise. Subtle
+// indicator that doesn't compete with the textinput's own cursor.
+func focusMarker(focused bool) string {
+	if focused {
+		return brokenStyle.Render("> ")
+	}
+	return "  "
 }
 
 // renderConfirmDelete is the modal shown before tearing down a workspace.

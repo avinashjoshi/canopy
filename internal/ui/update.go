@@ -96,10 +96,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// In newMode, route non-handled messages (mostly textinput-internal
-	// like cursor blink ticks) through the input.
+	// like cursor blink ticks) through the FOCUSED input. Both inputs
+	// receive the message but only the focused one acts on it; this
+	// matches the bubbles textinput contract.
 	if m.mode == newMode {
 		var cmd tea.Cmd
-		m.nameInput, cmd = m.nameInput.Update(msg)
+		if m.newFocusIdx == 0 {
+			m.nameInput, cmd = m.nameInput.Update(msg)
+		} else {
+			m.sourceInput, cmd = m.sourceInput.Update(msg)
+		}
 		return m, cmd
 	}
 	return m, nil
@@ -154,11 +160,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, refreshCmd(m.mgr, m.tc)
 
 	case "n":
-		// Open the new-workspace modal. Reset input each time so a
-		// previous attempt doesn't leak into the fresh prompt.
+		// Open the new-workspace modal. Reset both inputs each time so
+		// a previous attempt doesn't leak into the fresh prompt.
+		// Focus starts on the name field (most common case: type a
+		// name and hit enter).
 		m.mode = newMode
 		m.nameInput.Reset()
+		m.sourceInput.Reset()
+		m.newFocusIdx = 0
+		m.newSpecErr = nil
 		m.nameInput.Focus()
+		m.sourceInput.Blur()
 		return m, textinputBlink()
 
 	case "d":
@@ -364,34 +376,93 @@ type attachAfterMsg struct {
 	session string
 }
 
-// handleNewModeKey is the keymap while the new-workspace modal is open.
-// Esc cancels back to the list. Enter submits with whatever's typed
-// (empty -> namegen picks a random name). Anything else falls through
-// to textinput's own Update.
+// handleNewModeKey is the keymap while the new-workspace modal is
+// open. Two inputs (name + source spec); tab/shift-tab cycles focus
+// between them. Esc cancels. Enter submits — parses the source spec
+// first, surfaces a parse error inline if invalid (so the user can
+// fix without leaving the modal). Empty source means a fresh
+// workspace, same as canopy new with no flags.
 func (m *Model) handleNewModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.mode = listMode
 		m.nameInput.Blur()
+		m.sourceInput.Blur()
+		m.newSpecErr = nil
 		return m, nil
+
+	case "tab", "down":
+		m.toggleNewFocus(1)
+		return m, nil
+	case "shift+tab", "up":
+		m.toggleNewFocus(-1)
+		return m, nil
+
 	case "enter":
-		name := m.nameInput.Value()
-		m.mode = busyMode
-		m.busyOp = busyOpCreate
-		m.busyTitle = "Creating workspace..."
-		if name != "" {
-			m.busyTitle = fmt.Sprintf("Creating workspace %q...", name)
+		// Parse the source spec first so a typo doesn't cost the
+		// user their typed-in name.
+		spec, err := workspace.ParseSourceSpec(m.sourceInput.Value())
+		if err != nil {
+			m.newSpecErr = err
+			return m, nil
 		}
+		name := m.nameInput.Value()
+		m.busyOp = busyOpCreate
+		m.busyTitle = newBusyTitle(name, spec)
 		m.busyDone = false
 		m.busyOutput = ""
 		m.busyErr = nil
+		m.mode = busyMode
 		m.nameInput.Blur()
-		return m, createCmd(m.mgr, name)
+		m.sourceInput.Blur()
+		m.newSpecErr = nil
+		return m, createCmd(m.mgr, name, spec)
 	}
-	// Forward to textinput for character handling.
+
+	// Forward to the focused textinput for character handling.
+	// Clear the spec-error on any keystroke so the inline hint is
+	// only sticky for ONE failed enter (not every redraw afterward).
+	m.newSpecErr = nil
 	var cmd tea.Cmd
-	m.nameInput, cmd = m.nameInput.Update(msg)
+	if m.newFocusIdx == 0 {
+		m.nameInput, cmd = m.nameInput.Update(msg)
+	} else {
+		m.sourceInput, cmd = m.sourceInput.Update(msg)
+	}
 	return m, cmd
+}
+
+// toggleNewFocus flips focus between the name (0) and source (1)
+// inputs. delta is +1 for tab, -1 for shift-tab; we wrap mod-2.
+func (m *Model) toggleNewFocus(delta int) {
+	m.newFocusIdx = (m.newFocusIdx + delta + 2) % 2
+	if m.newFocusIdx == 0 {
+		m.nameInput.Focus()
+		m.sourceInput.Blur()
+	} else {
+		m.nameInput.Blur()
+		m.sourceInput.Focus()
+	}
+}
+
+// newBusyTitle picks the busy-mode title shown while a Create
+// operation is in flight. Customized per source variant so the user
+// sees "Fetching PR #1234 ..." instead of a generic spinner — useful
+// because the gh + git fetch can take a few seconds before scripts.setup
+// even starts.
+func newBusyTitle(name string, spec workspace.SourceSpec) string {
+	switch {
+	case spec.PR > 0:
+		return fmt.Sprintf("Checking out PR #%d...", spec.PR)
+	case spec.Issue > 0:
+		return fmt.Sprintf("Setting up workspace for issue #%d...", spec.Issue)
+	case spec.Branch != "":
+		return fmt.Sprintf("Checking out branch %q...", spec.Branch)
+	}
+	if name != "" {
+		return fmt.Sprintf("Creating workspace %q...", name)
+	}
+	return "Creating workspace..."
 }
 
 // handleBusyModeKey: the busy view shows the in-progress or completed
@@ -523,14 +594,26 @@ func removeCmd(mgr *workspace.Manager, name string) tea.Cmd {
 	}
 }
 
-// createCmd kicks off Manager.Create asynchronously. Captures the
-// streamed setup output into a single buffer (no live streaming in v0;
-// the user sees output after Create returns). Sends createDoneMsg back
-// to Update when finished.
-func createCmd(mgr *workspace.Manager, name string) tea.Cmd {
+// createCmd kicks off Manager.Create asynchronously. spec drives the
+// source variant (zero spec = fresh workspace; populated spec =
+// pr/issue/branch). The gh shellouts + git fetches happen inside
+// ResolveSource, so the goroutine handles the whole "fetch then
+// setup" sequence without blocking the TUI. Captures the streamed
+// setup output into a single buffer; sends createDoneMsg back to
+// Update when finished.
+func createCmd(mgr *workspace.Manager, name string, spec workspace.SourceSpec) tea.Cmd {
 	return func() tea.Msg {
 		var buf bytes.Buffer
-		ws, err := mgr.Create(context.Background(), name, workspace.CreateOptions{}, &buf, &buf)
+		ctx := context.Background()
+		opts, suggestedName, err := mgr.ResolveSource(ctx, spec)
+		if err != nil {
+			return createDoneMsg{output: buf.String(), err: err}
+		}
+		// Explicit name beats source-derived suggestion beats namegen.
+		if name == "" {
+			name = suggestedName
+		}
+		ws, err := mgr.Create(ctx, name, opts, &buf, &buf)
 		msg := createDoneMsg{output: buf.String(), err: err}
 		if err == nil && ws != nil {
 			msg.tmuxSession = ws.TmuxSession

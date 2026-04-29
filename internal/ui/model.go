@@ -101,7 +101,23 @@ type Model struct {
 	err      error // last operational error to surface; cleared on next refresh
 
 	// New-workspace modal (mode == newMode).
-	nameInput textinput.Model
+	//
+	// Two text inputs: workspace name (optional) and source spec
+	// (optional, parsed via workspace.ParseSourceSpec). Tab/shift-tab
+	// cycles focus between them; enter on either submits.
+	//
+	// newFocusIdx: 0 = name, 1 = source. Mirrors the focus a typical
+	// tab-modal expects so users hitting tab from the name field land
+	// on source.
+	nameInput   textinput.Model
+	sourceInput textinput.Model
+	newFocusIdx int
+
+	// newSpecErr surfaces source-spec parse errors from the most
+	// recent submit attempt back into renderNewModal as a one-line
+	// hint under the inputs. Cleared on every keystroke so the user
+	// sees feedback only for their most recent enter.
+	newSpecErr error
 
 	// Confirm-delete modal (mode == confirmDeleteMode).
 	deleteTarget string   // workspace name pending removal
@@ -135,11 +151,18 @@ func New(mgr *workspace.Manager) *Model {
 	ti.Placeholder = "leave blank for a random name"
 	ti.CharLimit = 60
 	ti.Width = 40
+
+	si := textinput.New()
+	si.Placeholder = "blank for fresh, or `pr 1234` / `issue 42` / `branch feat/x`"
+	si.CharLimit = 120
+	si.Width = 60
+
 	return &Model{
 		mgr:         mgr,
 		tc:          mgr.Tmux,
 		projectName: mgr.Cfg.Project,
 		nameInput:   ti,
+		sourceInput: si,
 		mode:        listMode,
 		fromGlobal:  os.Getenv("CANOPY_FROM_GLOBAL") == "1",
 	}

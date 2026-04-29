@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/config"
@@ -17,9 +18,14 @@ import (
 // the env-var read path go through New() instead.
 func newTestModel(fromGlobal bool) *Model {
 	return &Model{
-		mgr:         &workspace.Manager{Tmux: tmux.WithSocket("canopy-test")},
+		mgr: &workspace.Manager{
+			Tmux: tmux.WithSocket("canopy-test"),
+			Cfg:  &config.Config{Project: "test-project", ProjectRoot: "/tmp/test-project"},
+		},
 		tc:          tmux.WithSocket("canopy-test"),
 		projectName: "test-project",
+		nameInput:   textinput.New(),
+		sourceInput: textinput.New(),
 		mode:        listMode,
 		fromGlobal:  fromGlobal,
 	}
@@ -287,6 +293,113 @@ func TestRenderTable_NoHintsNoBadges(t *testing.T) {
 		if strings.Contains(out, badge) {
 			t.Errorf("unexpected badge %q in row without hints:\n%s", badge, out)
 		}
+	}
+}
+
+// TestNewModal_TabCyclesFocus: tab/shift-tab move focus between the
+// name and source inputs. Verifies the contract the modal renderer
+// depends on (focus marker + which input receives keystrokes).
+func TestNewModal_TabCyclesFocus(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newMode
+	m.newFocusIdx = 0
+	m.nameInput.Focus()
+
+	// Tab → focus moves to source.
+	model, _ := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyTab})
+	m = model.(*Model)
+	if m.newFocusIdx != 1 {
+		t.Errorf("after tab: focusIdx = %d; want 1", m.newFocusIdx)
+	}
+	// Shift-tab → back to name.
+	model, _ = m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = model.(*Model)
+	if m.newFocusIdx != 0 {
+		t.Errorf("after shift-tab: focusIdx = %d; want 0", m.newFocusIdx)
+	}
+}
+
+// TestNewModal_EscCancels: esc closes the modal without dispatching
+// a create cmd. The user's typed-in name/source isn't preserved
+// across cancel — opening 'n' again starts fresh.
+func TestNewModal_EscCancels(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newMode
+	m.nameInput.SetValue("foo")
+	m.sourceInput.SetValue("pr 42")
+
+	model, cmd := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = model.(*Model)
+	if m.mode != listMode {
+		t.Errorf("esc should return to listMode; got %v", m.mode)
+	}
+	if cmd != nil {
+		t.Errorf("esc should not produce a cmd; got %T", cmd)
+	}
+}
+
+// TestNewModal_EnterParsesSource: a populated source spec parses,
+// the modal flips to busyMode, and the busy title reflects the
+// source variant. Doesn't actually run create (no live mgr) — the
+// returned cmd is the goroutine that would, if executed.
+func TestNewModal_EnterParsesSource(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newMode
+	m.sourceInput.SetValue("pr 1234")
+
+	model, cmd := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("enter on valid spec should flip to busyMode; got %v", m.mode)
+	}
+	if !strings.Contains(m.busyTitle, "PR #1234") {
+		t.Errorf("busy title should mention PR #1234; got %q", m.busyTitle)
+	}
+	if cmd == nil {
+		t.Errorf("expected create cmd; got nil")
+	}
+}
+
+// TestNewModal_EnterInvalidSourceShowsError: a malformed source
+// keeps the modal open and surfaces the parse error inline. The
+// user can fix and re-submit without losing their typed-in name.
+func TestNewModal_EnterInvalidSourceShowsError(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newMode
+	m.nameInput.SetValue("preserved-name")
+	m.sourceInput.SetValue("wat 5") // unknown kind
+
+	model, _ := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != newMode {
+		t.Errorf("invalid spec should keep modal open; got mode %v", m.mode)
+	}
+	if m.newSpecErr == nil {
+		t.Errorf("expected newSpecErr to be set on parse failure")
+	}
+	if m.nameInput.Value() != "preserved-name" {
+		t.Errorf("name should be preserved across failed submit; got %q", m.nameInput.Value())
+	}
+}
+
+// TestNewModal_EnterEmptySpec: empty source field = fresh workspace.
+// Same shape as canopy new with no flags.
+func TestNewModal_EnterEmptySpec(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newMode
+	m.nameInput.SetValue("fresh-one")
+	// sourceInput intentionally left empty
+
+	model, cmd := m.handleNewModeKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("expected busyMode; got %v", m.mode)
+	}
+	if cmd == nil {
+		t.Errorf("expected create cmd")
+	}
+	if !strings.Contains(m.busyTitle, "fresh-one") {
+		t.Errorf("busy title should mention name on fresh path; got %q", m.busyTitle)
 	}
 }
 
