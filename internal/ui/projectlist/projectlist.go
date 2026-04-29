@@ -299,22 +299,23 @@ func (m Model) renderTable() string {
 
 		var line string
 		if isSelected {
-			// Selected row: identical 4-space leading indent to
-			// non-selected rows (so columns don't shift left when
-			// the cursor moves), built as PLAIN text (no inner ANSI
-			// codes that would break selectionStyle's outer bg
-			// propagation), then wrapped uniformly with selection bg
-			// padded to terminal width.
+			// Selected row: simple `>` caret in bold white at the
+			// start, then plain content (no inner ANSI) wrapped with
+			// the selection bg padded to terminal width.
 			//
-			// No caret/marker glyph — the bg highlight alone is the
-			// "this is selected" signal. Lazyworktree-style: cleaner,
-			// no jarring column shift, no extra glyph competing with
-			// the row content.
+			// The caret prefix is `>   ` (4 cells: chevron + 3 spaces),
+			// which matches non-selected rows' 4-space leading indent
+			// — columns don't shift left/right as the cursor moves.
+			//
+			// Caret is rendered as part of the same plain string so
+			// selectionStyle.Render wraps everything uniformly: bold
+			// fg comes from selectionStyle (which has Bold(true)), the
+			// bg is the same selection grey across the whole line.
 			aliveDot := "○"
 			if r.Alive {
 				aliveDot = "●"
 			}
-			plainContent := fmt.Sprintf("    %s  %-*s  %s  %s  %*s",
+			plainContent := fmt.Sprintf(">   %s  %-*s  %s  %s  %*s",
 				aliveDot,
 				colName, r.Name,
 				fmt.Sprintf("%-*s", colBranch, r.Branch),
@@ -566,15 +567,14 @@ func subtleHelper() lipgloss.Style {
 }
 
 func selectionStyle() lipgloss.Style {
-	// Soft dark-grey bg + near-white fg + bold. Lighter than the v0.7
-	// bright-violet bg (62) which was too punchy and made the selected
-	// row feel like a notification banner; this reads as "row is
-	// highlighted" without shouting. The leading `▌` gutter glyph
-	// (rendered violet via the embedded fg in the row text) provides
-	// the visual "this is the current selection" anchor.
+	// Soft dark-grey bg + bright white fg + bold. Lighter than the
+	// v0.7 bright-violet bg (62) which was too punchy. Bright white
+	// (231) for the fg so the inline `>` caret + row content read
+	// boldly against the grey bg — the eye snaps to the row without
+	// the bg color shouting.
 	return lipgloss.NewStyle().
 		Background(lipgloss.Color("237")).
-		Foreground(lipgloss.Color("252")).
+		Foreground(lipgloss.Color("231")).
 		Bold(true)
 }
 
