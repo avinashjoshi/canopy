@@ -272,6 +272,17 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 	row := m.rows[m.cursor]
 	ctx := context.Background()
 
+	// Main row: attach if alive, else hint the user toward
+	// `canopy main` to start the session. The row is always
+	// rendered now, so we have to handle both states explicitly.
+	if row.IsMain {
+		if row.Alive {
+			return m, attachCmd(m.mgr, row.TmuxSession)
+		}
+		m.err = fmt.Errorf("main session not running — run `canopy main` in a terminal to start it")
+		return m, nil
+	}
+
 	// Decide what to do based on status. broken/orphaned/setting_up cases
 	// surface an error in the TUI rather than handing off to a dead
 	// session. ready and main go straight to attach. stopped resurrects

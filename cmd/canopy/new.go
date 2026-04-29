@@ -186,48 +186,69 @@ func optionsForPR(ctx context.Context, projectRoot string, num int, userName str
 		return workspace.CreateOptions{}, "", fmt.Errorf("--pr %d: %w", num, err)
 	}
 
-	// Branch routing:
-	// - Same-repo PR: origin/<headRefName> already exists on the user's
-	//   remote, so we check it out directly. The local branch becomes
-	//   <headRefName> tracking origin/<headRefName>.
-	// - Cross-repo (fork) PR: the head isn't on origin as a branch ref
-	//   but IS reachable via refs/pull/<num>/head. Fetch it as a local
-	//   ref under refs/heads/canopy/pr-<num>.
-	var startPoint, branch string
+	// Branch routing — three sub-cases, each picks the right git
+	// worktree shape:
+	//
+	//  A. Cross-repo (fork) PR: the head isn't on origin as a branch
+	//     ref. Fetch it under refs/heads/canopy/pr-<num> via the
+	//     refs/pull/<num>/head refspec (works for forks AND same-repo,
+	//     so it's the universal PR-fetch primitive). Then check out
+	//     that local branch via AddExisting (no -b).
+	//  B. Same-repo PR with no local branch yet: create a tracking
+	//     branch via `git worktree add -b <head> <path> origin/<head>`.
+	//     This is the common case for `gh pr checkout`-style flows.
+	//  C. Same-repo PR with a local branch already (e.g. user previously
+	//     ran `gh pr checkout 1185`): check out the local branch.
+	//
+	// Why this matters: `git worktree add <path> origin/<head>` (no -b)
+	// produces a DETACHED HEAD because git treats origin/<head> as a
+	// commit-ish, not a branch reference. The PR's hints then fail
+	// (`gh pr view HEAD` is meaningless) and `git status` shows
+	// "not on any branch" — the bug just-reported by users.
+	name := userName
+	if name == "" {
+		name = fmt.Sprintf("pr-%d", pr.Number)
+	}
+
 	if pr.IsCrossRepository {
 		ref := fmt.Sprintf("canopy/pr-%d", pr.Number)
 		spec := fmt.Sprintf("refs/pull/%d/head:%s", pr.Number, ref)
 		if err := git.FetchRefspec(ctx, projectRoot, "origin", spec); err != nil {
 			return workspace.CreateOptions{}, "", fmt.Errorf("fetch PR #%d head: %w", pr.Number, err)
 		}
-		startPoint = ref
-		branch = ref
-	} else {
-		// Same-repo: just check out origin/<head>.
-		// AddExisting with origin/<branch> creates a tracking branch.
-		startPoint = "origin/" + pr.HeadRefName
-		// Make sure the remote ref exists locally (post-fetch).
-		if !git.RefExists(ctx, projectRoot, startPoint) {
-			// Best-effort fetch in case the branch was pushed after
-			// the user's last fetch. Errors fall through to the
-			// AddExisting attempt, which will surface a clearer
-			// "no such ref" error.
-			_ = git.Fetch(ctx, projectRoot, "origin")
-		}
-		branch = pr.HeadRefName
+		return workspace.CreateOptions{
+			SourceKind:    "pr",
+			SourceContext: formatPRContext(pr),
+			Branch:        ref,
+			StartPoint:    ref,
+			CreateBranch:  false, // local ref already exists post-fetch
+		}, name, nil
 	}
 
-	name := userName
-	if name == "" {
-		name = fmt.Sprintf("pr-%d", pr.Number)
+	// Same-repo. Make sure origin/<head> is locally known.
+	branch := pr.HeadRefName
+	originRef := "origin/" + branch
+	if !git.RefExists(ctx, projectRoot, originRef) {
+		_ = git.Fetch(ctx, projectRoot, "origin")
 	}
 
+	if git.RefExists(ctx, projectRoot, branch) {
+		// Case C: local branch already exists; check it out.
+		return workspace.CreateOptions{
+			SourceKind:    "pr",
+			SourceContext: formatPRContext(pr),
+			Branch:        branch,
+			StartPoint:    branch,
+			CreateBranch:  false,
+		}, name, nil
+	}
+	// Case B: create a fresh tracking branch from origin/<head>.
 	return workspace.CreateOptions{
 		SourceKind:    "pr",
 		SourceContext: formatPRContext(pr),
 		Branch:        branch,
-		StartPoint:    startPoint,
-		CreateBranch:  false, // checking out an existing branch
+		StartPoint:    originRef,
+		CreateBranch:  true, // -b <branch> on top of origin/<branch>
 	}, name, nil
 }
 
@@ -304,36 +325,46 @@ func optionsForBranch(ctx context.Context, projectRoot, branch string, allowLoca
 	_ = git.Fetch(ctx, projectRoot, "origin")
 
 	originRef := "origin/" + branch
-	localRef := "refs/heads/" + branch
+	localExists := git.RefExists(ctx, projectRoot, branch)
+	originExists := git.RefExists(ctx, projectRoot, originRef)
 
 	switch {
-	case git.RefExists(ctx, projectRoot, originRef):
-		// Common case: branch is on origin. Check out the remote-
-		// tracking ref so the new local branch tracks origin/<name>.
+	case localExists:
+		// Local branch already exists — check it out as-is. Don't
+		// re-create from origin even if origin/<branch> also exists;
+		// that would either error (branch taken) or surprise the
+		// user by silently overwriting their local state.
+		return workspace.CreateOptions{
+			SourceKind:   "branch",
+			Branch:       branch,
+			StartPoint:   branch,
+			CreateBranch: false,
+		}, defaultBranchName(branch, userName), nil
+
+	case originExists:
+		// No local branch yet — create a fresh tracking branch from
+		// origin/<branch>. `git worktree add -b <name> <path>
+		// origin/<name>` is the right invocation; using AddExisting
+		// here would detach HEAD, which is the bug we're fixing.
 		return workspace.CreateOptions{
 			SourceKind:   "branch",
 			Branch:       branch,
 			StartPoint:   originRef,
-			CreateBranch: false,
+			CreateBranch: true,
 		}, defaultBranchName(branch, userName), nil
 
-	case git.RefExists(ctx, projectRoot, localRef):
-		if !allowLocal {
-			return workspace.CreateOptions{}, "", fmt.Errorf(
-				"branch %q exists locally but not on origin/. Pass --allow-local to use the local copy, "+
-					"or push the branch first.", branch)
-		}
-		return workspace.CreateOptions{
-			SourceKind:   "branch",
-			Branch:       branch,
-			StartPoint:   branch, // local branch ref
-			CreateBranch: false,
-		}, defaultBranchName(branch, userName), nil
+	case allowLocal:
+		// Neither local nor origin — but --allow-local was passed,
+		// so the user expected a local branch to exist. Surface a
+		// clearer error for that specific failure mode.
+		return workspace.CreateOptions{}, "", fmt.Errorf(
+			"branch %q not found locally (--allow-local was set). Run `git branch %s` first, "+
+				"or drop --allow-local to require an origin/<branch>.", branch, branch)
 
 	default:
 		return workspace.CreateOptions{}, "", fmt.Errorf(
-			"branch %q not found on origin or locally. Check the name (case-sensitive) "+
-				"or run `git fetch origin` and try again.", branch)
+			"branch %q not found on origin/. Run `git fetch origin` then retry, "+
+				"or pass --allow-local if you have a local-only branch.", branch)
 	}
 }
 

@@ -297,6 +297,20 @@ func (m *GlobalModel) renderHelp() string {
 // action. This is the deliberate v0.5 boundary: global mode shows what's
 // there, project mode does anything destructive or canopy.json-aware.
 func (m *GlobalModel) activate(row state.GlobalRow) tea.Cmd {
+	// Main rows: attach if alive, else hint the user toward
+	// `canopy main` to start the session. The row is always
+	// rendered (so the user knows the project has a main concept)
+	// but enter only attaches when there's a live session waiting.
+	if row.IsMain {
+		if row.Alive {
+			return m.attachCmd(row.TmuxSession)
+		}
+		hint := fmt.Errorf(
+			"%s main session not running — press `o` to open the project, "+
+				"then run `canopy main` from there to start it",
+			row.Project)
+		return func() tea.Msg { return globalErrMsg{err: hint} }
+	}
 	switch row.Status {
 	case state.StatusReady, "main":
 		return m.attachCmd(row.TmuxSession)

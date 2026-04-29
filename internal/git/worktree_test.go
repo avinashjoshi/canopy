@@ -186,6 +186,45 @@ func TestAddExisting_CheckoutExistingBranch(t *testing.T) {
 	}
 }
 
+// TestAdd_TrackingBranch_FromOriginRef: regression test for the v0.6
+// detached-HEAD bug.
+//
+// Bug recap: the PR-checkout flow used `git worktree add <path> origin/<head>`
+// which produces a detached HEAD because git treats `origin/<head>`
+// as a commit-ish, not a branch. The fix uses `-b <head>` with
+// `origin/<head>` as the start point, creating a proper local branch.
+//
+// This test forges that scenario: forge an origin/feature-x ref in
+// the source repo, then call Add(repo, "feature-x", wt, "origin/feature-x").
+// The resulting worktree must be on a real branch named "feature-x",
+// not a detached HEAD.
+func TestAdd_TrackingBranch_FromOriginRef(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH; skipping integration test")
+	}
+
+	repo := newScratchRepo(t)
+	// Forge a remote-tracking ref pointing at main's tip.
+	if out, err := exec.Command("git", "-C", repo, "update-ref",
+		"refs/remotes/origin/feature-x", "main").CombinedOutput(); err != nil {
+		t.Fatalf("update-ref: %v\n%s", err, out)
+	}
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := canopygit.Add(context.Background(), repo, "feature-x", wt, "origin/feature-x"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// HEAD must be on a real branch, not detached.
+	out, err := exec.Command("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "feature-x" {
+		t.Errorf("worktree HEAD = %q; want feature-x (detached HEAD regression?)", got)
+	}
+}
+
 // TestRefExists covers the rev-parse-based ref probe used by canopy
 // new --branch to validate user-supplied branches before kicking off
 // a worktree.

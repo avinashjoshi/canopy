@@ -194,22 +194,29 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client) tea.Cmd {
 
 		rows := []Row{}
 
-		// Main row: present iff the session is alive.
+		// Main row (synthetic) — always present so the user can see
+		// the project has a main concept and reach for `canopy main`
+		// even when no session is active. Alive reflects whether the
+		// tmux session is currently up; the activate handler decides
+		// what enter does (attach if alive, "run canopy main" hint
+		// otherwise).
 		mainSession := tmux.SafeName(mgr.Cfg.Project) + "-main"
-		if alive, _ := tc.HasSession(ctx, mainSession); alive {
-			r := Row{
-				IsMain:      true,
-				Name:        "(main)",
-				Branch:      "—",
-				Status:      "main", // not one of the 5 workspace states
-				TmuxSession: mainSession,
-				Alive:       true,
-			}
-			if meta, ok := st.Projects[mgr.Cfg.Project]; ok {
-				r.Port = meta.PortBase
-			}
-			rows = append(rows, r)
+		alive, _ := tc.HasSession(ctx, mainSession)
+		r := Row{
+			IsMain:      true,
+			Name:        "(main)",
+			Branch:      "—",
+			Status:      "main", // not one of the 5 workspace states
+			TmuxSession: mainSession,
+			Alive:       alive,
 		}
+		if meta, ok := st.Projects[mgr.Cfg.Project]; ok {
+			// ProjectRoot key — matches BuildGlobalRows. The basename
+			// key path (legacy) is also tolerated by st.Projects
+			// readers, so this lookup works for v1 and v2 state.
+			r.Port = meta.PortBase
+		}
+		rows = append(rows, r)
 
 		// Workspace rows.
 		for _, w := range workspaces {
