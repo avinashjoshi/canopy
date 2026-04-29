@@ -194,6 +194,27 @@ func DiscoverAndLoad(startDir string) (*Config, error) {
 	return Load(path)
 }
 
+// LoadFrom reads canopy.json directly from <root>/canopy.json without the
+// walk-up that DiscoverAndLoad does. Used when the caller already knows the
+// canonical project root (e.g. cross-project destructive ops in the unified
+// TUI: state.GlobalRow.ProjectRoot is authoritative — no need to walk up).
+//
+// Returns ErrNotFound if the file is missing, ErrInvalid for parse failures.
+func LoadFrom(root string) (*Config, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("config.LoadFrom: abs %s: %w", root, err)
+	}
+	path := filepath.Join(abs, FileName)
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("config.LoadFrom(%s): %w", root, ErrNotFound)
+		}
+		return nil, fmt.Errorf("config.LoadFrom: stat %s: %w", path, err)
+	}
+	return Load(path)
+}
+
 // validate normalizes the loaded config and surfaces user-fixable
 // problems. Today it:
 //   - Defaults Agent.Type to "claude" when unset (back-compat for

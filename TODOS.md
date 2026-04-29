@@ -811,3 +811,51 @@ The v0.5 boundary ("global is read-only, project owns destructive") made sense b
 **Estimated effort:** L (CC ~6-8 hours of design + implementation + testing). Worth a /plan-ceo-review and /plan-eng-review before implementation since this touches every TUI entry point.
 
 **Depends on / blocked by:** v0.7 popup + statusline + install tmux landed (this branch). No external blockers. Should ship before any v0.8 features that build on the TUI surface (PR statusline is fine in parallel; Claude keybind actions can wait).
+
+**CEO review status (2026-04-29):** /plan-ceo-review completed, 3-round spec review converged at 9/10. CEO plan: `~/.gstack/projects/canopy/ceo-plans/2026-04-29-tui-unification.md`. Approach: A (big-bang GlobalModel-as-base, single PR with 2-commit internal structure). Mode: SELECTIVE EXPANSION. Cherry-picks accepted: D3 (R confirm-on-non-broken modal), D5 (tab bar always-render with empty-state onboarding), D6 (cross-project d/R with project-name confirm), D7 (keymap.go extraction), D8 (filepath.EvalSymlinks fix in resolver port). Cherry-picks deferred: D4 (open-in-editor — see TODO below). **Run /plan-eng-review before implementation.**
+
+---
+
+## v0.8+ — Repurpose freed-up `o` keybind for "open worktree in editor" (deferred from TUI unification CEO review)
+
+**What:** After v0.8 TUI unification, the `o` keybind is freed (its old purpose — open project TUI from popup — disappears). A natural reuse: launch the user's editor on the highlighted workspace dir.
+
+**Why:** matches canopy's "switch fast" gestalt. You'd be inside tmux on the workspace one keystroke later anyway; `o` could short-circuit straight to `nvim /path/to/workspace` (or whatever the user has configured).
+
+**Open design questions** (these are why this was deferred from the unification PR — they deserve their own design pass):
+- Which editor binary? Read `$EDITOR`? Add an `editor` field to `canopy.json`? Both with config trumping env?
+- Is it `o` (lowercase) or `O` (uppercase)? Does that matter? Lowercase fits the "single keystroke for the most common action" pattern; uppercase signals "this is more aggressive than just navigating."
+- Where does the editor open?
+  - New tmux pane in the current workspace's session? (closest to "switch fast" — but creates a new pane every time, clutter)
+  - New tmux window in the current session? (cleaner, but same clutter problem)
+  - Current pane (replacing the canopy TUI)? (zero clutter, but loses the canopy TUI entirely)
+  - Detached tmux popup? (quick-edit a file feels great, but for a multi-file editor the popup geometry is too small)
+- What's the behavior when invoked from outside tmux? Just `exec.Command(editor, path)`?
+- What's the behavior when the workspace's tmux session isn't running? Auto-`canopy switch` first?
+- Should this also exist as a CLI verb (`canopy edit <workspace>`)?
+- Does it work on the Local tab only, or both Local and Global? (Probably both — opening another project's workspace in $EDITOR is a real use case.)
+
+**Effort:** S (CC ~30-60 min once design is settled).
+**Priority:** P2 (nice-to-have; muscle memory for `o` is valuable but small).
+**Depends on / blocked by:** v0.8 TUI unification. Within unification PR, `o` is unbound (no-op).
+
+---
+
+## v0.9+ — "Recent workspaces" 3rd tab in unified TUI
+
+**What:** After the unified TUI ships (v0.8), consider a 3rd tab beyond Local/Global: "Recent" — last N workspaces the user attached to, ordered by last-use timestamp.
+
+**Why:** scales as canopy adoption grows. With 5 projects × 10 workspaces each, the Global tab gets noisy. Most-recently-used is a strong default for "what do I want next?"
+
+**Pros:**
+- Power-user feature; avoids fuzzy-search for the 5-most-recent case
+- State already tracked (state.Workspaces have lastSwitchedAt or similar)
+
+**Cons:**
+- Adds a 3rd tab to the bar (always-show + dim policy still works)
+- Requires defining "recent" precisely (last N? last 7 days? exclude main rows?)
+- Premature if Global tab + fuzzy search covers 95% of cases
+
+**Effort:** S (CC ~45 min).
+**Priority:** P3.
+**Depends on / blocked by:** v0.8 TUI unification.

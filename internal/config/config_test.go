@@ -260,6 +260,81 @@ func TestLoad_AgentEmptyBlock(t *testing.T) {
 	}
 }
 
+// TestLoadFrom_HappyPath: LoadFrom reads <root>/canopy.json directly
+// without any walk-up.
+func TestLoadFrom_HappyPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "canopy.json"), validJSON)
+
+	cfg, err := config.LoadFrom(dir)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.Project == "" {
+		t.Errorf("LoadFrom returned empty Project")
+	}
+	if cfg.ProjectRoot == "" {
+		t.Errorf("LoadFrom returned empty ProjectRoot")
+	}
+}
+
+// TestLoadFrom_NotFound: missing canopy.json at the given root returns
+// ErrNotFound (not a generic error). Lets callers distinguish "config
+// gone" from "config corrupt" without parsing error strings.
+func TestLoadFrom_NotFound(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// Note: do NOT write canopy.json
+	_, err := config.LoadFrom(dir)
+	if err == nil {
+		t.Fatalf("LoadFrom missing-file: want error, got nil")
+	}
+	if !errors.Is(err, config.ErrNotFound) {
+		t.Errorf("LoadFrom missing-file: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestLoadFrom_NoWalkUp: LoadFrom must NOT walk up the directory tree.
+// Discover walks; LoadFrom is the targeted variant for callers who
+// already know the canonical root (e.g. cross-project ops in the unified
+// TUI). Verify by placing canopy.json at the parent and asking for the
+// child — must error.
+func TestLoadFrom_NoWalkUp(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	writeFile(t, filepath.Join(parent, "canopy.json"), validJSON)
+	child := filepath.Join(parent, "subdir")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	_, err := config.LoadFrom(child)
+	if err == nil {
+		t.Fatalf("LoadFrom child-dir: want error, got nil (LoadFrom must NOT walk up)")
+	}
+	if !errors.Is(err, config.ErrNotFound) {
+		t.Errorf("LoadFrom child-dir: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestLoadFrom_BadJSON: parse failure surfaces ErrInvalid the same way
+// Load does. LoadFrom is just Load with a different lookup, so it should
+// inherit Load's error semantics.
+func TestLoadFrom_BadJSON(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "canopy.json"), `{not valid json`)
+
+	_, err := config.LoadFrom(dir)
+	if err == nil {
+		t.Fatalf("LoadFrom bad-json: want error, got nil")
+	}
+	if !errors.Is(err, config.ErrInvalid) {
+		t.Errorf("LoadFrom bad-json: want ErrInvalid, got %v", err)
+	}
+}
+
 // TestLoad_ScriptsAgentOverride: scripts.agent (the power-user override
 // path) round-trips alongside the agent block.
 func TestLoad_ScriptsAgentOverride(t *testing.T) {
