@@ -219,11 +219,13 @@ func detectCanopyBlock(content string) canopyBlockState {
 }
 
 // canopyBlockBody is the literal text we write between markers. The
-// canopy binary path is resolved from os.Executable() so the bindings
-// always point at the binary that ran the install — meaning dogfood
-// builds (./canopy or /tmp/canopy-foo) write their own path, and
-// installed builds (~/.local/bin/canopy) write theirs. Re-run
-// `canopy install tmux --force` from the new binary to swap.
+// block invokes bare `canopy` (PATH-resolved at tmux runtime) rather
+// than baking an absolute path. With `canopy use` swapping the
+// ~/.local/bin/canopy symlink between release and dev binaries, bare
+// `canopy` follows the symlink automatically — no `install tmux --force`
+// re-run on every binary swap. PATH lookup is also what end users
+// expect: tmux config doesn't pin to the install-time location of the
+// binary, which can break later moves.
 //
 // Reload safety: tmux's `set -ag` (append) accumulates on every
 // source-file invocation — running `tmux source-file ~/.tmux.conf`
@@ -298,33 +300,19 @@ func isShellSafeBare(s string) bool {
 	return true
 }
 
-// selfBinaryPath returns the absolute path to the running canopy binary.
-// Used by canopyBinForBlock so generated tmux config points at the
-// binary that ran `canopy install tmux` — dogfood builds get their own
-// path, installed builds get theirs. Re-run install to swap.
-func selfBinaryPath() (string, error) {
-	bin, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(bin)
-	if err != nil {
-		return bin, nil
-	}
-	return resolved, nil
-}
-
-// canopyBinForBlock returns the binary path to embed in the generated
-// tmux config. Resolved from os.Executable() so each install points at
-// itself. Falls back to bare "canopy" (PATH-resolved at tmux runtime)
-// if executable resolution fails — a graceful degradation that matches
-// the v0.7 plan's manual snippet.
+// canopyBinForBlock returns the binary name embedded in the generated
+// tmux config. Always bare `canopy` so the tmux popup keybind follows
+// whatever ~/.local/bin/canopy currently points at. `canopy use` swaps
+// that symlink between release and dev builds; with bare `canopy` here
+// the swap is invisible to tmux. Embedding os.Executable() (the prior
+// behavior) baked the install-time binary path into ~/.tmux.conf, which
+// forced a `canopy install tmux --force` re-run on every binary swap.
+//
+// Kept as a function (not a constant) so the block-generation surface
+// stays consistent with shellQuote and to leave a clear seam if we
+// ever want to re-introduce path-baking behind a flag.
 func canopyBinForBlock() string {
-	bin, err := selfBinaryPath()
-	if err != nil || bin == "" {
-		return "canopy"
-	}
-	return bin
+	return "canopy"
 }
 
 // applyCanopyBlock returns existing with the canopy block applied. If a
