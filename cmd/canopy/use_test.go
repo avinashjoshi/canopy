@@ -119,12 +119,26 @@ func TestSwitchToRelease_happyPath(t *testing.T) {
 // TestSwitchToWorkspace_unknownName: an unknown workspace name returns
 // an error listing the available alternatives. This is the "you typed
 // it wrong" UX — the user shouldn't need to re-run `canopy use` to see
-// what they could have meant.
+// what they could have meant. Suggestions are filtered to canopy
+// source worktrees only — see TestErrUnknownWorkspace_filtersNonCanopy
+// for the filter coverage.
 func TestSwitchToWorkspace_unknownName(t *testing.T) {
+	dir := t.TempDir()
+	wtA := filepath.Join(dir, "A")
+	wtB := filepath.Join(dir, "B")
+	if err := os.MkdirAll(wtA, 0o755); err != nil {
+		t.Fatalf("mkdir A: %v", err)
+	}
+	if err := os.MkdirAll(wtB, 0o755); err != nil {
+		t.Fatalf("mkdir B: %v", err)
+	}
+	makeCanopyWorktree(t, wtA)
+	makeCanopyWorktree(t, wtB)
+
 	st := &state.State{
 		Workspaces: []state.Workspace{
-			{Name: "feature-A", Path: "/some/path/A"},
-			{Name: "feature-B", Path: "/some/path/B"},
+			{Name: "feature-A", Path: wtA},
+			{Name: "feature-B", Path: wtB},
 		},
 	}
 	err := errUnknownWorkspace("featuer-A", st) // typo
@@ -177,6 +191,21 @@ func TestFindWorkspaceByName(t *testing.T) {
 	}
 }
 
+// makeCanopyWorktree creates a fake canopy source worktree at dir.
+// Adds cmd/canopy/main.go so isCanopyWorktree returns true. Test
+// helper used by every test that needs a "this is a canopy worktree"
+// state row.
+func makeCanopyWorktree(t *testing.T, dir string) {
+	t.Helper()
+	canopyDir := filepath.Join(dir, "cmd", "canopy")
+	if err := os.MkdirAll(canopyDir, 0o755); err != nil {
+		t.Fatalf("mkdir cmd/canopy: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(canopyDir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+}
+
 // TestSwitchToWorkspace_missingDevBin: workspace exists in state but
 // ./canopy hasn't been built. Refuse with a message that suggests both
 // `make build` AND `canopy use --build`.
@@ -186,6 +215,7 @@ func TestSwitchToWorkspace_missingDevBin(t *testing.T) {
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	makeCanopyWorktree(t, worktree)
 	canopyHome := filepath.Join(dir, ".canopy")
 	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
 		t.Fatalf("mkdir canopy home: %v", err)
@@ -218,6 +248,182 @@ func TestSwitchToWorkspace_missingDevBin(t *testing.T) {
 	}
 }
 
+// TestIsCanopyWorktree covers the source-worktree detection: present
+// when cmd/canopy/main.go exists, absent otherwise. Defensive empty-
+// path guard returns false.
+func TestIsCanopyWorktree(t *testing.T) {
+	dir := t.TempDir()
+
+	// Empty path → false (defensive).
+	if isCanopyWorktree("") {
+		t.Error("empty path should return false")
+	}
+
+	// Plain dir, no cmd/canopy/main.go → false.
+	plain := filepath.Join(dir, "plain")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if isCanopyWorktree(plain) {
+		t.Error("plain dir without cmd/canopy/main.go should return false")
+	}
+
+	// Has cmd/canopy/main.go → true.
+	canopy := filepath.Join(dir, "canopy")
+	if err := os.MkdirAll(canopy, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	makeCanopyWorktree(t, canopy)
+	if !isCanopyWorktree(canopy) {
+		t.Error("canopy worktree with cmd/canopy/main.go should return true")
+	}
+}
+
+// TestSwitchToWorkspace_notACanopyWorktree refuses with a clear error
+// when the user tries to `canopy use` a workspace that exists but
+// isn't a canopy source worktree (e.g., a Rails workspace in cravd).
+// The error message must explain WHY (not a canopy source worktree)
+// and point at the no-args listing for valid alternatives.
+func TestSwitchToWorkspace_notACanopyWorktree(t *testing.T) {
+	dir := t.TempDir()
+	rails := filepath.Join(dir, "rails-worktree")
+	if err := os.MkdirAll(rails, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Note: no cmd/canopy/main.go — this is a non-canopy worktree.
+
+	canopyHome := filepath.Join(dir, ".canopy")
+	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Setenv("HOME", dir)
+
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{
+			{Name: "crisp-badger", Path: rails, Project: "cravd"},
+		},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	link := filepath.Join(dir, ".local", "bin", "canopy")
+	var out bytes.Buffer
+	err := switchToWorkspace(context.Background(), "crisp-badger", false, link, &out)
+	if err == nil {
+		t.Fatal("expected refusal for non-canopy worktree")
+	}
+	for _, want := range []string{"isn't a canopy source worktree", "Project: cravd", "github.com/oncactus/canopy"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q; got %v", want, err)
+		}
+	}
+	// Symlink must NOT have been created.
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("symlink should not be created on refusal")
+	}
+}
+
+// TestPrintUseList_filtersNonCanopyWorktrees: the listing must skip
+// rows from other projects. The footer must mention how many were
+// skipped so the user knows the listing is intentionally scoped.
+func TestPrintUseList_filtersNonCanopyWorktrees(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	binReal := filepath.Join(binDir, "canopy.bin")
+	if err := os.WriteFile(binReal, []byte("rel"), 0o755); err != nil {
+		t.Fatalf("seed canopy.bin: %v", err)
+	}
+	link := filepath.Join(binDir, "canopy")
+	if err := os.Symlink("canopy.bin", link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	canopyHome := filepath.Join(dir, ".canopy")
+	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Setenv("HOME", dir)
+
+	canopyWS := filepath.Join(dir, "canopy-ws")
+	if err := os.MkdirAll(canopyWS, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	makeCanopyWorktree(t, canopyWS)
+
+	railsWS := filepath.Join(dir, "rails-ws")
+	if err := os.MkdirAll(railsWS, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// rails-ws deliberately has no cmd/canopy/main.go — should be filtered.
+
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{
+			{Name: "smooth-fawn", Path: canopyWS, Project: "canopy"},
+			{Name: "crisp-badger", Path: railsWS, Project: "cravd"},
+			{Name: "fierce-salmon", Path: railsWS, Project: "cravd"},
+		},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := printUseList(context.Background(), &out, link, binReal); err != nil {
+		t.Fatalf("printUseList: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "smooth-fawn") {
+		t.Errorf("canopy worktree should appear; got:\n%s", got)
+	}
+	if strings.Contains(got, "crisp-badger") || strings.Contains(got, "fierce-salmon") {
+		t.Errorf("non-canopy worktrees should be filtered; got:\n%s", got)
+	}
+	if !strings.Contains(got, "2 workspace(s) from other projects skipped") {
+		t.Errorf("footer should mention 2 skipped; got:\n%s", got)
+	}
+}
+
+// TestErrUnknownWorkspace_filtersNonCanopy: typo recovery suggestion
+// list must NOT include cravd workspaces. Pointing the user at a
+// workspace they can't actually use is worse than not suggesting
+// anything.
+func TestErrUnknownWorkspace_filtersNonCanopy(t *testing.T) {
+	dir := t.TempDir()
+	canopyWS := filepath.Join(dir, "canopy-ws")
+	if err := os.MkdirAll(canopyWS, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	makeCanopyWorktree(t, canopyWS)
+
+	railsWS := filepath.Join(dir, "rails-ws")
+	if err := os.MkdirAll(railsWS, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	st := &state.State{
+		Workspaces: []state.Workspace{
+			{Name: "smooth-fawn", Path: canopyWS},
+			{Name: "crisp-badger", Path: railsWS},
+		},
+	}
+	err := errUnknownWorkspace("smoothfawn", st)
+	msg := err.Error()
+	if !strings.Contains(msg, "smooth-fawn") {
+		t.Errorf("canopy worktree must appear in suggestions; got %v", err)
+	}
+	if strings.Contains(msg, "crisp-badger") {
+		t.Errorf("non-canopy worktree must NOT appear in suggestions; got %v", err)
+	}
+	if !strings.Contains(msg, "release") {
+		t.Errorf("release alias must appear in suggestions; got %v", err)
+	}
+}
+
 // TestSwitchToWorkspace_happyPath: workspace exists, ./canopy built →
 // symlink points at the absolute dev binary path.
 func TestSwitchToWorkspace_happyPath(t *testing.T) {
@@ -226,6 +432,7 @@ func TestSwitchToWorkspace_happyPath(t *testing.T) {
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	makeCanopyWorktree(t, worktree)
 	devBin := filepath.Join(worktree, "canopy")
 	if err := os.WriteFile(devBin, []byte("fake"), 0o755); err != nil {
 		t.Fatalf("seed dev binary: %v", err)
@@ -275,6 +482,7 @@ func TestSwitchToWorkspace_buildFlag(t *testing.T) {
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	makeCanopyWorktree(t, worktree)
 	devBin := filepath.Join(worktree, "canopy")
 
 	// Stub: when "build" is invoked, write the binary file. This
@@ -347,6 +555,9 @@ func TestPrintUseList(t *testing.T) {
 	t.Setenv("HOME", dir)
 
 	// One workspace built (./canopy exists), one not built.
+	// Both must look like canopy source worktrees so the filter
+	// doesn't drop them — that's tested separately in
+	// TestPrintUseList_filtersNonCanopyWorktrees.
 	wtA := filepath.Join(dir, "wsA")
 	wtB := filepath.Join(dir, "wsB")
 	if err := os.MkdirAll(wtA, 0o755); err != nil {
@@ -355,6 +566,8 @@ func TestPrintUseList(t *testing.T) {
 	if err := os.MkdirAll(wtB, 0o755); err != nil {
 		t.Fatalf("mkdir B: %v", err)
 	}
+	makeCanopyWorktree(t, wtA)
+	makeCanopyWorktree(t, wtB)
 	if err := os.WriteFile(filepath.Join(wtA, "canopy"), []byte("dev"), 0o755); err != nil {
 		t.Fatalf("seed A canopy: %v", err)
 	}

@@ -161,6 +161,19 @@ func switchToWorkspace(ctx context.Context, name string, build bool, symlinkPath
 	if ws == nil {
 		return errUnknownWorkspace(name, st)
 	}
+	// Refuse non-canopy worktrees with a clearer message than "no
+	// dev binary at <path>". The latter would leave the user thinking
+	// they need to run `make build` somewhere — but they can't,
+	// because the worktree isn't canopy source.
+	if !isCanopyWorktree(ws.Path) {
+		return fmt.Errorf(
+			"canopy use %s: workspace %q exists but isn't a canopy source worktree.\n"+
+				"  Project: %s\n"+
+				"  Path:    %s\n"+
+				"  canopy use only works with worktrees of github.com/oncactus/canopy itself.\n"+
+				"  Run 'canopy use' (no args) to see canopy worktrees you can switch to.",
+			name, name, ws.Project, ws.Path)
+	}
 
 	devBin := filepath.Join(ws.Path, "canopy")
 
@@ -212,21 +225,42 @@ func printUseList(ctx context.Context, out io.Writer, symlinkPath, releaseTarget
 	fmt.Fprintln(tw, "  TARGET\tPATH\tBUILT")
 	fmt.Fprintln(tw, fmt.Sprintf("  %s\t%s\t%s", useReleaseAlias, releaseTargetPath, builtAgo(releaseTargetPath)))
 
+	canopyOnly := 0
+	skipped := 0
 	if st != nil {
 		// Sort workspaces alphabetically for stable output. Without sort
 		// the order depends on JSON load order, which is itself unstable.
+		// Only include canopy source worktrees — rows from other projects
+		// (Rails, Python, etc. registered in the same canopy state.json)
+		// can't have ./canopy and would just be noise in the listing.
 		names := make([]string, 0, len(st.Workspaces))
 		for _, ws := range st.Workspaces {
-			names = append(names, ws.Name)
+			if isCanopyWorktree(ws.Path) {
+				names = append(names, ws.Name)
+			} else {
+				skipped++
+			}
 		}
 		sort.Strings(names)
 		for _, n := range names {
 			ws := findWorkspaceByName(st, n)
 			devBin := filepath.Join(ws.Path, canopyBinName)
 			fmt.Fprintf(tw, "  %s\t%s\t%s\n", ws.Name, devBin, builtAgo(devBin))
+			canopyOnly++
 		}
 	}
 	tw.Flush()
+
+	// One-line footer when we filtered anything out, so the user knows
+	// the listing is canopy-only on purpose. Without this, someone with
+	// a workspace named "feature-X" in a non-canopy project might think
+	// `canopy use` lost it.
+	if skipped > 0 {
+		fmt.Fprintf(out, "\n  (%d workspace(s) from other projects skipped — canopy use only works with canopy source worktrees)\n", skipped)
+	}
+	if canopyOnly == 0 && st != nil && len(st.Workspaces) > 0 {
+		fmt.Fprintln(out, "  (no canopy source worktrees registered)")
+	}
 	return nil
 }
 
@@ -345,16 +379,41 @@ func findWorkspaceByName(st *state.State, name string) *state.Workspace {
 	return nil
 }
 
+// isCanopyWorktree reports whether a workspace dir is a canopy source
+// worktree. Test: does it have cmd/canopy/main.go? That file is the
+// canopy entry point and is unique to this repo — a Rails worktree
+// (e.g., a cravd workspace registered in the same canopy state.json)
+// won't have it.
+//
+// Filter is applied at both list time (skip non-canopy rows in the
+// `canopy use` output) and at switch time (refuse with a clearer
+// error than "no dev binary"). The state.json mixes workspaces from
+// every project canopy manages, so without this filter the list shows
+// rows the user can't possibly `canopy use` against.
+func isCanopyWorktree(workspacePath string) bool {
+	if workspacePath == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(workspacePath, "cmd", "canopy", "main.go"))
+	return err == nil
+}
+
 // errUnknownWorkspace formats the "unknown workspace" error with the
 // list of names the user could have meant. The fast diagnostic — they
 // usually mistyped a hyphen or capitalized a letter, and seeing the
 // real names side-by-side is faster than re-running `canopy use` for
 // the listing.
+//
+// Suggestions are filtered to canopy worktrees only — listing a
+// cravd workspace as a "did you mean" suggestion when canopy use
+// can't actually use it would mislead.
 func errUnknownWorkspace(name string, st *state.State) error {
 	available := []string{useReleaseAlias}
 	if st != nil {
 		for _, ws := range st.Workspaces {
-			available = append(available, ws.Name)
+			if isCanopyWorktree(ws.Path) {
+				available = append(available, ws.Name)
+			}
 		}
 	}
 	sort.Strings(available)
