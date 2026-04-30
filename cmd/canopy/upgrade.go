@@ -121,9 +121,14 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 
 	// Always fetch the remote VERSION. Comparing against running
 	// version tells us whether to bother with the pull at all.
+	//
+	// Fetch path: HTTP first (fast, no fork), git fallback (works for
+	// private repos where raw.githubusercontent.com 404s anonymous
+	// requests). The src clone always has working git auth — that's
+	// how install.sh succeeded — so the git fallback is dependable.
 	ctx, cancel := context.WithTimeout(cmd.Context(), upgradeFetchTimeout)
 	defer cancel()
-	remote, err := upgradeFetchVersion(ctx, upgradeVersionURL)
+	remote, err := fetchRemoteFile(ctx, srcDir, upgradeVersionURL, "VERSION")
 	if err != nil {
 		return fmt.Errorf("canopy upgrade: fetch VERSION: %w", err)
 	}
@@ -145,8 +150,9 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Best-effort CHANGELOG preview. Failure is non-fatal — we don't
-	// want a slow CDN to block the upgrade.
-	if changelog, err := upgradeFetchVersion(ctx, upgradeChangelogURL); err == nil {
+	// want a slow CDN, a 404 (private repo), or a stalled git fetch
+	// to block the upgrade.
+	if changelog, err := fetchRemoteFile(ctx, srcDir, upgradeChangelogURL, "CHANGELOG.md"); err == nil {
 		preview := changelogSlice(changelog, current, remote)
 		if preview != "" {
 			fmt.Fprintln(out, "\nWhat's new:")
@@ -248,6 +254,59 @@ func changelogSlice(content, current, remote string) string {
 		return content[startIdx : startIdx+len(remoteHeading)+nextSection]
 	}
 	return content[startIdx : startIdx+endIdx]
+}
+
+// fetchRemoteFile reads a file from the canopy repo's main branch.
+// Tries HTTP first (raw.githubusercontent.com, fast, no fork). On any
+// failure — including 404 from private-repo anonymous access — falls
+// back to git: `git fetch origin main && git show origin/main:<path>`
+// in the local src clone. The clone has working auth (otherwise
+// install.sh wouldn't have succeeded), so git always works regardless
+// of repo visibility.
+//
+// gitPath is the path of the file relative to the repo root (e.g.
+// "VERSION", "CHANGELOG.md"). url is the raw.githubusercontent.com
+// URL for the same file. The HTTP path is exposed so when the repo
+// goes public, the upgrade check is one HTTP GET instead of a git
+// fetch — strictly faster.
+//
+// Both paths are tested via the upgradeFetchVersion + upgradeGitFetchFile
+// stubs (each independently injectable so tests can simulate "HTTP
+// works", "HTTP fails, git works", "both fail").
+func fetchRemoteFile(ctx context.Context, srcDir, url, gitPath string) (string, error) {
+	// HTTP first.
+	body, httpErr := upgradeFetchVersion(ctx, url)
+	if httpErr == nil {
+		return body, nil
+	}
+	// HTTP failed (404, network, timeout). Fall back to git.
+	body, gitErr := upgradeGitFetchFile(ctx, srcDir, gitPath)
+	if gitErr == nil {
+		return body, nil
+	}
+	// Both failed — surface the original HTTP error since that's
+	// the canonical first attempt; mention git fallback context too
+	// so the user knows we tried.
+	return "", fmt.Errorf("HTTP: %w; git fallback also failed: %v", httpErr, gitErr)
+}
+
+// upgradeGitFetchFile reads <gitPath> from origin/main of srcDir.
+// Runs `git fetch --quiet origin main` first so the read sees the
+// latest remote state. Both commands respect the context's deadline.
+//
+// Exposed as a package-level var so tests can stub the git path
+// without forking real git.
+var upgradeGitFetchFile = func(ctx context.Context, srcDir, gitPath string) (string, error) {
+	fetch := exec.CommandContext(ctx, "git", "-C", srcDir, "fetch", "--quiet", "origin", "main")
+	if err := fetch.Run(); err != nil {
+		return "", fmt.Errorf("git fetch origin main in %s: %w", srcDir, err)
+	}
+	show := exec.CommandContext(ctx, "git", "-C", srcDir, "show", "origin/main:"+gitPath)
+	out, err := show.Output()
+	if err != nil {
+		return "", fmt.Errorf("git show origin/main:%s: %w", gitPath, err)
+	}
+	return string(out), nil
 }
 
 // upgradeFetchVersion is the http GET seam exposed for testing.

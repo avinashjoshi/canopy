@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,19 +255,25 @@ func TestRunUpgrade_missingSrcDir(t *testing.T) {
 	}
 }
 
-// TestRunUpgrade_versionFetchFails: a network failure on the VERSION
-// fetch surfaces a clear error. canopy upgrade is pull-only — we
-// don't accidentally git-pull when we couldn't even check the
-// version.
-func TestRunUpgrade_versionFetchFails(t *testing.T) {
+// TestRunUpgrade_bothFetchPathsFail: when HTTP fails AND the git
+// fallback fails, surface a combined error. canopy upgrade is pull-
+// only — we don't accidentally git-pull when we couldn't even check
+// the version. The error message must mention both attempts so the
+// user can debug (network vs auth vs missing file vs bad clone).
+func TestRunUpgrade_bothFetchPathsFail(t *testing.T) {
 	prevFetch := upgradeFetchVersion
+	prevGitFetch := upgradeGitFetchFile
 	prevShell := upgradeRunShell
 	t.Cleanup(func() {
 		upgradeFetchVersion = prevFetch
+		upgradeGitFetchFile = prevGitFetch
 		upgradeRunShell = prevShell
 	})
 	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
 		return "", errors.New("network unreachable")
+	}
+	upgradeGitFetchFile = func(ctx context.Context, srcDir, gitPath string) (string, error) {
+		return "", errors.New("git: not a repository")
 	}
 	shellCalls := 0
 	upgradeRunShell = func(ctx context.Context, srcDir string) error {
@@ -292,13 +299,91 @@ func TestRunUpgrade_versionFetchFails(t *testing.T) {
 
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("expected error on network failure")
+		t.Fatal("expected error when both fetch paths fail")
 	}
-	if !strings.Contains(err.Error(), "network unreachable") {
-		t.Errorf("error should propagate underlying cause; got %v", err)
+	for _, want := range []string{"network unreachable", "not a repository", "git fallback also failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention both attempts; missing %q in %v", want, err)
+		}
 	}
 	if shellCalls != 0 {
-		t.Errorf("network failure should skip shell entirely; got %d calls", shellCalls)
+		t.Errorf("dual fetch failure should skip shell entirely; got %d calls", shellCalls)
+	}
+}
+
+// TestRunUpgrade_httpFailsGitSucceeds: the private-repo scenario.
+// raw.githubusercontent.com 404s anonymous requests on private repos,
+// so the HTTP path fails with a 404. The git fallback (using cached
+// auth from the original clone) succeeds and the upgrade proceeds
+// normally. This is the path canopy users hit until the repo goes
+// public — must keep working.
+func TestRunUpgrade_httpFailsGitSucceeds(t *testing.T) {
+	prevFetch := upgradeFetchVersion
+	prevGitFetch := upgradeGitFetchFile
+	prevShell := upgradeRunShell
+	t.Cleanup(func() {
+		upgradeFetchVersion = prevFetch
+		upgradeGitFetchFile = prevGitFetch
+		upgradeRunShell = prevShell
+	})
+
+	httpCalls := 0
+	gitCalls := 0
+	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+		httpCalls++
+		return "", errors.New("HTTP 404 from raw.githubusercontent.com (private repo)")
+	}
+	upgradeGitFetchFile = func(ctx context.Context, srcDir, gitPath string) (string, error) {
+		gitCalls++
+		switch gitPath {
+		case "VERSION":
+			return "0.13.0", nil
+		case "CHANGELOG.md":
+			return "# Changelog\n\n## [0.13.0] - 2026-05-15\n\n### Added\n- shinier pill\n\n## [0.12.0]\n", nil
+		}
+		return "", fmt.Errorf("unexpected gitPath %q", gitPath)
+	}
+	shellCalls := 0
+	upgradeRunShell = func(ctx context.Context, srcDir string) error {
+		shellCalls++
+		return nil
+	}
+
+	prevVersion := version
+	t.Cleanup(func() { version = prevVersion })
+	version = "v0.12.0+test1234"
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srcDir := filepath.Join(tmp, ".canopy", "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cmd := newUpgradeCmd()
+	cmd.SetArgs([]string{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("expected success via git fallback; got %v", err)
+	}
+	if httpCalls < 1 {
+		t.Errorf("HTTP path should be tried first; got %d calls", httpCalls)
+	}
+	if gitCalls < 2 {
+		// One git call for VERSION, one for CHANGELOG.
+		t.Errorf("git fallback should be invoked for both VERSION and CHANGELOG; got %d calls", gitCalls)
+	}
+	got := out.String()
+	for _, want := range []string{"Latest:   v0.13.0", "shinier pill", "Upgraded to v0.13.0"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q; got:\n%s", want, got)
+		}
+	}
+	if shellCalls != 1 {
+		t.Errorf("git-fallback success path should still run upgrade shell; got %d calls", shellCalls)
 	}
 }
 
