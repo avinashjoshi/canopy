@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oncactus/canopy/internal/lifecycle"
 	"github.com/oncactus/canopy/internal/state"
 )
 
@@ -113,6 +114,52 @@ func TestActionRefresh_InvalidatesCache(t *testing.T) {
 	}
 	if got != probe.val {
 		t.Errorf("post-r GetLoad = %+v; want %+v (cache should have been invalidated)", got, probe.val)
+	}
+}
+
+// TestActionRefresh_InvalidatesPRStatusCache is the regression test
+// for the "pressing r doesn't update PR status" bug. Mem cache was
+// busted on `r` but the pr_status cache (10-min TTL) was not, so a
+// user who just merged a PR or pushed a review change still saw the
+// stale "PR #142 awaiting review" hint until the TTL elapsed.
+//
+// The fix: actionRefresh calls lifecycle.ResetPRStatusCache alongside
+// memCache.InvalidateAll so all "freshness gates" bust together.
+// Background ticks and reconcile keep the TTL — only deliberate user
+// action ('r') invalidates.
+func TestActionRefresh_InvalidatesPRStatusCache(t *testing.T) {
+	// Drive cache state through the public ResetPRStatusCache surface
+	// rather than reaching into lifecycle's package-private map. The
+	// behavior we care about is "after r, the cache is empty" — we
+	// verify by running a real cache-fill path.
+	defer lifecycle.ResetPRStatusCache()
+
+	// Seed the cache by calling RunFast on a fake workspace. queryPRStatus
+	// will fail (no real path / no gh / no PR), but detectPRStatus caches
+	// the nil result with the current timestamp — that's still a cache
+	// entry the size helper will count.
+	ws := state.Workspace{
+		Name:        "test-ws",
+		Path:        "/tmp/canopy-r-bug-test",
+		ProjectRoot: "/tmp/canopy-r-bug-test",
+		Branch:      "test-branch",
+	}
+	_ = lifecycle.RunFast(context.Background(), ws)
+
+	// If RunFast didn't seed the cache (gh missing, branch resolution
+	// failed before the cache write), we can't observe the bust — skip
+	// rather than producing a false pass.
+	before := lifecycle.PRStatusCacheSize()
+	if before == 0 {
+		t.Skip("could not seed pr_status cache in this env (gh missing or branch unresolvable); skipping regression check")
+	}
+
+	m := newTestModel(false)
+	m.memCache = state.NewMemCache(time.Hour)
+	_, _ = actionRefresh(m, teaKeyMsg{})
+
+	if got := lifecycle.PRStatusCacheSize(); got != 0 {
+		t.Errorf("after actionRefresh: pr_status cache size = %d; want 0 (REGRESSION: r must bust pr_status cache so user sees fresh PR state)", got)
 	}
 }
 
