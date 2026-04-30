@@ -111,7 +111,7 @@ func fixture(t *testing.T) (*workspace.Manager, func()) {
 	}
 
 	cleanup := func() {
-		_ = tmuxClient.KillServer(context.Background())
+		_ = tmuxClient.KillServerAndReap(context.Background())
 	}
 	t.Cleanup(cleanup)
 	return mgr, cleanup
@@ -325,7 +325,7 @@ func retryFixture(t *testing.T) (*workspace.Manager, string) {
 		},
 	}
 	t.Cleanup(func() {
-		_ = tmuxClient.KillServer(context.Background())
+		_ = tmuxClient.KillServerAndReap(context.Background())
 	})
 	return mgr, setupPath
 }
@@ -567,6 +567,144 @@ func TestReconcile_RefreshesBranchAfterRename(t *testing.T) {
 	}
 	if got.Branch == originalBranch {
 		t.Errorf("Branch unchanged after rename + Reconcile (= %q)", got.Branch)
+	}
+}
+
+// TestBareAttach_CreatesDebugSession: BareAttach on a workspace
+// creates a -debug-suffixed tmux session at the workspace path with
+// CANOPY_* env vars set, but does NOT rerun scripts.setup. Subsumes
+// the v0.5 `canopy debug` TODO. Verified by checking the debug session
+// is alive post-call and is distinct from the workspace's normal
+// session.
+func TestBareAttach_CreatesDebugSession(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(context.Background(), "debug-me", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	debugSession, err := mgr.BareAttach(context.Background(), "debug-me")
+	if err != nil {
+		t.Fatalf("BareAttach: %v", err)
+	}
+	wantSession := ws.TmuxSession + "-debug"
+	if debugSession != wantSession {
+		t.Errorf("debug session name = %q; want %q", debugSession, wantSession)
+	}
+
+	// Verify the debug session is alive.
+	if alive, err := mgr.Tmux.HasSession(context.Background(), debugSession); err != nil {
+		t.Fatalf("HasSession: %v", err)
+	} else if !alive {
+		t.Errorf("debug session %q not alive after BareAttach", debugSession)
+	}
+
+	// Verify the workspace's normal session is also still alive (BareAttach
+	// must not interfere with it).
+	if alive, err := mgr.Tmux.HasSession(context.Background(), ws.TmuxSession); err != nil {
+		t.Fatalf("HasSession workspace: %v", err)
+	} else if !alive {
+		t.Errorf("workspace session %q got killed by BareAttach (must be independent)", ws.TmuxSession)
+	}
+}
+
+// TestBareAttach_ReusesExistingSession: a second BareAttach call when
+// the debug session already exists is a no-op session reuse — returns
+// the same session name without trying to recreate.
+func TestBareAttach_ReusesExistingSession(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := mgr.Create(context.Background(), "reuse-me", workspace.CreateOptions{}, &stdout, &stderr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	first, err := mgr.BareAttach(context.Background(), "reuse-me")
+	if err != nil {
+		t.Fatalf("first BareAttach: %v", err)
+	}
+	second, err := mgr.BareAttach(context.Background(), "reuse-me")
+	if err != nil {
+		t.Fatalf("second BareAttach: %v", err)
+	}
+	if first != second {
+		t.Errorf("BareAttach reuse: first=%q second=%q; want identical", first, second)
+	}
+}
+
+// TestBareAttach_OrphanedWorkspace_ReturnsError: a workspace whose
+// dir is gone surfaces a clean error (with a hint about canopy rm)
+// rather than silently creating a session at a phantom path.
+func TestBareAttach_OrphanedWorkspace_ReturnsError(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(context.Background(), "orphan-me", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Remove the dir out from under the workspace (simulates manual rm -rf).
+	if err := os.RemoveAll(ws.Path); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+
+	_, err = mgr.BareAttach(context.Background(), "orphan-me")
+	if err == nil {
+		t.Fatal("BareAttach on orphaned workspace returned nil; expected error")
+	}
+	if !strings.Contains(err.Error(), "workspace dir missing") {
+		t.Errorf("orphan error = %q; want it to mention 'workspace dir missing'", err.Error())
+	}
+}
+
+// TestBareAttachMain_CreatesDebugSession: BareAttachMain on a project
+// creates a `<project>-main-debug` tmux session at the project root
+// with CANOPY_* env vars set, but does NOT touch the project's main
+// session if one exists. Symmetric with BareAttach for workspaces;
+// shipped 2026-04-29 once we made main rows full first-class citizens
+// of the inspect drawer.
+func TestBareAttachMain_CreatesDebugSession(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	debugSession, err := mgr.BareAttachMain(context.Background())
+	if err != nil {
+		t.Fatalf("BareAttachMain: %v", err)
+	}
+	wantSuffix := "-main-debug"
+	if !strings.HasSuffix(debugSession, wantSuffix) {
+		t.Errorf("debug session name = %q; want suffix %q", debugSession, wantSuffix)
+	}
+
+	if alive, err := mgr.Tmux.HasSession(context.Background(), debugSession); err != nil {
+		t.Fatalf("HasSession: %v", err)
+	} else if !alive {
+		t.Errorf("debug session %q not alive after BareAttachMain", debugSession)
+	}
+}
+
+// TestBareAttachMain_ReusesExistingSession: a second BareAttachMain
+// call returns the same session name without recreating — same
+// idempotency contract as BareAttach for workspaces.
+func TestBareAttachMain_ReusesExistingSession(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	first, err := mgr.BareAttachMain(context.Background())
+	if err != nil {
+		t.Fatalf("first BareAttachMain: %v", err)
+	}
+	second, err := mgr.BareAttachMain(context.Background())
+	if err != nil {
+		t.Fatalf("second BareAttachMain: %v", err)
+	}
+	if first != second {
+		t.Errorf("BareAttachMain reuse: first=%q second=%q; want identical", first, second)
 	}
 }
 
