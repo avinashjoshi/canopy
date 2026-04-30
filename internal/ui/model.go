@@ -238,6 +238,27 @@ type Model struct {
 	// is then shown but empty (with onboarding text).
 	currentProject string
 
+	// currentWorkspace is the registered workspace name whose Path
+	// matches cwd at startup. Set when cwd is inside a workspace dir;
+	// used to pre-select that workspace in the list on the first
+	// rowsLoadedMsg. Empty otherwise (popup launched from main session
+	// or outside any workspace — fall back to row 0).
+	currentWorkspace string
+
+	// currentWorkspaceRoot is the ProjectRoot of currentWorkspace.
+	// Tracked alongside the name so escape/preselect logic disambiguates
+	// across projects with same-named workspaces — e.g. project A and
+	// B both have a "foo" workspace, and from A/foo deleting B/foo on
+	// the Global tab must not trigger an escape switch to B's main.
+	currentWorkspaceRoot string
+
+	// initialCursorPlaced flips to true once the first rowsLoadedMsg
+	// has been used to position the cursor on currentWorkspace. Without
+	// this latch, every subsequent refresh would yank the cursor back
+	// to currentWorkspace mid-session, losing whatever the user was
+	// hovering on.
+	initialCursorPlaced bool
+
 	// tab tracks which top-level tab is active. tabLocal filters to
 	// rows whose ProjectRoot matches currentProject; tabGlobal shows
 	// every row from state.BuildGlobalRows.
@@ -381,7 +402,7 @@ func (m *Model) branchInWorkspace(branch string) (string, bool) {
 // Wraps NewUnified with the project-mode defaults: tabLocal pre-selected,
 // currentProject = mgr.Cfg.ProjectRoot.
 func New(mgr *workspace.Manager) *Model {
-	return NewUnified(mgr, mgr.Store, mgr.Tmux, mgr.Cfg.ProjectRoot)
+	return NewUnified(mgr, mgr.Store, mgr.Tmux, mgr.Cfg.ProjectRoot, "", "")
 }
 
 // NewUnified is the v0.8 unified-TUI constructor. Single entry point for
@@ -396,7 +417,7 @@ func New(mgr *workspace.Manager) *Model {
 // Popup-mode rendering is detected via CANOPY_IN_POPUP=1 (set by the
 // tmux display-popup -E invocation in install_tmux.go). Single source of
 // truth: the env var is what flips chrome from fullscreen to popup.
-func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject string) *Model {
+func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace string) *Model {
 	ti := textinput.New()
 	ti.Placeholder = "leave blank for a random name"
 	ti.CharLimit = 60
@@ -420,16 +441,18 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	}
 
 	m := &Model{
-		mgr:            mgr,
-		tc:             tc,
-		store:          store,
-		projectName:    projectName,
-		nameInput:      ti,
-		listInput:      li,
-		mode:           listMode,
-		inPopup:        os.Getenv("CANOPY_IN_POPUP") == "1",
-		currentProject: currentProject,
-		tab:            defaultTab,
+		mgr:                  mgr,
+		tc:                   tc,
+		store:                store,
+		projectName:          projectName,
+		nameInput:            ti,
+		listInput:            li,
+		mode:                 listMode,
+		inPopup:              os.Getenv("CANOPY_IN_POPUP") == "1",
+		currentProject:       currentProject,
+		currentWorkspace:     currentWorkspace,
+		currentWorkspaceRoot: currentWorkspaceRoot,
+		tab:                  defaultTab,
 	}
 	// projectlist owns row rendering + cursor. We supply nil callbacks
 	// because the unified TUI's bindings table dispatches activate /
@@ -438,6 +461,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	// parent's `enter` binding (actionAttach), not projectlist's
 	// OnActivate. SetRows happens after each refresh.
 	m.list = projectlist.New(projectlist.Options{})
+	m.list.SetCurrent(currentWorkspaceRoot, currentWorkspace)
 	return m
 }
 
@@ -448,8 +472,8 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 //
 // In popup mode (CANOPY_IN_POPUP=1) we omit MouseCellMotion since the
 // popup is keyboard-driven and mouse handling adds latency.
-func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject string) error {
-	m := NewUnified(mgr, store, tc, currentProject)
+func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace string) error {
+	m := NewUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
 	opts := []tea.ProgramOption{tea.WithAltScreen()}
 	if !m.inPopup {
 		opts = append(opts, tea.WithMouseCellMotion())

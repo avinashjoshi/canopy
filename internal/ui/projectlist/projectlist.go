@@ -86,6 +86,15 @@ type Model struct {
 	onActivate    func(state.GlobalRow) tea.Cmd
 	onGoToProject func(state.GlobalRow) tea.Cmd
 	onRefresh     func() tea.Cmd
+
+	// currentRoot+currentName mark the workspace whose dir hosts the
+	// running canopy invocation (popup launched from inside a workspace).
+	// Set via SetCurrent. Used by the renderer to decorate that row
+	// with a "you are here" marker in addition to the cursor — without
+	// it, navigating away from the auto-preselected row loses the
+	// "this is where I am" cue.
+	currentRoot string
+	currentName string
 }
 
 // New constructs a Model with no rows. The parent typically follows up
@@ -192,6 +201,32 @@ func (m *Model) UpdateRowHints(project, name string, hints []state.Hint) {
 			return
 		}
 	}
+}
+
+// SetCurrent records which (projectRoot, name) is the "you are here"
+// row — the workspace whose dir cwd was inside at canopy launch. Empty
+// values disable the marker.
+func (m *Model) SetCurrent(projectRoot, name string) {
+	m.currentRoot = projectRoot
+	m.currentName = name
+}
+
+// SetCursorTo moves the cursor to the first row matching (projectRoot,
+// name). Returns true on hit, false if no row matched. Used by the
+// unified TUI to pre-select the workspace whose dir the popup was
+// launched from (load-bearing UX: opening the popup in workspace X
+// should highlight X, not row 0). No-op when projectRoot is empty.
+func (m *Model) SetCursorTo(projectRoot, name string) bool {
+	if projectRoot == "" || name == "" {
+		return false
+	}
+	for i, r := range m.rows {
+		if r.ProjectRoot == projectRoot && r.Name == name {
+			m.cursor = i
+			return true
+		}
+	}
+	return false
 }
 
 // CursorRow returns the row currently under the cursor, or zero value +
@@ -310,6 +345,8 @@ func (m Model) renderTable() string {
 			port = fmt.Sprintf("%d", r.Port)
 		}
 		isSelected := i == m.cursor
+		isCurrent := m.currentRoot != "" && m.currentName != "" &&
+			r.ProjectRoot == m.currentRoot && r.Name == m.currentName
 		statusText := displayStatus(r)
 
 		var line string
@@ -349,6 +386,9 @@ func (m Model) renderTable() string {
 			)
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				plainContent += "  " + stripAnsi(hintBadges)
+			}
+			if isCurrent {
+				plainContent += "  ← here"
 			}
 
 			rowStyle := selectionStyle()
@@ -406,6 +446,9 @@ func (m Model) renderTable() string {
 			)
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				line += "  " + hintBadges
+			}
+			if isCurrent {
+				line += "  " + currentMarkerStyle().Render("← here")
 			}
 		}
 		b.WriteString(line)
@@ -715,6 +758,14 @@ func hintPRStyle() lipgloss.Style {
 
 func subtleHelper() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+}
+
+// currentMarkerStyle is the "← here" suffix on the row whose dir hosts
+// the running canopy invocation. Cyan + bold so it pops against the
+// surrounding subtle-grey hint badges without competing with the
+// selection-bg highlight.
+func currentMarkerStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
 }
 
 func selectionStyle() lipgloss.Style {

@@ -47,6 +47,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.allRows = msg.rows
 		}
 		m.list.SetRows(m.filteredRows())
+		// Position the cursor on the workspace whose dir cwd was inside
+		// (popup launched from inside a workspace → highlight that
+		// workspace, not row 0). Latches on the first NON-EMPTY load so
+		// subsequent refreshes don't yank the cursor back. The "non-empty"
+		// gate handles two failure modes:
+		//   - early empty rowsLoadedMsg (state racing the refresh): don't
+		//     burn the preselect opportunity, the next non-empty load
+		//     gets to try.
+		//   - target missing from the *filtered* set (user changed tab
+		//     before the load completed): we still latch, because the
+		//     row was reachable through allRows but the user's tab
+		//     filter excluded it. Auto-jumping the cursor on a later
+		//     refresh when the row reappears would surprise the user
+		//     mid-navigation.
+		if !m.initialCursorPlaced && len(m.allRows) > 0 {
+			if m.currentWorkspace != "" && m.currentWorkspaceRoot != "" {
+				m.list.SetCursorTo(m.currentWorkspaceRoot, m.currentWorkspace)
+			}
+			m.initialCursorPlaced = true
+		}
 		// Phase 2: kick off per-row hint loaders in parallel.
 		if msg.err != nil || len(m.allRows) == 0 {
 			return m, nil
@@ -105,9 +125,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case attachAfterMsg:
-		// Resurrection completed, now attach. Same exec-process flow as
-		// the direct ready-status path.
-		return m, attachCmd(m.mgr, msg.session)
+		// Resurrection completed, now attach. attachOrSwitch picks the
+		// right verb (popup → switch-client + quit, fullscreen → exec).
+		return m, m.attachOrSwitch(msg.session)
 
 
 	case createStartedMsg:
@@ -157,7 +177,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busyTitle = ""
 			m.busyOutput = ""
 			m.busyDone = false
-			return m, attachCmd(m.mgr, msg.tmuxSession)
+			return m, m.attachOrSwitch(msg.tmuxSession)
 		}
 		return m, nil
 
@@ -207,12 +227,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case drawerAttachAfterMsg:
 		// Bare attach session is ready — attach via the normal path.
-		// In popup mode this still uses tea.ExecProcess (we just
-		// created a fresh session, not switched to one). After detach,
-		// refreshCmd reloads the list and we land back on listMode.
+		// attachOrSwitch handles popup vs fullscreen.
 		m.mode = listMode
 		m.drawerRow = Row{}
-		return m, attachCmd(m.mgr, msg.session)
+		return m, m.attachOrSwitch(msg.session)
 
 	case killDoneMsg:
 		// `K` kill finished. Invalidate the cache for the killed
@@ -450,6 +468,17 @@ func (m *Model) clearNewTarget() {
 func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
 	if !ok || row.ProjectRoot == "" {
+		return m, nil
+	}
+	// Short-circuit when re-focusing the already-current project: just
+	// flip to Local tab and re-filter rows. Avoids a needless canopy.json
+	// reload (which would surface a spurious m.err if the file is
+	// transiently unreadable, even though the existing m.mgr is still
+	// valid). The visible side effect — landing on Local tab — happens
+	// either way.
+	if row.ProjectRoot == m.currentProject {
+		m.tab = tabLocal
+		m.list.SetRows(m.filteredRows())
 		return m, nil
 	}
 	cfg, err := config.LoadFrom(row.ProjectRoot)
@@ -983,25 +1012,39 @@ func (m *Model) attachOrSwitch(session string) tea.Cmd {
 	})
 }
 
-// attachCmd dispatches tea.ExecProcess against tmux's attach command.
-// On detach, sends a refreshCmd so the rendered status updates.
-func attachCmd(mgr *workspace.Manager, session string) tea.Cmd {
-	cmd, err := mgr.Tmux.AttachCmd(context.Background(), session)
-	if err != nil {
-		return func() tea.Msg {
-			return rowsLoadedMsg{err: err}
-		}
+// escapeIfDeletingCurrent moves the user's tmux client off the workspace
+// that's about to be removed. Without this, deleting the workspace whose
+// session hosts the popup (or whose tmux session the user is attached to)
+// strands the client when Manager.Remove kills the session.
+//
+// Triggered when (projectRoot, name) matches (currentWorkspaceRoot,
+// currentWorkspace). Match is on the full pair because workspace names
+// are unique per project, not globally — A/foo and B/foo coexist. We
+// bring up the project's main session if it isn't already (idempotent —
+// the `enter`-on-dead-main-row path uses the same EnsureMainSession),
+// then switch-client to it. Both calls are best-effort: failures don't
+// block the delete, just log so the user gets the diagnostic if their
+// client did get stranded.
+//
+// No-op when currentWorkspace is empty (popup launched from outside any
+// workspace) or doesn't match the (root, name) pair (user is deleting a
+// different workspace than the one they're sitting in).
+func (m *Model) escapeIfDeletingCurrent(mgr *workspace.Manager, projectRoot, name string) {
+	if mgr == nil || m.currentWorkspace == "" {
+		return
 	}
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
-			log.Warn("ui.attach.exec-failed", "session", session, "err", err)
-			return rowsLoadedMsg{err: fmt.Errorf("attach %s: %w", session, err)}
-		}
-		// Detach completed cleanly; refresh rows so any state changes
-		// during the session (rare but possible if the user ran canopy
-		// commands inside a pane) show up.
-		return refreshCmd(mgr, mgr.Tmux, mgr.Store)()
-	})
+	if name != m.currentWorkspace || projectRoot != m.currentWorkspaceRoot {
+		return
+	}
+	ctx := context.Background()
+	mainSession, err := mgr.EnsureMainSession(ctx)
+	if err != nil {
+		log.Warn("ui.delete.ensure-main-failed", "name", name, "err", err.Error())
+		return
+	}
+	if err := m.tc.SwitchClient(ctx, mainSession); err != nil {
+		log.Warn("ui.delete.switch-client-failed", "target", mainSession, "err", err.Error())
+	}
 }
 
 // resurrectAndAttachCmd handles the stopped-status flow. Runs Resurrect
@@ -1597,6 +1640,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		name := m.deleteTarget
+		m.escapeIfDeletingCurrent(mgr, m.deleteTargetRoot, name)
 		m.mode = busyMode
 		m.busyOp = busyOpRemove
 		m.busyTitle = fmt.Sprintf("Force-removing workspace %q...", name)
@@ -1620,6 +1664,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		name := m.deleteTarget
+		m.escapeIfDeletingCurrent(mgr, m.deleteTargetRoot, name)
 		m.mode = busyMode
 		m.busyOp = busyOpRemove
 		m.busyTitle = fmt.Sprintf("Removing workspace %q...", name)

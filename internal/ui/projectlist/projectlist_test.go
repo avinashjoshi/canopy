@@ -67,6 +67,58 @@ func TestSetRows_ClampsCursor(t *testing.T) {
 	}
 }
 
+// TestRender_CurrentMarker: the row matching SetCurrent gets a visible
+// "← here" suffix in the rendered view, and rows that don't match
+// stay clean. Catches accidental marker leak (every row shows it) or
+// missed match (no row shows it).
+func TestRender_CurrentMarker(t *testing.T) {
+	m := New(Options{})
+	m.SetRows(sampleRows())
+	m.SetCurrent("/b/canopy", "ancient-hornet")
+	m.SetSize(120, 20)
+
+	out := m.View()
+	if !strings.Contains(out, "← here") {
+		t.Errorf("View() missing current marker; got:\n%s", out)
+	}
+	// Marker should appear exactly once — only on the matching row.
+	if got := strings.Count(out, "← here"); got != 1 {
+		t.Errorf("current marker count = %d; want 1", got)
+	}
+
+	// Clearing current → marker disappears.
+	m.SetCurrent("", "")
+	if strings.Contains(m.View(), "← here") {
+		t.Errorf("View() still has marker after SetCurrent(\"\", \"\")")
+	}
+}
+
+// TestSetCursorTo_HitAndMiss: SetCursorTo positions the cursor on a
+// matching (projectRoot, name) row and reports true; misses leave the
+// cursor untouched and report false. Empty inputs are no-ops.
+func TestSetCursorTo_HitAndMiss(t *testing.T) {
+	m := New(Options{})
+	m.SetRows(sampleRows())
+
+	if !m.SetCursorTo("/b/canopy", "ancient-hornet") {
+		t.Fatalf("SetCursorTo(hit) = false; want true")
+	}
+	if m.cursor != 2 {
+		t.Errorf("cursor after hit = %d; want 2", m.cursor)
+	}
+
+	if m.SetCursorTo("/b/canopy", "nonexistent") {
+		t.Errorf("SetCursorTo(miss) = true; want false")
+	}
+	if m.cursor != 2 {
+		t.Errorf("cursor after miss = %d; want unchanged (2)", m.cursor)
+	}
+
+	if m.SetCursorTo("", "anything") {
+		t.Errorf("SetCursorTo(empty project) = true; want false")
+	}
+}
+
 // TestNav_JKAndArrows: ↑/↓/j/k all move cursor, both within bounds.
 func TestNav_JKAndArrows(t *testing.T) {
 	m := New(Options{})

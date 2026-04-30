@@ -72,6 +72,12 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Best-effort: if cwd is inside a workspace dir, capture both the
+	// workspace name and its project root so the unified TUI can
+	// pre-select that exact row (project root + name disambiguates
+	// across projects with same-named workspaces). Falls back to ("","")
+	// when cwd is outside any workspace.
+	currentWorkspaceRoot, currentWorkspace := workspace.ResolveCurrentWorkspace(cwd, st)
 
 	var mgr *workspace.Manager
 	if currentProject != "" {
@@ -123,7 +129,7 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 		}
 	}
 
-	return ui.RunUnified(mgr, store, tc, currentProject)
+	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
 }
 
 // resolveProjectContext picks the canonical current-project root for the
