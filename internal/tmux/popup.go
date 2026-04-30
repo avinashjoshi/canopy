@@ -69,6 +69,29 @@ func (c *Client) PaneCwd(ctx context.Context, pane string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// DetachClient detaches the current tmux client (the one identified by
+// $TMUX in the calling environment). The popup uses this when the user
+// deletes the workspace they're sitting in: instead of letting tmux
+// auto-switch the client to some other session — or worse, auto-build
+// the project main session as a parking spot — we just kick the client
+// out of tmux entirely. The user lands back at whatever shell started
+// tmux. Sessions other than the killed one are unaffected.
+//
+// Errors are surfaced verbatim; the typical caller wraps them as
+// best-effort logs (the popup is closing anyway, no UI to surface to).
+func (c *Client) DetachClient(ctx context.Context) error {
+	log.Info("tmux.detach-client")
+
+	args := c.args("detach-client")
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux.DetachClient: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 // SwitchClient switches the current tmux client to the named target
 // session, the equivalent of `<prefix>s`-then-pick. Used by canopy popup
 // to flip from the popup's host client into a workspace's session.

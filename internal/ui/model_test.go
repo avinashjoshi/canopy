@@ -1534,23 +1534,193 @@ func TestRetryStartedMsg_DispatchesStreamingBatch(t *testing.T) {
 	}
 }
 
-// TestRemoveDone_AppendsTrailingOutput: removeDoneMsg appends the
-// final tail to busyOutput rather than overwriting. busyOutput
-// already contains the streamed archive script output via tick
-// messages; overwriting would erase it.
-func TestRemoveDone_AppendsTrailingOutput(t *testing.T) {
+// TestRemoveDone_AppendsTrailingOutputOnError: on the error path,
+// removeDoneMsg appends the final tail to busyOutput rather than
+// overwriting. busyOutput already contains the streamed archive script
+// output via tick messages; overwriting would erase it. We stay in
+// busyMode so the user can read the diagnostic.
+func TestRemoveDone_AppendsTrailingOutputOnError(t *testing.T) {
 	m := newTestModel(false)
 	m.mode = busyMode
 	m.busyOutput = "archive ran on port 41010\n"
 
-	model, _ := m.Update(removeDoneMsg{output: "Removed.\n"})
+	model, _ := m.Update(removeDoneMsg{output: "remove failed.\n", err: fmt.Errorf("boom")})
 	m = model.(*Model)
 
+	if m.mode != busyMode {
+		t.Errorf("removeDoneMsg(err) should keep busyMode for the diagnostic; got %v", m.mode)
+	}
 	if !strings.Contains(m.busyOutput, "archive ran on port 41010") {
 		t.Errorf("removeDoneMsg should preserve streamed output: %q", m.busyOutput)
 	}
-	if !strings.Contains(m.busyOutput, "Removed.") {
+	if !strings.Contains(m.busyOutput, "remove failed.") {
 		t.Errorf("removeDoneMsg should append trailing output: %q", m.busyOutput)
+	}
+}
+
+// TestRemoveDone_AutoDismissOnSuccess: success-path removeDoneMsg
+// auto-exits busyMode instead of leaving the popup open waiting for a
+// keypress. The user's tmux client has already been switched off any
+// doomed session by escapeIfDeletingCurrent, so there's nothing to
+// linger for. Fullscreen returns to listMode; popup mode tea.Quits.
+//
+// Asymmetric on purpose with the error path (TestRemoveDone_Appends...
+// OnError above), which keeps busyMode so the user can read the
+// archive output + error message.
+func TestRemoveDone_AutoDismissOnSuccess(t *testing.T) {
+	t.Run("fullscreen → listMode + clears busy fields", func(t *testing.T) {
+		m := newTestModel(false)
+		m.mode = busyMode
+		m.busyOp = busyOpRemove
+		m.busyTitle = "Removing workspace \"x\"..."
+		m.busyOutput = "archive ran\n"
+
+		model, cmd := m.Update(removeDoneMsg{})
+		m = model.(*Model)
+
+		if m.mode != listMode {
+			t.Errorf("mode after success removeDoneMsg = %v; want listMode", m.mode)
+		}
+		if m.busyOp != busyOpNone {
+			t.Errorf("busyOp = %v; want busyOpNone", m.busyOp)
+		}
+		if m.busyTitle != "" || m.busyOutput != "" {
+			t.Errorf("busy fields not cleared: title=%q output=%q", m.busyTitle, m.busyOutput)
+		}
+		if cmd == nil {
+			t.Errorf("expected refresh cmd on success; got nil")
+		}
+	})
+
+	t.Run("popup → tea.Quit", func(t *testing.T) {
+		m := newTestModel(false)
+		m.inPopup = true
+		m.mode = busyMode
+		m.busyOp = busyOpRemove
+
+		model, cmd := m.Update(removeDoneMsg{})
+		m = model.(*Model)
+
+		if cmd == nil {
+			t.Fatal("expected tea.Quit on popup success; got nil cmd")
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Errorf("expected tea.QuitMsg from cmd; got %T", cmd())
+		}
+		// Busy fields must be cleared so any post-quit render flash
+		// doesn't show a stale "Removing..." popup.
+		if m.busyOp != busyOpNone || m.busyTitle != "" || m.busyOutput != "" {
+			t.Errorf("busy fields not cleared on popup quit: op=%v title=%q output=%q",
+				m.busyOp, m.busyTitle, m.busyOutput)
+		}
+	})
+}
+
+// TestDeletingCurrentInPopup covers the four-way truth table:
+// only popup-mode AND a (root, name) match against currentWorkspace
+// should return true. Anything else is false.
+func TestDeletingCurrentInPopup(t *testing.T) {
+	cases := []struct {
+		name             string
+		inPopup          bool
+		currentWorkspace string
+		currentRoot      string
+		argRoot          string
+		argName          string
+		want             bool
+	}{
+		{"popup + match → true", true, "feature-x", "/p", "/p", "feature-x", true},
+		{"popup + name mismatch → false", true, "feature-x", "/p", "/p", "other", false},
+		{"popup + root mismatch → false", true, "feature-x", "/p", "/q", "feature-x", false},
+		{"fullscreen + match → false", false, "feature-x", "/p", "/p", "feature-x", false},
+		{"popup + no current workspace → false", true, "", "", "/p", "feature-x", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newTestModel(false)
+			m.inPopup = c.inPopup
+			m.currentWorkspace = c.currentWorkspace
+			m.currentWorkspaceRoot = c.currentRoot
+			got := m.deletingCurrentInPopup(c.argRoot, c.argName)
+			if got != c.want {
+				t.Errorf("got %v; want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestConfirmDeleteY_PopupCurrentWorkspace_TakesDetachShortcut: when
+// the user is deleting the workspace they opened the popup from,
+// pressing y skips busyMode entirely and dispatches the detach +
+// detached-subprocess shortcut. The cmd is non-nil so the user
+// experiences "popup closes immediately" rather than "popup sits at
+// busyMode while the underlying tmux session changes."
+//
+// We can't easily assert the cmd's side effects (it spawns a real
+// subprocess + runs tmux detach-client), but we can verify the
+// branch was taken: mode stays as listMode-equivalent (we don't
+// transition to busyMode), and a non-nil cmd is returned.
+func TestConfirmDeleteY_PopupCurrentWorkspace_SkipsBusyMode(t *testing.T) {
+	m := newTestModel(false)
+	m.inPopup = true
+	m.currentWorkspaceRoot = "/tmp/test-project"
+	m.currentWorkspace = "feature-x"
+	m.deleteTarget = "feature-x"
+	m.deleteTargetRoot = "/tmp/test-project"
+	m.mode = confirmDeleteMode
+	// One row matching the delete target so resolveTargetMgr finds it.
+	m.setTestRows([]Row{{
+		Project:     "test-project",
+		ProjectRoot: "/tmp/test-project",
+		Name:        "feature-x",
+		Status:      state.StatusReady,
+	}})
+
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = model.(*Model)
+
+	if m.mode == busyMode {
+		t.Errorf("popup+current y should skip busyMode; got mode=%v", m.mode)
+	}
+	if cmd == nil {
+		t.Fatal("expected popupDetachAndRemoveCmd; got nil cmd")
+	}
+	if m.deleteTarget != "" || m.deleteTargetRoot != "" {
+		t.Errorf("delete fields not cleared: target=%q root=%q", m.deleteTarget, m.deleteTargetRoot)
+	}
+}
+
+// TestConfirmDeleteY_PopupNotCurrent_UsesBusyMode: opening the popup
+// from project main (or fullscreen, or a different workspace) and
+// deleting some other workspace should keep using the existing
+// busyMode flow — we only want to skip busy when the user is
+// deleting the workspace they're sitting in.
+func TestConfirmDeleteY_PopupNotCurrent_UsesBusyMode(t *testing.T) {
+	m := newTestModel(false)
+	m.inPopup = true
+	m.currentWorkspaceRoot = ""
+	m.currentWorkspace = "" // popup opened from outside any workspace
+	m.deleteTarget = "feature-x"
+	m.deleteTargetRoot = "/tmp/test-project"
+	m.mode = confirmDeleteMode
+	m.setTestRows([]Row{{
+		Project:     "test-project",
+		ProjectRoot: "/tmp/test-project",
+		Name:        "feature-x",
+		Status:      state.StatusReady,
+	}})
+
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = model.(*Model)
+
+	if m.mode != busyMode {
+		t.Errorf("non-current delete should enter busyMode; got %v", m.mode)
+	}
+	if m.busyOp != busyOpRemove {
+		t.Errorf("busyOp = %v; want busyOpRemove", m.busyOp)
+	}
+	if cmd == nil {
+		t.Errorf("expected removeCmd; got nil")
 	}
 }
 
