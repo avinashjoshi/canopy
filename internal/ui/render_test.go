@@ -63,3 +63,56 @@ func TestStatusCell_IncludesGlyphAndName(t *testing.T) {
 		}
 	}
 }
+
+// renderVersionPill drives the top-bar release-vs-DEV indicator. Three
+// branches: DEV pill (devWorkspace set), release pill (versionLabel set),
+// suppressed (both empty). Any regression here changes the user's
+// at-a-glance "which canopy am I running" cue, which is the whole point
+// of the install-and-dev-workflow design.
+func TestRenderVersionPill_dev(t *testing.T) {
+	m := &Model{}
+	m.SetVersionInfo("ignored-when-dev-set", "feature-A")
+	pill := m.renderVersionPill()
+	if pill == "" {
+		t.Fatal("DEV pill must render when devWorkspace is set")
+	}
+	if !strings.Contains(pill, "DEV: feature-A") {
+		t.Errorf("DEV pill missing 'DEV: feature-A' content; got %q", pill)
+	}
+	// versionLabel must be ignored when devWorkspace wins — the DEV
+	// signal is more useful and we don't want to clutter the pill.
+	if strings.Contains(pill, "ignored-when-dev-set") {
+		t.Errorf("DEV pill leaked versionLabel content: %q", pill)
+	}
+}
+
+func TestRenderVersionPill_release(t *testing.T) {
+	m := &Model{}
+	m.SetVersionInfo("v0.12.0+abc1234", "")
+	pill := m.renderVersionPill()
+	if pill == "" {
+		t.Fatal("release pill must render when versionLabel is set")
+	}
+	if !strings.Contains(pill, "v0.12.0+abc1234") {
+		t.Errorf("release pill missing version label; got %q", pill)
+	}
+	if strings.Contains(pill, "DEV") {
+		t.Errorf("release pill must not contain 'DEV': %q", pill)
+	}
+}
+
+func TestRenderVersionPill_suppressed(t *testing.T) {
+	m := &Model{}
+	// Default zero-value → no version info, no pill. This is the
+	// "tests + bare-bones invocations don't gain unwanted chrome"
+	// path described in the renderVersionPill docstring.
+	if pill := m.renderVersionPill(); pill != "" {
+		t.Errorf("empty version info should suppress pill; got %q", pill)
+	}
+
+	// Explicit empty pair via setter → also suppressed.
+	m.SetVersionInfo("", "")
+	if pill := m.renderVersionPill(); pill != "" {
+		t.Errorf("explicit-empty SetVersionInfo should suppress pill; got %q", pill)
+	}
+}

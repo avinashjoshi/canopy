@@ -20,6 +20,14 @@ import (
 	"github.com/oncactus/canopy/internal/workspace"
 )
 
+// testSocket is this package's named tmux socket. Per-PACKAGE socket
+// name is load-bearing: `go test ./...` runs packages in parallel by
+// default, and if internal/tmux and internal/workspace shared one
+// socket, their TestMain teardowns would kill each other's sessions
+// mid-run ("server exited unexpectedly" failures, intermittent on busy
+// machines). Each package uses its own socket so they can't trample.
+const testSocket = "canopy-test-workspace"
+
 func TestMain(m *testing.M) {
 	teardown, _ := clog.Init(false)
 	defer teardown()
@@ -93,7 +101,7 @@ func fixture(t *testing.T) (*workspace.Manager, func()) {
 		t.Fatalf("state.NewStore: %v", err)
 	}
 
-	tmuxClient := tmux.WithSocket("canopy-test")
+	tmuxClient := tmux.WithSocket(testSocket)
 	mgr := &workspace.Manager{
 		Cfg:        cfg,
 		Store:      store,
@@ -147,7 +155,7 @@ func TestCreate_HappyPath(t *testing.T) {
 
 	// tmux session must exist with the standard 3-pane layout
 	// (nvim top-left, claude top-right, shell full-width bottom).
-	out, err := exec.Command("tmux", "-L", "canopy-test", "list-panes", "-t", ws.TmuxSession).Output()
+	out, err := exec.Command("tmux", "-L", testSocket,"list-panes", "-t", ws.TmuxSession).Output()
 	if err != nil {
 		t.Errorf("list-panes: %v", err)
 	} else if got := len(strings.Split(strings.TrimSpace(string(out)), "\n")); got != 3 {
@@ -371,7 +379,7 @@ func retryFixture(t *testing.T) (*workspace.Manager, string) {
 	if err != nil {
 		t.Fatalf("state.NewStore: %v", err)
 	}
-	tmuxClient := tmux.WithSocket("canopy-test")
+	tmuxClient := tmux.WithSocket(testSocket)
 	mgr := &workspace.Manager{
 		Cfg:        cfg,
 		Store:      store,
@@ -795,7 +803,7 @@ func TestResurrect_HappyPath(t *testing.T) {
 		t.Errorf("status after resurrect = %q; want ready", revived.Status)
 	}
 
-	out, err := exec.Command("tmux", "-L", "canopy-test", "list-panes", "-t", ws.TmuxSession).Output()
+	out, err := exec.Command("tmux", "-L", testSocket,"list-panes", "-t", ws.TmuxSession).Output()
 	if err != nil {
 		t.Errorf("list-panes: %v", err)
 	} else if got := len(strings.Split(strings.TrimSpace(string(out)), "\n")); got != 3 {

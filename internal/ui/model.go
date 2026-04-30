@@ -306,6 +306,34 @@ type Model struct {
 	drawerLogTail  string // last N lines of ~/.canopy/log/canopy-<ws>.log
 	drawerSetupLog string // last setup run output, or "no setup log captured"
 	drawerErr      error  // non-fatal load error to surface in-drawer
+
+	// Version pill state. Set by SetVersionInfo from cmd/canopy on
+	// startup so the top bar can surface "release vs DEV, and which
+	// workspace if dev" at a glance. Both fields empty means "no
+	// version info available" — the pill is omitted from the top bar
+	// and the existing chrome is unchanged.
+	//
+	// versionLabel is the human-friendly version string ("v0.12.0",
+	// "main-abc1234", or "dev"). Shown muted gray for release builds.
+	//
+	// devWorkspace is the canopy workspace name when the running
+	// canopy is a dev build inside a known worktree, or "" when not
+	// detectable. Non-empty triggers the cyan DEV pill regardless of
+	// versionLabel; empty + versionLabel == "dev" still renders DEV
+	// (untracked); empty + versionLabel != "dev" renders the version
+	// pill normally.
+	versionLabel string
+	devWorkspace string
+}
+
+// SetVersionInfo records the running binary's version surface for the
+// top-bar pill. Called by cmd/canopy after constructing the model so
+// the UI never has to know about ldflags or BuildInfo — it just renders
+// the strings it's given. Safe to call with all-empty arguments to
+// suppress the pill (e.g., in tests that don't care about chrome).
+func (m *Model) SetVersionInfo(versionLabel, devWorkspace string) {
+	m.versionLabel = versionLabel
+	m.devWorkspace = devWorkspace
 }
 
 // tabKind identifies which top-level tab is active in the unified TUI.
@@ -470,10 +498,15 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 // popup. mgr is optional — nil when invoked from outside a registered
 // project. currentProject is the resolved Local-tab filter root.
 //
+// versionLabel + devWorkspace populate the top-bar version pill via
+// Model.SetVersionInfo. Pass empty strings to suppress the pill (no
+// observable behavior change — the chrome just doesn't gain the pill).
+//
 // In popup mode (CANOPY_IN_POPUP=1) we omit MouseCellMotion since the
 // popup is keyboard-driven and mouse handling adds latency.
-func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace string) error {
+func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, devWorkspace string) error {
 	m := NewUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
+	m.SetVersionInfo(versionLabel, devWorkspace)
 	opts := []tea.ProgramOption{tea.WithAltScreen()}
 	if !m.inPopup {
 		opts = append(opts, tea.WithMouseCellMotion())

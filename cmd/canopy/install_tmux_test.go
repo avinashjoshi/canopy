@@ -145,6 +145,53 @@ func TestCanopyBlockBody_popupBindShape(t *testing.T) {
 	}
 }
 
+// TestCanopyBlockBody_bareBinaryNoAbsolutePath asserts the block embeds
+// bare `canopy` (PATH-resolved at tmux runtime) and never an absolute
+// path. With `canopy use` swapping the ~/.local/bin/canopy symlink
+// between release and dev binaries, an absolute path baked into the
+// block would force `canopy install tmux --force` after every swap —
+// which is exactly the pain this design eliminates.
+//
+// REGRESSION GUARD: the prior implementation resolved os.Executable()
+// and wrote that path into the block. Any future change that brings
+// path-baking back must also update the design doc and explicitly
+// document why; this test fails first.
+func TestCanopyBlockBody_bareBinaryNoAbsolutePath(t *testing.T) {
+	body := canopyBlockBody()
+
+	// The popup keybind line must end with `canopy"` (bare invocation),
+	// not `/path/to/canopy"` or `'/path/to/canopy'"`.
+	if !strings.Contains(body, `CANOPY_IN_POPUP=1 canopy"`) {
+		t.Errorf("popup keybind missing bare `canopy` (expected `CANOPY_IN_POPUP=1 canopy\"`):\n%s", body)
+	}
+
+	// The statusline `set -ag` line must reference bare `canopy` too.
+	if !strings.Contains(body, "#(canopy statusline --format=current)") {
+		t.Errorf("statusline segment missing bare `canopy` (expected `#(canopy statusline ...)`):\n%s", body)
+	}
+
+	// Defense-in-depth: no absolute paths anywhere in the block. tmux
+	// configs sometimes contain `/path/...` for unrelated reasons, so we
+	// can't blanket-forbid all slashes — but `/canopy` followed by a
+	// quote or end-of-line is the unambiguous signature of the prior
+	// path-baking bug.
+	for _, sig := range []string{`/canopy"`, `/canopy '`, `/canopy)`} {
+		if strings.Contains(body, sig) {
+			t.Errorf("block contains absolute-path canopy invocation %q (path-baking regression):\n%s", sig, body)
+		}
+	}
+}
+
+// TestCanopyBinForBlock asserts the helper returns bare `canopy` always.
+// Belt-and-suspenders for the regression test above: if someone changes
+// canopyBinForBlock to return os.Executable() again, this fires before
+// the integration test does.
+func TestCanopyBinForBlock(t *testing.T) {
+	if got := canopyBinForBlock(); got != "canopy" {
+		t.Errorf("canopyBinForBlock() = %q; want %q", got, "canopy")
+	}
+}
+
 // TestApplyCanopyBlock_idempotent: applying twice produces same output.
 // IRON RULE for install: re-runs must be safe.
 func TestApplyCanopyBlock_idempotent(t *testing.T) {
@@ -187,8 +234,11 @@ func TestRunInstallTmux_freshFile(t *testing.T) {
 	if !strings.Contains(body, "CANOPY_IN_POPUP=1") {
 		t.Errorf("written file missing CANOPY_IN_POPUP=1 env:\n%s", body)
 	}
-	// Binary path is resolved at install time from os.Executable() so
-	// the path embedded varies per test run.
+	// Block invokes bare `canopy` (PATH-resolved) so it follows the
+	// ~/.local/bin/canopy symlink across `canopy use` swaps.
+	if !strings.Contains(body, `CANOPY_IN_POPUP=1 canopy"`) {
+		t.Errorf("written file missing bare `canopy` invocation in popup keybind:\n%s", body)
+	}
 	if !strings.Contains(body, " statusline --format=current") {
 		t.Errorf("written file missing 'statusline' subcommand reference:\n%s", body)
 	}

@@ -121,7 +121,14 @@ func renderCurrentLine(ctx context.Context) string {
 		return ""
 	}
 
-	return formatCurrent(ws.Name, ws.Status, ws.Port)
+	// Resolve "is the running canopy a dev build?" once per invocation.
+	// Statusline is invoked every status-interval seconds, so we keep
+	// this cheap: VersionDetails does at most one git fork (dev only,
+	// path heuristic miss only). The DEV suffix is the user's
+	// at-a-glance reminder that they swapped binaries via `canopy use`
+	// or `make dev` and forgot to swap back.
+	d := versionDetails()
+	return formatCurrent(ws.Name, ws.Status, ws.Port, d.IsDev, d.DevWorkspace)
 }
 
 // loadStateForStatusline opens state.json read-only. No flock — statusline
@@ -152,11 +159,30 @@ func findWorkspaceBySession(st *state.State, sessionName string) *state.Workspac
 	return nil
 }
 
-// formatCurrent renders one line: "canopy: <name> <glyph> :<port>".
-// Always passes through escapeForTmux so `#` in a workspace name can't
-// inject style sequences.
-func formatCurrent(name string, status state.Status, port int) string {
-	return escapeForTmux(fmt.Sprintf("canopy: %s %s :%d", name, statuslineGlyph(status), port))
+// formatCurrent renders one line: "canopy: <name> <glyph> :<port>",
+// optionally appending a "[DEV:<branch>]" suffix when the running
+// canopy is a dev build. Always passes through escapeForTmux so `#`
+// in a workspace name (or branch name) can't inject style sequences.
+//
+// The DEV suffix is independent of which workspace the user is in: it
+// reflects the running canopy binary, not the active session. So a
+// user inside workspace B's tmux who has `canopy use feature-A` flipped
+// will see `canopy: B ● :40010 [DEV:feature-A]` — which is exactly the
+// confusion-buster the design calls for.
+//
+// devWorkspace may be empty even when isDev is true (binary lives
+// outside any known worktree); we fall back to bare "[DEV]" then so
+// the user still sees the dev marker.
+func formatCurrent(name string, status state.Status, port int, isDev bool, devWorkspace string) string {
+	base := fmt.Sprintf("canopy: %s %s :%d", name, statuslineGlyph(status), port)
+	if isDev {
+		if devWorkspace != "" {
+			base += fmt.Sprintf(" [DEV:%s]", devWorkspace)
+		} else {
+			base += " [DEV]"
+		}
+	}
+	return escapeForTmux(base)
 }
 
 // statuslineGlyph mirrors the protanopia-friendly glyph set used in the

@@ -69,23 +69,54 @@ func TestEscapeForTmux(t *testing.T) {
 }
 
 // TestFormatCurrent verifies the user-facing line shape: "canopy: <name>
-// <glyph> :<port>" with hash-escape applied.
+// <glyph> :<port>" with hash-escape applied. Covers both the release
+// case (isDev=false → no suffix) and the dev case (isDev=true → [DEV:<branch>]
+// suffix). Also covers the "dev build but workspace unknown" fallback
+// to bare "[DEV]".
 func TestFormatCurrent(t *testing.T) {
 	cases := []struct {
-		name   string
-		ws     string
-		status state.Status
-		port   int
-		want   string
+		name         string
+		ws           string
+		status       state.Status
+		port         int
+		isDev        bool
+		devWorkspace string
+		want         string
 	}{
-		{"ready", "silent-falcon", state.StatusReady, 40010, "canopy: silent-falcon ● :40010"},
-		{"broken", "misty-aspen", state.StatusBroken, 40011, "canopy: misty-aspen ✗ :40011"},
-		{"stopped", "bold-otter", state.StatusStopped, 40012, "canopy: bold-otter ⏸ :40012"},
-		{"hostile_name", "feat#[bg=red]", state.StatusReady, 40013, "canopy: feat##[bg=red] ● :40013"},
+		// Release builds — no DEV suffix, no matter the workspace name.
+		{"ready_release", "silent-falcon", state.StatusReady, 40010, false, "", "canopy: silent-falcon ● :40010"},
+		{"broken_release", "misty-aspen", state.StatusBroken, 40011, false, "", "canopy: misty-aspen ✗ :40011"},
+		{"stopped_release", "bold-otter", state.StatusStopped, 40012, false, "", "canopy: bold-otter ⏸ :40012"},
+		{"hostile_name_release", "feat#[bg=red]", state.StatusReady, 40013, false, "", "canopy: feat##[bg=red] ● :40013"},
+
+		// Dev builds — append [DEV:<branch>] when devWorkspace is
+		// known. The suffix appears even when the workspace name in
+		// the session is DIFFERENT from the dev workspace, because
+		// it's reporting which canopy binary is running, not which
+		// workspace the user is in.
+		{"dev_known_workspace", "silent-falcon", state.StatusReady, 40010, true, "install-and-dev-workflow",
+			"canopy: silent-falcon ● :40010 [DEV:install-and-dev-workflow]"},
+		{"dev_self_workspace", "feature-A", state.StatusReady, 40010, true, "feature-A",
+			"canopy: feature-A ● :40010 [DEV:feature-A]"},
+
+		// Dev build but workspace not detectable → bare [DEV] suffix.
+		// This is the "binary lives outside any known worktree"
+		// fallback (e.g., contributor running ./canopy from a fork
+		// they cloned to ~/Code/canopy directly).
+		{"dev_unknown_workspace", "silent-falcon", state.StatusReady, 40010, true, "",
+			"canopy: silent-falcon ● :40010 [DEV]"},
+
+		// Dev workspace name with hostile chars must be escaped just
+		// like the workspace name in the prefix. A branch named
+		// "feat#[fg=red]" reaching status-right unescaped would inject
+		// styles — same vulnerability as the existing escape, just on
+		// the suffix side.
+		{"dev_hostile_branch", "silent-falcon", state.StatusReady, 40010, true, "feat#[fg=red]",
+			"canopy: silent-falcon ● :40010 [DEV:feat##[fg=red]]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatCurrent(tc.ws, tc.status, tc.port); got != tc.want {
+			if got := formatCurrent(tc.ws, tc.status, tc.port, tc.isDev, tc.devWorkspace); got != tc.want {
 				t.Errorf("formatCurrent: got %q; want %q", got, tc.want)
 			}
 		})

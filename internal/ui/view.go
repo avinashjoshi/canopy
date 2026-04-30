@@ -47,12 +47,20 @@ func (m *Model) View() string {
 	}
 
 	var b strings.Builder
-	// Top bar: brand pill ◆ canopy + scope pill (current focus or "global").
-	// Both are rounded-end pills via powerline glyphs — the eye reads
-	// brand first, scope second, no heavy title bar eating a full line.
-	b.WriteString(roundedPill("◆ canopy", "231", "99"))      // bright white on violet
+	// Top bar: brand pill ◆ canopy + scope pill + optional version
+	// pill. Pills are rounded-end via powerline glyphs — the eye reads
+	// brand first, scope second, version (when present) third.
+	//
+	// Version pill is the design's "you always know which canopy is
+	// running" cue: muted gray for release, cyan for DEV. Suppressed
+	// when neither field is set (tests + edge cases).
+	b.WriteString(roundedPill("◆ canopy", "231", "99"))           // bright white on violet
 	b.WriteString(" ")
 	b.WriteString(roundedPillSubtle(m.scopeLabel(), "250", "237")) // grey on dark grey
+	if pill := m.renderVersionPill(); pill != "" {
+		b.WriteString(" ")
+		b.WriteString(pill)
+	}
 	b.WriteString("\n\n")
 
 	// Tab bar + search-line on the row below the top bar.

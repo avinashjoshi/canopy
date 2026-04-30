@@ -176,6 +176,34 @@ func roundedPillSubtle(content, fgColor, bgColor string) string {
 	return cap.Render("") + body.Render(content) + cap.Render("")
 }
 
+// renderVersionPill returns the top-bar version pill string, or "" to
+// suppress the pill entirely. Three cases (in priority order):
+//
+//  1. devWorkspace non-empty → cyan "DEV: <workspace>" pill. The DEV
+//     pill always wins when the binary is a dev build inside a known
+//     worktree, regardless of versionLabel — it's the more useful
+//     signal (which workspace's canopy is active).
+//  2. versionLabel empty AND devWorkspace empty → no pill. Lets tests
+//     and bare-bones invocations skip the chrome without special
+//     handling. Also covers dev builds that landed outside any
+//     known worktree (path heuristic + git fallback both missed).
+//     We prefer no pill over a bare "DEV" pill that would surprise
+//     the user with an active state they didn't request.
+//  3. versionLabel non-empty → muted gray release pill.
+//
+// Color choices: cyan (51) for DEV is loud enough to catch the eye
+// without clashing with the violet brand pill; gray-on-dark-gray
+// (245/237) for release matches the scope pill's existing palette.
+func (m *Model) renderVersionPill() string {
+	if m.devWorkspace != "" {
+		return roundedPill("DEV: "+m.devWorkspace, "0", "51") // black on bright cyan
+	}
+	if m.versionLabel == "" {
+		return ""
+	}
+	return roundedPillSubtle(m.versionLabel, "245", "237") // gray on dark gray
+}
+
 // statusStyle returns the lipgloss style for a given workspace status.
 // Falls back to subtleStyle for unknown values + the synthetic "main"
 // status (rendered violet to match the title), so the table renders
