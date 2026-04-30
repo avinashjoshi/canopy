@@ -7,7 +7,52 @@ and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-29 — TUI unification
+
+One TUI for every canopy invocation. The popup, the global view, and the
+project view collapse into one model with two tabs (Local + Global). What
+this means in practice: pressing `<prefix>g` from any tmux pane opens the
+same screen `canopy` shows from a terminal. No more "different screen"
+jolt when navigating to a project — every entry point lands on the same
+unified view.
+
 ### Added
+- **One unified TUI surface.** Three Bubbletea models (project Model, GlobalModel, GlobalModel.AsPopup) and two cobra subcommands (popup, popup-inner) collapsed into one Model + one entry point. Same screen everywhere: `canopy` from a terminal, `canopy` from inside a workspace, `<prefix>g` popup. Tab key switches between Local (current project) and Global (all projects).
+- **Cross-project destructive verbs.** `d` (delete) and `R` (retry) now work on any row in the Global tab, not just the current project. The confirm modal shows the project name as a safety net. Mirrors `canopy d --project=foo workspace-bar` on the CLI.
+- **Retry confirmation modal.** Pressing `R` on a healthy (non-broken) workspace now opens a y/N gate instead of silently erroring. Mirrors the CLI's `canopy retry --force` friction so a muscle-memory R-press doesn't clobber state.
+- **Project focus from Global tab.** Press `o` on any Global-tab row to switch the unified TUI's focus to that project — Local tab pre-populates, `n` (new workspace) becomes available. No spawn, no nested canopy. The unified TUI carries the focus context, not the parent shell.
+- **Popup launches from inside workspace panes.** When you press `<prefix>g` from a workspace's tmux pane, the resolver maps the worktree path back to the canonical source-repo ProjectRoot and Local tab pre-populates with that project's workspaces. Includes a fix for symlinked cwds (`filepath.EvalSymlinks` before path-prefix matching).
+- **Lazyworktree-flavored chrome.** Brand pill `◆ canopy` + scope pill on the top bar, rounded-cap tab pills via powerline glyphs (Nerd Font required), keybind cheatsheet at the bottom with each binding as `[key] desc`. Selected row highlights as a single bold-white-on-grey band with a `>` caret prefix. Tab bar always renders; empty tabs dim and show context-specific onboarding text. Search has its own `🔍 SEARCH` pill in active mode, `🔍 query  (esc to clear)` in persistent-filter mode.
+- **Onboarding hint on Global tab.** Subtle reminder above the keybind cheatsheet: "add a project: cd to its repo and run `canopy init`". Hidden on Local where the project is already known.
+
+### Changed
+- **`canopy install tmux` writes the new bind shape.** `bind g display-popup -E -w 80% -h 80% -d "#{pane_current_path}" "CANOPY_IN_POPUP=1 <bin>"` — replaces the old `bind g run-shell "<bin> popup"`. The `-d "#{pane_current_path}"` is load-bearing for the Local-tab resolver. `CANOPY_IN_POPUP=1` is the env-var flag that flips the unified TUI into popup-mode rendering (single-line tab bar + switch-client attach).
+- **Bare `canopy` runs inside tmux without `CANOPY_ALLOW_NESTED=1`.** The unified TUI uses `tmux switch-client` for selecting workspaces (no nested attach), so it's safe to launch from any tmux pane. `canopy new`, `canopy rm`, `canopy retry` still hit the nested-tmux guard — those genuinely need a non-tmux shell.
+- **Routing simplified.** `cmd/canopy/route.go` now picks the unified TUI for almost every invocation; init splash only fires for fresh git repos with zero registered projects. When `workspace.New` fails (e.g. v1/v2 state collision), routing falls back to global mode with a warning instead of refusing to launch — destructive verbs on that project are unavailable until the underlying state is reconciled, but the user can still see and act on other projects.
+- **Lazy-loaded hint badges persist across tab/search mutations.** PR-status, shipped, and rename badges no longer disappear when you press tab or type in the search box. Hints merge into the unfiltered row store; tab/search filters re-derive the rendered set from there.
+- **Canopy migration auto-resolves stale v1/v2 state collisions.** When state.json contains both a legacy basename key (`cravd`) and a v2 root-path key (`/home/avi/Work/cravd`) for the same project, the basename entry is now dropped during `MigrateLegacyProject` (PortBase salvaged to v2). Previously the basename-collision guard refused to construct a Manager, blocking the unified TUI from launching from inside that project.
+
+### Removed
+- **`canopy popup` and `canopy popup-inner` subcommands.** tmux's `display-popup -E` now invokes `canopy` directly. ~600 LOC of subcommand + spawning + signal-channel code deleted.
+- **Spawn-a-child-canopy popup architecture.** The `goToProject` re-exec, `CANOPY_FROM_GLOBAL` / `CANOPY_FROM_POPUP` env vars, the `os.Exit(7)` popup-attach signal, and the `attachedFromPopup` field are all gone. Single-process popup hosting via `display-popup -E` is simpler and faster.
+- **Three Bubbletea models and their tests.** `internal/ui/model_global.go` (906 LOC), `internal/ui/model_global_test.go` (748 LOC), and the popup test trio (`popup_test.go`, `popup_inner_test.go`, `popup_inner_resolve_test.go`) all deleted. Net: -1452 LOC across the merge commit alone.
+
+### Fixed
+- **Cross-project delete now matches by (Project, Name) pair.** Pre-fix: two projects each with a workspace named "foo" could be ambiguous on the Global tab — a refresh between modal-open and confirm could re-order rows so the wrong "foo" got deleted. P0 data-loss bug caught by the adversarial review during /ship; regression test added.
+- **Popup-from-workspace-pane finds the right project.** Previously `<prefix>g` from inside `~/.canopy/workspaces/canopy/foo` would walk up canopy.json into the worktree dir, mismatch every state.GlobalRow's ProjectRoot, and the Local tab would silently empty. Resolver now does a workspace-path-prefix lookup first and returns the canonical source-repo ProjectRoot.
+- **Lazy hint loading no longer breaks across tab switches.** rowHintsMsg now mutates the unfiltered store before re-pushing the filtered set to projectlist, so hints survive every SetRows that tab-switch and search-mutation trigger.
+
+### Added (foundations)
+- `config.LoadFrom(root)` — direct read of `<root>/canopy.json` without the walk-up that `DiscoverAndLoad` does. Used by the unified TUI's transient Manager construction (cross-project d/R) where the caller already knows the canonical project root from `state.GlobalRow.ProjectRoot`.
+- `internal/workspace/projectroot.go` — the popup-pane → project-root resolver, ported from `cmd/canopy/popup_inner.go` and exposed as `workspace.ResolveCurrentProject`. Two-step lookup (workspace-path prefix match → registered-project canopy.json walk-up), with `filepath.EvalSymlinks` applied first for symlink resilience. Structured DEBUG logs at every resolution branch so `~/.canopy/log/canopy.log` answers the "why is my Local tab empty?" question without rerunning under `--debug`.
+- `internal/ui/keymap.go` — listMode bindings as a `[]Binding` data table wrapping `bubbles/key.Binding` with an `Action` func. Replaces the giant switch statement in `update.go`. Each binding has an optional `Available(*Model) bool` predicate that gates both help-line rendering and dispatch — `n` is hidden on Global tab via this single source of truth.
+
+### Added
+- MIT license + README license badge.
+- GitHub Actions CI: unit + e2e test runs on push/PR.
+- `docs/landscape.md` — public-facing positioning ("where canopy fits").
+- ASCII header in README for terminal-native vibes.
+- Status badges now carry a 1-rune shape glyph (`…` setting_up, `⏸` stopped, `✗` broken, `!` orphaned) so the workspace state reads under protanopia and on monochrome terminals, not just by color. Healthy and main rows stay clean. The live `●`/`○` badge still conveys aliveness.
 - MIT license + README license badge.
 - GitHub Actions CI: unit + e2e test runs on push/PR.
 - `docs/landscape.md` — public-facing positioning ("where canopy fits").
@@ -83,5 +128,6 @@ cycle):
   `docs/migrate-from-conductor.md`, `docs/troubleshooting.md`,
   `docs/architecture.md`, `docs/design/v0-canopy.md`.
 
-[Unreleased]: https://github.com/oncactus/canopy/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/oncactus/canopy/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/oncactus/canopy/releases/tag/v0.8.0
 [0.1.0]: https://github.com/oncactus/canopy/releases/tag/v0.1.0

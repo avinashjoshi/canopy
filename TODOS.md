@@ -755,7 +755,7 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## v0.8 — TUI unification: one model, three contexts (PRIORITY)
+## v0.8 — TUI unification: one model, three contexts (✅ SHIPPED v0.8.0, 2026-04-29)
 
 **What:** Collapse canopy's three TUI flows into one. Today there are three separate Bubbletea models and three invocation paths:
 
