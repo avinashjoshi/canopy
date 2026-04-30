@@ -44,33 +44,112 @@ func (m *Manager) SafetyPreflight(ctx context.Context, name string) ([]string, e
 // directly so callers can run the checks without first calling Find
 // (e.g., when they already have ws in hand from a prior load).
 //
-// PR state gates the unpushed check: if gh reports the PR as MERGED,
-// the local "ahead of origin/main" commits are work that's already
-// landed in a squashed/rebased shape — flagging them as data-loss
-// risk is wrong and was the user-reported "PR says merged but rm
-// still warns about losing work" confusion. We read PR state once
-// up front and skip the unpushed check when MERGED.
+// Two signals gate the unpushed and open-PR checks:
+//
+//  1. PR state (gh): if `gh pr view` reports MERGED, the local
+//     "ahead of origin/main" commits are work that's already landed
+//     in a squashed/rebased shape — flagging them as data-loss risk
+//     is wrong and was the original "PR says merged but rm still
+//     warns about losing work" confusion.
+//
+//  2. Upstream deleted (git): the branch had a configured upstream
+//     and the remote ref is now gone. This is the canonical signal
+//     of GitHub's auto-delete-branch flow on PR merge: the PR landed,
+//     the branch was retired remote-side, and the local commits are
+//     not "work in danger of being lost" — they were pushed and
+//     accepted (squash-merged) before the remote branch went away.
+//     Treating "upstream deleted" as merged also covers the case
+//     where gh isn't on PATH, isn't authenticated, or rate-limits —
+//     so the user doesn't get a force-screen just because gh is
+//     unavailable.
 func safetyChecks(ctx context.Context, worktreePath, branch string) []string {
 	if worktreePath == "" {
 		return nil // no path to check; orphaned-row safe path
 	}
 	prState := readPRState(ctx, worktreePath, branch)
+	merged := prState == "MERGED" || wasUpstreamDeleted(ctx, worktreePath)
 
 	var hangs []string
 	if msg := checkUncommitted(ctx, worktreePath); msg != "" {
 		hangs = append(hangs, msg)
 	}
-	if prState != "MERGED" {
+	if !merged {
 		if msg := checkUnpushed(ctx, worktreePath); msg != "" {
 			hangs = append(hangs, msg)
 		}
 	}
-	if prState == "OPEN" {
+	if !merged && prState == "OPEN" {
 		if msg := checkOpenPR(ctx, worktreePath, branch); msg != "" {
 			hangs = append(hangs, msg)
 		}
 	}
 	return hangs
+}
+
+// wasUpstreamDeleted returns true when the branch had an upstream
+// configured (i.e., was pushed at some point) but the remote-tracking
+// ref is no longer present locally. After a `git fetch --prune` (or
+// any fetch with default `remote.<name>.prune` semantics), this state
+// is the canonical signature of "GitHub auto-deleted the branch on PR
+// merge."
+//
+// Why both conditions matter:
+//   - Upstream configured: distinguishes "this branch was pushed and
+//     tracked" from "freshly created local-only branch" (the latter
+//     never had a remote in the first place; absence isn't a signal).
+//   - Remote ref absent: the remote-side branch the upstream pointed
+//     at is gone.
+//
+// Without an explicit prune the stale ref can linger in
+// refs/remotes/origin/<branch> for a while; in that window we fall
+// back to the gh-based MERGED signal in safetyChecks. Either signal
+// alone is sufficient.
+func wasUpstreamDeleted(ctx context.Context, path string) bool {
+	// Resolve the current branch name from HEAD. Detached HEAD or
+	// non-branch state → no signal.
+	branchOut, err := exec.CommandContext(ctx, "git", "-C", path,
+		"symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	if err != nil {
+		return false
+	}
+	branch := strings.TrimSpace(string(branchOut))
+	if branch == "" {
+		return false
+	}
+
+	// Read upstream configuration directly from .git/config rather
+	// than via `@{u}` — once the remote-tracking ref is gone, git's
+	// `@{u}` resolution itself fails (which is exactly the state
+	// we're trying to detect, not bail out on).
+	remoteOut, err := exec.CommandContext(ctx, "git", "-C", path,
+		"config", "--get", "branch."+branch+".remote").Output()
+	if err != nil {
+		return false // no upstream configured (never pushed)
+	}
+	remote := strings.TrimSpace(string(remoteOut))
+	if remote == "" || remote == "." {
+		// remote == "." means upstream is in this same repo (no
+		// remote tracking ref to delete). Skip.
+		return false
+	}
+	mergeOut, err := exec.CommandContext(ctx, "git", "-C", path,
+		"config", "--get", "branch."+branch+".merge").Output()
+	if err != nil {
+		return false
+	}
+	merge := strings.TrimSpace(string(mergeOut))
+	if !strings.HasPrefix(merge, "refs/heads/") {
+		return false
+	}
+	upstreamBranch := strings.TrimPrefix(merge, "refs/heads/")
+
+	// Probe whether the remote-tracking ref still exists. Absent
+	// ref + present upstream config = "branch was pushed, then the
+	// remote-side branch was deleted."
+	trackingRef := "refs/remotes/" + remote + "/" + upstreamBranch
+	probe := exec.CommandContext(ctx, "git", "-C", path, "rev-parse",
+		"--verify", "--quiet", trackingRef)
+	return probe.Run() != nil
 }
 
 // readPRState returns the gh-reported PR state for the branch, or empty
