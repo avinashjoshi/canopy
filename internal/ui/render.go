@@ -124,6 +124,7 @@ var (
 			Foreground(lipgloss.Color("231")).
 			Background(lipgloss.Color("238")).
 			Padding(0, 1)
+
 )
 
 // isSubseq returns true if needle's characters appear in haystack in

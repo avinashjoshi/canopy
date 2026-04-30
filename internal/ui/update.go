@@ -365,13 +365,66 @@ func actionSearchEntry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// actionNewWorkspace opens the new-workspace variant picker. Gated by
-// availableNewWorkspace (mgr non-nil + Local tab) — if the user types `n`
-// while disabled, this Action never fires (the bindings table filters by
-// Available before dispatching).
+// actionNewWorkspace opens the new-workspace variant picker. Resolves
+// the TARGET project before the picker opens so every downstream
+// handler (loaders, submits, busy renderer) can read m.newTargetMgr
+// without re-deriving it.
+//
+// Two resolution paths:
+//
+//   - Local tab: target = m.mgr. Trivial; this is how `n` always
+//     worked.
+//   - Global tab: target = managerForRow(cursor). Cross-project entry
+//     point; mirrors d/R/K. config.LoadFrom + workspace.New runs here,
+//     not in availableNewWorkspace, so the cheap predicate stays cheap.
+//
+// On any resolution failure (canopy.json missing/broken, manager
+// construction error), surface via m.err and stay in listMode — the
+// picker doesn't open against a half-resolved target.
 func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var (
+		mgr      *workspace.Manager
+		root     string
+		projName string
+	)
+	if m.tab == tabLocal {
+		if m.mgr == nil {
+			// Should be unreachable — availableNewWorkspace guards this —
+			// but defend the invariant rather than panic'ing on a nil deref.
+			return m, nil
+		}
+		mgr = m.mgr
+		root = m.mgr.Cfg.ProjectRoot
+		projName = m.mgr.Cfg.Project
+	} else {
+		row, ok := m.list.CursorRow()
+		if !ok || row.ProjectRoot == "" {
+			return m, nil
+		}
+		var err error
+		mgr, err = m.managerForRow(row)
+		if err != nil {
+			m.err = fmt.Errorf("new in %s: %w", row.Project, err)
+			return m, nil
+		}
+		root = mgr.Cfg.ProjectRoot
+		projName = mgr.Cfg.Project
+	}
+	m.newTargetMgr = mgr
+	m.newTargetRoot = root
+	m.newTargetName = projName
 	m.openNewPicker()
 	return m, nil
+}
+
+// clearNewTarget zeroes out the in-flight new-workspace target. Called
+// when the flow exits (esc back to listMode, busy dismiss after create
+// success/failure) so a future `n` press starts from a clean slate
+// rather than inheriting the previous target's project context.
+func (m *Model) clearNewTarget() {
+	m.newTargetMgr = nil
+	m.newTargetRoot = ""
+	m.newTargetName = ""
 }
 
 // actionFocusProject "loads into" the cursor row's project: sets it as
@@ -987,6 +1040,7 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.mode = listMode
+		m.clearNewTarget()
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -1066,7 +1120,7 @@ func (m *Model) handleNewFreshKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.busyErr = nil
 		m.mode = busyMode
 		m.nameInput.Blur()
-		return m, createCmd(m.mgr, name, spec)
+		return m, createCmd(m.newTargetMgr, name, spec)
 	}
 	var cmd tea.Cmd
 	m.nameInput, cmd = m.nameInput.Update(msg)
@@ -1085,7 +1139,7 @@ func (m *Model) openNewPR() tea.Cmd {
 	m.newLoading = true
 	m.newLoadErr = nil
 	m.newPRs = nil
-	return tea.Batch(textinputBlink(), loadPRsCmd(m.mgr.Cfg.ProjectRoot))
+	return tea.Batch(textinputBlink(), loadPRsCmd(m.newTargetRoot))
 }
 
 // prListLoadedMsg carries the result of an async ghx.ListPRs call.
@@ -1180,7 +1234,7 @@ func (m *Model) submitNewPR(num int) (tea.Model, tea.Cmd) {
 	m.busyErr = nil
 	m.mode = busyMode
 	m.listInput.Blur()
-	return m, createCmd(m.mgr, "", spec)
+	return m, createCmd(m.newTargetMgr, "", spec)
 }
 
 // openNewIssue is the issue-picker analog of openNewPR. Same shape,
@@ -1194,7 +1248,7 @@ func (m *Model) openNewIssue() tea.Cmd {
 	m.newLoading = true
 	m.newLoadErr = nil
 	m.newIssues = nil
-	return tea.Batch(textinputBlink(), loadIssuesCmd(m.mgr.Cfg.ProjectRoot))
+	return tea.Batch(textinputBlink(), loadIssuesCmd(m.newTargetRoot))
 }
 
 // issueListLoadedMsg is the issue analog of prListLoadedMsg.
@@ -1264,7 +1318,7 @@ func (m *Model) submitNewIssue(num int) (tea.Model, tea.Cmd) {
 	m.busyErr = nil
 	m.mode = busyMode
 	m.listInput.Blur()
-	return m, createCmd(m.mgr, "", spec)
+	return m, createCmd(m.newTargetMgr, "", spec)
 }
 
 // openNewBranch is the branch-picker analog. Doesn't need gh —
@@ -1280,7 +1334,7 @@ func (m *Model) openNewBranch() tea.Cmd {
 	m.newLoading = true
 	m.newLoadErr = nil
 	m.newBranches = nil
-	return tea.Batch(textinputBlink(), loadBranchesCmd(m.mgr.Cfg.ProjectRoot))
+	return tea.Batch(textinputBlink(), loadBranchesCmd(m.newTargetRoot))
 }
 
 // branchListLoadedMsg carries the result of an async git
@@ -1378,7 +1432,7 @@ func (m *Model) submitNewBranch(spec workspace.SourceSpec) (tea.Model, tea.Cmd) 
 	m.busyErr = nil
 	m.mode = busyMode
 	m.listInput.Blur()
-	return m, createCmd(m.mgr, "", spec)
+	return m, createCmd(m.newTargetMgr, "", spec)
 }
 
 // branchHasOrigin returns true when the ListBranches output contains
@@ -1464,6 +1518,11 @@ func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.err = m.busyErr
 		m.busyErr = nil
 	}
+	// New-workspace target lives across the whole flow (picker → sub-modal
+	// → busy); clear it on busy dismiss so the next `n` press is fresh.
+	// Safe even for non-create busy ops (Remove, Retry) — newTargetMgr is
+	// only set by actionNewWorkspace and harmless if already nil.
+	m.clearNewTarget()
 	return m, m.refresh()
 }
 

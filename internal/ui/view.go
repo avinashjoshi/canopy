@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
+
 	"github.com/oncactus/canopy/internal/ghx"
 	"github.com/oncactus/canopy/internal/state"
 )
@@ -269,6 +271,74 @@ func (m *Model) renderHelpLine() string {
 	return strings.Join(parts, "  ")
 }
 
+// renderTargetBanner is the unmissable "creating in: <project>" header
+// shown at the top of every screen in the new-workspace flow (picker,
+// sub-modals, busy view). Powered by m.newTargetName + m.newTargetRoot,
+// which actionNewWorkspace populates before the picker opens.
+//
+// Why mandatory: when `n` is triggered from the Global tab targeting a
+// project other than the launch context (m.mgr), the banner is the
+// signal that prevents creating a workspace in the wrong project.
+// Hiding or dimming this defeats the whole point of cross-project `n`.
+//
+// Layout:
+//
+//	  creating in   cravd   ~/Work/cravd
+//
+// The chip uses roundedPill (brand violet bg + bright white fg) so it
+// reads as a primary identifier on the same vocabulary as the brand
+// pill and active tab — not chrome to be skimmed past.
+func (m *Model) renderTargetBanner() string {
+	if m.newTargetName == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("  ")
+	b.WriteString(subtleStyle.Render("creating in"))
+	b.WriteString("  ")
+	b.WriteString(roundedPill(m.newTargetName, "231", "99"))
+	if m.newTargetRoot != "" {
+		b.WriteString("  ")
+		b.WriteString(subtleStyle.Render(m.newTargetRoot))
+	}
+	b.WriteString("\n\n")
+	return b.String()
+}
+
+// renderFilterPill renders the filter input chrome for the PR / issue /
+// branch sub-modals. Same visual vocabulary as the main TUI's
+// renderSearchLine pill (🔍 + brand-violet label + grey input bg + the
+// thin "▏" caret) so the user reads "this is the typing-to-narrow
+// box" without learning a modal-specific UI.
+//
+// Why FILTER instead of SEARCH: the main TUI's `/` is search across
+// all rows; here, the input is the modal's primary action — narrowing
+// a fixed list of PRs/issues/branches the user opened the modal to
+// pick from. Different verb, same chrome family.
+//
+// Why we render manually instead of calling ti.View(): bubbles'
+// textinput overwrites Cursor.SetChar on every render with the
+// character at the cursor position, then renders it via Cursor.View()
+// (which reverses fg/bg for the block-cursor look). That fights the
+// main TUI's "▏" thin-bar caret. We bypass by reading ti.Value()
+// directly — textinput stays the capture model for Update, but
+// rendering matches renderSearchLine exactly.
+//
+// Placeholder handling: when the value is empty, surface the
+// textinput's Placeholder as a dim hint to the right of the pill so
+// the modal-specific "type a PR number, or arrow to a row below"
+// guidance still has a home. Once the user types anything, the hint
+// gets out of the way.
+func renderFilterPill(ti textinput.Model) string {
+	label := searchLabelStyle.Render("🔍 FILTER")
+	typed := ti.Value()
+	body := searchInputStyle.Render(" " + typed + "▏ ")
+	if typed == "" && ti.Placeholder != "" {
+		return label + body + "  " + subtleStyle.Render(ti.Placeholder)
+	}
+	return label + body
+}
+
 // renderNewPicker is step 1 of the new-workspace flow — the variant
 // picker. Each option carries a single-letter shortcut printed in
 // brackets so the user sees "press p for pull request" without
@@ -280,21 +350,34 @@ func (m *Model) renderHelpLine() string {
 // telegraph the entire keymap inline with the options.
 func (m *Model) renderNewPicker() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("canopy new") + " " + subtleStyle.Render(m.projectName))
+	b.WriteString(m.renderTargetBanner())
+	b.WriteString(titleStyle.Render("new workspace"))
 	b.WriteString("\n\n")
 	b.WriteString("  How do you want to start?\n\n")
 
 	for i, opt := range newPickerOptions {
+		// Cursor caret matches the main workspace list's "❯ " — same
+		// glyph across every screen so the eye reads "here's what's
+		// selected" without learning a per-modal indicator. Non-
+		// selected rows pad with whitespace so columns don't shift
+		// as the cursor moves.
 		cursor := "    "
 		if i == m.newPickerCursor {
-			cursor = "  > "
+			cursor = "  ❯ "
 		}
 		// Letter shortcut + label, then a dim description on the
 		// next line. Two-line entries give the picker breathing
 		// room and let the description carry the "why this option"
 		// without bloating the headline.
+		//
+		// Shortcut pill uses keyPillStyle — the same inverted-bg pill
+		// used by the help line at the bottom — so "press this key"
+		// reads with the same visual vocabulary across surfaces.
+		// Avoid brokenStyle: that's broken-status / error red, and a
+		// shortcut letter is neither.
 		b.WriteString(cursor)
-		b.WriteString(brokenStyle.Render("[" + opt.key + "] "))
+		b.WriteString(keyPillStyle.Render(opt.key))
+		b.WriteString("  ")
 		if i == m.newPickerCursor {
 			b.WriteString(selectedStyle.Render(opt.label))
 		} else {
@@ -335,7 +418,8 @@ var newPickerOptions = []newPickerOption{
 // is the simple/common case that most `n` presses end at.
 func (m *Model) renderNewFresh() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(m.renderTargetBanner())
+	b.WriteString(titleStyle.Render("new workspace"))
 	b.WriteString(" ")
 	b.WriteString(subtleStyle.Render("· fresh"))
 	b.WriteString("\n\n")
@@ -427,13 +511,14 @@ func renderScrollHint(top, end, total int) string {
 // fast path.
 func (m *Model) renderNewPR() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(m.renderTargetBanner())
+	b.WriteString(titleStyle.Render("new workspace"))
 	b.WriteString(" ")
 	b.WriteString(subtleStyle.Render("· pull request"))
 	b.WriteString("\n\n")
 
-	b.WriteString("  PR number or filter:\n  ")
-	b.WriteString(m.listInput.View())
+	b.WriteString("  ")
+	b.WriteString(renderFilterPill(m.listInput))
 	b.WriteString("\n\n")
 
 	switch {
@@ -462,7 +547,7 @@ func (m *Model) renderNewPR() string {
 				pr := filtered[i]
 				marker := "    "
 				if i == cursor {
-					marker = "  ● "
+					marker = "  ❯ "
 				}
 				// Lookup the workspace (if any) currently holding
 				// this PR's branch so the row can be tagged "in
@@ -558,13 +643,14 @@ func truncateRight(s string, width int) string {
 // layout and state-switch logic; different data type rendered.
 func (m *Model) renderNewIssue() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(m.renderTargetBanner())
+	b.WriteString(titleStyle.Render("new workspace"))
 	b.WriteString(" ")
 	b.WriteString(subtleStyle.Render("· issue"))
 	b.WriteString("\n\n")
 
-	b.WriteString("  Issue number or filter:\n  ")
-	b.WriteString(m.listInput.View())
+	b.WriteString("  ")
+	b.WriteString(renderFilterPill(m.listInput))
 	b.WriteString("\n\n")
 
 	switch {
@@ -593,7 +679,7 @@ func (m *Model) renderNewIssue() string {
 				iss := filtered[i]
 				marker := "    "
 				if i == cursor {
-					marker = "  ● "
+					marker = "  ❯ "
 				}
 				line := fmt.Sprintf("%s#%-5d %-12s %s",
 					marker, iss.Number, truncateRight(iss.Author.Login, 12), iss.Title)
@@ -650,13 +736,14 @@ func filterIssues(issues []ghx.IssueSummary, filter string) []ghx.IssueSummary {
 // using the --allow-local-equivalent path.
 func (m *Model) renderNewBranch() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("canopy new"))
+	b.WriteString(m.renderTargetBanner())
+	b.WriteString(titleStyle.Render("new workspace"))
 	b.WriteString(" ")
 	b.WriteString(subtleStyle.Render("· branch"))
 	b.WriteString("\n\n")
 
-	b.WriteString("  Filter:\n  ")
-	b.WriteString(m.listInput.View())
+	b.WriteString("  ")
+	b.WriteString(renderFilterPill(m.listInput))
 	b.WriteString("\n\n")
 
 	switch {
@@ -685,7 +772,7 @@ func (m *Model) renderNewBranch() string {
 				ref := filtered[i]
 				marker := "    "
 				if i == cursor {
-					marker = "  ● "
+					marker = "  ❯ "
 				}
 				// Strip "origin/" for the workspace-conflict
 				// lookup so a remote-tracking ref that points at
@@ -926,6 +1013,12 @@ func (m *Model) renderDrawer() string {
 // shows the success/error summary plus the captured output buffer.
 func (m *Model) renderBusyView() string {
 	var b strings.Builder
+	// Only the Create flow carries a target-project banner — Remove and
+	// Retry operate on a row in the existing list and don't open the
+	// new-workspace flow that populates newTargetName.
+	if m.busyOp == busyOpCreate {
+		b.WriteString(m.renderTargetBanner())
+	}
 	b.WriteString(titleStyle.Render(m.busyTitle))
 	b.WriteString("\n\n")
 
@@ -956,7 +1049,7 @@ func (m *Model) renderBusyView() string {
 	if m.busyErr != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("Failed: %v", m.busyErr)))
 	} else {
-		b.WriteString(readyStyle.Render(busySuccessMessage(m.busyOp)))
+		b.WriteString(readyStyle.Render(busySuccessMessage(m.busyOp, m.newTargetName)))
 	}
 	b.WriteString("\n\n")
 	if m.busyOutput != "" {
@@ -1051,13 +1144,21 @@ func (m *Model) selectedHint() string {
 // busySuccessMessage maps a completed busy-mode op to the right success
 // line. Kept as a small switch so the View stays declarative and so we
 // can extend without touching renderBusyView again.
-func busySuccessMessage(op busyOpKind) string {
+//
+// For Create, projectName fills in the target project so the success
+// line mirrors the banner's promise ("creating in cravd" → "Workspace
+// created in cravd"). Empty projectName falls back to the legacy
+// generic line so older code paths and tests keep working.
+func busySuccessMessage(op busyOpKind, projectName string) string {
 	switch op {
 	case busyOpRemove:
 		return "Workspace removed."
 	case busyOpRetry:
 		return "Workspace recovered — scripts.setup re-ran cleanly."
 	case busyOpCreate:
+		if projectName != "" {
+			return "Workspace created in " + projectName + "."
+		}
 		return "Workspace created successfully."
 	}
 	return "Done."
