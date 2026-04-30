@@ -1616,10 +1616,11 @@ func TestRemoveDone_AutoDismissOnSuccess(t *testing.T) {
 	})
 }
 
-// TestDeletingCurrentInPopup covers the four-way truth table:
-// only popup-mode AND a (root, name) match against currentWorkspace
-// should return true. Anything else is false.
-func TestDeletingCurrentInPopup(t *testing.T) {
+// TestDeletingCurrentSession covers the truth table for both popup
+// and fullscreen modes: a (root, name) match against currentWorkspace
+// should return true regardless of mode. Empty currentWorkspace or a
+// mismatch returns false.
+func TestDeletingCurrentSession(t *testing.T) {
 	cases := []struct {
 		name             string
 		inPopup          bool
@@ -1632,8 +1633,11 @@ func TestDeletingCurrentInPopup(t *testing.T) {
 		{"popup + match → true", true, "feature-x", "/p", "/p", "feature-x", true},
 		{"popup + name mismatch → false", true, "feature-x", "/p", "/p", "other", false},
 		{"popup + root mismatch → false", true, "feature-x", "/p", "/q", "feature-x", false},
-		{"fullscreen + match → false", false, "feature-x", "/p", "/p", "feature-x", false},
+		{"fullscreen + match → true", false, "feature-x", "/p", "/p", "feature-x", true},
+		{"fullscreen + name mismatch → false", false, "feature-x", "/p", "/p", "other", false},
+		{"fullscreen + root mismatch → false", false, "feature-x", "/p", "/q", "feature-x", false},
 		{"popup + no current workspace → false", true, "", "", "/p", "feature-x", false},
+		{"fullscreen + no current workspace → false", false, "", "", "/p", "feature-x", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1641,7 +1645,7 @@ func TestDeletingCurrentInPopup(t *testing.T) {
 			m.inPopup = c.inPopup
 			m.currentWorkspace = c.currentWorkspace
 			m.currentWorkspaceRoot = c.currentRoot
-			got := m.deletingCurrentInPopup(c.argRoot, c.argName)
+			got := m.deletingCurrentSession(c.argRoot, c.argName)
 			if got != c.want {
 				t.Errorf("got %v; want %v", got, c.want)
 			}
@@ -1649,44 +1653,54 @@ func TestDeletingCurrentInPopup(t *testing.T) {
 	}
 }
 
-// TestConfirmDeleteY_PopupCurrentWorkspace_TakesDetachShortcut: when
-// the user is deleting the workspace they opened the popup from,
+// TestConfirmDeleteY_CurrentSession_SkipsBusyMode covers both popup
+// and fullscreen flavors of "deleting the workspace I'm sitting in":
 // pressing y skips busyMode entirely and dispatches the detach +
-// detached-subprocess shortcut. The cmd is non-nil so the user
-// experiences "popup closes immediately" rather than "popup sits at
-// busyMode while the underlying tmux session changes."
+// detached-subprocess shortcut. The user experiences "canopy closes
+// immediately" rather than "busyMode sits there while the underlying
+// tmux session changes."
 //
 // We can't easily assert the cmd's side effects (it spawns a real
-// subprocess + runs tmux detach-client), but we can verify the
-// branch was taken: mode stays as listMode-equivalent (we don't
-// transition to busyMode), and a non-nil cmd is returned.
-func TestConfirmDeleteY_PopupCurrentWorkspace_SkipsBusyMode(t *testing.T) {
-	m := newTestModel(false)
-	m.inPopup = true
-	m.currentWorkspaceRoot = "/tmp/test-project"
-	m.currentWorkspace = "feature-x"
-	m.deleteTarget = "feature-x"
-	m.deleteTargetRoot = "/tmp/test-project"
-	m.mode = confirmDeleteMode
-	// One row matching the delete target so resolveTargetMgr finds it.
-	m.setTestRows([]Row{{
-		Project:     "test-project",
-		ProjectRoot: "/tmp/test-project",
-		Name:        "feature-x",
-		Status:      state.StatusReady,
-	}})
-
-	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	m = model.(*Model)
-
-	if m.mode == busyMode {
-		t.Errorf("popup+current y should skip busyMode; got mode=%v", m.mode)
+// subprocess + runs tmux detach-client), but we can verify the branch
+// was taken: mode stays as listMode-equivalent and a non-nil cmd is
+// returned.
+func TestConfirmDeleteY_CurrentSession_SkipsBusyMode(t *testing.T) {
+	cases := []struct {
+		name    string
+		inPopup bool
+	}{
+		{"popup + current", true},
+		{"fullscreen + current", false},
 	}
-	if cmd == nil {
-		t.Fatal("expected popupDetachAndRemoveCmd; got nil cmd")
-	}
-	if m.deleteTarget != "" || m.deleteTargetRoot != "" {
-		t.Errorf("delete fields not cleared: target=%q root=%q", m.deleteTarget, m.deleteTargetRoot)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := newTestModel(false)
+			m.inPopup = c.inPopup
+			m.currentWorkspaceRoot = "/tmp/test-project"
+			m.currentWorkspace = "feature-x"
+			m.deleteTarget = "feature-x"
+			m.deleteTargetRoot = "/tmp/test-project"
+			m.mode = confirmDeleteMode
+			m.setTestRows([]Row{{
+				Project:     "test-project",
+				ProjectRoot: "/tmp/test-project",
+				Name:        "feature-x",
+				Status:      state.StatusReady,
+			}})
+
+			model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+			m = model.(*Model)
+
+			if m.mode == busyMode {
+				t.Errorf("current-session y should skip busyMode; got mode=%v", m.mode)
+			}
+			if cmd == nil {
+				t.Fatal("expected detachAndRemoveCmd; got nil cmd")
+			}
+			if m.deleteTarget != "" || m.deleteTargetRoot != "" {
+				t.Errorf("delete fields not cleared: target=%q root=%q", m.deleteTarget, m.deleteTargetRoot)
+			}
+		})
 	}
 }
 

@@ -1038,45 +1038,57 @@ func (m *Model) attachOrSwitch(session string) tea.Cmd {
 	})
 }
 
-// deletingCurrentInPopup reports whether the about-to-be-deleted
-// workspace is the one this popup-mode TUI was opened from. The popup
-// gets cwd from the host pane (`-d "#{pane_current_path}"`); when the
-// user opened it from inside workspace X and now wants to delete X,
-// the simple "tea.Quit when done" exit would leave the user's tmux
-// client attached to a session that's about to die.
+// deletingCurrentSession reports whether the about-to-be-deleted
+// workspace is the one this canopy invocation is sitting inside. True
+// in two cases:
 //
-// Returns false when not in popup mode, when there's no current
-// workspace tracked, or when the (root, name) pair doesn't match.
-func (m *Model) deletingCurrentInPopup(projectRoot, name string) bool {
-	if !m.inPopup || m.currentWorkspace == "" {
+//   - Popup mode: the popup was opened from inside workspace X
+//     (`-d "#{pane_current_path}"` carried the cwd) and the user is
+//     deleting X.
+//   - Fullscreen mode: canopy was launched from inside workspace X
+//     (cwd matched X's path at startup, so currentWorkspace was set)
+//     and the user is deleting X.
+//
+// Both shapes of "I'm deleting the workspace I'm in" need the same
+// escape: spawn the cleanup as a detached subprocess and detach the
+// tmux client, so canopy can exit cleanly before the session it's
+// hosted by dies.
+//
+// Returns false when there's no current workspace tracked, or when
+// the (root, name) pair doesn't match.
+func (m *Model) deletingCurrentSession(projectRoot, name string) bool {
+	if m.currentWorkspace == "" {
 		return false
 	}
 	return name == m.currentWorkspace && projectRoot == m.currentWorkspaceRoot
 }
 
-// popupDetachAndRemoveCmd handles the "delete the workspace I'm
-// currently sitting in, from the popup" case. Replaces the busyMode
-// flow + escapeIfDeletingCurrent's SwitchClient(canopy-main) — that
-// older path auto-built the project main session (slow nvim+claude
+// detachAndRemoveCmd handles the "delete the workspace I'm currently
+// sitting in" case for both popup and fullscreen modes. Replaces the
+// busyMode flow + escapeIfDeletingCurrent's SwitchClient(canopy-main):
+// the older path auto-built the project main session (slow nvim+claude
 // spin-up), which the user perceived as "tmux loaded a random
-// session." Instead:
+// session." It also doesn't help fullscreen mode — switching the tmux
+// *client* to main doesn't move the canopy *process* off the doomed
+// pane, so canopy would still die mid-cleanup. Instead:
 //
 //  1. Spawn a detached `canopy rm <name> --yes --force` subprocess.
 //     Setsid + Process.Release disowns it so it survives our exit and
 //     completes cleanup independently. Logs go to ~/.canopy/log/canopy.log
 //     via the standard logger; stdio is detached.
-//  2. Detach the popup's host tmux client. The popup overlay closes;
-//     the user lands back at whatever shell started tmux. Other tmux
-//     sessions (e.g. the project main if it was already alive)
-//     continue running — they just no longer have a client attached.
+//  2. Detach the calling tmux client. The popup overlay closes (popup
+//     mode) or the user's terminal returns from `tmux attach` to its
+//     parent shell (fullscreen mode). When canopy was launched from a
+//     non-tmux shell, $TMUX is unset and detach-client errors out
+//     harmlessly — the cleanup-then-quit sequence still works.
 //  3. tea.Quit. Belt-and-suspenders: detach-client SIGHUPs us anyway,
 //     but explicit Quit makes the path predictable for tests.
 //
-// Errors are logged, not surfaced — the popup is closing and there's
-// no UI left to show them in. The detached subprocess will retry-style
+// Errors are logged, not surfaced — canopy is closing and there's no
+// UI left to show them in. The detached subprocess will retry-style
 // surface any cleanup failure as a `broken`/`orphaned` row next time
 // the user opens canopy.
-func (m *Model) popupDetachAndRemoveCmd(projectRoot, name string) tea.Cmd {
+func (m *Model) detachAndRemoveCmd(projectRoot, name string) tea.Cmd {
 	tc := m.tc
 	return func() tea.Msg {
 		if exe, err := os.Executable(); err == nil {
@@ -1731,11 +1743,11 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.deleteTarget = ""
 		m.deleteTargetRoot = ""
 		m.deleteHangs = nil
-		// Popup + deleting-the-workspace-I'm-in: skip busyMode and run
-		// the cleanup as a detached subprocess. See
-		// popupDetachAndRemoveCmd for rationale.
-		if m.deletingCurrentInPopup(root, name) {
-			return m, m.popupDetachAndRemoveCmd(root, name)
+		// Deleting-the-workspace-I'm-in (popup OR fullscreen): skip
+		// busyMode and run the cleanup as a detached subprocess. See
+		// detachAndRemoveCmd for rationale.
+		if m.deletingCurrentSession(root, name) {
+			return m, m.detachAndRemoveCmd(root, name)
 		}
 		m.escapeIfDeletingCurrent(mgr, root, name)
 		m.mode = busyMode
@@ -1762,8 +1774,8 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.deleteTarget = ""
 		m.deleteTargetRoot = ""
 		m.deleteHangs = nil
-		if m.deletingCurrentInPopup(root, name) {
-			return m, m.popupDetachAndRemoveCmd(root, name)
+		if m.deletingCurrentSession(root, name) {
+			return m, m.detachAndRemoveCmd(root, name)
 		}
 		m.escapeIfDeletingCurrent(mgr, root, name)
 		m.mode = busyMode
