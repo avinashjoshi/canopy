@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oncactus/canopy/internal/clog"
 	"github.com/oncactus/canopy/internal/config"
@@ -221,6 +222,66 @@ func TestRemove_HappyPath(t *testing.T) {
 	// tmux session gone.
 	if has, err := mgr.Tmux.HasSession(context.Background(), tmuxName); err != nil || has {
 		t.Errorf("tmux session still alive: has=%v err=%v", has, err)
+	}
+}
+
+// TestRemove_StateRowDropsBeforeSlowWork pins the UX-load-bearing
+// invariant: the state row disappears as soon as Remove starts, BEFORE
+// the slow archive/git/tmux work finishes. The popup-detach delete
+// flow relies on this — a fresh canopy invocation opened immediately
+// after the popup closes must not see the just-deleted workspace as a
+// stale row.
+//
+// We force the slowness by replacing the archive script with one that
+// blocks on a marker file, kick Remove off in a goroutine, and assert
+// Find returns ErrWorkspaceNotFound while the archive is still
+// blocked. Only then do we unblock archive and let Remove finish.
+func TestRemove_StateRowDropsBeforeSlowWork(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := mgr.Create(context.Background(), "to-remove", workspace.CreateOptions{}, &stdout, &stderr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Replace the archive script with one that blocks until a marker
+	// file appears. This holds Remove in step 2 (archive) so we have a
+	// deterministic window to observe state mid-Remove.
+	gateDir := t.TempDir()
+	gateFile := filepath.Join(gateDir, "release")
+	archivePath := filepath.Join(mgr.Cfg.ProjectRoot, "bin", "canopy-archive")
+	body := fmt.Sprintf("#!/usr/bin/env bash\nwhile [ ! -f %q ]; do sleep 0.05; done\nexit 0\n", gateFile)
+	if err := os.WriteFile(archivePath, []byte(body), 0o755); err != nil {
+		t.Fatalf("write blocking archive: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		var out, errBuf bytes.Buffer
+		done <- mgr.Remove(context.Background(), "to-remove", &out, &errBuf)
+	}()
+
+	// Poll for the state row to disappear. Bounded wait — should happen
+	// well before archive returns (state drop is now step 1).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, err := mgr.Find(context.Background(), "to-remove")
+		if errors.Is(err, workspace.ErrWorkspaceNotFound) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := mgr.Find(context.Background(), "to-remove"); !errors.Is(err, workspace.ErrWorkspaceNotFound) {
+		t.Errorf("state row still present while archive blocked: got %v; want ErrWorkspaceNotFound", err)
+	}
+
+	// Release the archive and let Remove finish.
+	if err := os.WriteFile(gateFile, []byte("go"), 0o644); err != nil {
+		t.Fatalf("write gate file: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Remove returned error: %v", err)
 	}
 }
 

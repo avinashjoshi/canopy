@@ -5,6 +5,38 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3] - 2026-04-30 — Detach-and-remove now covers fullscreen + instant state-row drop
+
+### Fixed
+- Deleting the workspace you launched fullscreen `canopy` from no longer
+  strands on-disk + state cleanup mid-Remove. The v0.11.2 detach +
+  detached-subprocess shortcut was scoped to popup mode; in fullscreen,
+  `escapeIfDeletingCurrent` would fall through to `busyMode + removeCmd`
+  with canopy still hosted in a pane of the doomed session — when tmux
+  Kill fired, canopy died and the rest of `Manager.Remove` (git worktree
+  remove, branch delete, state-row drop) never ran. The path now flips
+  on a (root, name) match against `currentWorkspace` regardless of mode,
+  spawns the same detached `canopy rm --yes --force <name>` subprocess,
+  runs `tmux detach-client`, and `tea.Quit`s. The user lands at the
+  shell that started tmux; cleanup finishes in the background. When
+  canopy was launched from a non-tmux shell, detach-client errors
+  harmlessly and the rest of the sequence still works.
+- `Manager.Remove` drops the state row up front (under the lock,
+  immediately after snapshotting the row) instead of last. Reopening
+  canopy in the gap between popup-close and the detached subprocess
+  finishing no longer shows the just-deleted workspace as a stale row,
+  and pressing enter on it no longer surfaces "tmux session not found."
+  Steps 2-6 (archive, tmux kill, git remove, branch delete, log
+  cleanup) work entirely off the in-memory snapshot so they don't need
+  the state row to still exist. Failures after the drop leave residue
+  on disk that `canopy reconcile` discovers — strictly better UX than
+  a zombie row that lies for several seconds.
+
+### Changed
+- Renamed `deletingCurrentInPopup` → `deletingCurrentSession` and
+  `popupDetachAndRemoveCmd` → `detachAndRemoveCmd` to reflect that the
+  shortcut is no longer popup-specific.
+
 ## [0.11.2] - 2026-04-30 — Popup delete: detach instead of auto-switch
 
 ### Fixed
