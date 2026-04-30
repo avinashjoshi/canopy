@@ -5,6 +5,25 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-04-30 — Fix: `r` now refreshes PR status
+
+Pressing `r` (refresh) busted the in-memory RSS/CPU cache but silently
+ignored the 10-minute pr_status cache, so users who just merged a PR
+or pushed a review change kept seeing the stale "PR #142 awaiting
+review" hint until the TTL expired. `r` now busts both — same intent,
+both freshness gates.
+
+Background ticks and reconcile keep the 10-minute TTL to stay inside
+the GitHub API budget. Only deliberate user action (`r`) invalidates.
+
+### Fixed
+
+- **`r` now invalidates the pr_status cache.** `actionRefresh` calls
+  the new exported `lifecycle.ResetPRStatusCache` alongside the
+  existing `memCache.InvalidateAll`. Regression test in
+  `internal/ui/effective_status_test.go` seeds the cache via
+  `RunFast`, presses `r`, and asserts the cache is empty.
+
 ## [0.10.0] - 2026-04-30 — Workspace health, diagnostics, and machine-load visibility
 
 A complete pass on workspace health and observability. The TUI list page
