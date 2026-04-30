@@ -39,10 +39,16 @@ var (
 )
 
 func main() {
+	// Resolve once at startup so --help can lead with the active version
+	// (matches the convention "$tool $version" most CLIs expose). Cheap
+	// — versionDetails is a few syscalls plus one optional git fork for
+	// dev builds.
+	helpHeader := helpVersionLine(versionDetails()) + "\n\n"
 	root := &cobra.Command{
 		Use:   "canopy",
 		Short: "TUI for managing git worktrees with paired tmux sessions and per-project setup hooks.",
-		Long: "   _____\n" +
+		Long: helpHeader +
+			"   _____\n" +
 			"  / ____|\n" +
 			" | |     __ _ _ __   ___  _ __  _   _\n" +
 			" | |    / _` | '_ \\ / _ \\| '_ \\| | | |\n" +
@@ -378,4 +384,23 @@ func formatVersionDetails(d VersionDetails) string {
 		b.WriteString("  mode:      release\n")
 	}
 	return b.String()
+}
+
+// helpVersionLine renders the one-line version label that leads
+// `canopy --help`. Format mirrors the convention `$tool $version`:
+//
+//	canopy v0.12.2+abc1234        (release)
+//	canopy DEV (calm-firefly)     (dev build inside a known worktree)
+//	canopy DEV                    (dev build, workspace not resolvable)
+//
+// Kept distinct from formatVersionDetails — that one is the multi-line
+// `canopy version` block; this one is a single line for the help banner.
+func helpVersionLine(d VersionDetails) string {
+	if d.IsDev {
+		if d.DevWorkspace != "" {
+			return fmt.Sprintf("canopy DEV (%s)", d.DevWorkspace)
+		}
+		return "canopy DEV"
+	}
+	return "canopy " + d.Version
 }

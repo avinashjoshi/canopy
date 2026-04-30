@@ -650,6 +650,161 @@ func TestBuiltAgo(t *testing.T) {
 	}
 }
 
+// TestParseVersionLine covers the four shapes of `canopy version` first
+// lines we expect, plus the malformed-input fallback. Drives both the
+// release row's display string and the future stability of the column
+// — if formatVersionDetails ever drops the "canopy " prefix this test
+// fails loudly.
+func TestParseVersionLine(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"release_full", "canopy v0.12.2+abc1234\n  binary: ...", "v0.12.2+abc1234"},
+		{"dev_label", "canopy DEV\n  workspace: feature-A", "DEV"},
+		{"single_line_no_newline", "canopy v0.12.2+abc1234", "v0.12.2+abc1234"},
+		{"empty", "", ""},
+		{"missing_prefix", "Canopy v0.12.2", ""},
+		{"only_prefix", "canopy ", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseVersionLine(tc.in); got != tc.want {
+				t.Errorf("parseVersionLine(%q): got %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDevVersionLabel: built dev binary → "DEV", missing → "—".
+// Both branches matter for the canopy use listing.
+func TestDevVersionLabel(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "absent")
+	if got := devVersionLabel(missing); got != "—" {
+		t.Errorf("missing devBin: got %q, want %q", got, "—")
+	}
+
+	present := filepath.Join(dir, "canopy")
+	if err := os.WriteFile(present, []byte("dev"), 0o755); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if got := devVersionLabel(present); got != "DEV" {
+		t.Errorf("present devBin: got %q, want %q", got, "DEV")
+	}
+}
+
+// TestPrintUseList_versionColumn verifies the listing surfaces the
+// VERSION column in both the header and each row. Stubs
+// releaseVersionLabel so the test doesn't fork a real binary.
+func TestPrintUseList_versionColumn(t *testing.T) {
+	prev := releaseVersionLabel
+	t.Cleanup(func() { releaseVersionLabel = prev })
+	releaseVersionLabel = func(ctx context.Context, binPath string) string {
+		return "v9.9.9+test123"
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	binReal := filepath.Join(binDir, "canopy.bin")
+	if err := os.WriteFile(binReal, []byte("rel"), 0o755); err != nil {
+		t.Fatalf("seed canopy.bin: %v", err)
+	}
+	link := filepath.Join(binDir, "canopy")
+	if err := os.Symlink("canopy.bin", link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	canopyHome := filepath.Join(dir, ".canopy")
+	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Setenv("HOME", dir)
+
+	// One workspace built (./canopy exists → "DEV"), one not built
+	// (./canopy missing → "—").
+	wtBuilt := filepath.Join(dir, "ws-built")
+	wtUnbuilt := filepath.Join(dir, "ws-unbuilt")
+	for _, p := range []string{wtBuilt, wtUnbuilt} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		makeCanopyWorktree(t, p)
+	}
+	if err := os.WriteFile(filepath.Join(wtBuilt, "canopy"), []byte("dev"), 0o755); err != nil {
+		t.Fatalf("seed dev bin: %v", err)
+	}
+
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{
+			{Name: "ws-built", Path: wtBuilt},
+			{Name: "ws-unbuilt", Path: wtUnbuilt},
+		},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := printUseList(context.Background(), &out, link, binReal); err != nil {
+		t.Fatalf("printUseList: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"VERSION", "v9.9.9+test123", "DEV", "—"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output:\n%s", want, got)
+		}
+	}
+}
+
+// TestReleaseVersionLabel_missingBinary: stat fails → returns "—". This
+// is the "no canopy.bin yet" path that hits a fresh install where the
+// release symlink isn't populated.
+func TestReleaseVersionLabel_missingBinary(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "canopy.bin")
+	if got := releaseVersionLabel(context.Background(), missing); got != "—" {
+		t.Errorf("missing binary: got %q, want %q", got, "—")
+	}
+}
+
+// TestHelpVersionLine covers all three branches of the --help banner:
+// release version, dev with workspace, dev without workspace.
+func TestHelpVersionLine(t *testing.T) {
+	cases := []struct {
+		name string
+		d    VersionDetails
+		want string
+	}{
+		{
+			"release",
+			VersionDetails{Version: "v0.12.2+abc1234", IsDev: false},
+			"canopy v0.12.2+abc1234",
+		},
+		{
+			"dev_with_workspace",
+			VersionDetails{Version: "dev", IsDev: true, DevWorkspace: "calm-firefly"},
+			"canopy DEV (calm-firefly)",
+		},
+		{
+			"dev_untracked",
+			VersionDetails{Version: "dev", IsDev: true},
+			"canopy DEV",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := helpVersionLine(tc.d); got != tc.want {
+				t.Errorf("helpVersionLine: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunUse_buildWithoutTarget: --build without a workspace argument
 // is a usage error. The flag only makes sense paired with a target.
 func TestRunUse_buildWithoutTarget(t *testing.T) {
