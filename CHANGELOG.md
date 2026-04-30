@@ -5,6 +5,28 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-04-30 — Popup delete: detach instead of auto-switch
+
+### Fixed
+- Deleting the workspace you opened the popup from no longer auto-builds and
+  switches your tmux client to the project main session — a flow the user
+  perceived as "tmux loaded a random session" because EnsureMainSession spun
+  up a fresh nvim+claude pane behind the popup. The popup now closes
+  immediately, the tmux client detaches back to whatever shell started tmux,
+  and the workspace cleanup runs in a detached `canopy rm --yes --force`
+  subprocess (Setsid + Process.Release) so it survives the popup's exit.
+  Other delete paths (deleting a different workspace from the popup, or
+  deleting from fullscreen) keep using the existing busyMode + escape flow.
+- `removeDoneMsg` now auto-dismisses busyMode on success instead of leaving
+  the popup sitting at "Removed." waiting for a keypress. Mirrors
+  `createDoneMsg`'s "drop the busy view as soon as the work is done"
+  pattern. Failure path is unchanged — busyMode stays so the captured
+  archive output and error are visible for diagnosis.
+
+### Added
+- `tmux.Client.DetachClient(ctx)` — wrapper around `tmux detach-client` for
+  the popup-delete escape path.
+
 ## [0.11.1] - 2026-04-30 — TUI UX fixes round
 
 ### Fixed
