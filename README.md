@@ -22,74 +22,74 @@ The pitch in one sentence: `canopy new` and ten seconds later you're attached to
 
 ## Install
 
-### Requirements
+### Prerequisites
 
-| Tool | Why canopy needs it |
-|---|---|
-| `git >= 2.30` | worktree creation per workspace |
-| `tmux >= 3.0` | one tmux session per workspace |
-| `nvim` (Neovim) | launched in the top-left pane of every workspace |
-| `go >= 1.22` | only if installing from source (the `go install` and `make install` paths) |
+**Required:**
 
-Optional but recommended:
-- `claude` ([Claude Code](https://docs.claude.com/en/docs/claude-code)) — populates the top-right pane. Canopy still works without it; the pane just says "command not found" until you install it.
+| Tool | Version | Why |
+|---|---|---|
+| `git` | 2.x+ | worktree creation per workspace |
+| `tmux` | 3.2+ | display-popup support (canopy popup keybind needs this) |
+| `go` | 1.22+ | canopy is built from source on install |
+| `make` | any | drives the install pipeline |
 
-### Linux
+**Expected (canopy's defaults assume them, but workspaces can run anything):**
+- `nvim` (Neovim) — typical editor pane in the canopy session layout
+- `claude` ([Claude Code](https://docs.claude.com/en/docs/claude-code)) — default `agent` config in canopy.json launches it
+
+`install.sh` enforces the required tools — if any are missing, it prints the exact install command for your OS and exits cleanly. The expected tools aren't checked because they're per-project workflow, not canopy runtime.
+
+### One-liner install (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh
+```
+
+That clones canopy to `~/.canopy/src`, runs `make install` (which writes the binary to `~/.local/bin/canopy.bin` and symlinks `~/.local/bin/canopy` at it), and prints a PATH hint if `~/.local/bin` isn't on your shell's PATH.
+
+Idempotent: re-running on a machine that already has canopy installed prints "looks like canopy is already installed, run canopy upgrade instead" and exits 0.
+
+### Per-platform prereq install
+
+Run the appropriate line first, then the curl one-liner above.
 
 **Arch / CachyOS / Omarchy:**
 ```bash
 sudo pacman -S git tmux neovim go
-go install github.com/oncactus/canopy/cmd/canopy@latest
 ```
 
 **Debian / Ubuntu:**
 ```bash
-sudo apt install git tmux neovim golang
-go install github.com/oncactus/canopy/cmd/canopy@latest
+sudo apt-get install git tmux neovim golang-go make
 ```
 
-### macOS
-
-Homebrew handles all dependencies:
+**macOS:**
 ```bash
 brew install git tmux neovim go
-go install github.com/oncactus/canopy/cmd/canopy@latest
 ```
 
-### Windows
+**Windows:** canopy needs tmux, which doesn't run natively. Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and run the Debian/Ubuntu line inside the Linux shell.
 
-Canopy depends on `tmux`, which doesn't run natively on Windows. Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install):
-
-```powershell
-# In an admin PowerShell:
-wsl --install
-```
-
-Reboot, finish the Linux user setup, then inside the WSL shell follow the Debian/Ubuntu instructions above. Run `canopy` from inside WSL — Windows Terminal renders the TUI cleanly.
-
-### From source (any platform)
-
-If you want to track `main` or hack on canopy:
+### Update
 
 ```bash
-git clone https://github.com/oncactus/canopy.git
-cd canopy
-make install        # builds ./canopy and copies to ~/.local/bin
-canopy --help
+canopy upgrade
 ```
 
-`make install` is the dogfood loop — re-run it after every `git pull` to keep the installed binary current. If `~/.local/bin` isn't on your `$PATH`, the Makefile prints a one-liner to add it.
+That fetches the latest VERSION from `main`, compares with what you're running, prints the CHANGELOG diff, and runs `git pull --ff-only && make install` in `~/.canopy/src`. Refuses cleanly if you're on a dev binary (`canopy use release` first) or if `~/.canopy/src` is missing/corrupt (re-run install.sh).
 
-Other Make targets:
+Two flags:
+- `canopy upgrade --check` — compare versions without upgrading
+- `canopy upgrade --force` — run `git pull` + `make install` even when versions match
 
+### Uninstall
+
+```bash
+make -C ~/.canopy/src uninstall    # remove ~/.local/bin/canopy{,.bin}
+rm -rf ~/.canopy                    # remove the source clone, workspaces, state, and logs
 ```
-make build       # build ./canopy in repo root, don't install
-make test        # fast unit tests
-make test-e2e    # full E2E suite (real tmux, scratch repo, slow)
-make lint        # golangci-lint if installed
-make uninstall   # remove ~/.local/bin/canopy
-make clean       # remove ./canopy
-```
+
+The second line is destructive — it nukes every workspace on disk too. Only run it when you really mean to wipe canopy entirely.
 
 ### Verify
 
@@ -97,11 +97,65 @@ make clean       # remove ./canopy
 canopy version
 ```
 
-Should print something like `canopy v0.0.0-... (commit abc1234, built 2026-04-28T...)`. If you see `command not found`, your `go install` target dir (default `~/go/bin`) isn't on your `$PATH` — add it to your shell rc file (`~/.bashrc`, `~/.zshrc`, or your fish config):
+Output looks like:
+```
+canopy v0.12.0+abc1234
+  binary:    /home/you/.local/bin/canopy -> canopy.bin
+  commit:    abc1234
+  built:     2026-04-30T12:34:56Z
+  mode:      release
+```
+
+If you see `command not found`, `~/.local/bin` isn't on your PATH. Add it:
 
 ```bash
-export PATH="$HOME/go/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 ```
+
+## Dev workflow (contributing)
+
+If you're hacking on canopy itself, you'll have multiple worktrees in flight (one per feature). The active `canopy` on PATH is a symlink — flip it between the released binary and any in-flight feature build with one command, no rebuild on the way back.
+
+**`canopy use`** is the from-anywhere switcher. Works inside or outside any worktree.
+
+```bash
+canopy use                       # show current target + list available
+canopy use release               # symlink → ~/.local/bin/canopy.bin
+canopy use feature-A             # symlink → workspace feature-A's ./canopy
+canopy use --build feature-A     # build feature-A's ./canopy first, then switch
+```
+
+**`make dev`** and **`make release`** are Makefile wrappers, useful for the muscle memory of "from inside the worktree I'm working on":
+
+```bash
+cd ~/.canopy/workspaces/canopy/feature-A
+make dev          # build this worktree's ./canopy and make it active
+make release      # flip back to the released ~/.local/bin/canopy.bin (no rebuild)
+```
+
+The active binary is visually obvious in three places:
+
+- `canopy version` shows the resolved binary path + mode (release/DEV) + workspace name
+- The TUI top bar shows a muted `v0.12.0+abc1234` pill in release mode and a cyan `DEV: <workspace>` pill in dev mode
+- The tmux statusline appends `[DEV:<workspace>]` to the workspace segment when the running canopy is a dev build
+
+If you've forgotten which canopy is active, look at the status bar or run `canopy version`.
+
+### From-source dev tasks
+
+```
+make build          # build ./canopy in the worktree (no install, no symlink change)
+make install        # build with ldflags, install to ~/.local/bin/canopy.bin, symlink canopy → canopy.bin
+make dev            # build + flip ~/.local/bin/canopy at this worktree's ./canopy
+make release        # flip ~/.local/bin/canopy back at canopy.bin (no rebuild)
+make test           # fast unit tests
+make test-e2e       # full E2E suite (real tmux, scratch repo, slow)
+make lint           # golangci-lint if installed
+make uninstall      # remove ~/.local/bin/canopy and canopy.bin
+make clean          # remove ./canopy in the worktree
+```
+
+Convention: only run `make install` from main. From feature branches, `make dev` is the right tool — it doesn't touch the released `canopy.bin`, so parallel agents in other worktrees aren't affected.
 
 ## What works today
 

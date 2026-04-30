@@ -5,6 +5,92 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-04-30 — Source-based install, `canopy use` switcher, and visible release/DEV indicators
+
+End-user install + dev-loop ergonomics. One curl line installs canopy from
+source. `canopy upgrade` keeps it current. `canopy use` flips the active
+binary between any feature build and the released one in milliseconds.
+Three visual indicators (TUI top bar, tmux statusline suffix, `canopy
+version`) make it impossible to forget which canopy is active.
+
+### Added
+- `install.sh` at the repo root, hosted via raw.githubusercontent.com.
+  Detects OS via `uname`, checks for git/tmux 3.2+/Go 1.22+/make and
+  prints the exact install command if any is missing, clones to
+  `~/.canopy/src`, and runs `make install`. Idempotent: re-running on
+  an already-installed machine prints "run canopy upgrade" and exits 0.
+  One-liner: `curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh`.
+- `canopy upgrade` — fetches `~/.canopy/src` to latest main and runs
+  `make install`. Reads VERSION from raw.githubusercontent.com and
+  string-compares with the running binary, prints CHANGELOG diff before
+  the pull. `--check` compares without upgrading; `--force` runs even
+  when versions match. Refuses cleanly on dev binaries (suggests
+  `canopy use release` first) and on missing/corrupt source clones.
+- `canopy use [target]` — single switcher subcommand for the active
+  binary. With no args, lists current target + every workspace canopy
+  knows about with built-or-not status (sorted alphabetically). With a
+  target name, retargets `~/.local/bin/canopy` symlink atomically:
+  `release` (alias: `main`) points at `canopy.bin`; a workspace name
+  points at that worktree's `./canopy`. `--build` flag rebuilds the
+  workspace binary first.
+- `make dev` Makefile target — thin wrapper that builds this worktree's
+  `./canopy` (no ldflags, so version stays "dev") and flips
+  `~/.local/bin/canopy` at it. Works from any worktree.
+- `make release` Makefile target — flips `~/.local/bin/canopy` back at
+  `canopy.bin` from any worktree, with no rebuild. Refuses cleanly if
+  `canopy.bin` is missing.
+- VERSION file at the repo root holding the human-curated semver
+  (matches gstack/gbrain convention). `canopy upgrade` and the
+  Makefile's ldflags both read from it.
+- TUI top-bar version pill — muted gray for release builds (`v0.12.0+abc1234`),
+  cyan for dev builds (`DEV: <workspace>`). Suppressed when no version
+  info is available so tests + bare invocations stay clean.
+- `canopy statusline --format=current` appends `[DEV:<workspace>]` to
+  the workspace segment when the running canopy is a dev build, regardless
+  of which workspace's tmux session the user is in. The "I forgot I
+  switched and this isn't the released canopy" reminder.
+- `canopy version` now prints a structured multi-line block: version,
+  commit, build date, resolved binary path (with symlink target), mode
+  (release/DEV), and workspace name when running a dev build inside a
+  known worktree.
+
+### Changed
+- **`canopy install tmux` now invokes bare `canopy` (PATH-resolved)
+  instead of the absolute path of the binary that ran the install.**
+  With `canopy use` swapping the symlink between release and dev
+  binaries, bare `canopy` follows the symlink automatically — no
+  `canopy install tmux --force` re-run on every binary swap.
+- `make install` now writes to `~/.local/bin/canopy.bin` and symlinks
+  `~/.local/bin/canopy` at it. `canopy use` flips the symlink. The
+  symlink is the single source of truth for the active canopy on PATH;
+  every other tool (tmux, shell aliases, `canopy upgrade`) follows it.
+- `make install` injects ldflags from VERSION + git short-sha so
+  `canopy version` produces a real version string for installed binaries
+  without needing goreleaser. `make build` and `make dev` deliberately
+  skip the ldflags so dev binaries surface as `version == "dev"` and
+  the DEV banner fires.
+
+### Documentation
+- README: rewritten Install section (curl one-liner first), new Update
+  section (`canopy upgrade`), new Dev workflow section (`canopy use`,
+  `make dev`, `make release`, visual indicators), new Uninstall section.
+- CLAUDE.md: new "Multi-workspace dogfooding" section instructing future
+  Claudes to use `./canopy` or `/tmp/canopy-XX` per-workspace and never
+  bare `canopy`, with rules for routing "make this active" requests to
+  `canopy use` or `make dev`.
+- Design doc: `docs/design/v0-install-and-dev-workflow.md` formalizes
+  the source-based distribution decision (Approaches A/B/C compared),
+  filesystem shape, switching state machine, and failure modes.
+
+### Why source-based instead of goreleaser + binary releases
+Canopy's audience is devs comfortable with shells; they have or can
+install Go in one line. Source-based distribution matches gstack/gbrain
+(the user's existing tooling), avoids `.goreleaser.yaml` + release
+workflow + Gatekeeper notarization + cross-platform build matrix, and
+already matches the user's "make install on main" dogfood habit. If
+non-Go users ever materialize, goreleaser layers on top of this; doesn't
+replace it.
+
 ## [0.11.3] - 2026-04-30 — Detach-and-remove now covers fullscreen + instant state-row drop
 
 ### Fixed
