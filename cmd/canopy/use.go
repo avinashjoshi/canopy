@@ -222,8 +222,12 @@ func printUseList(ctx context.Context, out io.Writer, symlinkPath, releaseTarget
 
 	fmt.Fprintln(out, "Available targets:")
 	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "  TARGET\tPATH\tBUILT")
-	fmt.Fprintln(tw, fmt.Sprintf("  %s\t%s\t%s", useReleaseAlias, releaseTargetPath, builtAgo(releaseTargetPath)))
+	fmt.Fprintln(tw, "  TARGET\tPATH\tVERSION\tBUILT")
+	fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
+		useReleaseAlias,
+		releaseTargetPath,
+		releaseVersionLabel(ctx, releaseTargetPath),
+		builtAgo(releaseTargetPath))
 
 	canopyOnly := 0
 	skipped := 0
@@ -245,7 +249,8 @@ func printUseList(ctx context.Context, out io.Writer, symlinkPath, releaseTarget
 		for _, n := range names {
 			ws := findWorkspaceByName(st, n)
 			devBin := filepath.Join(ws.Path, canopyBinName)
-			fmt.Fprintf(tw, "  %s\t%s\t%s\n", ws.Name, devBin, builtAgo(devBin))
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
+				ws.Name, devBin, devVersionLabel(devBin), builtAgo(devBin))
 			canopyOnly++
 		}
 	}
@@ -262,6 +267,60 @@ func printUseList(ctx context.Context, out io.Writer, symlinkPath, releaseTarget
 		fmt.Fprintln(out, "  (no canopy source worktrees registered)")
 	}
 	return nil
+}
+
+// releaseVersionLabel runs `<binPath> version` and parses the version
+// out of the first line ("canopy v0.12.2+abc1234" → "v0.12.2+abc1234").
+// On any failure (missing binary, exec error, parse miss) it returns
+// "—" so the row still renders cleanly. Capped at 2s so a wedged
+// release binary can't hang `canopy use`.
+//
+// Dev rows go through devVersionLabel instead — make build is dev-by-
+// convention and an exec there would just confirm what we already know.
+//
+// var-typed for the same reason as goBuildInWorktree: lets tests stub
+// the exec without spawning a real subprocess.
+var releaseVersionLabel = func(ctx context.Context, binPath string) string {
+	if _, err := os.Stat(binPath); err != nil {
+		return "—"
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, binPath, "version").Output()
+	if err != nil {
+		return "—"
+	}
+	if v := parseVersionLine(string(out)); v != "" {
+		return v
+	}
+	return "—"
+}
+
+// devVersionLabel returns "DEV" if the dev binary exists, "—" if it
+// doesn't. Keeps the column scannable without forking the binary —
+// `make build` produces dev binaries by convention.
+func devVersionLabel(devBin string) string {
+	if _, err := os.Stat(devBin); err != nil {
+		return "—"
+	}
+	return "DEV"
+}
+
+// parseVersionLine extracts the version label from the first line of
+// `canopy version` output. The first line is always "canopy <label>"
+// (see formatVersionDetails) — for releases that's the version string,
+// for dev builds it's literally "DEV".
+//
+// Returns "" if the output doesn't start with "canopy " — caller maps
+// that to "—" so a future format change degrades to a missing column,
+// not a misleading row.
+func parseVersionLine(out string) string {
+	line, _, _ := strings.Cut(out, "\n")
+	line = strings.TrimSpace(line)
+	if rest, ok := strings.CutPrefix(line, "canopy "); ok {
+		return strings.TrimSpace(rest)
+	}
+	return ""
 }
 
 // builtAgo returns a human-friendly "built Xh ago" string for path's
