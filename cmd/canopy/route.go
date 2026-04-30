@@ -129,7 +129,21 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 		}
 	}
 
-	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
+	// Resolve the running binary's version surface so the TUI top bar
+	// can show the version pill. versionLabel is the human-friendly
+	// label ("v0.12.0+abc1234" or "dev"); devWorkspace is the canopy
+	// workspace name when this is a dev build inside a known worktree,
+	// or "" otherwise. The UI uses both to pick muted-gray-release vs
+	// cyan-DEV styling.
+	d := versionDetails()
+	versionLabel := d.Version
+	if d.IsDev {
+		// Don't surface the literal "dev" string in the pill — it's
+		// uninformative compared to the workspace name. Empty here
+		// hands rendering control to devWorkspace below.
+		versionLabel = ""
+	}
+	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, d.DevWorkspace)
 }
 
 // resolveProjectContext picks the canonical current-project root for the
