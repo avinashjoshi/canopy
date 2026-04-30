@@ -270,7 +270,7 @@ func (m Model) renderTable() string {
 	// unaffected; the trailing space gives a gap before the branch text.
 	const branchIcon = "⎇ "
 
-	colName, colBranch, colStatus, colPort := 4, 6, 6, 4
+	colName, colBranch, colStatus, colPort, colMem := 4, 6, 6, 4, 4
 	for _, r := range m.rows {
 		colName = maxInt(colName, len(r.Name))
 		colBranch = maxInt(colBranch, len(r.Branch))
@@ -278,6 +278,7 @@ func (m Model) renderTable() string {
 		if r.Port > 0 {
 			colPort = maxInt(colPort, lenInt(r.Port))
 		}
+		colMem = maxInt(colMem, len(memCell(r)))
 	}
 
 	// Recompute colStatus to account for IsMain rows showing "running"
@@ -312,18 +313,39 @@ func (m Model) renderTable() string {
 		statusText := displayStatus(r)
 
 		var line string
+		// presenceGlyph: 2-char slot before the name encoding session
+		// presence in three states:
+		//   ⊙   tmux alive AND a client is attached — "you're looking
+		//       at it." Rendered green so it pops at a scan.
+		//   ○   tmux alive, no client attached — "running quietly in
+		//       the background." Subtle grey.
+		//   (blank) no tmux session — the status column says why
+		//       (stopped, broken, orphaned, not started).
+		// The three-state encoding distinguishes "running quietly"
+		// from "doesn't exist," which a single attached/blank glyph
+		// conflated.
+		presenceGlyph := "  "
+		switch {
+		case r.Alive && r.Attached:
+			presenceGlyph = "⊙ "
+		case r.Alive:
+			presenceGlyph = "○ "
+		}
+
 		if isSelected {
 			// Selected row: `❯ ` caret + plain content (no inner ANSI)
 			// wrapped with the selection bg padded to terminal width.
 			// Non-selected rows pad with two spaces in the caret slot
 			// so columns stay put as the cursor moves.
-			plainContent := fmt.Sprintf("❯ %-*s  %s%-*s  %s%-*s  %*s",
+			plainContent := fmt.Sprintf("❯ %s%-*s  %s%-*s  %s%-*s  %*s  %*s",
+				presenceGlyph,
 				colName, r.Name,
 				branchIcon,
 				colBranch, r.Branch,
-				statusGlyphFor(r.Status)+" ",
+				displayGlyph(r)+" ",
 				colStatus, statusText,
 				colPort, port,
+				colMem, memCell(r),
 			)
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				plainContent += "  " + stripAnsi(hintBadges)
@@ -339,7 +361,7 @@ func (m Model) renderTable() string {
 			// density. Status color reflects lifecycle state (and for
 			// IsMain rows, alive vs not-started); branch styling tags
 			// renamed branches in bold-white.
-			statusCell := mainAwareStatusStyle(r).Render(statusGlyphFor(r.Status) + " " + fmt.Sprintf("%-*s", colStatus, statusText))
+			statusCell := mainAwareStatusStyle(r).Render(displayGlyph(r) + " " + fmt.Sprintf("%-*s", colStatus, statusText))
 			// Branch cell: icon + padded text, styled together so the
 			// glyph picks up the same color as the name. Three styling
 			// modes:
@@ -358,11 +380,29 @@ func (m Model) renderTable() string {
 			case r.Branch != "" && r.Branch != "—":
 				branchDisplay = renamedBranchStyle().Render(branchDisplay)
 			}
-			line = fmt.Sprintf("  %-*s  %s  %s  %*s",
+			// Presence glyph color: green for attached (the eye-catcher
+			// — "you're in this one"), subtle grey for detached-alive
+			// (background presence), blank for not-running (status
+			// column carries the meaning).
+			var styledPresence string
+			switch {
+			case r.Alive && r.Attached:
+				styledPresence = lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Render(presenceGlyph)
+			case r.Alive:
+				styledPresence = subtleHelper().Render(presenceGlyph)
+			default:
+				styledPresence = presenceGlyph // blank, no styling needed
+			}
+			// Two-space caret slot (matches the `❯ ` width of the
+			// selected branch) so everything after stays put when the
+			// cursor moves between rows.
+			line = fmt.Sprintf("  %s%-*s  %s  %s  %*s  %s",
+				styledPresence,
 				colName, r.Name,
 				branchDisplay,
 				statusCell,
 				colPort, port,
+				memCellStyled(r, colMem),
 			)
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				line += "  " + hintBadges
@@ -374,12 +414,24 @@ func (m Model) renderTable() string {
 	return b.String()
 }
 
-// displayStatus returns the user-facing status string for a row. For
-// regular workspace rows it's the literal Status field. For IsMain
-// rows we promote the alive bit into the status itself — "running"
-// when the main session is up, "not started" when it isn't — so a
-// glance at the status column tells you what's running without
-// needing a separate alive-dot column.
+// displayStatus returns the user-facing status string for a row.
+//
+// Three layers of mapping:
+//
+//  1. Main rows promote Alive into the status itself: "running" when
+//     the main session is up, "not started" otherwise.
+//  2. Workspace rows whose recorded Status is "ready" are displayed
+//     as "running" (matches the main-row vocabulary; "ready" was
+//     ambiguous between "ready to attach" and "actively running").
+//  3. Stale-ready override: a workspace whose Status says ready but
+//     whose freshly-probed Alive is false (tmux died out-of-band,
+//     Reconcile hasn't caught up) is displayed as "stopped" so the
+//     column doesn't lie. The Enter handler also routes these rows
+//     through resurrect via effectiveStatus — same idea, same data.
+//  4. setting_up renders with a space ("setting up") rather than the
+//     internal underscore form for readability.
+//
+// Other workspace statuses (stopped, broken, orphaned) display as-is.
 func displayStatus(r state.GlobalRow) string {
 	if r.IsMain {
 		if r.Alive {
@@ -387,20 +439,36 @@ func displayStatus(r state.GlobalRow) string {
 		}
 		return "not started"
 	}
+	switch r.Status {
+	case state.StatusReady:
+		if !r.Alive {
+			return "stopped"
+		}
+		return "running"
+	case state.StatusSettingUp:
+		return "setting up"
+	}
 	return string(r.Status)
 }
 
-// mainAwareStatusStyle picks the right color for the status cell. For
-// IsMain rows we use green when running (matches workspace "ready")
-// and gray when not started (matches workspace "stopped" feel without
-// the orange-alarm of an actual stopped workspace). Other rows fall
-// through to statusStyleFor as before.
+// mainAwareStatusStyle picks the right color for the status cell.
+//
+//   - Main rows: green when alive ("running"), gray when not started.
+//   - Workspace rows with status=ready but Alive=false: amber, matching
+//     the stopped-workspace color since displayStatus also renders them
+//     as "stopped" (stale-ready override). Without this, a stale row
+//     shows the green "running" color even though the text says
+//     "stopped" — visual inconsistency.
+//   - Other workspace rows: statusStyleFor(Status).
 func mainAwareStatusStyle(r state.GlobalRow) lipgloss.Style {
 	if r.IsMain {
 		if r.Alive {
 			return lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 		}
 		return subtleHelper()
+	}
+	if r.Status == state.StatusReady && !r.Alive {
+		return statusStyleFor(state.StatusStopped)
 	}
 	return statusStyleFor(r.Status)
 }
@@ -476,6 +544,15 @@ func RenderHintBadges(hints []state.Hint) string {
 			parts = append(parts, hintRenameStyle().Render("↻ rename"))
 		}
 	}
+	// Then git stats — show always (regardless of PR/merged state) so
+	// the user sees in-flight commit counts + dirty file count at a
+	// glance. Detector returns nil when all three counts are zero, so
+	// clean workspaces don't get a noisy "↑0 ↓0 *0" badge.
+	for _, h := range hints {
+		if h.Kind == "git_stats" && h.Message != "" {
+			parts = append(parts, gitStatsStyle().Render(h.Message))
+		}
+	}
 	// Then the lifecycle-state badge: PR if present, shipped fallback
 	// otherwise.
 	for _, h := range hints {
@@ -486,10 +563,21 @@ func RenderHintBadges(hints []state.Hint) string {
 			if hasPR {
 				continue // PR state wins; suppress the local fallback
 			}
-			parts = append(parts, hintShippedStyle().Render("✓ shipped (local)"))
+			// "✓ merged" reflects what we actually detect: the
+			// branch's commits are now in the default branch via
+			// squash-merge. Action is `canopy rm`.
+			parts = append(parts, hintShippedStyle().Render("✓ merged"))
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// gitStatsStyle returns the lipgloss style for the git-stats badge.
+// Subtle grey — the badge is informational chrome, not an actionable
+// alert. The arrows + count communicate everything; loud color would
+// over-claim attention against the actionable rename/PR badges.
+func gitStatsStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 }
 
 // prBadge formats the pr_status hint into a short, color-coded label.
@@ -655,11 +743,12 @@ func badgeFor(alive bool) string {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("○")
 }
 
-// statusGlyphFor returns a 1-rune shape prefix for a status, providing a
-// non-color signal so status reads correctly under protanopia and on
-// monochrome terminals. Mirrors render.statusGlyph in the parent ui pkg —
-// duplicated rather than imported because projectlist intentionally
-// stands alone for reuse from `canopy ls --all` and other future surfaces.
+// statusGlyphFor returns a 1-rune shape prefix for a raw Status enum
+// value. Provides a non-color signal so status reads correctly under
+// protanopia and on monochrome terminals. Mirrors render.statusGlyph
+// in the parent ui pkg — duplicated rather than imported because
+// projectlist intentionally stands alone for reuse from `canopy ls
+// --all` and other future surfaces.
 func statusGlyphFor(s state.Status) string {
 	switch s {
 	case state.StatusSettingUp:
@@ -672,6 +761,86 @@ func statusGlyphFor(s state.Status) string {
 		return "!"
 	}
 	return " "
+}
+
+// displayGlyph is the row-aware version of statusGlyphFor. The glyph
+// must agree with displayStatus's text — otherwise stale-ready rows
+// render as " stopped" (ready glyph + stopped text), which the user
+// rightly called out as inconsistent. Always go through this helper
+// from row-rendering code; the bare statusGlyphFor is for legends
+// and other contexts where we want the literal status mapping.
+func displayGlyph(r state.GlobalRow) string {
+	if r.IsMain {
+		return " "
+	}
+	// Stale-ready: status says ready but freshly-probed Alive is false.
+	// Match the displayStatus override so glyph + text agree.
+	if r.Status == state.StatusReady && !r.Alive {
+		return statusGlyphFor(state.StatusStopped)
+	}
+	return statusGlyphFor(r.Status)
+}
+
+// memCell returns the human-readable load text for a row: "320M 12%"
+// shape combining MemRSS and CPU in one cell. Returns "—" when there's
+// no meaningful data (main rows where the probe didn't run yet, dead
+// sessions, probe-failed rows).
+//
+// CPU is rendered as an integer percentage (sum of pcpu across panes,
+// can exceed 100 on multi-core boxes — that's fine, it's signal that
+// the workspace is hammering multiple cores). Always shown when mem
+// is shown so the cell format stays consistent across rows; an idle
+// workspace renders "320M 0%" rather than collapsing to "320M". The
+// "0%" carries the "genuinely idle" signal and avoids the ambiguity
+// of "is CPU missing because <1% or because we don't have data?"
+func memCell(r state.GlobalRow) string {
+	if r.IsMain || !r.Alive || r.MemRSS <= 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%s %d%%", humanRSS(r.MemRSS), int(r.CPU+0.5))
+}
+
+// memCellStyled returns memCell padded to width with a heat-aware
+// color: subtle when low, amber when medium (>500MB), red when high
+// (>2GB). Heaviness draws the eye so the user can scan a long list
+// and immediately spot the workspace eating their machine. CPU
+// participates in the heat threshold by getting the same color as the
+// RSS-driven decision — keeps the cell as one visual unit.
+func memCellStyled(r state.GlobalRow, width int) string {
+	cell := memCell(r)
+	padded := fmt.Sprintf("%*s", width, cell)
+	if cell == "—" {
+		return subtleHelper().Render(padded)
+	}
+	switch {
+	case r.MemRSS >= 2*1024*1024*1024 || r.CPU >= 200:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(padded) // red
+	case r.MemRSS >= 500*1024*1024 || r.CPU >= 50:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(padded) // amber
+	default:
+		return subtleHelper().Render(padded)
+	}
+}
+
+// humanRSS formats bytes as a 4-character compact string (e.g. " 12M",
+// "320M", "1.2G"). Optimized for column scanning, not exact
+// reporting.
+func humanRSS(n int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+	)
+	switch {
+	case n >= gb:
+		return fmt.Sprintf("%.1fG", float64(n)/float64(gb))
+	case n >= mb:
+		return fmt.Sprintf("%dM", n/mb)
+	case n >= kb:
+		return fmt.Sprintf("%dK", n/kb)
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
 }
 
 func statusStyleFor(s state.Status) lipgloss.Style {

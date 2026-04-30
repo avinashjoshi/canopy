@@ -32,6 +32,10 @@ func (m *Model) View() string {
 		return m.renderNewBranch()
 	case confirmDeleteMode:
 		return m.renderConfirmDelete()
+	case confirmKillMode:
+		return m.renderConfirmKill()
+	case drawerMode:
+		return m.renderDrawer()
 	case busyMode:
 		return m.renderBusyView()
 	}
@@ -781,6 +785,141 @@ func (m *Model) renderConfirmDelete() string {
 	return b.String()
 }
 
+// renderConfirmKill is the y/N prompt for K (kill tmux session). Less
+// destructive than rm — only the tmux session goes. Re-pressing Enter
+// after kill resurrects via Manager.Resurrect (workspace rows) or
+// Manager.EnsureMainSession (main rows).
+//
+// The prompt copy adapts to the row type. For workspace rows it
+// reassures that state.json + worktree dir + branch all survive
+// (the things that COULD be lost in canopy rm, so worth naming
+// explicitly here as "this is NOT that"). For main rows there's
+// nothing identity-level to lose, so the copy just describes the
+// kill itself.
+func (m *Model) renderConfirmKill() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("kill tmux session"))
+	b.WriteString("\n\n")
+	if m.killTarget == "(main)" {
+		b.WriteString("  Kill the project's main tmux session?\n\n")
+		b.WriteString(subtleStyle.Render("  This shuts down the main session (panes, running scripts.run,\n"))
+		b.WriteString(subtleStyle.Render("  claude/nvim processes). Your source repo and project state are\n"))
+		b.WriteString(subtleStyle.Render("  untouched. Press Enter on the main row again to rebuild it\n"))
+		b.WriteString(subtleStyle.Render("  (claude --continue keeps history).\n"))
+	} else {
+		b.WriteString(fmt.Sprintf("  Kill the tmux session for workspace %q?\n\n", m.killTarget))
+		b.WriteString(subtleStyle.Render("  This shuts down the workspace's tmux session (panes, running\n"))
+		b.WriteString(subtleStyle.Render("  scripts.run, claude/nvim processes). The worktree dir, the\n"))
+		b.WriteString(subtleStyle.Render("  branch, and state.json all survive. Press Enter on the row\n"))
+		b.WriteString(subtleStyle.Render("  again to resurrect the session (claude --continue keeps history).\n"))
+	}
+	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to kill  ·  any other key to cancel")
+	return b.String()
+}
+
+// renderDrawer is the diagnostic detail view for one workspace, opened
+// with `i`. Read-only, scope-capped: process tree, recent log lines,
+// env, last setup output, status. See model.go drawerMode docstring
+// for the full scope cap.
+func (m *Model) renderDrawer() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render(fmt.Sprintf("inspect: %s", m.drawerRow.Name)))
+	b.WriteString("\n\n")
+
+	// Header line: branch, status, port, path.
+	b.WriteString(fmt.Sprintf("  branch: %s\n", m.drawerRow.Branch))
+	attached := "no"
+	if m.drawerRow.Attached {
+		attached = "yes (you're looking at this session)"
+	}
+	b.WriteString(fmt.Sprintf("  status: %s   tmux-alive: %v   tmux-attached: %s   port: %d\n",
+		m.drawerRow.Status, m.drawerRow.Alive, attached, m.drawerRow.Port))
+	if m.drawerRow.Path != "" {
+		b.WriteString(fmt.Sprintf("  path:   %s\n", m.drawerRow.Path))
+	}
+	b.WriteString("\n")
+
+	if m.drawerErr != nil {
+		b.WriteString(errorStyle.Render(fmt.Sprintf("load error: %v", m.drawerErr)))
+		b.WriteString("\n\n")
+	}
+
+	// Process tree section.
+	b.WriteString(subtleStyle.Render("─── processes ───"))
+	b.WriteString("\n")
+	if m.drawerProcInfo == "" {
+		b.WriteString(subtleStyle.Render("  (loading…)\n"))
+	} else {
+		b.WriteString(m.drawerProcInfo)
+		if !strings.HasSuffix(m.drawerProcInfo, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+
+	// Recent log lines section. Workspace rows read per-workspace
+	// log; main rows don't have one (clog fan-out keys on workspace
+	// name) so we surface the limitation honestly rather than
+	// pretending an empty section is "no log captured yet".
+	b.WriteString(subtleStyle.Render("─── recent log entries ───"))
+	b.WriteString("\n")
+	switch {
+	case m.drawerRow.IsMain:
+		b.WriteString(subtleStyle.Render("  (main rows don't have per-session logs — main events go to ~/.canopy/log/canopy.log)\n"))
+	case m.drawerLogTail == "":
+		b.WriteString(subtleStyle.Render("  (no log captured yet — workspace logs land at ~/.canopy/log/canopy-" + m.drawerRow.Name + ".log)\n"))
+	default:
+		b.WriteString(m.drawerLogTail)
+		if !strings.HasSuffix(m.drawerLogTail, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+
+	// Setup log section. Main rows don't run scripts.setup, so this
+	// section is N/A there.
+	b.WriteString(subtleStyle.Render("─── last scripts.setup output ───"))
+	b.WriteString("\n")
+	switch {
+	case m.drawerRow.IsMain:
+		b.WriteString(subtleStyle.Render("  (N/A — main rows don't run scripts.setup)\n"))
+	case m.drawerSetupLog == "":
+		b.WriteString(subtleStyle.Render("  (no setup log captured)\n"))
+	default:
+		b.WriteString(m.drawerSetupLog)
+		if !strings.HasSuffix(m.drawerSetupLog, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+
+	b.WriteString(subtleStyle.Render("  "))
+	b.WriteString(subtleStyle.Render("Esc/q "))
+	b.WriteString(subtleStyle.Render("close  ·  "))
+	// `b` only earns its slot when the row is broken (Enter would
+	// refuse, so b is the only way to drop in and debug) or main
+	// (a one-pane shell at project root with CANOPY env is a
+	// distinct gesture from the 3-pane main session). For
+	// everyday running/stopped workspaces, Enter does the right
+	// thing and b would just spawn redundant clutter — so the
+	// keybind stays available (handler still dispatches if you
+	// somehow press it) but isn't advertised.
+	if m.drawerRow.IsMain || m.drawerRow.Status == state.StatusBroken {
+		b.WriteString(subtleStyle.Render("b "))
+		if m.drawerRow.IsMain {
+			b.WriteString(subtleStyle.Render("bare shell at project root  ·  "))
+		} else {
+			b.WriteString(subtleStyle.Render("bare attach (skip scripts.setup)  ·  "))
+		}
+	}
+	b.WriteString(subtleStyle.Render("r "))
+	b.WriteString(subtleStyle.Render("reload"))
+	return b.String()
+}
+
 // renderBusyView is shown while a Create or Remove is in progress and
 // immediately after it completes (so the user can see the captured
 // output). While busy, it's a simple "working..." line; once done, it
@@ -830,8 +969,13 @@ func (m *Model) renderBusyView() string {
 	return b.String()
 }
 
-// renderHelp draws the full keybind reference (toggled with ?). Any key
-// dismisses it back to the main view.
+// renderHelp draws the full keybind reference + visual legend
+// (toggled with ?). Any key dismisses it back to the main view.
+//
+// The legend section is the load-bearing part — without it, the
+// row's mix of glyphs (⊙ attach indicator, ⏸/✗/!/… status glyphs,
+// caret) becomes a memory test. Reading the help once should be
+// enough to scan rows without guessing what each shape means.
 func (m *Model) renderHelp() string {
 	lines := []string{
 		titleStyle.Render("canopy — keybindings"),
@@ -839,20 +983,53 @@ func (m *Model) renderHelp() string {
 		"  ↑/↓, j/k       move selection",
 		"  g, home        first row",
 		"  G, end         last row",
+		"  tab            switch Local / Global tab",
+		"  /              fuzzy search",
 		"",
-		"  enter          attach to selected workspace",
+		"  enter          attach to selected (resurrects if stopped)",
+		"  i              inspect — open diagnostic detail drawer",
+		"  K              kill tmux session (state survives; Enter rebuilds)",
 		"  n              new workspace",
-		"  d              delete selected (with confirmation)",
+		"  d              delete selected workspace (with confirmation)",
 		"  R              retry scripts.setup on a broken workspace",
-		"  r              refresh state",
+		"  o              focus project (Global tab only)",
+		"  p              open PR in browser (when row has PR hint)",
+		"  r              refresh state (also enables Mem column)",
 		"",
 		"  ?              this help",
-	}
-	lines = append(lines,
 		"  q, ctrl-c      quit",
 		"",
+		titleStyle.Render("legend"),
+		"",
+		"  status column:",
+		"    running        tmux session alive, processes running",
+		"    stopped  ⏸     tmux session is dead (was killed or crashed)",
+		"    broken   ✗     scripts.setup failed; press R to retry",
+		"    setting up  …  workspace is being created right now",
+		"    orphaned !     workspace dir is missing on disk",
+		"    not started    main session: no tmux session yet",
+		"",
+		"  row prefixes:",
+		"    ❯              cursor is on this row",
+		"    ⊙ (green)      tmux alive, a client is attached (you're looking at it)",
+		"    ○ (grey)       tmux alive, no client attached (running in background)",
+		"    (blank)        no tmux session — status column says why",
+		"",
+		"  Right-side badges (when applicable):",
+		"    ↻ rename       branch is auto-named — the agent should rename it",
+		"    ↑3 ↓1 *5       git stats: 3 commits unpushed, 1 commit behind, 5 files dirty",
+		"    PR open / approved / changes / merged / closed   GitHub PR state",
+		"    ✓ merged       branch's commits are in main (canopy rm now safe)",
+		"",
+		"  Load column (Mem RSS + CPU%):",
+		"    —              no data yet (probe still running, or dead session)",
+		"    320M 0%        idle workspace (alive, processes mostly waiting)",
+		"    320M 12%       memory + CPU (sum across panes; can exceed 100% on multi-core)",
+		"    (amber)        > 500 MB OR > 50% CPU",
+		"    (red)          > 2 GB OR > 200% CPU",
+		"",
 		subtleStyle.Render("Press any key to dismiss."),
-	)
+	}
 	return helpBodyStyle.Render(strings.Join(lines, "\n"))
 }
 

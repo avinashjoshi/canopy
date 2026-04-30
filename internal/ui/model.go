@@ -79,6 +79,21 @@ const (
 	// a healthy workspace and clobber whatever state setup mutates
 	// (db reseed, env regen, etc.).
 	confirmRetryMode
+	// confirmKillMode is the y/N gate before `K` tears down a workspace's
+	// tmux session. Distinct from confirmDeleteMode because K is much
+	// less destructive: state.json + worktree dir + branch all survive,
+	// only the tmux session goes. Re-pressing Enter after kill resurrects
+	// the workspace cleanly. The friction here is "did you really mean
+	// to drop this session?", not "are you sure you want to lose work?".
+	confirmKillMode
+	// drawerMode is the diagnostic detail drawer (opened with `i`).
+	// Read-only view of one workspace's process tree, recent logs, env,
+	// status history, and last setup log. The drawer is opt-in (no
+	// auto-open) and scope-capped to diagnostics — no editing, no live
+	// dev-server tailing, no canopy.json mutation. See the CEO plan at
+	// ~/.gstack/projects/canopy/ceo-plans/2026-04-29-tmux-health-and-resurrect.md
+	// for the load-bearing scope cap rationale.
+	drawerMode
 	busyMode
 )
 
@@ -231,6 +246,29 @@ type Model struct {
 	// CLI's --force friction. The pending row name is held in
 	// retryTarget; the modal is the busyMode parent waiting for input.
 	retryTarget string
+
+	// memCache caches per-session RSS+CPU values for the load column
+	// with a 5s TTL. Without caching, every refresh tick would spawn
+	// a `ps -A` per workspace row. Invalidated on K (kill) so the
+	// just-killed row flips to "—" immediately rather than lagging
+	// the actual state by up to TTL seconds.
+	memCache *state.MemCache
+
+	// Confirm-kill modal (mode == confirmKillMode). K kills the
+	// workspace's tmux session; the y/N gate prevents accidental
+	// keypress. killTargetRoot scopes by ProjectRoot for the same
+	// reason deleteTargetRoot does — see comment on deleteTargetRoot.
+	killTarget     string
+	killTargetRoot string
+
+	// Drawer state (mode == drawerMode). The drawer snapshots the row
+	// it was opened against and the loaded diagnostic data so re-renders
+	// during async refreshes don't pull data from underneath the user.
+	drawerRow      Row
+	drawerProcInfo string // pre-rendered process tree text, "" while loading
+	drawerLogTail  string // last N lines of ~/.canopy/log/canopy-<ws>.log
+	drawerSetupLog string // last setup run output, or "no setup log captured"
+	drawerErr      error  // non-fatal load error to surface in-drawer
 }
 
 // tabKind identifies which top-level tab is active in the unified TUI.
@@ -417,7 +455,17 @@ func Run(mgr *workspace.Manager) error {
 // popup-without-project mode). Either way the result lands in
 // m.allRows; tab + search filtering happens on every render.
 func (m *Model) Init() tea.Cmd {
-	return refreshCmd(m.mgr, m.tc, m.store)
+	if m.memCache == nil {
+		m.memCache = state.NewMemCache(state.DefaultMemCacheTTL)
+	}
+	// Auto-populate the Mem/CPU column on first render. Bubbletea's
+	// async-Cmd model means the table still appears instantly with
+	// Mem="—" placeholders; the rowsLoadedMsg arrives a moment later
+	// (one ps -A per session, ~5-10ms on a typical workstation) and
+	// triggers a re-render with the populated values. No explicit `r`
+	// gesture required — the column "just works" the way every other
+	// column does.
+	return m.refresh()
 }
 
 // rowsLoadedMsg is the result of a refresh. Carries the new rows or an
@@ -435,6 +483,41 @@ type rowsLoadedMsg struct {
 // we run Reconcile first (which mutates state.json) so the freshly-built
 // rows reflect the latest stopped/ready transitions.
 func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea.Cmd {
+	return refreshCmdWithMem(mgr, tc, store, nil)
+}
+
+// refresh is the model-bound refresh. Always populates the Mem+CPU
+// column when a memCache is configured — auto-load is the right
+// default since Bubbletea's async Cmd model keeps the first render
+// instant and the populated values arrive on the next tick.
+func (m *Model) refresh() tea.Cmd {
+	return refreshCmdWithMem(m.mgr, m.tc, m.store, m.memCache)
+}
+
+// tmuxLoadAdapter wraps *tmux.Client to satisfy state.LoadProbe. The
+// adapter exists because state can't import tmux (would create the
+// usual layered-package cycle), so the load-shape struct lives in
+// each package separately and we translate at the boundary. Cheap;
+// just one struct copy per probe.
+type tmuxLoadAdapter struct{ c *tmux.Client }
+
+func (a tmuxLoadAdapter) SessionLoad(ctx context.Context, session string) (state.LoadValue, error) {
+	if a.c == nil {
+		return state.LoadValue{}, nil
+	}
+	got, err := a.c.SessionLoad(ctx, session)
+	if err != nil {
+		return state.LoadValue{}, err
+	}
+	return state.LoadValue{RSS: got.RSS, CPU: got.CPU}, nil
+}
+
+// refreshCmdWithMem is the cache-aware variant of refreshCmd. When
+// memCache is non-nil, populates row.MemRSS+CPU via
+// BuildGlobalRowsWithLoad so the Mem column has data on first render.
+// Default refreshCmd keeps memCache nil for callers that don't want
+// the column (cmd/canopy/ls).
+func refreshCmdWithMem(mgr *workspace.Manager, tc *tmux.Client, store *state.Store, memCache *state.MemCache) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -451,7 +534,12 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea
 		if err != nil {
 			return rowsLoadedMsg{err: err}
 		}
-		rows := st.BuildGlobalRows(ctx, tc)
+		var rows []state.GlobalRow
+		if memCache != nil && tc != nil {
+			rows = st.BuildGlobalRowsWithLoad(ctx, tc, tmuxLoadAdapter{c: tc}, memCache)
+		} else {
+			rows = st.BuildGlobalRows(ctx, tc)
+		}
 		fillMainBranches(ctx, rows)
 		return rowsLoadedMsg{rows: rows}
 	}

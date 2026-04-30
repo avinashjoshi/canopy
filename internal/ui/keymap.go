@@ -121,6 +121,23 @@ var listModeBindings = []Binding{
 		Action: actionDelete,
 	},
 	{
+		// K (capital) kills the workspace's tmux session without
+		// removing state. Lower-case k is cursor-up, intentional —
+		// the muscle-memory case is nav, the deliberate-keypress
+		// case is destructive. Same shift-key friction as F (force-
+		// remove). Re-pressing Enter after kill resurrects.
+		K:      key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "kill tmux")),
+		Action: actionKill,
+	},
+	{
+		// `i` opens the diagnostic detail drawer for the selected
+		// workspace. Read-only; scope-capped to "what's the state
+		// of this one workspace right now?". See drawerMode docstring
+		// in model.go for the load-bearing scope cap rationale.
+		K:      key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inspect")),
+		Action: actionInspect,
+	},
+	{
 		K:      key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "retry")),
 		Action: actionRetry,
 	},
