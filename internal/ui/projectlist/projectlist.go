@@ -264,6 +264,12 @@ func (m Model) View() string {
 // doesn't help with column alignment when rows have styled cells of
 // different visible widths, so we compute widths ourselves.
 func (m Model) renderTable() string {
+	// branchIcon prefixes every Branch cell. `⎇` is U+2387 (alternative
+	// key symbol) — renders as a small fork on terminals without nerd
+	// fonts, no font dependency. Single visible cell so column math is
+	// unaffected; the trailing space gives a gap before the branch text.
+	const branchIcon = "⎇ "
+
 	colName, colBranch, colStatus, colPort := 4, 6, 6, 4
 	for _, r := range m.rows {
 		colName = maxInt(colName, len(r.Name))
@@ -274,18 +280,25 @@ func (m Model) renderTable() string {
 		}
 	}
 
+	// Recompute colStatus to account for IsMain rows showing "running"
+	// or "not started" instead of the bare "main" status — those labels
+	// can be longer than the original column width.
+	for _, r := range m.rows {
+		colStatus = maxInt(colStatus, len(displayStatus(r)))
+	}
+
 	var b strings.Builder
 	prevProject := ""
 
 	for i, r := range m.rows {
-		// New project group: emit a blank separator + project header line.
-		// First group skips the blank line so the table flush-aligns under
-		// the title.
+		// New project group: blank separator + flush-left header. Header
+		// sits at column 0 so it visually outdents from the rows below
+		// (which start at column 2 = caret + space) — gives the eye a
+		// clear "section / contents" hierarchy.
 		if r.Project != prevProject {
 			if prevProject != "" {
 				b.WriteString("\n")
 			}
-			b.WriteString("  ")
 			b.WriteString(projectHeaderStyle().Render(r.Project))
 			b.WriteString("\n")
 			prevProject = r.Project
@@ -296,30 +309,20 @@ func (m Model) renderTable() string {
 			port = fmt.Sprintf("%d", r.Port)
 		}
 		isSelected := i == m.cursor
+		statusText := displayStatus(r)
 
 		var line string
 		if isSelected {
-			// Selected row: simple `>` caret in bold white at the
-			// start, then plain content (no inner ANSI) wrapped with
-			// the selection bg padded to terminal width.
-			//
-			// The caret prefix is `>   ` (4 cells: chevron + 3 spaces),
-			// which matches non-selected rows' 4-space leading indent
-			// — columns don't shift left/right as the cursor moves.
-			//
-			// Caret is rendered as part of the same plain string so
-			// selectionStyle.Render wraps everything uniformly: bold
-			// fg comes from selectionStyle (which has Bold(true)), the
-			// bg is the same selection grey across the whole line.
-			aliveDot := "○"
-			if r.Alive {
-				aliveDot = "●"
-			}
-			plainContent := fmt.Sprintf(">   %s  %-*s  %s  %s  %*s",
-				aliveDot,
+			// Selected row: `❯ ` caret + plain content (no inner ANSI)
+			// wrapped with the selection bg padded to terminal width.
+			// Non-selected rows pad with two spaces in the caret slot
+			// so columns stay put as the cursor moves.
+			plainContent := fmt.Sprintf("❯ %-*s  %s%-*s  %s%-*s  %*s",
 				colName, r.Name,
-				fmt.Sprintf("%-*s", colBranch, r.Branch),
-				statusGlyphFor(r.Status)+" "+fmt.Sprintf("%-*s", colStatus, r.Status),
+				branchIcon,
+				colBranch, r.Branch,
+				statusGlyphFor(r.Status)+" ",
+				colStatus, statusText,
 				colPort, port,
 			)
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
@@ -333,17 +336,29 @@ func (m Model) renderTable() string {
 			line = rowStyle.Render(plainContent)
 		} else {
 			// Non-selected row: full per-column styling for visual
-			// density (status colors, dimmed branch on identity name,
-			// hint badge colors).
-			statusCell := statusStyleFor(r.Status).Render(statusGlyphFor(r.Status) + " " + fmt.Sprintf("%-*s", colStatus, r.Status))
-			branchDisplay := fmt.Sprintf("%-*s", colBranch, r.Branch)
-			if r.Branch == r.Name {
+			// density. Status color reflects lifecycle state (and for
+			// IsMain rows, alive vs not-started); branch styling tags
+			// renamed branches in bold-white.
+			statusCell := mainAwareStatusStyle(r).Render(statusGlyphFor(r.Status) + " " + fmt.Sprintf("%-*s", colStatus, statusText))
+			// Branch cell: icon + padded text, styled together so the
+			// glyph picks up the same color as the name. Three styling
+			// modes:
+			//   - main row     → gray (the project's default branch is
+			//                    informational, not actionable here)
+			//   - Branch==Name → gray (auto-generated namegen, unrenamed)
+			//   - else         → bold-white (user/agent renamed it on
+			//                    purpose; this is the "I named this"
+			//                    visual cue)
+			branchDisplay := branchIcon + fmt.Sprintf("%-*s", colBranch, r.Branch)
+			switch {
+			case r.IsMain:
 				branchDisplay = subtleHelper().Render(branchDisplay)
-			} else if r.Branch != "" && r.Branch != "—" {
+			case r.Branch == r.Name:
+				branchDisplay = subtleHelper().Render(branchDisplay)
+			case r.Branch != "" && r.Branch != "—":
 				branchDisplay = renamedBranchStyle().Render(branchDisplay)
 			}
-			line = fmt.Sprintf("    %s  %-*s  %s  %s  %*s",
-				badgeFor(r.Alive),
+			line = fmt.Sprintf("  %-*s  %s  %s  %*s",
 				colName, r.Name,
 				branchDisplay,
 				statusCell,
@@ -357,6 +372,37 @@ func (m Model) renderTable() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// displayStatus returns the user-facing status string for a row. For
+// regular workspace rows it's the literal Status field. For IsMain
+// rows we promote the alive bit into the status itself — "running"
+// when the main session is up, "not started" when it isn't — so a
+// glance at the status column tells you what's running without
+// needing a separate alive-dot column.
+func displayStatus(r state.GlobalRow) string {
+	if r.IsMain {
+		if r.Alive {
+			return "running"
+		}
+		return "not started"
+	}
+	return string(r.Status)
+}
+
+// mainAwareStatusStyle picks the right color for the status cell. For
+// IsMain rows we use green when running (matches workspace "ready")
+// and gray when not started (matches workspace "stopped" feel without
+// the orange-alarm of an actual stopped workspace). Other rows fall
+// through to statusStyleFor as before.
+func mainAwareStatusStyle(r state.GlobalRow) lipgloss.Style {
+	if r.IsMain {
+		if r.Alive {
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+		}
+		return subtleHelper()
+	}
+	return statusStyleFor(r.Status)
 }
 
 // stripAnsi removes ANSI SGR escape sequences from s. Used to flatten
@@ -456,22 +502,39 @@ func RenderHintBadges(hints []state.Hint) string {
 //   - open         → cyan       (informational, no action implied)
 //   - changes      → orange     (attention needed)
 //   - closed       → gray       (PR didn't ship)
+//
+// Checks rollup: when the message carries a " · checks <state>" suffix
+// (only present on OPEN PRs), append a second badge so the user sees
+// CI status at a glance — green for passing, orange for failing, cyan
+// for running.
 func prBadge(message string) string {
+	var pr string
 	switch {
 	case strings.Contains(message, "merged"):
-		return hintShippedStyle().Render("✓ PR merged")
+		pr = hintShippedStyle().Render("✓ PR merged")
 	case strings.Contains(message, "approved"):
-		return hintPRStyle().Render("PR approved")
+		pr = hintPRStyle().Render("PR approved")
 	case strings.Contains(message, "changes requested"):
-		return hintRenameStyle().Render("PR changes")
+		pr = hintRenameStyle().Render("PR changes")
 	case strings.Contains(message, "closed"):
-		return subtleHelper().Render("PR closed")
+		pr = subtleHelper().Render("PR closed")
 	case strings.Contains(message, "open"):
-		return hintPRStyle().Render("PR open")
+		pr = hintPRStyle().Render("PR open")
+	default:
+		// Unknown state (forward-compat for new gh review states):
+		// fall back to a generic badge.
+		pr = hintPRStyle().Render("PR")
 	}
-	// Unknown state (forward-compat for new gh review states):
-	// fall back to a generic badge.
-	return hintPRStyle().Render("PR")
+
+	switch {
+	case strings.Contains(message, "checks failing"):
+		return pr + " " + hintRenameStyle().Render("✗ checks")
+	case strings.Contains(message, "checks running"):
+		return pr + " " + hintPRStyle().Render("… checks")
+	case strings.Contains(message, "checks passing"):
+		return pr + " " + hintShippedStyle().Render("✓ checks")
+	}
+	return pr
 }
 
 // emptyState is the table-area copy when there are no rows. Parents

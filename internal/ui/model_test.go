@@ -1,7 +1,11 @@
 package ui
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -120,6 +124,63 @@ func TestHandleKey_TabSwitch(t *testing.T) {
 	got = model.(*Model)
 	if got.tab != tabLocal {
 		t.Errorf("after second tab key: tab = %v; want tabLocal (round-trip)", got.tab)
+	}
+}
+
+// TestHandleKey_TabSwitch_GlobalToLocalAutoFocus is the regression test
+// for the user-reported "tab from Global doesn't enter Local" bug:
+// when canopy is launched outside any project (currentProject == ""),
+// Local has no meaningful filter, so Tab → Local would either show
+// every row (no-op) or feel broken. The fix routes Global → Local
+// through actionFocusProject when there's a cursor row, so Tab
+// behaves as "enter the project I'm looking at."
+func TestHandleKey_TabSwitch_GlobalToLocalAutoFocus(t *testing.T) {
+	// Set up a temp project with canopy.json so actionFocusProject's
+	// LoadFrom + workspace.New succeeds. The test only cares about the
+	// post-Tab Model state, not Manager construction success — but we
+	// need the load to not fail loudly.
+	projectRoot := t.TempDir()
+	canopyJSON := []byte(`{"scripts": {"setup": "x", "run": "y", "archive": "z"}}`)
+	if err := os.WriteFile(filepath.Join(projectRoot, "canopy.json"), canopyJSON, 0o644); err != nil {
+		t.Fatalf("write canopy.json: %v", err)
+	}
+
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.currentProject = ""
+	m.mgr = nil
+	m.setTestRows([]Row{
+		{Project: filepath.Base(projectRoot), ProjectRoot: projectRoot, IsMain: true, Name: "(main)", Status: "main"},
+	})
+
+	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	got := model.(*Model)
+	if got.tab != tabLocal {
+		t.Errorf("after Tab from Global w/ empty currentProject: tab = %v; want tabLocal", got.tab)
+	}
+	if got.currentProject != projectRoot {
+		t.Errorf("after Tab: currentProject = %q; want %q (auto-focus from cursor row)", got.currentProject, projectRoot)
+	}
+}
+
+// TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext covers the no-row
+// edge case: Tab from Global with no rows can't auto-focus (nothing to
+// focus on), so it falls through to the plain tab flip. currentProject
+// stays empty; user sees the "no projects" empty state.
+func TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.currentProject = ""
+	m.mgr = nil
+	m.setTestRows(nil)
+
+	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	got := model.(*Model)
+	if got.tab != tabLocal {
+		t.Errorf("after Tab w/ no rows: tab = %v; want tabLocal (plain flip)", got.tab)
+	}
+	if got.currentProject != "" {
+		t.Errorf("after Tab w/ no rows: currentProject = %q; want \"\" (nothing to focus)", got.currentProject)
 	}
 }
 
@@ -1255,5 +1316,69 @@ func TestSelectedHint(t *testing.T) {
 				t.Errorf("selectedHint() = %q; want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestFillMainBranches_DefaultsToMain covers the fallback path: a project
+// with no origin/main or origin/master remote (e.g. a freshly-init local
+// repo) gets "main" as the displayed default branch rather than the
+// "—" placeholder. The function must not error or skip the row when
+// DetectDefaultBranch fails — the UI relies on every main row carrying
+// a non-empty Branch so the branch column renders consistently.
+func TestFillMainBranches_DefaultsToMain(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	if err := exec.Command("git", "-C", dir, "init", "--initial-branch=trunk").Run(); err != nil {
+		t.Skipf("git init: %v", err)
+	}
+
+	rows := []state.GlobalRow{
+		{IsMain: true, ProjectRoot: dir, Project: "fresh", Name: "(main)", Branch: "—"},
+		{IsMain: false, ProjectRoot: dir, Project: "fresh", Name: "ws", Branch: "feat-x"},
+	}
+	fillMainBranches(context.Background(), rows)
+
+	if rows[0].Branch != "main" {
+		t.Errorf("main row Branch = %q; want %q (fallback when origin/main|master miss)", rows[0].Branch, "main")
+	}
+	if rows[1].Branch != "feat-x" {
+		t.Errorf("non-main row Branch = %q; want %q (untouched)", rows[1].Branch, "feat-x")
+	}
+}
+
+// TestFillMainBranches_DetectsOriginMain wires up a real git repo with
+// an origin/main ref so DetectDefaultBranch's happy path exercises end-
+// to-end. The fallback test covers the error path; this covers the
+// detection path.
+func TestFillMainBranches_DetectsOriginMain(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := t.TempDir()
+	steps := [][]string{
+		{"-C", repo, "init", "--initial-branch=main"},
+		{"-C", repo, "config", "user.email", "t@x"},
+		{"-C", repo, "config", "user.name", "t"},
+		{"-C", repo, "commit", "--allow-empty", "-m", "x"},
+		// Synthesize an origin/main remote-tracking ref by pointing
+		// refs/remotes/origin/main at HEAD. No real network round-trip
+		// — DetectDefaultBranch only reads the local ref.
+		{"-C", repo, "update-ref", "refs/remotes/origin/main", "HEAD"},
+	}
+	for _, args := range steps {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	rows := []state.GlobalRow{
+		{IsMain: true, ProjectRoot: repo, Project: "p", Name: "(main)", Branch: "—"},
+	}
+	fillMainBranches(context.Background(), rows)
+
+	if rows[0].Branch != "main" {
+		t.Errorf("main row Branch = %q; want %q", rows[0].Branch, "main")
 	}
 }

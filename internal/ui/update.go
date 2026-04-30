@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -276,12 +277,26 @@ func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // to projectlist via SetRows; projectlist clamps its cursor automatically
 // so a long-list scroll position from the previous tab doesn't carry
 // over past the end of the new tab.
-func actionTabSwitch(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+//
+// Special case: Global → Local with no currentProject (canopy invoked
+// outside any project) routes through actionFocusProject so Tab acts
+// as "enter the project I'm looking at." Without this, Local would
+// either show every row (empty currentProject = no filter) or feel
+// broken — neither helps the user. The cursor row's ProjectRoot
+// becomes the new Local context.
+func actionTabSwitch(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.tab == tabLocal {
 		m.tab = tabGlobal
-	} else {
-		m.tab = tabLocal
+		m.list.SetRows(m.filteredRows())
+		return m, nil
 	}
+	if m.currentProject == "" {
+		row, ok := m.list.CursorRow()
+		if ok && row.ProjectRoot != "" {
+			return actionFocusProject(m, msg)
+		}
+	}
+	m.tab = tabLocal
 	m.list.SetRows(m.filteredRows())
 	return m, nil
 }
@@ -340,6 +355,33 @@ func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.projectName = cfg.Project
 	m.tab = tabLocal
 	m.list.SetRows(m.filteredRows())
+	return m, nil
+}
+
+// actionOpenPR opens the cursor row's pull request in the user's
+// default browser via `gh pr view --web`. Runs gh from the workspace
+// directory so gh resolves the PR for the worktree's checked-out
+// branch (matches what the pr_status hint surfaced). gh handles the
+// browser handoff itself — we just spawn and forget.
+//
+// Errors (gh missing, no PR, network) surface in m.err so the user
+// sees them on the status line. The TUI doesn't quit; the user can
+// retry or just ignore.
+func actionOpenPR(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	row, ok := m.list.CursorRow()
+	if !ok || row.Path == "" {
+		return m, nil
+	}
+	cmd := exec.Command("gh", "pr", "view", "--web")
+	cmd.Dir = row.Path
+	if err := cmd.Start(); err != nil {
+		m.err = fmt.Errorf("open PR: %w", err)
+		return m, nil
+	}
+	// gh's --web returns immediately after handing off to the browser;
+	// Wait in a goroutine so we don't leave a zombie if the user is
+	// quick to act on something else.
+	go func() { _ = cmd.Wait() }()
 	return m, nil
 }
 
@@ -590,8 +632,22 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 		if row.Alive {
 			return m, m.attachOrSwitch(row.TmuxSession)
 		}
-		m.err = fmt.Errorf("main session not running — run `canopy main` in a terminal to start it")
-		return m, nil
+		// Auto-start the main session and attach. Without this, enter on
+		// a dead main row sent the user back to a shell to run `canopy
+		// main` — which the popup user can't even reach without first
+		// closing the popup. EnsureMainSession is idempotent (no-op on a
+		// live session) so the dispatch is uniform.
+		mgr, err := m.managerForRow(row)
+		if err != nil {
+			m.err = err
+			return m, nil
+		}
+		session, err := mgr.EnsureMainSession(ctx)
+		if err != nil {
+			m.err = fmt.Errorf("start main session: %w", err)
+			return m, nil
+		}
+		return m, m.attachOrSwitch(session)
 	}
 
 	switch row.Status {
