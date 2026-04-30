@@ -5,26 +5,19 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
-## P1 — Manager.Remove order strands fullscreen canopy mid-removal (2026-04-30)
+## ✅ DONE 2026-04-30 — Fullscreen+current delete strand (v0.11.3)
 
-**Where:** `internal/workspace/lifecycle.go:Remove` (step ordering).
+The fullscreen+current case now reuses the v0.11.2 popup detach pattern
+(spawn detached `canopy rm`, `tmux detach-client`, `tea.Quit`) instead
+of reordering `Manager.Remove`. Resolution lives in the UI layer
+(`detachAndRemoveCmd` in `internal/ui/update.go`) — `Manager.Remove`'s
+step ordering is unchanged. Aligns with the explicit memory guidance to
+prefer detach + detached-subprocess over a workspace-layer reorder.
 
-**What:** Remove kills the workspace's tmux session at step 2, BEFORE `git
-worktree remove` (step 3) and the state-row drop. If the user launched
-fullscreen `canopy` from inside that workspace's tmux pane, the canopy
-process itself dies when its host session is killed — leaving git/state
-cleanup incomplete. The popup-mode `escapeIfDeletingCurrent` switch-client
-fix added in `tui-ux-fixes-round` doesn't help fullscreen mode because
-switching the tmux *client* doesn't move the canopy *process* off the
-doomed pane.
-
-**Fix:** Reorder Remove so disk-level work (git worktree remove, state
-drop) runs BEFORE tmux Kill. Risk: archive script needs the worktree dir,
-so archive must stay first; kill-tmux moves to last. Verify no consumer
-depends on the old "tmux dead before git remove" ordering.
-
-**Surfaced by:** Codex adversarial review, 2026-04-30 (`/ship` of
-tui-ux-fixes-round).
+Residual hazard: a bare-shell `canopy rm $current` typed from inside
+the doomed session's pane still strands the cleanup process when tmux
+Kill fires (the CLI has no UI layer to spawn a detached subprocess
+from). Niche — accept and document if it bites someone in practice.
 
 ---
 
