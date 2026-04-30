@@ -405,8 +405,8 @@ func TestRunFast_Parallelism(t *testing.T) {
 // shelling out. We verify by setting a sentinel value, calling
 // detectPRStatus, and checking the cache wasn't replaced.
 func TestPRStatusCache_TTL(t *testing.T) {
-	resetPRStatusCache()
-	defer resetPRStatusCache()
+	ResetPRStatusCache()
+	defer ResetPRStatusCache()
 
 	// Pre-seed cache with a fake "no PR" entry.
 	prStatusMu.Lock()
@@ -432,7 +432,7 @@ func TestPRStatusCache_TTL(t *testing.T) {
 // without messing with PATH; the test only verifies the function
 // doesn't panic and returns nil gracefully when ws is invalid.
 func TestPRStatus_GHMissing(t *testing.T) {
-	resetPRStatusCache()
+	ResetPRStatusCache()
 	// We can't reliably make gh missing in a test (other tests on the
 	// same machine might depend on it). Just verify the function call
 	// path doesn't panic with a minimal ws.

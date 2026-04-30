@@ -265,9 +265,27 @@ func repoFromProjectRoot(projectRoot string) string {
 	return "" // empty → gh resolves from cwd (set via cmd.Dir)
 }
 
-// resetPRStatusCache wipes the cache. Exposed for tests; production
-// code lets the TTL handle staleness. Mutex-protected.
-func resetPRStatusCache() {
+// PRStatusCacheSize returns the number of entries currently in the
+// pr_status cache. Exposed for tests + diagnostics; production code
+// should not branch on this.
+func PRStatusCacheSize() int {
+	prStatusMu.Lock()
+	defer prStatusMu.Unlock()
+	return len(prStatusCache)
+}
+
+// ResetPRStatusCache wipes the cache. Called by the TUI's `r` (refresh)
+// action — pressing `r` is the user saying "I want truth now," not
+// "respect the 10-minute TTL." Without this, a user who pushed a PR
+// review or merged a PR would see stale "awaiting review" / "open"
+// hints for up to 10 minutes after refreshing. Same intent as
+// memCache.InvalidateAll() in the same `r` handler. Mutex-protected.
+//
+// Background ticks and reconcile still hit the cache (they're not the
+// user explicitly demanding fresh data), so the GitHub API budget
+// argument that motivated the 10-min TTL still holds for ambient
+// loads — only deliberate user action busts.
+func ResetPRStatusCache() {
 	prStatusMu.Lock()
 	prStatusCache = map[string]prStatusEntry{}
 	prStatusMu.Unlock()
