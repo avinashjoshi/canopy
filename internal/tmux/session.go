@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -250,6 +251,20 @@ func (c *Client) SelectLayout(ctx context.Context, session, layout string) error
 
 // Kill terminates the named session. Returns ErrSessionNotFound if the
 // session doesn't exist; reconciliation can ignore that.
+//
+// Important: also reaps the pane process tree before kill-session to
+// catch processes that detach from their tmux pane on launch (notably
+// `nvim --embed`, which interactive `nvim .` forks as its editor
+// backend with deliberate session-detachment so it can outlive its
+// launcher). Without explicit reaping, every Kill leaves one nvim
+// --embed orphaned to PID 1, accumulating across `K` keypresses and
+// test runs into gigabytes of zombie RAM.
+//
+// The reap is best-effort: enumeration failures don't block kill-
+// session. Production callers (Manager.Remove) run scripts.archive
+// before Kill, so workloads have already had their chance to shut
+// down gracefully — the reap here is a safety net for processes that
+// refused to die or never received the cascade.
 func (c *Client) Kill(ctx context.Context, name string) error {
 	log.Info("tmux.kill", "name", name)
 
@@ -261,13 +276,128 @@ func (c *Client) Kill(ctx context.Context, name string) error {
 		return fmt.Errorf("tmux.Kill(%s): %w", name, ErrSessionNotFound)
 	}
 
+	// Snapshot pane PIDs BEFORE kill-session — the server going down
+	// loses our enumeration handle. Errors here are non-fatal.
+	pidsToReap := c.collectPanePIDs(ctx, name)
+
 	cmd := exec.CommandContext(ctx, "tmux", c.args("kill-session", "-t", name)...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("tmux.Kill(%s): %w (stderr: %s)", name, err, strings.TrimSpace(stderr.String()))
 	}
+
+	// SIGKILL anything from the snapshot still alive. SIGKILL not
+	// SIGTERM: these are processes that didn't already die from the
+	// kill-session cascade, so polite signals won't help.
+	for _, pid := range pidsToReap {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
 	return nil
+}
+
+// isReapableComm returns true if /proc/<pid>/comm names a process
+// known to detach from its launching tmux pane. Currently just nvim
+// (whose --embed child does the deliberate detach). Add more entries
+// here only when you have evidence a program leaks orphaned children
+// under canopy's kill flow — gate liberally; the cwd-only filter
+// already SIGKILLed canopy itself when run from a workspace pane.
+func isReapableComm(pidStr string) bool {
+	commBytes, err := os.ReadFile("/proc/" + pidStr + "/comm")
+	if err != nil {
+		return false
+	}
+	comm := strings.TrimSpace(string(commBytes))
+	switch comm {
+	case "nvim":
+		return true
+	}
+	return false
+}
+
+// collectPanePIDs walks a session's pane tree and returns every PID
+// to kill, using PaneInfos PLUS a CWD-based scan to catch processes
+// that detached from their pane on launch (notably nvim --embed,
+// which deliberately detaches its session so it can outlive its
+// launcher).
+//
+// Strategy: enumerate panes, take each pane's cwd as a probe, then
+// walk /proc/*/cwd to find any process — regardless of parent —
+// whose working directory matches a pane cwd. The pane's normal
+// process tree is also collected via PaneInfos. Union of both is
+// returned. Best-effort: enumeration failures return an empty
+// slice rather than an error.
+func (c *Client) collectPanePIDs(ctx context.Context, session string) []int {
+	infos, err := c.PaneInfos(ctx, session)
+	if err != nil {
+		return nil
+	}
+	pidSet := map[int]struct{}{}
+	cwds := map[string]struct{}{}
+	for _, p := range infos {
+		for _, proc := range p.Tree {
+			pidSet[proc.PID] = struct{}{}
+		}
+		// Resolve the pane's working directory so we can match
+		// detached children below.
+		args := c.args("display-message", "-t", session+"."+strconv.Itoa(p.Index), "-p", "#{pane_current_path}")
+		out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+		if err == nil {
+			cwd := strings.TrimSpace(string(out))
+			if cwd != "" {
+				cwds[cwd] = struct{}{}
+			}
+		}
+	}
+
+	// Scan /proc for processes whose cwd matches any pane cwd AND
+	// whose comm matches a known target list. The motivating case is
+	// `nvim --embed` (interactive nvim's editor backend), which
+	// detaches from its pane on launch — the regular pane process
+	// tree misses it.
+	//
+	// Image-name gating is load-bearing: a bare cwd match would
+	// SIGKILL anything happening to live at the workspace path.
+	// Specifically, `canopy` itself (when launched from a workspace
+	// pane via the popup keybind) has cwd=workspace-path and would
+	// kill itself mid-keystroke if not filtered out. Only known
+	// detach-on-launch programs go on this list.
+	if len(cwds) > 0 {
+		entries, err := os.ReadDir("/proc")
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				pid, err := strconv.Atoi(entry.Name())
+				if err != nil {
+					continue
+				}
+				cwd, err := os.Readlink("/proc/" + entry.Name() + "/cwd")
+				if err != nil {
+					continue
+				}
+				// Strip the " (deleted)" suffix the kernel appends
+				// when the cwd's underlying inode has been unlinked
+				// — happens when a test's t.TempDir cleanup runs
+				// before the process exits.
+				cwd = strings.TrimSuffix(cwd, " (deleted)")
+				if _, ok := cwds[cwd]; !ok {
+					continue
+				}
+				if !isReapableComm(entry.Name()) {
+					continue
+				}
+				pidSet[pid] = struct{}{}
+			}
+		}
+	}
+
+	out := make([]int, 0, len(pidSet))
+	for pid := range pidSet {
+		out = append(out, pid)
+	}
+	return out
 }
 
 // Attach hands the current process off to `tmux attach -t <name>`. On
@@ -413,9 +543,68 @@ func attachVerbForCurrentEnv() string {
 
 // KillServer shuts down the tmux server bound to this client's socket.
 // Used by tests to clean up in t.Cleanup; rarely useful in production.
+//
+// Important: kill-server alone doesn't always reap children. Specifically,
+// `nvim --embed` (which interactive `nvim .` forks as its editor backend)
+// deliberately detaches its session so it can outlive the launcher — a
+// feature for "embed nvim in another tool" use cases. Without explicit
+// reaping, every test that spawns an `nvim .` pane leaks one nvim --embed
+// process to PID 1; over hundreds of test runs that adds up to gigabytes
+// of RAM held by zombie test fixtures. KillServerAndReap below is the
+// fix.
 func (c *Client) KillServer(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "tmux", c.args("kill-server")...)
 	// kill-server exits non-zero if no server was running; treat that as success.
 	_ = cmd.Run()
+	return nil
+}
+
+// KillServerAndReap is KillServer plus aggressive orphan cleanup.
+// Before killing the server, it enumerates every session's pane
+// process tree via PaneInfos and collects the descendant PIDs.
+// After the server dies, it SIGKILLs anything from that PID set
+// still alive — catching nvim --embed and any other process that
+// detached from its tmux pane.
+//
+// Use this instead of KillServer in test cleanup. Production code
+// shouldn't need it: real workspace lifecycle uses Manager.Remove
+// which runs scripts.archive (the user's chance to gracefully shut
+// down dev servers etc.) before kill-session.
+//
+// Best-effort: errors enumerating panes don't block the kill. The
+// tmux server going down is the load-bearing part; the reap is
+// belt-and-suspenders.
+func (c *Client) KillServerAndReap(ctx context.Context) error {
+	// Collect every PID under every pane in every session BEFORE
+	// killing the server (the server dying loses our enumeration handle).
+	var pidsToReap []int
+	sessionsCmd := exec.CommandContext(ctx, "tmux", c.args("list-sessions", "-F", "#{session_name}")...)
+	if out, err := sessionsCmd.Output(); err == nil {
+		for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if name == "" {
+				continue
+			}
+			infos, err := c.PaneInfos(ctx, name)
+			if err != nil {
+				continue
+			}
+			for _, p := range infos {
+				for _, proc := range p.Tree {
+					pidsToReap = append(pidsToReap, proc.PID)
+				}
+			}
+		}
+	}
+
+	// Now kill the server.
+	_ = exec.CommandContext(ctx, "tmux", c.args("kill-server")...).Run()
+
+	// SIGKILL anything from the collected PID set that survived.
+	// Use SIGKILL not SIGTERM — these are zombies from a forced server
+	// shutdown; we want them gone immediately, not given a chance to
+	// "gracefully exit" (which is what got us here in the first place).
+	for _, pid := range pidsToReap {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
 	return nil
 }
