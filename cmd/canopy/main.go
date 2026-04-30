@@ -202,6 +202,14 @@ func versionInfo() (string, string, string) {
 // graceful fallback so a partial filesystem failure can't break
 // `canopy version` for the user.
 func versionDetails() VersionDetails {
+	// Capture the original ldflags-injected (or default) version BEFORE
+	// any BuildInfo fallback. The fallback below may overwrite a literal
+	// "dev" with a pseudo-version (useful display for `go install`
+	// users), but IsDev must still be driven by the original sentinel
+	// — otherwise `make build` binaries appear as releases, the DEV
+	// banner doesn't fire, and `canopy upgrade` doesn't refuse them.
+	rawVersion := version
+
 	d := VersionDetails{
 		Version: version,
 		Commit:  commit,
@@ -229,7 +237,9 @@ func versionDetails() VersionDetails {
 			}
 		}
 		// Module version is the `go install`-time pseudo-version; only
-		// useful when ldflags are absent AND module info is real.
+		// useful when ldflags are absent AND module info is real. We
+		// surface it for forensic display but rawVersion still drives
+		// IsDev below.
 		if d.Version == "dev" && info.Main.Version != "" && info.Main.Version != "(devel)" {
 			d.Version = info.Main.Version
 		}
@@ -242,7 +252,7 @@ func versionDetails() VersionDetails {
 		d.Date = "unknown"
 	}
 
-	d.IsDev = d.Version == "dev"
+	d.IsDev = rawVersion == "dev"
 
 	if bin, err := os.Executable(); err == nil {
 		d.BinaryPath = bin
