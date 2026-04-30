@@ -11,10 +11,17 @@ import (
 	"github.com/oncactus/canopy/internal/tmux"
 )
 
-// testSocket is the named tmux socket all tests share. tmux's server-per-socket
-// model means this isolates the test world from the user's real tmux server —
-// running these tests will not touch any of your real workspaces.
-const testSocket = "canopy-test"
+// testSocket is this package's named tmux socket. tmux's server-per-socket
+// model means this isolates the test world from the user's real tmux server.
+//
+// Per-PACKAGE socket name is load-bearing: `go test ./...` runs packages in
+// parallel by default. If internal/tmux and internal/workspace shared one
+// socket, their TestMain teardowns would kill each other's sessions mid-run
+// ("server exited unexpectedly" failures, intermittent on busy machines).
+// Each package uses its own socket so they can't trample each other; within
+// a package tests run sequentially (no t.Parallel calls) so a single socket
+// is fine.
+const testSocket = "canopy-test-tmux"
 
 // TestMain initializes clog so package-level loggers don't shout JSON to
 // stderr during the test run.
@@ -130,7 +137,7 @@ func TestSplitPane(t *testing.T) {
 	}
 
 	// Verify pane count via tmux list-panes.
-	out, err := exec.Command("tmux", "-L", "canopy-test", "list-panes", "-t", name).Output()
+	out, err := exec.Command("tmux", "-L", testSocket,"list-panes", "-t", name).Output()
 	if err != nil {
 		t.Fatalf("list-panes: %v", err)
 	}
@@ -160,7 +167,7 @@ func TestSelectPaneDirection(t *testing.T) {
 	if err := c.SelectPaneDirection(ctx, name, "R"); err != nil {
 		t.Fatalf("SelectPaneDirection R: %v", err)
 	}
-	out, err := exec.Command("tmux", "-L", "canopy-test", "display-message", "-p", "-t", name, "#{pane_left}").Output()
+	out, err := exec.Command("tmux", "-L", testSocket,"display-message", "-p", "-t", name, "#{pane_left}").Output()
 	if err != nil {
 		t.Fatalf("display-message: %v", err)
 	}
