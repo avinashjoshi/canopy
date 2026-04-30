@@ -120,3 +120,33 @@ func ResolveCurrentProjectFromWD(st *state.State) string {
 	}
 	return ResolveCurrentProject(cwd, st)
 }
+
+// ResolveCurrentWorkspace returns (projectRoot, workspaceName) when
+// cwd is inside (or equal to) a registered workspace's Path. The
+// project root is the workspace's source-repo root; the workspace name
+// is the registered Name. Returns ("", "") when cwd doesn't sit inside
+// any registered workspace — callers still get the project root via
+// ResolveCurrentProject for the project-walk-up case.
+//
+// Symlink handling mirrors ResolveCurrentProject. nil state yields
+// ("", "") (best-effort during startup).
+func ResolveCurrentWorkspace(cwd string, st *state.State) (string, string) {
+	if st == nil {
+		return "", ""
+	}
+	resolved := cwd
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		resolved = r
+	}
+	cwdWithSlash := strings.TrimRight(resolved, "/") + "/"
+	for _, ws := range st.Workspaces {
+		if ws.Path == "" {
+			continue
+		}
+		wsPathWithSlash := strings.TrimRight(ws.Path, "/") + "/"
+		if cwdWithSlash == wsPathWithSlash || strings.HasPrefix(cwdWithSlash, wsPathWithSlash) {
+			return ws.ProjectRoot, ws.Name
+		}
+	}
+	return "", ""
+}
