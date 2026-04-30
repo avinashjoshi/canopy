@@ -5,6 +5,36 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-04-30 — TUI UX fixes round
+
+### Fixed
+- `o` (focus project) now works on the already-selected project — re-focusing
+  is a harmless tab switch, no reason to disable the keybind. Removed the
+  same-project guard. Also short-circuits the canopy.json reload in that
+  case so a transiently unreadable config doesn't surface a spurious error.
+- Deleting the workspace whose dir hosts the running canopy popup no longer
+  strands the tmux client. Before kill-session runs, canopy ensures the
+  project's main session is up and `switch-client`s the user there. Match is
+  on (project root, name) so cross-project name collisions (A/foo and B/foo)
+  don't trip the wrong escape target.
+- Popup picker now pre-selects the workspace whose directory hosted the
+  popup invocation, instead of always landing on row 0. The latch fires on
+  the first non-empty refresh — early empty probes don't burn the preselect
+  opportunity, and a missed match (target filtered out by tab) still latches
+  so later refreshes don't yank the cursor.
+- New workspaces (and resurrections) now land active focus on the Claude
+  pane instead of the nvim pane — the agent is what you typed `n` to talk
+  to, the cursor should be there waiting.
+- `n` from the Global picker no longer panics with a nil pointer dereference.
+  Three `attachCmd(m.mgr, ...)` callsites that crashed when `m.mgr` was nil
+  (canopy launched outside any project) now route through the existing
+  `attachOrSwitch` helper, which uses the always-set `m.tc` directly.
+
+### Added
+- "← here" indicator on the workspace row whose directory hosts the running
+  canopy invocation. Cyan + bold so it stays visible even when you navigate
+  the cursor away from the auto-preselected row.
+
 ## [0.11.0] - 2026-04-30 — Cross-project new workspace + picker chrome polish
 
 `n` (new workspace) now works from the Global tab. Press `n` on any row and

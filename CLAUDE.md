@@ -9,7 +9,7 @@ gstack mirrors: `~/.gstack/projects/canopy/` (regenerated; not load-bearing)
 ## Project context
 
 - First-time Go project. Lean on stdlib, prefer plain patterns over clever abstractions, gloss idioms in PR descriptions or code comments when they're non-obvious.
-- v0 supports any project that has a `canopy.json` and is the cwd-walk-up project. Cross-project switching is v0.5.
+- v0 supports any project that has a `canopy.json` and is the cwd-walk-up project. Cross-project switching shipped in v0.11.0 — the Global tab in the TUI lists workspaces across every project and `n` works from any row.
 - "Workspace" is the user-facing word for canopy's unit. "Worktree" is reserved for the git concept and lives only in `internal/git/`.
 - Workspaces live on disk at `~/.canopy/workspaces/<project>/<name>` (the dir is a git worktree, but it's stored centrally so the source repo stays clean).
 - State + logs in `~/.canopy/`. Project config in `<repo>/canopy.json`.

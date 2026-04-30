@@ -140,6 +140,36 @@ func TestSplitPane(t *testing.T) {
 	}
 }
 
+// TestSelectPaneDirection confirms direction-relative pane selection
+// works after a horizontal split — the active pane should move from
+// pane 0 (left) to the new right-side pane.
+func TestSelectPaneDirection(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	name := "select-pane-dir-test"
+	cwd := t.TempDir()
+
+	if err := c.Create(ctx, name, cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// -d keeps active on pane 0; the new pane is to the right.
+	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+	if err := c.SelectPaneDirection(ctx, name, "R"); err != nil {
+		t.Fatalf("SelectPaneDirection R: %v", err)
+	}
+	out, err := exec.Command("tmux", "-L", "canopy-test", "display-message", "-p", "-t", name, "#{pane_left}").Output()
+	if err != nil {
+		t.Fatalf("display-message: %v", err)
+	}
+	left := strings.TrimSpace(string(out))
+	if left == "0" {
+		t.Errorf("after select-pane R, active pane_left = 0 (still on left pane); want non-zero (right pane)")
+	}
+}
+
 // TestSelectLayout confirms the layout call returns nil for a known-good
 // preset name.
 func TestSelectLayout(t *testing.T) {

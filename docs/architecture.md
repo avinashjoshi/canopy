@@ -22,7 +22,8 @@ internal/git/                  worktree add/remove/sanitize, fetch, default-bran
                                detection. Pure os/exec wrappers, sentinel errors.
 internal/tmux/                 Client struct (with optional named socket for tests).
                                HasSession / Create / SplitPane / SelectLayout /
-                               Attach (syscall.Exec) / KillServer. SafeName helper.
+                               SelectPaneDirection / Attach (syscall.Exec) /
+                               KillServer. SafeName helper.
 internal/hooks/                exec.CommandContext-based script runner with
                                process-group kill + WaitDelay so SIGINT cleanly
                                unwinds bundle install style children.

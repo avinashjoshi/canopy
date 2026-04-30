@@ -670,6 +670,14 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
 		return err
 	}
+	// Land the active pane on the agent (claude) pane — that's the
+	// thing the user wants to interact with first after `n`. Splits
+	// above all use -d (active stays on nvim), so we explicitly move
+	// right to the just-created agent pane. Best-effort: a select-
+	// pane failure shouldn't tear down workspace creation.
+	if err := m.Tmux.SelectPaneDirection(ctx, ws.TmuxSession, "R"); err != nil {
+		log.Warn("workspace.build.select-agent-pane-failed", "session", ws.TmuxSession, "err", err.Error())
+	}
 	return nil
 }
 
@@ -965,6 +973,10 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	}
 	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
 		return nil, err
+	}
+	// Land active pane on the agent — same rationale as buildSession.
+	if err := m.Tmux.SelectPaneDirection(ctx, wsCopy.TmuxSession, "R"); err != nil {
+		log.Warn("workspace.resurrect.select-agent-pane-failed", "session", wsCopy.TmuxSession, "err", err.Error())
 	}
 
 	// Flip status to ready + bump AgentLaunchCount. The agent pane was

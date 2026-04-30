@@ -143,3 +143,80 @@ func TestResolveCurrentProject_symlinkedCwd(t *testing.T) {
 			got, want, link, realWs)
 	}
 }
+
+// TestResolveCurrentWorkspace covers the workspace-name resolver used by
+// the unified TUI to pre-select the row whose dir hosts the popup. Hits
+// match by workspace Path prefix; misses (cwd outside any workspace,
+// nil state) yield empty results.
+func TestResolveCurrentWorkspace(t *testing.T) {
+	st := &state.State{
+		Workspaces: []state.Workspace{
+			{
+				Name:        "regal-pine",
+				Path:        "/home/avi/.canopy/workspaces/canopy/regal-pine",
+				ProjectRoot: "/home/avi/Work/canopy",
+			},
+			{
+				Name:        "fierce-salmon",
+				Path:        "/home/avi/.canopy/workspaces/cravd/fierce-salmon",
+				ProjectRoot: "/home/avi/Work/cravd",
+			},
+		},
+	}
+
+	cases := []struct {
+		name        string
+		cwd         string
+		wantRoot    string
+		wantWsName  string
+	}{
+		{
+			name:       "exact workspace path",
+			cwd:        "/home/avi/.canopy/workspaces/canopy/regal-pine",
+			wantRoot:   "/home/avi/Work/canopy",
+			wantWsName: "regal-pine",
+		},
+		{
+			name:       "subdir of workspace",
+			cwd:        "/home/avi/.canopy/workspaces/canopy/regal-pine/internal/ui",
+			wantRoot:   "/home/avi/Work/canopy",
+			wantWsName: "regal-pine",
+		},
+		{
+			name:       "different project workspace",
+			cwd:        "/home/avi/.canopy/workspaces/cravd/fierce-salmon",
+			wantRoot:   "/home/avi/Work/cravd",
+			wantWsName: "fierce-salmon",
+		},
+		{
+			name:       "outside any workspace",
+			cwd:        "/home/avi/Work/canopy",
+			wantRoot:   "",
+			wantWsName: "",
+		},
+		{
+			name:       "prefix collision (sibling dir)",
+			cwd:        "/home/avi/.canopy/workspaces/canopy/regal-pine-sibling",
+			wantRoot:   "",
+			wantWsName: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotRoot, gotName := workspace.ResolveCurrentWorkspace(tc.cwd, st)
+			if gotRoot != tc.wantRoot || gotName != tc.wantWsName {
+				t.Errorf("ResolveCurrentWorkspace(%q) = (%q, %q); want (%q, %q)",
+					tc.cwd, gotRoot, gotName, tc.wantRoot, tc.wantWsName)
+			}
+		})
+	}
+}
+
+// TestResolveCurrentWorkspace_nilState: nil state yields ("", "")
+// without panicking.
+func TestResolveCurrentWorkspace_nilState(t *testing.T) {
+	root, name := workspace.ResolveCurrentWorkspace("/anywhere", nil)
+	if root != "" || name != "" {
+		t.Errorf("nil state: got (%q, %q); want (\"\", \"\")", root, name)
+	}
+}

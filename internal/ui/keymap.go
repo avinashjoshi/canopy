@@ -201,9 +201,10 @@ func availableOpenPR(m *Model) bool {
 
 // availableFocusProject is the Available predicate for `o`. Only
 // meaningful on the Global tab (Local already IS the current project's
-// scope; pressing o there would be a no-op). Hidden when the cursor
-// row's ProjectRoot equals the current focus, since refocusing onto
-// the same project is also a no-op.
+// scope; pressing o there would be a no-op). The same-project case is
+// allowed — pressing o on the already-focused project is a harmless
+// re-focus + tab switch, and disabling it just creates muscle-memory
+// friction.
 func availableFocusProject(m *Model) bool {
 	if m.tab != tabGlobal {
 		return false
@@ -212,10 +213,7 @@ func availableFocusProject(m *Model) bool {
 	if !ok {
 		return false
 	}
-	if row.ProjectRoot == "" {
-		return false
-	}
-	return row.ProjectRoot != m.currentProject
+	return row.ProjectRoot != ""
 }
 
 // availableShortHelp returns the bindings that pass IsAvailable, in

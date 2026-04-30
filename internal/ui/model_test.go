@@ -61,7 +61,7 @@ func TestNewUnified_PopupModeFromEnv(t *testing.T) {
 
 	t.Run("env=1 → popup mode", func(t *testing.T) {
 		t.Setenv("CANOPY_IN_POPUP", "1")
-		m := NewUnified(nil, store, tc, "")
+		m := NewUnified(nil, store, tc, "", "", "")
 		if !m.inPopup {
 			t.Errorf("inPopup = false; want true when CANOPY_IN_POPUP=1")
 		}
@@ -69,7 +69,7 @@ func TestNewUnified_PopupModeFromEnv(t *testing.T) {
 
 	t.Run("env unset → fullscreen mode", func(t *testing.T) {
 		t.Setenv("CANOPY_IN_POPUP", "")
-		m := NewUnified(nil, store, tc, "")
+		m := NewUnified(nil, store, tc, "", "", "")
 		if m.inPopup {
 			t.Errorf("inPopup = true; want false when env unset")
 		}
@@ -77,7 +77,7 @@ func TestNewUnified_PopupModeFromEnv(t *testing.T) {
 
 	t.Run("env=other → fullscreen mode (strict eq)", func(t *testing.T) {
 		t.Setenv("CANOPY_IN_POPUP", "true")
-		m := NewUnified(nil, store, tc, "")
+		m := NewUnified(nil, store, tc, "", "", "")
 		if m.inPopup {
 			t.Errorf("inPopup = true; want false when env != \"1\"")
 		}
@@ -93,14 +93,14 @@ func TestNewUnified_DefaultTab(t *testing.T) {
 	tc := tmux.WithSocket("canopy-test")
 
 	t.Run("with current project → tabLocal", func(t *testing.T) {
-		m := NewUnified(nil, store, tc, "/some/project")
+		m := NewUnified(nil, store, tc, "/some/project", "", "")
 		if m.tab != tabLocal {
 			t.Errorf("tab = %v; want tabLocal when currentProject != \"\"", m.tab)
 		}
 	})
 
 	t.Run("no current project → tabGlobal", func(t *testing.T) {
-		m := NewUnified(nil, store, tc, "")
+		m := NewUnified(nil, store, tc, "", "", "")
 		if m.tab != tabGlobal {
 			t.Errorf("tab = %v; want tabGlobal when currentProject == \"\"", m.tab)
 		}
@@ -300,6 +300,40 @@ func TestAvailableNewWorkspace(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("availableNewWorkspace(mgr=%v, tab=%v, rows=%v) = %v; want %v",
 					tc.mgr, tc.tab, tc.rows, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAvailableFocusProject covers the `o` predicate. Available on
+// Global tab whenever the cursor row has a non-empty ProjectRoot —
+// the same-project case is allowed (re-focus is a harmless no-op
+// switch instead of muscle-memory-killing friction).
+func TestAvailableFocusProject(t *testing.T) {
+	cases := []struct {
+		name        string
+		tab         tabKind
+		rowRoot     string
+		currentProj string
+		want        bool
+	}{
+		{"Local tab → never", tabLocal, "/tmp/p", "/tmp/p", false},
+		{"Global, row root empty → no", tabGlobal, "", "", false},
+		{"Global, row root != current → yes", tabGlobal, "/tmp/p", "/tmp/q", true},
+		{"Global, row root == current → yes (re-focus is fine)", tabGlobal, "/tmp/p", "/tmp/p", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(false)
+			m.tab = tc.tab
+			m.currentProject = tc.currentProj
+			if tc.rowRoot != "" {
+				m.setTestRows([]Row{{Project: "p", ProjectRoot: tc.rowRoot, Name: "ws", Status: state.StatusReady}})
+			} else if tc.tab == tabGlobal {
+				m.setTestRows([]Row{{Project: "p", Name: "ws", Status: state.StatusReady}})
+			}
+			if got := availableFocusProject(m); got != tc.want {
+				t.Errorf("availableFocusProject = %v; want %v", got, tc.want)
 			}
 		})
 	}
@@ -571,6 +605,138 @@ func TestRetryConfirmModal_CancelOnN(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Errorf("after n: cmd != nil; want nil (no retry dispatched)")
+	}
+}
+
+// TestEscapeIfDeletingCurrent_NoOpWhenMismatched: the escape helper
+// short-circuits when any of the gating conditions fail — nil mgr,
+// empty currentWorkspace, name mismatch, OR project-root mismatch
+// (workspace names are unique per-project, not globally — A/foo and
+// B/foo coexist, and switching when deleting B/foo from inside A/foo
+// would trip the user into the wrong project's main session).
+func TestEscapeIfDeletingCurrent_NoOpWhenMismatched(t *testing.T) {
+	cases := []struct {
+		name                 string
+		mgr                  *workspace.Manager
+		currentWorkspace     string
+		currentWorkspaceRoot string
+		targetRoot           string
+		targetName           string
+	}{
+		{"nil mgr", nil, "ws-a", "/a", "/a", "ws-a"},
+		{"empty currentWorkspace", &workspace.Manager{}, "", "/a", "/a", "ws-a"},
+		{"name mismatch", &workspace.Manager{}, "ws-b", "/a", "/a", "ws-a"},
+		{"project root mismatch (cross-project name collision)", &workspace.Manager{}, "ws-a", "/a", "/b", "ws-a"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Model{currentWorkspace: tc.currentWorkspace, currentWorkspaceRoot: tc.currentWorkspaceRoot, tc: nil}
+			// No panic = pass: we never reached the tmux calls.
+			m.escapeIfDeletingCurrent(tc.mgr, tc.targetRoot, tc.targetName)
+		})
+	}
+}
+
+// TestUpdate_RowsLoaded_EmptyFirstThenPreselects: the latch must not
+// fire on an early empty rowsLoadedMsg — popup invocations sometimes
+// see an initial probe with no rows yet (state racing the refresh
+// goroutine), and consuming the preselect opportunity there leaves
+// cursor=0 even after real rows arrive on the next refresh. The
+// preselect should still hit when the actual rows show up.
+func TestUpdate_RowsLoaded_EmptyFirstThenPreselects(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.currentProject = "/b/canopy"
+	m.currentWorkspaceRoot = "/b/canopy"
+	m.currentWorkspace = "ancient-hornet"
+
+	// First refresh arrives empty (or with an error).
+	next, _ := m.Update(rowsLoadedMsg{rows: nil, err: nil})
+	got := next.(*Model)
+	if got.initialCursorPlaced {
+		t.Errorf("latch fired on empty first refresh; preselect would be lost")
+	}
+
+	// Second refresh has the real rows.
+	rows := []Row{
+		{Project: "cravd", ProjectRoot: "/a/cravd", Name: "bold-falcon", Status: state.StatusReady},
+		{Project: "canopy", ProjectRoot: "/b/canopy", Name: "ancient-hornet", Status: state.StatusReady},
+	}
+	next2, _ := got.Update(rowsLoadedMsg{rows: rows})
+	got2 := next2.(*Model)
+	if !got2.initialCursorPlaced {
+		t.Errorf("latch did not fire after preselect succeeded")
+	}
+	cur, _ := got2.list.CursorRow()
+	if cur.Name != "ancient-hornet" {
+		t.Errorf("cursor row name = %q; want ancient-hornet", cur.Name)
+	}
+}
+
+// TestUpdate_RowsLoaded_LatchFiresOnMiss: when the first non-empty
+// load doesn't contain the target row (e.g. the user changed tab
+// before rows arrived, filtering it out), the latch must still fire
+// so a later refresh — when the row reappears in the filtered set —
+// doesn't yank the cursor away from wherever the user navigated to.
+func TestUpdate_RowsLoaded_LatchFiresOnMiss(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.currentProject = "/b/canopy"
+	m.currentWorkspaceRoot = "/b/canopy"
+	m.currentWorkspace = "ancient-hornet"
+
+	// Rows that DON'T contain the target — simulates user-flipped tab
+	// or search hiding the row at first-load time.
+	rows := []Row{
+		{Project: "cravd", ProjectRoot: "/a/cravd", Name: "bold-falcon", Status: state.StatusReady},
+	}
+	next, _ := m.Update(rowsLoadedMsg{rows: rows})
+	got := next.(*Model)
+	if !got.initialCursorPlaced {
+		t.Errorf("latch did not fire on first non-empty load with miss; would auto-jump on later refresh")
+	}
+}
+
+// TestUpdate_RowsLoaded_PreselectsCurrentWorkspace: when currentWorkspace
+// is set (popup launched from inside a workspace dir), the first
+// rowsLoadedMsg moves the cursor onto that workspace's row. Subsequent
+// refreshes are no-ops on cursor position (latched via initialCursorPlaced)
+// so the user's hovering doesn't get yanked back.
+func TestUpdate_RowsLoaded_PreselectsCurrentWorkspace(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal // multi-row scenario; cursor=0 initially
+	m.currentProject = "/b/canopy"
+	m.currentWorkspaceRoot = "/b/canopy"
+	m.currentWorkspace = "ancient-hornet"
+
+	rows := []Row{
+		{Project: "cravd", ProjectRoot: "/a/cravd", Name: "bold-falcon", Status: state.StatusReady},
+		{Project: "cravd", ProjectRoot: "/a/cravd", Name: "soft-fox", Status: state.StatusStopped},
+		{Project: "canopy", ProjectRoot: "/b/canopy", Name: "ancient-hornet", Status: state.StatusReady},
+	}
+
+	next, _ := m.Update(rowsLoadedMsg{rows: rows})
+	got := next.(*Model)
+	if !got.initialCursorPlaced {
+		t.Errorf("initialCursorPlaced = false after first load; want true")
+	}
+	cur, ok := got.list.CursorRow()
+	if !ok {
+		t.Fatalf("CursorRow not ok after rowsLoaded")
+	}
+	if cur.Name != "ancient-hornet" {
+		t.Errorf("cursor row name = %q; want %q (preselect should land here)", cur.Name, "ancient-hornet")
+	}
+
+	// Second refresh: user has navigated to row 0 in the meantime;
+	// we simulate by setting cursor manually, then dispatching another
+	// rowsLoadedMsg. Cursor should NOT yank back.
+	got.list.SetCursorTo("/a/cravd", "bold-falcon")
+	next2, _ := got.Update(rowsLoadedMsg{rows: rows})
+	got2 := next2.(*Model)
+	cur2, _ := got2.list.CursorRow()
+	if cur2.Name != "bold-falcon" {
+		t.Errorf("cursor after second refresh = %q; want bold-falcon (latched)", cur2.Name)
 	}
 }
 

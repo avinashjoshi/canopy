@@ -249,6 +249,30 @@ func (c *Client) SelectLayout(ctx context.Context, session, layout string) error
 	return nil
 }
 
+// SelectPaneDirection moves the active-pane focus in the given
+// compass direction relative to the currently-active pane. dir is one
+// of "U", "D", "L", "R" (up/down/left/right).
+//
+// We use direction rather than absolute pane index because tmux's
+// pane-base-index is user-configurable — `select-pane -t session:.2`
+// would target the wrong pane on configs with `pane-base-index 1`.
+// Direction-relative selection is base-index-agnostic.
+//
+// Errors are non-fatal at the call site: failure to select a pane
+// shouldn't tear down the workspace build, just leaves the active
+// pane on whatever was previously active.
+func (c *Client) SelectPaneDirection(ctx context.Context, session, dir string) error {
+	flag := "-" + dir
+	cmd := exec.CommandContext(ctx, "tmux", c.args("select-pane", "-t", session, flag)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux.SelectPaneDirection(%s, %s): %w (stderr: %s)",
+			session, dir, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 // Kill terminates the named session. Returns ErrSessionNotFound if the
 // session doesn't exist; reconciliation can ignore that.
 //
