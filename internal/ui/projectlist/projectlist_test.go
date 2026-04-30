@@ -519,6 +519,123 @@ func TestRender_IncludesRowFields(t *testing.T) {
 	}
 }
 
+// TestRender_NoAliveDot covers the legend cleanup: with the alive dot
+// dropped from the row prefix, no `●` or `○` should appear in any row
+// rendering. The status column carries that information now (running /
+// not started / ready / stopped) — the dot was redundant for 4 of 6
+// statuses and confusing alongside the status text.
+func TestRender_NoAliveDot(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{Project: "p", Name: "ws", Branch: "feat", Status: state.StatusReady, Alive: true},
+		{Project: "p", Name: "stopped-ws", Branch: "feat-2", Status: state.StatusStopped, Alive: false},
+	})
+	m.cursor = -1
+	out := m.View()
+	if strings.Contains(out, "●") {
+		t.Errorf("rendered output still contains alive dot ●:\n%s", out)
+	}
+	if strings.Contains(out, "○") {
+		t.Errorf("rendered output still contains dead dot ○:\n%s", out)
+	}
+}
+
+// TestRender_MainStatusText covers the "main row reuses status column
+// for alive bit" simplification: instead of a separate dot column,
+// (main) rows render "running" when Alive and "not started" otherwise.
+func TestRender_MainStatusText(t *testing.T) {
+	cases := []struct {
+		alive bool
+		want  string
+	}{
+		{true, "running"},
+		{false, "not started"},
+	}
+	for _, tc := range cases {
+		m := New(Options{})
+		m.SetRows([]state.GlobalRow{
+			{Project: "p", IsMain: true, Name: "(main)", Branch: "main", Status: "main", Alive: tc.alive},
+		})
+		m.cursor = -1
+		out := m.View()
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("Alive=%v: rendered output missing %q:\n%s", tc.alive, tc.want, out)
+		}
+	}
+}
+
+// TestRender_ChecksBadge covers the new pr_checks suffix: when the
+// pr_status hint message includes " · checks <state>", the badge
+// renderer surfaces it as a separate colored pill alongside the PR
+// state badge so the user sees CI status at a glance.
+func TestRender_ChecksBadge(t *testing.T) {
+	cases := []struct {
+		message string
+		want    string
+	}{
+		{"PR #1 open; awaiting reviews · checks passing", "✓ checks"},
+		{"PR #1 open; awaiting reviews · checks failing", "✗ checks"},
+		{"PR #1 open; awaiting reviews · checks running", "… checks"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			m := New(Options{})
+			m.SetRows([]state.GlobalRow{
+				{
+					Project: "p", Name: "ws", Branch: "feat",
+					Status: state.StatusReady,
+					Hints:  []state.Hint{{Kind: "pr_status", Message: tc.message}},
+				},
+			})
+			m.cursor = -1
+			out := m.View()
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("message %q: rendered output missing %q:\n%s", tc.message, tc.want, out)
+			}
+		})
+	}
+}
+
+// TestRender_BranchIcon: every workspace row's Branch column is prefixed
+// with the U+2387 branch glyph so the column reads as a branch at a
+// glance. Smoke test — exact column position is left to visual review,
+// but the glyph must appear at least once in any non-empty render.
+func TestRender_BranchIcon(t *testing.T) {
+	m := New(Options{})
+	m.SetRows(sampleRows())
+	out := m.View()
+	if !strings.Contains(out, "⎇") {
+		t.Errorf("rendered output missing branch icon ⎇:\n%s", out)
+	}
+}
+
+// TestRender_MainRowBranchInGray: a (main) row carrying the project's
+// default branch must render in the gray "subtle" style. Lipgloss
+// suppresses color in non-TTY envs (like `go test`), so we can't
+// assert ANSI escapes here — instead we assert the unstyled text shape
+// (icon + branch name appears) and that the styling code path doesn't
+// crash. The visual gray is exercised by the runtime TUI.
+func TestRender_MainRowBranchInGray(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{
+			Project: "canopy", ProjectRoot: "/a/canopy",
+			IsMain: true, Name: "(main)", Branch: "main",
+			Status: "main",
+		},
+	})
+	m.cursor = -1 // off-row so the non-selected styling path fires
+	out := m.View()
+
+	// Branch icon + "main" branch name both visible.
+	if !strings.Contains(out, "⎇") {
+		t.Errorf("main-row missing branch icon:\n%s", out)
+	}
+	if !strings.Contains(out, "main") {
+		t.Errorf("main-row missing branch name:\n%s", out)
+	}
+}
+
 // TestSetSize_DoesNotPanic: SetSize is a setter; tested only for
 // not-blowing-up on extreme values.
 func TestSetSize_DoesNotPanic(t *testing.T) {

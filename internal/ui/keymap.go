@@ -112,6 +112,11 @@ var listModeBindings = []Binding{
 		Action:    actionFocusProject,
 	},
 	{
+		K:         key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "open PR")),
+		Available: availableOpenPR,
+		Action:    actionOpenPR,
+	},
+	{
 		K:      key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
 		Action: actionDelete,
 	},
@@ -143,6 +148,24 @@ var listModeBindings = []Binding{
 // on the cursor row's project.
 func availableNewWorkspace(m *Model) bool {
 	return m.mgr != nil && m.tab == tabLocal
+}
+
+// availableOpenPR is the Available predicate for `p`. Hidden when the
+// cursor row has no pr_status hint — `gh pr view --web` would error
+// out with "no pull requests found" otherwise. Skips main rows
+// (their branch is the project default; opening the "PR" for main
+// makes no sense). Workspace rows with the hint show the binding.
+func availableOpenPR(m *Model) bool {
+	row, ok := m.list.CursorRow()
+	if !ok || row.IsMain || row.Path == "" {
+		return false
+	}
+	for _, h := range row.Hints {
+		if h.Kind == "pr_status" {
+			return true
+		}
+	}
+	return false
 }
 
 // availableFocusProject is the Available predicate for `o`. Only

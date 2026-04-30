@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/oncactus/canopy/internal/config"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // routeRoot is hard to test end-to-end (each branch launches a Bubbletea
@@ -150,3 +151,146 @@ type silenceWriter struct{}
 func (silenceWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 var _ io.Writer = silenceWriter{}
+
+// TestResolveProjectContext_workspaceCwd is the regression test for the
+// popup-mode "Local tab is empty" bug: when canopy is launched from
+// inside a workspace dir (a git worktree of the source repo containing
+// the project's checked-in canopy.json), the canonical currentProject
+// must resolve to the SOURCE REPO root, not the workspace dir. Without
+// this, every state.GlobalRow for the project carries the source-repo
+// ProjectRoot but the Local tab filters by the worktree path → zero
+// rows → the user sees "No workspaces in this project" until they
+// switch tabs and focus-back to refresh currentProject from a row.
+//
+// The fix calls workspace.ResolveCurrentProject (workspace-path-prefix
+// match first) before falling back to DiscoverAndLoad. This test
+// verifies the resolution in isolation from the rest of routeRoot,
+// which launches a Bubbletea program and is hard to drive end-to-end.
+func TestResolveProjectContext_workspaceCwd(t *testing.T) {
+	root := t.TempDir()
+	srcRepo := filepath.Join(root, "src", "myproj")
+	if err := os.MkdirAll(srcRepo, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	wsDir := filepath.Join(root, "workspaces", "myproj", "feat-x")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("mkdir ws: %v", err)
+	}
+
+	// canopy.json at BOTH the source repo root AND the workspace dir
+	// (the worktree carries it via git). This is the exact shape that
+	// fooled the old DiscoverAndLoad-first resolution.
+	canopyJSON := []byte(`{"scripts": {"setup": "x", "run": "y", "archive": "z"}}`)
+	for _, dir := range []string{srcRepo, wsDir} {
+		if err := os.WriteFile(filepath.Join(dir, "canopy.json"), canopyJSON, 0o644); err != nil {
+			t.Fatalf("write canopy.json: %v", err)
+		}
+	}
+
+	// Resolve src repo through EvalSymlinks since state stores
+	// canonical paths and ResolveCurrentProject canonicalizes cwd
+	// before prefix matching. tmpdirs on macOS go through /var → /private/var,
+	// which would defeat string equality otherwise.
+	canonicalSrc, err := filepath.EvalSymlinks(srcRepo)
+	if err != nil {
+		t.Fatalf("evalsymlinks src: %v", err)
+	}
+	canonicalWs, err := filepath.EvalSymlinks(wsDir)
+	if err != nil {
+		t.Fatalf("evalsymlinks ws: %v", err)
+	}
+
+	st := &state.State{
+		Projects: map[string]state.ProjectMeta{
+			canonicalSrc: {Root: canonicalSrc},
+		},
+		Workspaces: []state.Workspace{
+			{
+				Name:        "feat-x",
+				Path:        canonicalWs,
+				ProjectRoot: canonicalSrc,
+				Project:     "myproj",
+			},
+		},
+	}
+
+	t.Run("cwd_inside_workspace_resolves_to_source_repo", func(t *testing.T) {
+		got, cfg, err := resolveProjectContext(canonicalWs, st)
+		if err != nil {
+			t.Fatalf("resolveProjectContext: %v", err)
+		}
+		if got != canonicalSrc {
+			t.Errorf("currentProject = %q; want %q (source-repo root, not workspace dir)", got, canonicalSrc)
+		}
+		// Workspace-prefix match returns no walk-up cfg — caller
+		// is expected to LoadFrom the canonical root itself.
+		if cfg != nil {
+			t.Errorf("walk-up cfg = %v; want nil (workspace match should not load cfg)", cfg)
+		}
+	})
+
+	t.Run("cwd_inside_source_repo_uses_walkup", func(t *testing.T) {
+		got, cfg, err := resolveProjectContext(canonicalSrc, st)
+		if err != nil {
+			t.Fatalf("resolveProjectContext: %v", err)
+		}
+		if got != canonicalSrc {
+			t.Errorf("currentProject = %q; want %q", got, canonicalSrc)
+		}
+		// Source-repo walk-up: ResolveCurrentProject also returns the
+		// root via its step-2 walk-up + state.Projects check, which
+		// short-circuits before our outer DiscoverAndLoad fallback.
+		// Either way the caller will LoadFrom the canonical root.
+		_ = cfg
+	})
+
+	t.Run("cwd_outside_any_project_returns_empty", func(t *testing.T) {
+		outside := filepath.Join(root, "elsewhere")
+		if err := os.MkdirAll(outside, 0o755); err != nil {
+			t.Fatalf("mkdir outside: %v", err)
+		}
+		got, cfg, err := resolveProjectContext(outside, st)
+		if err != nil {
+			t.Fatalf("resolveProjectContext: %v", err)
+		}
+		if got != "" {
+			t.Errorf("currentProject = %q; want \"\" (no project)", got)
+		}
+		if cfg != nil {
+			t.Errorf("cfg = %v; want nil", cfg)
+		}
+	})
+}
+
+// TestResolveProjectContext_unregisteredProjectFallsThrough covers the
+// fresh-clone path: cwd has canopy.json but state.json doesn't know
+// about the project yet (no `canopy init` run). ResolveCurrentProject
+// returns "" because step 2 only matches REGISTERED projects; the
+// outer DiscoverAndLoad fallback then populates currentProject so the
+// user still gets project context (and the splash gate doesn't fire,
+// since cfg is non-nil).
+func TestResolveProjectContext_unregisteredProjectFallsThrough(t *testing.T) {
+	dir := t.TempDir()
+	canopyJSON := []byte(`{"scripts": {"setup": "x", "run": "y", "archive": "z"}}`)
+	if err := os.WriteFile(filepath.Join(dir, "canopy.json"), canopyJSON, 0o644); err != nil {
+		t.Fatalf("write canopy.json: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("evalsymlinks: %v", err)
+	}
+
+	// Empty state — project is unregistered.
+	st := &state.State{}
+
+	got, cfg, err := resolveProjectContext(canonical, st)
+	if err != nil {
+		t.Fatalf("resolveProjectContext: %v", err)
+	}
+	if got != canonical {
+		t.Errorf("currentProject = %q; want %q (walk-up fallback)", got, canonical)
+	}
+	if cfg == nil {
+		t.Errorf("cfg = nil; want non-nil (walk-up should populate cfg)")
+	}
+}

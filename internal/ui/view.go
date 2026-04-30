@@ -105,12 +105,12 @@ func (m *Model) View() string {
 
 	// Onboarding hint sits right above the help line — the natural
 	// "next-action" zone of the screen. Global tab only because Local
-	// already implies an existing project. Future: when there's an
-	// `[a] add project` keybind, this becomes a keybind affordance
-	// instead of a CLI suggestion.
+	// already implies an existing project. Flush-left to match the
+	// project headers + help line; blank line above and below so it
+	// reads as a distinct row, not glued to the keybind cheatsheet.
 	if m.tab == tabGlobal {
-		b.WriteString(subtleStyle.Render("  add a project: cd to its repo and run `canopy init`"))
-		b.WriteString("\n")
+		b.WriteString(subtleStyle.Render("add a project: cd to its repo and run `canopy init`"))
+		b.WriteString("\n\n")
 	}
 	b.WriteString(m.renderHelpLine())
 	return b.String()

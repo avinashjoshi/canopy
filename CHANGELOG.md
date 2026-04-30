@@ -7,6 +7,43 @@ and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-04-29 — TUI polish pass
+
+A round of usability fixes and visual polish on top of the v0.8 unified TUI.
+The popup and CLI verbs both correctly resolve project context when invoked
+from inside a workspace dir, branch renames flow through to the TUI on the
+next refresh, and pressing enter on a dead main row brings it up instead of
+erroring. The list itself reads cleaner: branch icon, gray-styled main
+branch, status column carries alive-state directly (no separate dot), and
+selected rows wear a `❯` caret.
+
+### Added
+- **Branch icon (`⎇`)** prefixes every Branch column entry — single Unicode cell, no Nerd Font dependency.
+- **Default branch shown on (main) rows.** `state.GlobalRow.Branch` for main rows now carries the project's actual default branch (origin/main or origin/master) instead of the `—` placeholder. Rendered in gray to signal "informational, not actionable."
+- **Main row status reflects alive state.** Instead of always reading `main`, the (main) row's status column now shows `running` (green) when the main session is up and `not started` (gray) when it isn't. The standalone alive-dot column is gone — status carries that info.
+- **Tab auto-focuses from Global view.** When canopy is launched outside any project (currentProject is empty) and the user presses Tab to switch to Local, the cursor row's project becomes the new Local context — Tab acts as "enter the project I'm looking at."
+- **`p` keybind opens the workspace's PR.** Runs `gh pr view --web` from the workspace dir. Hidden when no `pr_status` hint exists, so the help line stays clean.
+- **PR check status in the hint badge.** OPEN PRs now also surface CI status — `✓ checks`, `✗ checks`, or `… checks` next to the existing PR-state badge. Sourced from `gh pr view --json statusCheckRollup`.
+- **Auto-detach other clients on attach.** Switching to a workspace from a second terminal now kicks the first terminal off the session by default, so two clients don't mirror keystrokes on the same tmux session. `CANOPY_NO_DETACH=1` opts back into tmux's default multi-client behavior.
+- **`Manager.EnsureMainSession`.** Idempotently brings up the project's main tmux session. Used by both `canopy main` (CLI) and the TUI's enter-on-main-row path.
+- **`git.CurrentBranch`** helper for reading a worktree's current branch.
+
+### Changed
+- **Selected-row caret `>` → `❯`.** Reads more cleanly at terminal weights.
+- **Project headers + "add a project" flush-left.** Was indented at column 2; now at column 0 to outdent visually from the workspace rows below (column 2). Blank line between the "add a project" hint and the help line so they don't blur together.
+- **Friendlier "no canopy.json" error.** Running `canopy main` or `canopy new` outside a project now reads `this directory isn't a canopy project yet — run` `canopy init` `here (or cd into one of your existing canopy projects)` instead of leaking the internal walk-up error verbatim.
+- **Cobra usage dump suppressed on RunE errors.** `SilenceUsage: true` on the root command so failures land as a one-line error instead of a flag-table wall after the message.
+- **Smarter delete safety.** `safetyChecks` now reads PR state once up front and skips the "unpushed commits" warning when the PR is `MERGED` — those commits are squashed/rebased into main, not lost work. Open-PR warning only fires for `OPEN` state.
+- **Reconcile refreshes branch.** `Manager.Reconcile` now also re-reads `git branch --show-current` per workspace and persists the result, so a `git branch -m` rename surfaces in the TUI on the next refresh instead of staying frozen at workspace-create time.
+
+### Fixed
+- **Popup from workspace dir resolved to worktree path, not source repo.** `routeRoot` did `config.DiscoverAndLoad(cwd)` first, which found the worktree's checked-in `canopy.json` and set `cfg.ProjectRoot` to the worktree path. Every state.GlobalRow keys by the canonical source-repo ProjectRoot, so the Local tab matched zero rows. Now `workspace.ResolveCurrentProject` wins (workspace-path-prefix match first), with `DiscoverAndLoad` only as the fallback for unregistered cwd. Extracted into `resolveProjectContext` for testability.
+- **Same bug in every CLI verb.** `loadManager` had the same `DiscoverAndLoad`-first shape, so `canopy reconcile`, `canopy switch`, `canopy rm`, etc. silently no-op'd when run from inside a workspace dir (Reconcile filtered every row out by ProjectRoot mismatch). Fixed via `resolveCfgForCwd` that mirrors the route-level resolver.
+- **Enter on a dead main row errored instead of starting the session.** Used to print "main session not running — run `canopy main` in a terminal to start it", which a popup user can't even reach without first closing the popup. Now calls `Manager.EnsureMainSession` to build the session, then attaches/switch-clients in the same flow. `cmd/canopy main` was refactored to share the implementation.
+
+### Removed
+- **Alive-dot column.** Was redundant for `ready` (always `●`), `stopped` / `broken` / `orphaned` (always `○`), and only added information for the `setting_up` and `main` rows. Status column carries that signal directly now.
+
 ## [0.8.0] - 2026-04-29 — TUI unification
 
 One TUI for every canopy invocation. The popup, the global view, and the

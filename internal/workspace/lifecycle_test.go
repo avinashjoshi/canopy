@@ -482,6 +482,94 @@ func TestCreate_DiagnoseHintCaptured(t *testing.T) {
 	}
 }
 
+// TestEnsureMainSession is the regression test for the unified TUI's
+// "main session not running" bug: pressing enter on a dead main row
+// used to dump the user back to a shell with a "run `canopy main`"
+// instruction (which a popup user can't even reach without closing
+// the popup first). EnsureMainSession centralizes the build path so
+// the TUI can bring up the session itself.
+//
+// Asserts: first call builds the session (HasSession reports true
+// after); second call is a no-op (no error, same name returned, still
+// alive). Idempotency matters because the TUI may auto-attach
+// repeatedly during a session.
+func TestEnsureMainSession(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	ctx := context.Background()
+	session, err := mgr.EnsureMainSession(ctx)
+	if err != nil {
+		t.Fatalf("EnsureMainSession (build): %v", err)
+	}
+	if session == "" {
+		t.Fatalf("EnsureMainSession returned empty session name")
+	}
+	alive, err := mgr.Tmux.HasSession(ctx, session)
+	if err != nil {
+		t.Fatalf("HasSession: %v", err)
+	}
+	if !alive {
+		t.Errorf("session %q not alive after EnsureMainSession", session)
+	}
+
+	// Second call: idempotent, should return the same name without rebuilding.
+	session2, err := mgr.EnsureMainSession(ctx)
+	if err != nil {
+		t.Fatalf("EnsureMainSession (idempotent): %v", err)
+	}
+	if session2 != session {
+		t.Errorf("second EnsureMainSession returned different name: %q vs %q", session2, session)
+	}
+}
+
+// TestReconcile_RefreshesBranchAfterRename is the regression test for
+// "TUI shows the old branch after rename": canopy.json's CLAUDE.md
+// instructs agents to `git branch -m <intent-slug>` on first turn, and
+// users do the same manually. Without a branch refresh in Reconcile,
+// state.json's Branch column stays frozen at workspace-create time and
+// the Local tab keeps showing the auto-generated namegen branch.
+//
+// Setup: Create a workspace (Branch == namegen). Rename the branch in
+// the worktree via `git branch -m`. Reconcile. Assert state.json's
+// Branch field reflects the new name.
+func TestReconcile_RefreshesBranchAfterRename(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(context.Background(), "auto-falcon", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	originalBranch := ws.Branch
+	if originalBranch == "" {
+		t.Fatalf("ws.Branch is empty after Create — fixture setup unexpected")
+	}
+
+	// Rename the branch inside the worktree (the agent/user workflow).
+	renameOut, err := exec.Command("git", "-C", ws.Path, "branch", "-m", "fix-real-bug").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch -m: %v\n%s", err, renameOut)
+	}
+
+	if _, err := mgr.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Read state to confirm the branch was persisted.
+	got, err := mgr.Find(context.Background(), "auto-falcon")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if got.Branch != "fix-real-bug" {
+		t.Errorf("Branch = %q; want %q (rename should have been picked up by Reconcile)", got.Branch, "fix-real-bug")
+	}
+	if got.Branch == originalBranch {
+		t.Errorf("Branch unchanged after rename + Reconcile (= %q)", got.Branch)
+	}
+}
+
 // TestResurrect_HappyPath: Create -> Kill tmux -> Resurrect -> tmux alive
 // again with 4 panes. Per-dir claude history isn't testable here (no
 // claude conversation in scratch), but the structural rebuild is.

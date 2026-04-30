@@ -26,6 +26,7 @@ import (
 	"github.com/oncactus/canopy/internal/clog"
 	"github.com/oncactus/canopy/internal/config"
 	"github.com/oncactus/canopy/internal/ghx"
+	"github.com/oncactus/canopy/internal/git"
 	"github.com/oncactus/canopy/internal/lifecycle"
 	"github.com/oncactus/canopy/internal/state"
 	"github.com/oncactus/canopy/internal/tmux"
@@ -451,7 +452,37 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea
 			return rowsLoadedMsg{err: err}
 		}
 		rows := st.BuildGlobalRows(ctx, tc)
+		fillMainBranches(ctx, rows)
 		return rowsLoadedMsg{rows: rows}
+	}
+}
+
+// fillMainBranches replaces the "—" placeholder in main rows with the
+// project's actual default branch (origin/main or origin/master). Done
+// once per project — DetectDefaultBranch is one git rev-parse call,
+// cheap but worth caching across multiple worktrees of the same repo.
+//
+// Failure is non-fatal: if the project has no remote or uses a
+// non-conventional default, the row keeps "main" as a fallback so
+// the column doesn't render bare. Either way the user reads
+// "this is the main session, branched off X" at a glance.
+func fillMainBranches(ctx context.Context, rows []state.GlobalRow) {
+	defaults := map[string]string{}
+	for i := range rows {
+		if !rows[i].IsMain || rows[i].ProjectRoot == "" {
+			continue
+		}
+		root := rows[i].ProjectRoot
+		branch, ok := defaults[root]
+		if !ok {
+			b, err := git.DetectDefaultBranch(ctx, root)
+			if err != nil || b == "" {
+				b = "main" // fallback when origin/main|master both miss
+			}
+			branch = b
+			defaults[root] = branch
+		}
+		rows[i].Branch = branch
 	}
 }
 

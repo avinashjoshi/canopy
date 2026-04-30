@@ -68,59 +68,41 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 	// is tolerated — both paths fall through cleanly.
 	st, _ := store.Load()
 
-	cfg, cfgErr := config.DiscoverAndLoad(cwd)
-
-	// Real walk-up error (permission denied, malformed mid-tree
-	// canopy.json) — surface as-is. ErrNotFound falls through.
-	if cfgErr != nil && !errors.Is(cfgErr, config.ErrNotFound) {
-		return cfgErr
+	currentProject, cfg, err := resolveProjectContext(cwd, st)
+	if err != nil {
+		return err
 	}
 
 	var mgr *workspace.Manager
-	currentProject := ""
-
-	if cfg != nil {
-		// Path 1: cwd has canopy.json. Try to construct a Manager;
-		// if it fails (v1/v2 state collision is the common cause),
-		// log a warning and fall back to global mode so the unified
-		// TUI still launches. The user can fix state.json from
-		// outside and re-run, or use the Global tab in the meantime.
-		currentProject = cfg.ProjectRoot
-		m, err := workspace.New(cfg)
-		if err != nil {
-			fmt.Fprintf(stdout,
-				"warning: couldn't construct Manager for %s (%v). "+
-					"Launching unified TUI in global mode — destructive verbs on this project's "+
-					"rows won't work until the underlying state issue is resolved.\n",
-				cfg.ProjectRoot, err)
-		} else {
-			mgr = m
-		}
-	} else {
-		// Path 2: cwd is a known workspace? Use the workspace-cwd
-		// resolver. ResolveCurrentProject also walks up canopy.json
-		// as a fallback, but cwd already failed that — so if it
-		// returns non-empty here, the match came from the workspace
-		// path-prefix lookup.
-		currentProject = workspace.ResolveCurrentProject(cwd, st)
-
-		// When the workspace-cwd resolver matched, load the project's
-		// canopy.json directly via LoadFrom (no walk-up) so we can
-		// construct a Manager. Without this, popup-mode launched from
-		// inside a workspace pane has m.mgr=nil and the `n` keybinding
-		// is hidden — breaking the muscle-memory case where the user
-		// pops the TUI to create a new workspace in the project they're
-		// already in.
-		if currentProject != "" {
-			pcfg, perr := config.LoadFrom(currentProject)
+	if currentProject != "" {
+		// Build the Manager from the CANONICAL project root. When
+		// ResolveCurrentProject matched a workspace dir, cwd's own
+		// canopy.json is the worktree's copy; we load via LoadFrom
+		// against the source-repo root so Manager's git operations
+		// (worktree add/remove) target the right repo. When the
+		// walk-up populated cfg, we re-use it directly (LoadFrom
+		// would just re-read the same file).
+		pcfg := cfg
+		if pcfg == nil {
+			lc, perr := config.LoadFrom(currentProject)
 			if perr == nil {
-				m, merr := workspace.New(pcfg)
-				if merr == nil {
-					mgr = m
-				}
-				// Manager construction failure is non-fatal — TUI
-				// still launches; n is just hidden until the user
-				// fixes the underlying state issue.
+				pcfg = lc
+			}
+			// LoadFrom failure is non-fatal — the source repo may have
+			// been moved or canopy.json deleted. TUI still launches in
+			// read-only mode so the user can see workspaces and fix
+			// the underlying issue from outside.
+		}
+		if pcfg != nil {
+			m, err := workspace.New(pcfg)
+			if err != nil {
+				fmt.Fprintf(stdout,
+					"warning: couldn't construct Manager for %s (%v). "+
+						"Launching unified TUI in global mode — destructive verbs on this project's "+
+						"rows won't work until the underlying state issue is resolved.\n",
+					currentProject, err)
+			} else {
+				mgr = m
 			}
 		}
 	}
@@ -142,6 +124,38 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 	}
 
 	return ui.RunUnified(mgr, store, tc, currentProject)
+}
+
+// resolveProjectContext picks the canonical current-project root for the
+// unified TUI launch given a cwd. ResolveCurrentProject (workspace-path
+// prefix match first, canopy.json walk-up + state.Projects check second)
+// is preferred so cwd inside a workspace dir maps to the source-repo
+// ProjectRoot, not the worktree's own path. Naive DiscoverAndLoad would
+// resolve ProjectRoot to the worktree dir (it contains the checked-in
+// canopy.json), which matches no rows in state and leaves the Local
+// tab empty — the user-reported popup bug.
+//
+// When ResolveCurrentProject comes up empty (cwd outside any registered
+// project), fall through to DiscoverAndLoad so users in an unregistered
+// canopy project — fresh clone, pre-init — still get a current-project
+// context. Returns (currentProject, cfgFromWalkUp, err); cfg is non-nil
+// only on the walk-up branch so the caller knows whether to re-use it
+// for Manager construction or LoadFrom against the canonical root.
+//
+// ErrNotFound from the walk-up is folded into ("","",nil) — "no project
+// here" is not an error, just the global-mode signal.
+func resolveProjectContext(cwd string, st *state.State) (string, *config.Config, error) {
+	if root := workspace.ResolveCurrentProject(cwd, st); root != "" {
+		return root, nil, nil
+	}
+	cfg, err := config.DiscoverAndLoad(cwd)
+	if err != nil {
+		if errors.Is(err, config.ErrNotFound) {
+			return "", nil, nil
+		}
+		return "", nil, err
+	}
+	return cfg.ProjectRoot, cfg, nil
 }
 
 // runInitSplashFlow shows the init prompt. If the user opts in, this

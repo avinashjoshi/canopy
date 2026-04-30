@@ -131,7 +131,7 @@ func queryPRStatus(ctx context.Context, projectRoot, branch string) *state.Hint 
 	// unmarshal is the cleanest path.
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch,
 		"--repo", repoFromProjectRoot(projectRoot),
-		"--json", "number,state,mergedAt,reviewDecision")
+		"--json", "number,state,mergedAt,reviewDecision,statusCheckRollup")
 	cmd.Dir = projectRoot
 	out, err := cmd.Output()
 	if err != nil {
@@ -147,6 +147,17 @@ func queryPRStatus(ctx context.Context, projectRoot, branch string) *state.Hint 
 		State          string `json:"state"` // "OPEN" | "CLOSED" | "MERGED"
 		MergedAt       string `json:"mergedAt,omitempty"`
 		ReviewDecision string `json:"reviewDecision,omitempty"`
+		// statusCheckRollup is an array of check entries; we collapse to
+		// a single conclusion (passing / failing / pending) for the badge.
+		StatusCheckRollup []struct {
+			// CI checks use Conclusion ("SUCCESS"/"FAILURE"/"") + Status
+			// ("COMPLETED"/"IN_PROGRESS"/"QUEUED"). Status checks (older
+			// commit-status API) use only State ("SUCCESS"/"FAILURE"/
+			// "PENDING"). We read both shapes and normalize.
+			Conclusion string `json:"conclusion,omitempty"`
+			Status     string `json:"status,omitempty"`
+			State      string `json:"state,omitempty"`
+		} `json:"statusCheckRollup,omitempty"`
 	}
 	if jsonErr := json.Unmarshal(out, &prData); jsonErr != nil {
 		log.Warn("lifecycle.pr_status.parse-failed",
@@ -176,11 +187,56 @@ func queryPRStatus(ctx context.Context, projectRoot, branch string) *state.Hint 
 		msg = fmt.Sprintf("PR #%d (%s)", prData.Number, prData.State)
 	}
 
+	// Append checks rollup so the badge renderer can show a separate
+	// "checks: passing/failing/pending" pill alongside the PR-state
+	// badge. Only meaningful for OPEN PRs — merged/closed PRs land in
+	// a terminal state and check status is moot.
+	if prData.State == "OPEN" && len(prData.StatusCheckRollup) > 0 {
+		if rollup := summarizeChecks(prData.StatusCheckRollup); rollup != "" {
+			msg = msg + " · " + rollup
+		}
+	}
+
 	return &state.Hint{
 		Kind:       "pr_status",
 		Message:    msg,
 		DetectedAt: time.Now(),
 	}
+}
+
+// summarizeChecks collapses a per-check array into a single rollup
+// label for badge rendering. Precedence: any failing check wins,
+// then any pending/running check, else passing. Empty when no check
+// has a recognizable state (e.g., very early in CI before any check
+// has reported).
+func summarizeChecks(checks []struct {
+	Conclusion string `json:"conclusion,omitempty"`
+	Status     string `json:"status,omitempty"`
+	State      string `json:"state,omitempty"`
+}) string {
+	hasFailing, hasPending, hasPassing := false, false, false
+	for _, c := range checks {
+		// Normalize across both check shapes (CI vs commit-status).
+		switch {
+		case c.Conclusion == "FAILURE", c.Conclusion == "TIMED_OUT", c.Conclusion == "CANCELLED",
+			c.State == "FAILURE", c.State == "ERROR":
+			hasFailing = true
+		case c.Conclusion == "SUCCESS", c.State == "SUCCESS":
+			hasPassing = true
+		case c.Status == "IN_PROGRESS", c.Status == "QUEUED", c.Status == "PENDING",
+			c.State == "PENDING":
+			hasPending = true
+		}
+	}
+	switch {
+	case hasFailing:
+		return "checks failing"
+	case hasPending:
+		return "checks running"
+	case hasPassing:
+		return "checks passing"
+	}
+	return ""
 }
 
 // ghAvailable returns true when the gh binary is on PATH. Logs the
