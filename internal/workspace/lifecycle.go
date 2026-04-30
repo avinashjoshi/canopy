@@ -858,27 +858,42 @@ func (m *Manager) markBroken(ws *state.Workspace, cause error, capturedStderr []
 	})
 }
 
-// Remove tears down a workspace: scripts.archive, tmux kill, git worktree
-// remove, then drop the state row. Failures in archive or tmux are logged
-// but don't block removal — a half-removed workspace is worse than a
-// best-effort full removal.
+// Remove tears down a workspace: drop the state row first, then run
+// scripts.archive, tmux kill, git worktree remove, branch delete, and
+// log cleanup against the in-memory snapshot. Failures in archive,
+// tmux, or git are logged but don't block removal — a half-removed
+// workspace is worse than a best-effort full removal.
+//
+// The state row drops at step 1 (right after we snapshot the row to
+// wsCopy) so concurrent canopy invocations don't see a stale row
+// during the slow archive/git/tmux work — important for the popup-
+// detach flow where the user closes canopy immediately after pressing
+// `y` and reopens it before the detached subprocess has finished.
+// Steps 2-5 work entirely off wsCopy, so they don't need the row to
+// still exist. Failures after the drop leave residue on disk
+// (worktree, branch) but no state row; `canopy reconcile` discovers
+// the orphan and the user can clean up manually if needed. This is
+// strictly better than the prior "row hangs around as zombie" UX.
 func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Writer) error {
 	if stdout == nil || stderr == nil {
 		return fmt.Errorf("workspace.Remove: stdout and stderr writers required")
 	}
 
-	// Look up the workspace (don't hold the lock during the slow ops).
-	st, err := m.Store.Load()
-	if err != nil {
-		return fmt.Errorf("workspace.Remove: load: %w", err)
+	// Snapshot + drop the state row up front. Steps 2+ don't touch
+	// state — they work off wsCopy.
+	var wsCopy state.Workspace
+	if err := m.Store.WithLock(func(s *state.State) error {
+		ws, err := s.Find(m.Cfg.ProjectRoot, name)
+		if err != nil {
+			return fmt.Errorf("workspace.Remove(%s): %w", name, ErrWorkspaceNotFound)
+		}
+		wsCopy = *ws
+		return s.Remove(m.Cfg.ProjectRoot, name)
+	}); err != nil {
+		return err
 	}
-	ws, err := st.Find(m.Cfg.ProjectRoot, name)
-	if err != nil {
-		return fmt.Errorf("workspace.Remove(%s): %w", name, ErrWorkspaceNotFound)
-	}
-	wsCopy := *ws // capture before slice mutations
 
-	// 1. scripts.archive — log failure but proceed. Empty -> skip.
+	// 2. scripts.archive — log failure but proceed. Empty -> skip.
 	if m.Cfg.Scripts.Archive != "" {
 		scriptPath := filepath.Join(m.Cfg.ProjectRoot, m.Cfg.Scripts.Archive)
 		if err := hooks.Run(ctx, scriptPath, hooks.Options{
@@ -892,12 +907,12 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 		}
 	}
 
-	// 2. tmux kill — log failure but proceed.
+	// 3. tmux kill — log failure but proceed.
 	if err := m.Tmux.Kill(ctx, wsCopy.TmuxSession); err != nil && !errors.Is(err, tmux.ErrSessionNotFound) {
 		log.Warn("workspace.remove.tmux-failed", "name", name, "err", err)
 	}
 
-	// 3. git worktree remove with --force (we already accept that user's
+	// 4. git worktree remove with --force (we already accept that user's
 	// uncommitted changes might exist; canopy rm is the explicit "drop
 	// this" command).
 	if err := git.Remove(ctx, m.Cfg.ProjectRoot, wsCopy.Path, true); err != nil &&
@@ -906,7 +921,7 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "warning: git worktree remove failed: %v\n", err)
 	}
 
-	// 4. Delete the underlying branch. Canopy's workspaces are ephemeral
+	// 5. Delete the underlying branch. Canopy's workspaces are ephemeral
 	// by design — leaving the branch behind every `canopy rm` would
 	// pile up dead branches the user has to clean by hand. force=true
 	// because the branch may have unmerged work and the user explicitly
@@ -916,19 +931,13 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "warning: failed to delete branch %s: %v\n", wsCopy.Branch, err)
 	}
 
-	// 5. Per-workspace logs (setup output + the workspace-scoped slog
-	// fan-out file). Best-effort; missing files aren't errors. Done
-	// before the state row drop so a partial failure here still leaves
-	// the row in place for retry.
+	// 6. Per-workspace logs (setup output + the workspace-scoped slog
+	// fan-out file). Best-effort; missing files aren't errors.
 	removeSetupLog(name)
 	if err := clog.RemoveWorkspaceLog(name); err != nil {
 		log.Warn("workspace.remove.workspace-log-failed", "name", name, "err", err)
 	}
-
-	// 6. Drop the state row.
-	return m.Store.WithLock(func(s *state.State) error {
-		return s.Remove(m.Cfg.ProjectRoot, name)
-	})
+	return nil
 }
 
 // Resurrect rebuilds the tmux session for a workspace whose dir is on
