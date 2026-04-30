@@ -134,6 +134,39 @@ Key routing rules:
 - Tune question sensitivity → invoke /plan-tune
 - Code quality dashboard → invoke /health
 
+## Multi-workspace dogfooding
+
+Canopy is its own dogfood: developers run multiple parallel worktrees (one per
+in-flight feature), each with its own `./canopy` build. Three rules keep these
+from interfering with each other.
+
+1. **NEVER run bare `canopy` for testing inside a worktree.** The bare command
+   resolves to whatever `~/.local/bin/canopy` (a symlink) currently points at,
+   which may be a different workspace's binary OR the released `canopy.bin`.
+   Testing through it gives signal about somebody else's code, not yours.
+
+2. **Always invoke your workspace's local build:**
+   - `./canopy <cmd>` from the worktree root, or
+   - `/tmp/canopy-XX <cmd>` (XX = initials of your workspace name; e.g.
+     `/tmp/canopy-iw` for `install-and-dev-workflow`).
+
+   Both of these are stable per-workspace paths that don't collide across
+   parallel agents. The auto-build hook keeps them fresh after canopy
+   feature changes.
+
+3. **The global `canopy` (the `~/.local/bin/canopy` symlink) belongs to the
+   user's interactive flow.** Treat it as user state, not Claude state. If
+   the user asks "make my workspace the active canopy," run:
+   - `canopy use <workspace-name>` from anywhere, or
+   - `make dev` from inside that worktree.
+
+   Either flips the global symlink at this workspace's `./canopy`. The user
+   can flip back to released with `canopy use release` (or `make release`).
+   Both surfaces show the active state in the TUI status bar (gray release
+   pill vs cyan DEV pill) and in the tmux statusline (`[DEV:<workspace>]`
+   suffix). If those indicators look wrong after a switch, treat it as a
+   bug and surface it.
+
 ## Testing
 
 `go test ./...` runs unit tests fast (<5s).

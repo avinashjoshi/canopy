@@ -114,6 +114,7 @@ func main() {
 	root.AddCommand(newStatuslineCmd())
 	root.AddCommand(newInstallCmd())
 	root.AddCommand(newRunCmd())
+	root.AddCommand(newUseCmd())
 
 	if err := root.Execute(); err != nil {
 		// cobra has already printed the error; just exit non-zero.

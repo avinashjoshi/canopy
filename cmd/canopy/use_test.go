@@ -1,0 +1,473 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/oncactus/canopy/internal/state"
+)
+
+// TestAtomicSymlink_replacesExisting: a pre-existing symlink to one
+// target gets atomically retargeted at another. Replicates the core
+// switching primitive `canopy use` exists for.
+func TestAtomicSymlink_replacesExisting(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "canopy")
+
+	// First link → "canopy.bin"
+	if err := atomicSymlink("canopy.bin", link); err != nil {
+		t.Fatalf("first symlink: %v", err)
+	}
+	if got, _ := os.Readlink(link); got != "canopy.bin" {
+		t.Fatalf("after first: got %q, want %q", got, "canopy.bin")
+	}
+
+	// Retarget → "/abs/path/canopy"
+	target := filepath.Join(dir, "abs", "canopy")
+	if err := atomicSymlink(target, link); err != nil {
+		t.Fatalf("retarget: %v", err)
+	}
+	if got, _ := os.Readlink(link); got != target {
+		t.Errorf("after retarget: got %q, want %q", got, target)
+	}
+
+	// No leftover tempfiles in dir.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".canopy-symlink-tmp-") {
+			t.Errorf("leftover tempfile after atomic replace: %s", e.Name())
+		}
+	}
+}
+
+// TestAtomicSymlink_createsParent: when the parent dir doesn't exist
+// yet (fresh install, ~/.local/bin not created), atomicSymlink mkdirs
+// before linking. install.sh and `make install` should never have to
+// pre-create the dir.
+func TestAtomicSymlink_createsParent(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "newdir", "subdir", "canopy")
+
+	if err := atomicSymlink("canopy.bin", link); err != nil {
+		t.Fatalf("symlink with missing parent: %v", err)
+	}
+	if got, _ := os.Readlink(link); got != "canopy.bin" {
+		t.Errorf("got %q, want %q", got, "canopy.bin")
+	}
+}
+
+// TestSwitchToRelease_missingBinary refuses cleanly when canopy.bin
+// doesn't exist. The error must include the path AND the next step
+// ("run make install on main") — users shouldn't have to think.
+func TestSwitchToRelease_missingBinary(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "canopy")
+	missing := filepath.Join(dir, "canopy.bin")
+
+	var out bytes.Buffer
+	err := switchToRelease(link, missing, &out)
+	if err == nil {
+		t.Fatal("expected error when canopy.bin is missing; got nil")
+	}
+	if !strings.Contains(err.Error(), "no release binary") {
+		t.Errorf("error should mention 'no release binary'; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "make install") {
+		t.Errorf("error should suggest 'make install'; got %v", err)
+	}
+	// Symlink should NOT have been created.
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("symlink should not exist on refusal; lstat err=%v", err)
+	}
+}
+
+// TestSwitchToRelease_happyPath: with canopy.bin present, the symlink
+// points at the relative target "canopy.bin" (not the absolute path)
+// so moving ~/.local/bin doesn't break the link.
+func TestSwitchToRelease_happyPath(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "canopy")
+	real := filepath.Join(dir, "canopy.bin")
+	if err := os.WriteFile(real, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("seed canopy.bin: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := switchToRelease(link, real, &out); err != nil {
+		t.Fatalf("switchToRelease: %v", err)
+	}
+	got, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if got != "canopy.bin" {
+		t.Errorf("symlink target: got %q, want relative %q", got, "canopy.bin")
+	}
+	for _, want := range []string{"Active:", "canopy.bin", "Mode:   release"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output missing %q; got:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestSwitchToWorkspace_unknownName: an unknown workspace name returns
+// an error listing the available alternatives. This is the "you typed
+// it wrong" UX — the user shouldn't need to re-run `canopy use` to see
+// what they could have meant.
+func TestSwitchToWorkspace_unknownName(t *testing.T) {
+	st := &state.State{
+		Workspaces: []state.Workspace{
+			{Name: "feature-A", Path: "/some/path/A"},
+			{Name: "feature-B", Path: "/some/path/B"},
+		},
+	}
+	err := errUnknownWorkspace("featuer-A", st) // typo
+	if err == nil {
+		t.Fatal("expected error for unknown name")
+	}
+	msg := err.Error()
+	for _, want := range []string{"unknown target", "featuer-A", "feature-A", "feature-B", "release"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error missing %q; got %v", want, err)
+		}
+	}
+}
+
+// TestFindWorkspaceByName: linear lookup must match exactly; partial
+// matches and case mismatches return nil so we never auto-pick a
+// neighbor. Hits both branches (found / not found) and the nil-state
+// guard.
+func TestFindWorkspaceByName(t *testing.T) {
+	st := &state.State{
+		Workspaces: []state.Workspace{
+			{Name: "feature-A", Path: "/A"},
+			{Name: "feature-B", Path: "/B"},
+		},
+	}
+	cases := []struct {
+		name      string
+		input     string
+		wantFound bool
+	}{
+		{"exact", "feature-A", true},
+		{"second", "feature-B", true},
+		{"unknown", "feature-C", false},
+		{"empty", "", false},
+		{"case_mismatch", "Feature-A", false},
+		{"prefix_only", "feature", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := findWorkspaceByName(st, tc.input)
+			if (ws != nil) != tc.wantFound {
+				t.Errorf("findWorkspaceByName(%q): got %v, wantFound=%v", tc.input, ws, tc.wantFound)
+			}
+		})
+	}
+
+	// Defensive: nil state must not panic.
+	if got := findWorkspaceByName(nil, "anything"); got != nil {
+		t.Errorf("nil state should return nil; got %v", got)
+	}
+}
+
+// TestSwitchToWorkspace_missingDevBin: workspace exists in state but
+// ./canopy hasn't been built. Refuse with a message that suggests both
+// `make build` AND `canopy use --build`.
+func TestSwitchToWorkspace_missingDevBin(t *testing.T) {
+	dir := t.TempDir()
+	worktree := filepath.Join(dir, "worktree")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	canopyHome := filepath.Join(dir, ".canopy")
+	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
+		t.Fatalf("mkdir canopy home: %v", err)
+	}
+	t.Setenv("HOME", dir)
+
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{
+			{Name: "feature-X", Path: worktree},
+		},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	link := filepath.Join(dir, ".local", "bin", "canopy")
+	var out bytes.Buffer
+	err := switchToWorkspace(context.Background(), "feature-X", false, link, &out)
+	if err == nil {
+		t.Fatal("expected error when ./canopy missing")
+	}
+	for _, want := range []string{"no dev binary", "make build", "canopy use --build feature-X"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q; got %v", want, err)
+		}
+	}
+	// Symlink should NOT exist.
+	if _, err := os.Lstat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("symlink should not be created on failure")
+	}
+}
+
+// TestSwitchToWorkspace_happyPath: workspace exists, ./canopy built →
+// symlink points at the absolute dev binary path.
+func TestSwitchToWorkspace_happyPath(t *testing.T) {
+	dir := t.TempDir()
+	worktree := filepath.Join(dir, "worktree")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	devBin := filepath.Join(worktree, "canopy")
+	if err := os.WriteFile(devBin, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("seed dev binary: %v", err)
+	}
+	canopyHome := filepath.Join(dir, ".canopy")
+	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
+		t.Fatalf("mkdir canopy home: %v", err)
+	}
+	t.Setenv("HOME", dir)
+
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{
+			{Name: "feature-X", Path: worktree},
+		},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	link := filepath.Join(dir, ".local", "bin", "canopy")
+	var out bytes.Buffer
+	if err := switchToWorkspace(context.Background(), "feature-X", false, link, &out); err != nil {
+		t.Fatalf("switchToWorkspace: %v", err)
+	}
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != devBin {
+		t.Errorf("symlink target: got %q, want %q", target, devBin)
+	}
+	if !strings.Contains(out.String(), "Mode:   DEV") {
+		t.Errorf("output missing 'Mode:   DEV'; got:\n%s", out.String())
+	}
+}
+
+// TestSwitchToWorkspace_buildFlag exercises --build. Stubs the build
+// function so the test stays unit-scoped (no real go-toolchain fork).
+// The goBuildInWorktree var pattern is the testability seam.
+func TestSwitchToWorkspace_buildFlag(t *testing.T) {
+	prev := goBuildInWorktree
+	t.Cleanup(func() { goBuildInWorktree = prev })
+
+	buildCalls := 0
+	dir := t.TempDir()
+	worktree := filepath.Join(dir, "worktree")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	devBin := filepath.Join(worktree, "canopy")
+
+	// Stub: when "build" is invoked, write the binary file. This
+	// simulates a real go build without running go.
+	goBuildInWorktree = func(ctx context.Context, d string) error {
+		if d != worktree {
+			t.Errorf("build called with wrong dir: got %q, want %q", d, worktree)
+		}
+		buildCalls++
+		return os.WriteFile(devBin, []byte("fake-built"), 0o755)
+	}
+
+	canopyHome := filepath.Join(dir, ".canopy")
+	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
+		t.Fatalf("mkdir canopy home: %v", err)
+	}
+	t.Setenv("HOME", dir)
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{
+			{Name: "feature-X", Path: worktree},
+		},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	link := filepath.Join(dir, ".local", "bin", "canopy")
+	var out bytes.Buffer
+	if err := switchToWorkspace(context.Background(), "feature-X", true, link, &out); err != nil {
+		t.Fatalf("switchToWorkspace --build: %v", err)
+	}
+	if buildCalls != 1 {
+		t.Errorf("expected 1 build call, got %d", buildCalls)
+	}
+	if !strings.Contains(out.String(), "Building canopy") {
+		t.Errorf("output missing 'Building canopy' progress; got:\n%s", out.String())
+	}
+	if got, _ := os.Readlink(link); got != devBin {
+		t.Errorf("symlink target: got %q, want %q", got, devBin)
+	}
+}
+
+// TestPrintUseList_lists releases and workspaces, with built-status.
+// Covers: active line, header, release row with timestamp, workspace
+// rows with built-or-not, sorted alphabetically.
+func TestPrintUseList(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	// Seed canopy.bin with mtime ~2h ago so "built 2h ago" surfaces.
+	binReal := filepath.Join(binDir, "canopy.bin")
+	if err := os.WriteFile(binReal, []byte("rel"), 0o755); err != nil {
+		t.Fatalf("seed canopy.bin: %v", err)
+	}
+	twoHoursAgo := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(binReal, twoHoursAgo, twoHoursAgo); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	link := filepath.Join(binDir, "canopy")
+	if err := os.Symlink("canopy.bin", link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	canopyHome := filepath.Join(dir, ".canopy")
+	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
+		t.Fatalf("mkdir canopy home: %v", err)
+	}
+	t.Setenv("HOME", dir)
+
+	// One workspace built (./canopy exists), one not built.
+	wtA := filepath.Join(dir, "wsA")
+	wtB := filepath.Join(dir, "wsB")
+	if err := os.MkdirAll(wtA, 0o755); err != nil {
+		t.Fatalf("mkdir A: %v", err)
+	}
+	if err := os.MkdirAll(wtB, 0o755); err != nil {
+		t.Fatalf("mkdir B: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wtA, "canopy"), []byte("dev"), 0o755); err != nil {
+		t.Fatalf("seed A canopy: %v", err)
+	}
+
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{
+			// Saved out of alphabetical order to verify sort.
+			{Name: "feature-B", Path: wtB},
+			{Name: "feature-A", Path: wtA},
+		},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := printUseList(context.Background(), &out, link, binReal); err != nil {
+		t.Fatalf("printUseList: %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		"Active:",
+		"-> canopy.bin",
+		"Available targets:",
+		"release",
+		"feature-A",
+		"feature-B",
+		"(not built)", // wsB has no ./canopy
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output:\n%s", want, got)
+		}
+	}
+
+	// Alphabetical: feature-A appears before feature-B.
+	idxA := strings.Index(got, "feature-A")
+	idxB := strings.Index(got, "feature-B")
+	if idxA == -1 || idxB == -1 || idxA > idxB {
+		t.Errorf("workspaces not sorted alphabetically; A@%d B@%d:\n%s", idxA, idxB, got)
+	}
+}
+
+// TestBuiltAgo covers all four bucket boundaries (just-now, minutes,
+// hours, days) plus the "(not built)" path. The user's status display
+// reads this directly, so each bucket is a user-visible string.
+func TestBuiltAgo(t *testing.T) {
+	dir := t.TempDir()
+
+	// not built
+	if got := builtAgo(filepath.Join(dir, "missing")); got != "(not built)" {
+		t.Errorf("missing file: got %q, want %q", got, "(not built)")
+	}
+
+	cases := []struct {
+		name       string
+		offset     time.Duration
+		wantPrefix string
+	}{
+		{"just_now", -10 * time.Second, "built just now"},
+		{"minutes", -5 * time.Minute, "built 5m ago"},
+		{"hours", -3 * time.Hour, "built 3h ago"},
+		{"days", -49 * time.Hour, "built 2d ago"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, tc.name)
+			if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			ts := time.Now().Add(tc.offset)
+			if err := os.Chtimes(path, ts, ts); err != nil {
+				t.Fatalf("chtimes: %v", err)
+			}
+			got := builtAgo(path)
+			if got != tc.wantPrefix {
+				t.Errorf("got %q, want %q", got, tc.wantPrefix)
+			}
+		})
+	}
+}
+
+// TestRunUse_buildWithoutTarget: --build without a workspace argument
+// is a usage error. The flag only makes sense paired with a target.
+func TestRunUse_buildWithoutTarget(t *testing.T) {
+	cmd := newUseCmd()
+	cmd.SetArgs([]string{"--build"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --build with no target")
+	}
+	if !strings.Contains(err.Error(), "requires a workspace target") {
+		t.Errorf("error should explain --build needs a target; got %v", err)
+	}
+}
+
+// TestRunUse_buildWithRelease: --build release is also a usage error;
+// you don't rebuild the released binary via this path. (Use `make
+// install` on main for that.)
+func TestRunUse_buildWithRelease(t *testing.T) {
+	cmd := newUseCmd()
+	cmd.SetArgs([]string{"--build", "release"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --build release")
+	}
+	if !strings.Contains(err.Error(), "only valid with a workspace target") {
+		t.Errorf("error should refuse --build release; got %v", err)
+	}
+}
