@@ -5,6 +5,68 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-04-30 — Cross-project new workspace + picker chrome polish
+
+`n` (new workspace) now works from the Global tab. Press `n` on any row and
+canopy creates a workspace in that row's project, mirroring how `d`/`R`/`K`
+already follow the cursor cross-project. The two-step `o` then `n` ritual is
+gone; one keystroke does what one keystroke should.
+
+To make cross-project intent unmissable, every screen in the new-workspace
+flow (variant picker, fresh / PR / issue / branch sub-modals, busy view)
+now leads with a "creating in `<project>`" banner — brand-violet chip,
+repo path beside it. The chip carries through to the success line:
+"Workspace created in cravd."
+
+The new flow's chrome also got pulled into the rest of the TUI's visual
+vocabulary. Variant picker letters render as the same key pill the help
+line uses, dropping the red-error-coded brackets they used to wear.
+PR/issue/branch sub-modals lost their bespoke filter input in favor of
+the main TUI's `🔍 FILTER` pill with the same `▏` caret. Cursor caret
+unified across the variant picker and all three sub-modals to match the
+main workspace list's `❯` marker — one indicator per cursor position,
+TUI-wide.
+
+### Added
+
+- **Cross-project `n` from the Global tab.** `availableNewWorkspace` now
+  fires when the cursor row has a non-empty `ProjectRoot`. The action
+  resolves the target project via `managerForRow(cursor)` (the same
+  primitive `d`/`R`/`K` already use), surfaces config-load errors via
+  `m.err` rather than panicking, and stores the resolved Manager + name
+  + root in three new model fields (`newTargetMgr`, `newTargetRoot`,
+  `newTargetName`) used by every submit + loader in the flow.
+- **Project banner on every new-workspace screen.** A new
+  `renderTargetBanner` helper emits "creating in" + brand-violet
+  rounded chip + dim project root. Injected at the top of
+  `renderNewPicker`, `renderNewFresh`, `renderNewPR`, `renderNewIssue`,
+  `renderNewBranch`, and the busy view's create branch.
+- **Project name in the create success line.** "Workspace created in
+  `<project>`." closes the loop the banner opened. Empty project name
+  falls back to the legacy generic line.
+
+### Changed
+
+- **Variant picker shortcut letters** render as `keyPillStyle` (the
+  inverted-bg pill the help line uses), no longer wrapped in `[ ]` and
+  no longer borrowing `brokenStyle`'s error red. Pill chrome implies
+  "press this" — same convention the rest of the TUI already used.
+- **PR / issue / branch sub-modal filters** replaced their bespoke
+  "PR number or filter:" / "Filter:" labels with the main TUI's
+  `🔍 FILTER` pill (`searchLabelStyle` + `searchInputStyle`).
+  Per-modal guidance moves to a dim hint to the right of the pill,
+  visible only when the value is empty. Caret renders as `▏` matching
+  the main TUI's search line, since `bubbles/textinput.View()`'s block
+  cursor fights canopy's vocabulary; we read `Value()` and compose the
+  caret manually.
+- **Cursor caret unified to `❯`** across the variant picker (was `>`)
+  and all three sub-modals (was `●`), matching the main workspace
+  list's selected-row glyph.
+- **`branchInWorkspace`** scope check now follows the in-flight
+  new-flow target when set, so the "(in workspace X)" tag in the
+  PR/branch picker reflects the target project — not the launch
+  context.
+
 ## [0.10.0] - 2026-04-30 — Workspace health, diagnostics, and machine-load visibility
 
 A complete pass on workspace health and observability. The TUI list page
