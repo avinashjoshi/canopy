@@ -184,51 +184,105 @@ func TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext(t *testing.T) {
 	}
 }
 
-// TestHandleKey_NDisabledOnGlobalTab: `n` (new workspace) is hidden +
-// no-op when the user is on the Global tab — n requires a current-project
-// Manager because it walks up canopy.json from cwd. The asymmetry with
-// d/R (which work cross-project) is documented in the unification plan.
+// TestHandleKey_NOnGlobalTab covers the v0.10+ cross-project `n` flow.
+// Global tab no longer hides `n` outright; it derives the target project
+// from the cursor row (mirroring how d/R/K already work). The two cases
+// here pin both halves of the predicate: with a row, n is available and
+// opens the picker; without one (or with a row missing ProjectRoot),
+// n stays a no-op so the binding's help-line entry disappears too.
 //
-// E1 follow-on: with the bindings-table refactor, an unavailable binding
-// doesn't fire its Action AT ALL — no err set, no mode change, completely
-// silent. This is cleaner than the v0.7 "set m.err with a hint" approach
-// because the help line already hides the key, so a user who types `n`
-// on the Global tab sees nothing happen, which matches the visual cue.
-func TestHandleKey_NDisabledOnGlobalTab(t *testing.T) {
-	m := newTestModel(false)
-	m.tab = tabGlobal
-	m.mgr = nil // Global mode: no current-project Manager
-	m.setTestRows([]Row{
-		{Project: "other", ProjectRoot: "/some/other", Name: "ws-1", Status: state.StatusReady},
+// Bindings-table semantics: a binding whose Available returns false
+// doesn't fire its Action — no err set, no mode change, silent. The
+// visual cue (n missing from help) does the user-facing signaling.
+func TestHandleKey_NOnGlobalTab(t *testing.T) {
+	t.Run("with cursor row → opens picker (cross-project)", func(t *testing.T) {
+		m := newTestModel(false)
+		m.tab = tabGlobal
+		// Cursor row's ProjectRoot will be loaded by managerForRow.
+		// Use the test model's own project (which newTestModel set up
+		// with Cfg.ProjectRoot = "/tmp/test-project") so managerForRow
+		// hits the m.mgr fast-path and skips config.LoadFrom.
+		m.setTestRows([]Row{
+			{Project: "test-project", ProjectRoot: "/tmp/test-project", Name: "ws-1", Status: state.StatusReady},
+		})
+
+		model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+		got := model.(*Model)
+		if got.mode != newPickerMode {
+			t.Errorf("n on Global tab w/ row: mode = %v; want newPickerMode", got.mode)
+		}
+		if got.newTargetMgr == nil {
+			t.Errorf("newTargetMgr unset; want target resolved from cursor row")
+		}
+		if got.newTargetRoot != "/tmp/test-project" {
+			t.Errorf("newTargetRoot = %q; want /tmp/test-project", got.newTargetRoot)
+		}
+		if got.newTargetName != "test-project" {
+			t.Errorf("newTargetName = %q; want test-project", got.newTargetName)
+		}
 	})
 
-	model, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	got := model.(*Model)
-	if got.mode != listMode {
-		t.Errorf("after n on Global tab: mode = %v; want listMode (n must no-op)", got.mode)
-	}
-	if cmd != nil {
-		t.Errorf("after n on Global tab: cmd != nil; want nil (no-op)")
-	}
-	// Bindings table filters by Available before dispatch, so no err
-	// is set on disabled-key press. Visual cue (n missing from help)
-	// is the user-facing signal.
+	t.Run("no rows → silent no-op", func(t *testing.T) {
+		m := newTestModel(false)
+		m.mgr = nil // Pure global-mode invocation (canopy from outside any project).
+		m.tab = tabGlobal
+		m.setTestRows(nil)
+
+		model, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+		got := model.(*Model)
+		if got.mode != listMode {
+			t.Errorf("n on empty Global tab: mode = %v; want listMode", got.mode)
+		}
+		if cmd != nil {
+			t.Errorf("n on empty Global tab: cmd = %v; want nil (no-op)", cmd)
+		}
+		if got.newTargetMgr != nil {
+			t.Errorf("newTargetMgr set without resolution; want nil")
+		}
+	})
+
+	t.Run("row missing ProjectRoot → silent no-op", func(t *testing.T) {
+		m := newTestModel(false)
+		m.tab = tabGlobal
+		m.setTestRows([]Row{
+			{Project: "ghost", ProjectRoot: "", Name: "orphan", Status: state.StatusReady},
+		})
+
+		model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+		got := model.(*Model)
+		if got.mode != listMode {
+			t.Errorf("n on row w/ empty ProjectRoot: mode = %v; want listMode", got.mode)
+		}
+	})
 }
 
 // TestAvailableNewWorkspace exercises the binding's Available predicate
 // directly. Both the help-line filter AND the dispatch gate read from
 // this; one source of truth for "is n usable right now."
+//
+// v0.10+ broadened semantics: Global tab is now a yes when the cursor
+// row has a non-empty ProjectRoot — managerForRow does the heavy lift
+// at action time. We deliberately don't require m.mgr on the Global
+// path so canopy launched from outside any project still gets `n`
+// once the user points at a row.
 func TestAvailableNewWorkspace(t *testing.T) {
+	type rowSpec struct {
+		project, root string
+	}
 	cases := []struct {
 		name string
 		mgr  bool
 		tab  tabKind
+		rows []rowSpec
 		want bool
 	}{
-		{"mgr + Local → enabled", true, tabLocal, true},
-		{"mgr + Global → disabled (cross-project n is meaningless)", true, tabGlobal, false},
-		{"no mgr + Local → disabled (no canopy.json context)", false, tabLocal, false},
-		{"no mgr + Global → disabled", false, tabGlobal, false},
+		{"mgr + Local → enabled", true, tabLocal, nil, true},
+		{"no mgr + Local → disabled (no canopy.json context)", false, tabLocal, nil, false},
+		{"mgr + Global w/ row+root → enabled (cross-project)", true, tabGlobal, []rowSpec{{"p", "/tmp/p"}}, true},
+		{"no mgr + Global w/ row+root → enabled (pure-global launch)", false, tabGlobal, []rowSpec{{"p", "/tmp/p"}}, true},
+		{"mgr + Global w/ no rows → disabled", true, tabGlobal, nil, false},
+		{"no mgr + Global w/ no rows → disabled", false, tabGlobal, nil, false},
+		{"Global w/ row missing ProjectRoot → disabled", true, tabGlobal, []rowSpec{{"p", ""}}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,13 +291,120 @@ func TestAvailableNewWorkspace(t *testing.T) {
 				m.mgr = nil
 			}
 			m.tab = tc.tab
+			rows := make([]Row, 0, len(tc.rows))
+			for _, r := range tc.rows {
+				rows = append(rows, Row{Project: r.project, ProjectRoot: r.root, Name: "ws", Status: state.StatusReady})
+			}
+			m.setTestRows(rows)
 			got := availableNewWorkspace(m)
 			if got != tc.want {
-				t.Errorf("availableNewWorkspace(mgr=%v, tab=%v) = %v; want %v",
-					tc.mgr, tc.tab, got, tc.want)
+				t.Errorf("availableNewWorkspace(mgr=%v, tab=%v, rows=%v) = %v; want %v",
+					tc.mgr, tc.tab, tc.rows, got, tc.want)
 			}
 		})
 	}
+}
+
+// TestActionNewWorkspace_Local: from Local tab, n populates newTargetMgr
+// from m.mgr (the launch-context Manager). Title/root mirror the project
+// the user is actively working in.
+func TestActionNewWorkspace_Local(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabLocal
+
+	model, _ := actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	got := model.(*Model)
+	if got.mode != newPickerMode {
+		t.Fatalf("mode = %v; want newPickerMode", got.mode)
+	}
+	if got.newTargetMgr != m.mgr {
+		t.Errorf("newTargetMgr = %p; want m.mgr (%p)", got.newTargetMgr, m.mgr)
+	}
+	if got.newTargetRoot != m.mgr.Cfg.ProjectRoot {
+		t.Errorf("newTargetRoot = %q; want %q", got.newTargetRoot, m.mgr.Cfg.ProjectRoot)
+	}
+	if got.newTargetName != m.mgr.Cfg.Project {
+		t.Errorf("newTargetName = %q; want %q", got.newTargetName, m.mgr.Cfg.Project)
+	}
+}
+
+// TestActionNewWorkspace_ClearsOnEsc: pressing esc out of the picker
+// clears the in-flight new-workspace target so the next `n` press
+// starts from a clean slate.
+func TestActionNewWorkspace_ClearsOnEsc(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabLocal
+	model, _ := actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m = model.(*Model)
+	if m.newTargetMgr == nil {
+		t.Fatal("setup: newTargetMgr should be set after actionNewWorkspace")
+	}
+
+	model, _ = m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyEsc})
+	got := model.(*Model)
+	if got.mode != listMode {
+		t.Errorf("after esc: mode = %v; want listMode", got.mode)
+	}
+	if got.newTargetMgr != nil || got.newTargetRoot != "" || got.newTargetName != "" {
+		t.Errorf("after esc: newTarget* should be cleared; got mgr=%v root=%q name=%q",
+			got.newTargetMgr != nil, got.newTargetRoot, got.newTargetName)
+	}
+}
+
+// TestRenderTargetBanner_ShowsProjectName: the banner must render the
+// target project as a primary identifier (chip + path), not subtle
+// chrome — load-bearing for cross-project intent clarity.
+func TestRenderTargetBanner_ShowsProjectName(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetName = "cravd"
+	m.newTargetRoot = "/Users/avi/Work/cravd"
+
+	out := stripAnsi(m.renderTargetBanner())
+	if !strings.Contains(out, "creating in") {
+		t.Errorf("banner missing 'creating in' label: %q", out)
+	}
+	if !strings.Contains(out, "cravd") {
+		t.Errorf("banner missing project name: %q", out)
+	}
+	if !strings.Contains(out, "/Users/avi/Work/cravd") {
+		t.Errorf("banner missing project root: %q", out)
+	}
+}
+
+// TestRenderTargetBanner_EmptyWhenUnset: outside the new-workspace flow
+// the banner returns "" so render paths that include it (busy view's
+// non-create ops, future call sites) emit nothing rather than a stray
+// blank line.
+func TestRenderTargetBanner_EmptyWhenUnset(t *testing.T) {
+	m := newTestModel(false)
+	if got := m.renderTargetBanner(); got != "" {
+		t.Errorf("renderTargetBanner with no target = %q; want empty string", got)
+	}
+}
+
+// TestBusySuccessMessage_CreateNamesProject: the success line for a
+// completed create includes the target project so the banner's promise
+// ("creating in cravd") is fulfilled at completion ("created in cravd").
+// Empty projectName falls back to the legacy generic message.
+func TestBusySuccessMessage_CreateNamesProject(t *testing.T) {
+	t.Run("create with project → named line", func(t *testing.T) {
+		got := busySuccessMessage(busyOpCreate, "cravd")
+		if !strings.Contains(got, "cravd") {
+			t.Errorf("create success = %q; want it to name the project", got)
+		}
+	})
+	t.Run("create without project → generic line", func(t *testing.T) {
+		got := busySuccessMessage(busyOpCreate, "")
+		if got != "Workspace created successfully." {
+			t.Errorf("create success (no project) = %q; want generic legacy line", got)
+		}
+	})
+	t.Run("remove ignores projectName", func(t *testing.T) {
+		got := busySuccessMessage(busyOpRemove, "cravd")
+		if got != "Workspace removed." {
+			t.Errorf("remove success = %q; want 'Workspace removed.'", got)
+		}
+	})
 }
 
 // TestHandleKey_SearchEntry: pressing "/" enters search mode and
@@ -498,22 +659,35 @@ func TestRenderHelpLine_TabSwitch(t *testing.T) {
 		}
 	})
 
-	t.Run("Global tab → n hidden", func(t *testing.T) {
+	t.Run("Global tab w/ row → n shown (cross-project)", func(t *testing.T) {
 		m := newTestModel(false)
 		m.tab = tabGlobal
+		m.setTestRows([]Row{
+			{Project: "test-project", ProjectRoot: "/tmp/test-project", Name: "ws", Status: state.StatusReady},
+		})
 		out := stripAnsi(m.renderHelpLine())
-		if strings.Contains(out, "new") {
-			t.Errorf("Global tab help should not show 'new' desc: %q", out)
+		if !strings.Contains(out, "new") {
+			t.Errorf("Global tab w/ row help should show 'new' desc (cross-project n): %q", out)
 		}
 	})
 
-	t.Run("nil mgr → n hidden even on Local tab", func(t *testing.T) {
+	t.Run("Global tab w/ no rows → n hidden", func(t *testing.T) {
+		m := newTestModel(false)
+		m.tab = tabGlobal
+		m.setTestRows(nil)
+		out := stripAnsi(m.renderHelpLine())
+		if strings.Contains(out, "new") {
+			t.Errorf("Global tab w/o rows should not show 'new' desc: %q", out)
+		}
+	})
+
+	t.Run("nil mgr + Local tab → n hidden", func(t *testing.T) {
 		m := newTestModel(false)
 		m.mgr = nil
 		m.tab = tabLocal
 		out := stripAnsi(m.renderHelpLine())
 		if strings.Contains(out, "new") {
-			t.Errorf("nil mgr help should not show 'new' desc: %q", out)
+			t.Errorf("nil mgr Local help should not show 'new' desc: %q", out)
 		}
 	})
 }
@@ -1381,4 +1555,164 @@ func TestFillMainBranches_DetectsOriginMain(t *testing.T) {
 	if rows[0].Branch != "main" {
 		t.Errorf("main row Branch = %q; want %q", rows[0].Branch, "main")
 	}
+}
+
+// TestRenderNewPicker_NoBracketRegression: variant picker shortcut
+// letters used to render as `[n] `, `[p] ` etc. wrapped in
+// brokenStyle (red 196 — same hue as broken-status workspaces and
+// error banners). The new style uses keyPillStyle: the pill chrome
+// itself implies "press this," so the literal brackets are gone.
+//
+// Asserting structurally (no `[n]` in the output) rather than against
+// SGR color codes — lipgloss strips colors when there's no TTY, so a
+// color-based check would silently pass even if the brokenStyle wrap
+// came back. Bracket presence is a stable structural signal.
+func TestRenderNewPicker_NoBracketRegression(t *testing.T) {
+	m := newTestModel(false)
+	// Banner needs a target so the picker renders cleanly.
+	m.newTargetName = "test-project"
+	m.newTargetRoot = "/tmp/test-project"
+
+	out := stripAnsi(m.renderNewPicker())
+
+	for _, opt := range newPickerOptions {
+		bracket := "[" + opt.key + "]"
+		if strings.Contains(out, bracket) {
+			t.Errorf("variant picker rendered literal %q — regression to red-bracket era. want keyPillStyle pill chrome.\noutput:\n%s",
+				bracket, out)
+		}
+		if !strings.Contains(out, opt.key) {
+			t.Errorf("variant picker missing shortcut letter %q in output:\n%s",
+				opt.key, out)
+		}
+	}
+
+	// Positive check via the same render pipeline: the pill chrome
+	// for the cursor row's letter is what keyPillStyle.Render emits.
+	// Comparing the rendered substring is profile-agnostic — works
+	// in both colored and stripped output.
+	wantPill := keyPillStyle.Render(newPickerOptions[m.newPickerCursor].key)
+	if !strings.Contains(m.renderNewPicker(), wantPill) {
+		t.Errorf("variant picker missing expected keyPillStyle render for cursor letter %q",
+			newPickerOptions[m.newPickerCursor].key)
+	}
+}
+
+// TestRenderFilterPill_CaretMatchesMainScreen: the filter pill caret
+// must be "▏" (a thin vertical bar) — same as renderSearchLine's
+// caret. The block-cursor that bubbles' textinput.View() emits would
+// look out of place against the main TUI's vocabulary.
+func TestRenderFilterPill_CaretMatchesMainScreen(t *testing.T) {
+	ti := textinput.New()
+	ti.SetValue("foo")
+	out := renderFilterPill(ti)
+	if !strings.Contains(out, "▏") {
+		t.Errorf("filter pill missing main-screen caret '▏': %q", out)
+	}
+	if !strings.Contains(stripAnsi(out), "foo▏") {
+		t.Errorf("caret should sit immediately after typed value; got: %q",
+			stripAnsi(out))
+	}
+}
+
+// TestRenderFilterPill_LabelIsFilter: pill label is "🔍 FILTER" (not
+// "SEARCH") because this narrows a fixed list rather than searching
+// across all rows. Same chrome family as the main TUI, different verb.
+func TestRenderFilterPill_LabelIsFilter(t *testing.T) {
+	ti := textinput.New()
+	out := stripAnsi(renderFilterPill(ti))
+	if !strings.Contains(out, "🔍 FILTER") {
+		t.Errorf("filter pill missing 'FILTER' label: %q", out)
+	}
+	if strings.Contains(out, "SEARCH") {
+		t.Errorf("filter pill should NOT use SEARCH label (that's the main-screen verb): %q", out)
+	}
+}
+
+// TestNewFlow_CursorCaretUnified: every screen in the new-workspace
+// flow (variant picker + PR + issue + branch) uses the same "❯ "
+// cursor caret that the main workspace list uses. One vocabulary
+// across the TUI — the eye reads "here's what's selected" without
+// learning a per-modal indicator.
+//
+// Catches the v0.10 era where the variant picker used "> " and the
+// sub-modals used "● " — three different cursor glyphs in flows the
+// user moves between in the same task. Regression test: if anyone
+// re-introduces a per-screen caret, this fails loudly with the
+// rendered output.
+func TestNewFlow_CursorCaretUnified(t *testing.T) {
+	const wantCaret = "  ❯ "
+
+	t.Run("variant picker", func(t *testing.T) {
+		m := newTestModel(false)
+		m.newTargetName = "test-project"
+		m.newTargetRoot = "/tmp/test-project"
+		out := stripAnsi(m.renderNewPicker())
+		if !strings.Contains(out, wantCaret) {
+			t.Errorf("variant picker missing %q caret:\n%s", wantCaret, out)
+		}
+	})
+
+	t.Run("PR picker", func(t *testing.T) {
+		m := newTestModel(false)
+		m.mode = newPRMode
+		m.newTargetName = "test-project"
+		m.newPRs = []ghx.PRSummary{{Number: 1, Title: "x", HeadRefName: "x"}}
+		out := stripAnsi(m.renderNewPR())
+		if !strings.Contains(out, wantCaret) {
+			t.Errorf("PR picker missing %q caret:\n%s", wantCaret, out)
+		}
+	})
+
+	t.Run("issue picker", func(t *testing.T) {
+		m := newTestModel(false)
+		m.mode = newIssueMode
+		m.newTargetName = "test-project"
+		m.newIssues = []ghx.IssueSummary{{Number: 1, Title: "x"}}
+		out := stripAnsi(m.renderNewIssue())
+		if !strings.Contains(out, wantCaret) {
+			t.Errorf("issue picker missing %q caret:\n%s", wantCaret, out)
+		}
+	})
+
+	t.Run("branch picker", func(t *testing.T) {
+		m := newTestModel(false)
+		m.mode = newBranchMode
+		m.newTargetName = "test-project"
+		m.newBranches = []string{"main"}
+		out := stripAnsi(m.renderNewBranch())
+		if !strings.Contains(out, wantCaret) {
+			t.Errorf("branch picker missing %q caret:\n%s", wantCaret, out)
+		}
+	})
+}
+
+// TestRenderFilterPill_PlaceholderShownWhenEmpty: when the user hasn't
+// typed anything, the textinput's Placeholder surfaces as a dim hint
+// to the right of the pill so per-modal guidance ("type a PR number,
+// or arrow to a row below") still has a home. Once the user types,
+// the hint must get out of the way — otherwise it competes with the
+// typed value for screen real estate.
+func TestRenderFilterPill_PlaceholderShownWhenEmpty(t *testing.T) {
+	ti := textinput.New()
+	ti.Placeholder = "type a PR number, or arrow to a row below"
+
+	t.Run("empty value → placeholder shown", func(t *testing.T) {
+		ti.SetValue("")
+		out := stripAnsi(renderFilterPill(ti))
+		if !strings.Contains(out, "type a PR number") {
+			t.Errorf("empty filter pill should show placeholder hint: %q", out)
+		}
+	})
+
+	t.Run("non-empty value → placeholder hidden", func(t *testing.T) {
+		ti.SetValue("1234")
+		out := stripAnsi(renderFilterPill(ti))
+		if strings.Contains(out, "type a PR number") {
+			t.Errorf("non-empty filter pill should NOT show placeholder: %q", out)
+		}
+		if !strings.Contains(out, "1234") {
+			t.Errorf("non-empty filter pill missing typed value: %q", out)
+		}
+	})
 }

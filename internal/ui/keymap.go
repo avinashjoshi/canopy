@@ -155,16 +155,30 @@ var listModeBindings = []Binding{
 	},
 }
 
-// availableNewWorkspace is the Available predicate for `n`. n is hidden
-// (and disabled) when the user is on the Global tab OR has no current-
-// project Manager — both cases lack the canopy.json walk-up that n
-// requires.
+// availableNewWorkspace is the Available predicate for `n`. Two paths:
 //
-// CP4 / D6 asymmetry: d/R work cross-project (their Available is nil =
-// always available); n is local-only because it operates on cwd, not
-// on the cursor row's project.
+//   - Local tab: needs m.mgr (the current-project Manager from canopy.json
+//     walk-up). The classic case — `n` operates on the launch-context
+//     project.
+//   - Global tab: needs a cursor row with a non-empty ProjectRoot. The
+//     row's project becomes the target; managerForRow resolves it lazily
+//     at action-time. Mirrors how d/R/K already behave for cross-project
+//     verbs.
+//
+// We deliberately don't load canopy.json here — that's a syscall. The
+// availability check stays cheap (struct-field reads); the action-time
+// resolver surfaces any load failure via m.err so the user sees a
+// status-line hint instead of silent disabling.
 func availableNewWorkspace(m *Model) bool {
-	return m.mgr != nil && m.tab == tabLocal
+	if m.tab == tabLocal {
+		return m.mgr != nil
+	}
+	// tabGlobal: need a cursor row with a project to point at.
+	row, ok := m.list.CursorRow()
+	if !ok {
+		return false
+	}
+	return row.ProjectRoot != ""
 }
 
 // availableOpenPR is the Available predicate for `p`. Hidden when the

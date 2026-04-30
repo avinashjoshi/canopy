@@ -184,6 +184,22 @@ type Model struct {
 	newIssues   []ghx.IssueSummary
 	newBranches []string // local + remote branches; remote prefixed "origin/"
 
+	// In-flight new-workspace target. Set by actionNewWorkspace before
+	// the picker opens, used by every submit/load handler in the flow,
+	// cleared when the flow exits (esc back to listMode, or busy dismiss).
+	//
+	// Decoupled from m.mgr because the Global tab's cursor may point at a
+	// project DIFFERENT from the launch-context project (m.mgr). On Local
+	// tab these all collapse to m.mgr / its config; on Global tab they're
+	// resolved from the cursor row's ProjectRoot via managerForRow.
+	//
+	// The picker, sub-modal headers, busy title, and success line all
+	// render newTargetName so the user sees which project they're
+	// creating in — load-bearing for cross-project intent clarity.
+	newTargetMgr  *workspace.Manager
+	newTargetRoot string // ProjectRoot of the target project
+	newTargetName string // display name (Cfg.Project) for the chip + headers
+
 	// Confirm-delete modal (mode == confirmDeleteMode).
 	deleteTarget string // workspace name pending removal
 	// deleteTargetRoot scopes deleteTarget to a specific project. Without
@@ -338,8 +354,18 @@ func (m *Model) branchInWorkspace(branch string) (string, bool) {
 		// project's source repo. Cross-project branch collisions are
 		// not the same conflict (each project has its own git tree).
 		// Rows with empty ProjectRoot pass through (legacy project-mode
-		// rows + tests that don't set the field).
-		if m.mgr != nil && r.ProjectRoot != "" && r.ProjectRoot != m.mgr.Cfg.ProjectRoot {
+		// rows + tests that don't set the field). Scope check uses the
+		// in-flight new-flow target when set (cross-project from Global
+		// tab); falls back to m.mgr for the Local-tab path and any
+		// caller outside the new flow.
+		scopeRoot := ""
+		switch {
+		case m.newTargetRoot != "":
+			scopeRoot = m.newTargetRoot
+		case m.mgr != nil:
+			scopeRoot = m.mgr.Cfg.ProjectRoot
+		}
+		if scopeRoot != "" && r.ProjectRoot != "" && r.ProjectRoot != scopeRoot {
 			continue
 		}
 		if r.Branch == branch {
