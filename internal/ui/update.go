@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"github.com/oncactus/canopy/internal/ghx"
 	"github.com/oncactus/canopy/internal/git"
 	"github.com/oncactus/canopy/internal/state"
+	"github.com/oncactus/canopy/internal/tmux"
 	"github.com/oncactus/canopy/internal/workspace"
 )
 
@@ -181,6 +183,49 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case drawerLoadedMsg:
+		// Stale message guard: if the user closed the drawer or
+		// re-opened on a different row, drop the stale data. Match
+		// on (Name, ProjectRoot) — Name alone collides across
+		// projects in the global TUI (e.g. two projects each having
+		// a workspace named "feature-a").
+		if m.mode != drawerMode || m.drawerRow.Name != msg.forName || m.drawerRow.ProjectRoot != msg.forRoot {
+			return m, nil
+		}
+		m.drawerProcInfo = msg.procInfo
+		m.drawerLogTail = msg.logTail
+		m.drawerSetupLog = msg.setupLog
+		m.drawerErr = msg.err
+		return m, nil
+
+	case drawerActionMsg:
+		if msg.err != nil {
+			m.drawerErr = msg.err
+		}
+		return m, nil
+
+	case drawerAttachAfterMsg:
+		// Bare attach session is ready — attach via the normal path.
+		// In popup mode this still uses tea.ExecProcess (we just
+		// created a fresh session, not switched to one). After detach,
+		// refreshCmd reloads the list and we land back on listMode.
+		m.mode = listMode
+		m.drawerRow = Row{}
+		return m, attachCmd(m.mgr, msg.session)
+
+	case killDoneMsg:
+		// `K` kill finished. Invalidate the cache for the killed
+		// session so a later resurrect re-probes immediately rather
+		// than serving up to TTL seconds of stale RSS/CPU from the
+		// dead session's pre-kill snapshot.
+		if m.memCache != nil && msg.session != "" {
+			m.memCache.Invalidate(msg.session)
+		}
+		if msg.err != nil {
+			m.err = msg.err
+		}
+		return m, m.refresh()
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -227,8 +272,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNewBranchKey(msg)
 	case confirmDeleteMode:
 		return m.handleConfirmDeleteKey(msg)
+	case confirmKillMode:
+		return m.handleConfirmKillKey(msg)
 	case confirmRetryMode:
 		return m.handleConfirmRetryKey(msg)
+	case drawerMode:
+		return m.handleDrawerKey(msg)
 	case busyMode:
 		return m.handleBusyModeKey(msg)
 	}
@@ -270,7 +319,13 @@ func actionHelpToggle(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	return m, refreshCmd(m.mgr, m.tc, m.store)
+	// Explicit refresh: user asked for fresh data, so bust the entire
+	// Mem cache. The 5s TTL is for steady-state cheap reads; `r` means
+	// "I want truth right now," not "respect the TTL."
+	if m.memCache != nil {
+		m.memCache.InvalidateAll()
+	}
+	return m, m.refresh()
 }
 
 // actionTabSwitch flips Local ↔ Global. The new filtered set is pushed
@@ -415,6 +470,125 @@ func actionDelete(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // first; popup-mode uses switch-client + tea.Quit instead of attach.
 func actionAttach(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.attachSelected()
+}
+
+// actionKill opens the confirm-kill modal for the cursor row. K kills
+// the tmux session only — state.json row (if any), worktree dir, and
+// branch all survive. Re-pressing Enter after kill resurrects: workspace
+// rows go through Manager.Resurrect, main rows go through
+// EnsureMainSession.
+//
+// Works on both workspace and main rows: K is a session-lifecycle
+// operation, not a workspace-identity operation. Killing main is no
+// more dangerous than killing a workspace session — both are
+// recoverable via Enter, and `claude --continue` keeps the AI
+// conversation history per-directory.
+//
+// Stopped/broken/orphaned rows (any row with Alive=false) are no-ops
+// — nothing to kill — surfaced as a status-line hint rather than
+// silently doing nothing.
+func actionKill(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	row, ok := m.list.CursorRow()
+	if !ok {
+		return m, nil
+	}
+	if !row.Alive {
+		label := row.Name
+		if row.IsMain {
+			label = "main session"
+		}
+		m.err = fmt.Errorf("%s has no live tmux session to kill", label)
+		return m, nil
+	}
+	m.mode = confirmKillMode
+	m.killTarget = row.Name
+	m.killTargetRoot = row.ProjectRoot
+	return m, nil
+}
+
+// handleConfirmKillKey is the keymap while the kill prompt is up.
+// y or Y kills the session; anything else cancels. Cancel-by-default
+// is the safe posture even though K is far less destructive than d.
+func (m *Model) handleConfirmKillKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "y" || msg.String() == "Y" {
+		// Resolve the target — same (Project, Name) match as confirm-delete.
+		var target Row
+		var found bool
+		for _, r := range m.filteredRows() {
+			if r.Name != m.killTarget {
+				continue
+			}
+			if m.killTargetRoot != "" && r.ProjectRoot != m.killTargetRoot {
+				continue
+			}
+			target = r
+			found = true
+			break
+		}
+		m.mode = listMode
+		m.killTarget = ""
+		m.killTargetRoot = ""
+		if !found {
+			// Row went away between modal open and confirm — treat as cancel.
+			return m, nil
+		}
+		return m, killCmd(m.tc, target.TmuxSession, target.Name)
+	}
+	// Anything else cancels.
+	m.mode = listMode
+	m.killTarget = ""
+	m.killTargetRoot = ""
+	return m, nil
+}
+
+// killDoneMsg carries the result of an async tmux kill back to Update.
+// session is plumbed through so the Update handler can invalidate the
+// load cache for the just-killed session — without that, a later
+// resurrect on the same row would serve up to TTL seconds of stale
+// RSS/CPU from the pre-kill snapshot.
+type killDoneMsg struct {
+	name    string
+	session string
+	err     error
+}
+
+// killCmd runs `tmux kill-session -t <session>` async via tea.Cmd. The
+// kill is fast (~5ms) but we still go through tea.Cmd so the UI stays
+// responsive and we can surface errors via the message channel rather
+// than blocking the Update goroutine.
+//
+// ErrSessionNotFound (the session was already dead) is treated as
+// success — the user's intent is "make this session gone," and gone
+// is gone whether we did the killing or someone else did.
+func killCmd(tc tmuxKiller, session, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		err := tc.Kill(ctx, session)
+		if err != nil && !isErrSessionNotFound(err) {
+			return killDoneMsg{name: name, session: session, err: fmt.Errorf("kill %s: %w", session, err)}
+		}
+		return killDoneMsg{name: name, session: session}
+	}
+}
+
+// tmuxKiller is the slice of *tmux.Client that killCmd needs. Decoupled
+// as an interface so tests can substitute a fake without spinning up a
+// real tmux server.
+type tmuxKiller interface {
+	Kill(ctx context.Context, name string) error
+}
+
+// Drawer (i / b) lives in drawer.go. actionInspect, handleDrawerKey,
+// drawerLoadCmd, drawerLoadedMsg, bareAttachCmd are defined there.
+
+// isErrSessionNotFound checks whether err's chain includes the tmux
+// "session not found" sentinel via errors.Is. The ui package already
+// imports internal/tmux for *tmux.Client, so there's no cycle risk —
+// the sentinel match is the right tool here, not string matching
+// (which would silently break if tmux ever rephrased the error or
+// internationalized it).
+func isErrSessionNotFound(err error) bool {
+	return errors.Is(err, tmux.ErrSessionNotFound)
 }
 
 // actionRetry handles `R`. v0.6: only ran on broken (no friction).
@@ -650,7 +824,7 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 		return m, m.attachOrSwitch(session)
 	}
 
-	switch row.Status {
+	switch effectiveStatus(row) {
 	case "main", state.StatusReady:
 		return m, m.attachOrSwitch(row.TmuxSession)
 
@@ -659,6 +833,12 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 		// right Manager; popup mode still uses tea.ExecProcess for the
 		// resurrect path (it spawns a workspace setup which doesn't fit
 		// switch-client semantics) and falls through to attach after.
+		//
+		// Reached via two paths: a row recorded as stopped, OR a row
+		// recorded as ready but whose tmux session is dead (effectiveStatus
+		// downgrades the latter so Enter on a stale-ready row resurrects
+		// instead of attempting an attach that would fail with
+		// ErrSessionNotFound).
 		mgr, err := m.managerForRow(row)
 		if err != nil {
 			m.err = err
@@ -685,6 +865,25 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 	log.Warn("ui.attach.unknown-status", "name", row.Name, "status", row.Status)
 	_ = ctx
 	return m, nil
+}
+
+// effectiveStatus returns the status the Enter dispatcher should act on.
+// For workspace rows recorded as ready, BuildGlobalRows already probes
+// the tmux session via HasSession and stamps the result on row.Alive —
+// when that probe says the session is gone, the recorded "ready" status
+// is stale (someone killed the session out-of-band) and the right action
+// is to resurrect, not attempt an attach that will fail with
+// ErrSessionNotFound.
+//
+// Main rows are excluded: attachSelected handles the IsMain branch
+// before reaching here, and main-row liveness drives a different path
+// (EnsureMainSession). Stopped/broken/orphaned rows pass through
+// unchanged — Alive is informational for them, not authoritative.
+func effectiveStatus(row Row) state.Status {
+	if !row.IsMain && row.Status == state.StatusReady && !row.Alive {
+		return state.StatusStopped
+	}
+	return row.Status
 }
 
 // attachOrSwitch dispatches the right tmux verb for the current context:
@@ -1265,7 +1464,7 @@ func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.err = m.busyErr
 		m.busyErr = nil
 	}
-	return m, refreshCmd(m.mgr, m.tc, m.store)
+	return m, m.refresh()
 }
 
 // handleConfirmDeleteKey is the keymap while the delete prompt is up.

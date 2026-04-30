@@ -618,7 +618,7 @@ func TestView_NoHintsNoBadges(t *testing.T) {
 		Status:      state.StatusReady,
 	}})
 	out := m.list.View()
-	for _, badge := range []string{"↻ rename", "✓ shipped", "PR open", "PR merged"} {
+	for _, badge := range []string{"↻ rename", "✓ merged", "PR open", "PR merged"} {
 		if strings.Contains(out, badge) {
 			t.Errorf("unexpected badge %q in row without hints:\n%s", badge, out)
 		}

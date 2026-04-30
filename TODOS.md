@@ -5,21 +5,189 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
-## v0.5 — `canopy debug <name>` verb (attach without running scripts)
+## P2 — Deferred review findings from v0.10 ship (2026-04-30)
 
-**What:** A new subcommand that opens a tmux session attached to a workspace's directory *without* running `scripts.setup` or any other lifecycle hook. Pure escape hatch for diagnosing why a broken workspace is broken — get into the worktree, poke at it, run the failing script manually with `bash -x`, fix the underlying issue, then `canopy retry` once you know what to fix.
+The `tmux-health-and-resurrect` ship-review surfaced several smaller findings
+that were not blocking but worth following up. Each is self-contained:
 
-**Why:** Avi hit this 2026-04-28 with cravd's misty-aspen workspace failing on AR encryption. `canopy retry` re-ran the same broken script in a loop with no way to inspect intermediate state. The current workaround is a manual `tmux new-session -c <workspace path>` — works but is friction every time. A first-class verb closes the gap.
+### load cache: thundering herd on first refresh
 
-**Pros:** ~30 LOC. Reuses the existing `tmux.AttachCmd` and dir resolution. Only new logic is "attach without invoking buildSession" — basically half of `Resurrect` minus the pane build. Becomes the recommended diagnostic flow alongside auto-detect hints + canopy retry.
+**Where:** `internal/state/mem.go:GetLoad` (and `Get`).
 
-**Cons:** Yet another verb in the CLI surface. Could be a flag on `canopy switch` instead (`canopy switch <name> --bare` or `--no-setup`). Argument for a separate verb: `canopy switch` refuses broken workspaces today; making it accept them under a flag muddies the contract. Argument for a flag: fewer top-level verbs = simpler CLI.
+**What:** The cache pattern is read-mutex / drop / probe (slow) / re-mutex.
+Multiple concurrent goroutines for the same session each see "no fresh entry,"
+each spawn a `ps -A` probe, all write back. On a TUI refresh after `r` (which
+`InvalidateAll`s), every workspace probe runs N times if the goroutines for
+the same session happen to overlap. Probably fine in steady state, but a
+measurable cost on cold-cache refreshes.
 
-**Context:** Likely shape: `canopy debug <name>` opens a one-pane tmux session at the workspace path with `CANOPY_*` env vars set (so manual `bin/conductor-setup` calls inherit the right env). No nvim, no claude, no auto-runs — just a shell. Status field is untouched (debugging doesn't change `broken` → `ready`). Implementation lives in a new `cmd/canopy/debug.go` and a tiny `Manager.AttachBare(ctx, name)` method that asserts the workspace exists on disk and hands off to `tmux.AttachCmd` with `-c <path>`.
+**Fix:** singleflight pattern (`golang.org/x/sync/singleflight`) keyed by
+session, OR hold the mutex across the probe call (simpler, blocks unrelated
+sessions for the duration of one probe).
 
-Pairs with the v0.5 per-workspace setup logs entry: those write `setup.log` per attempt; `canopy debug` lets you read it from inside the workspace's own dir without leaving the canopy ergonomics.
+### git_stats: no cache + N×4 goroutines per refresh
 
-**Depends on / blocked by:** v0. No blockers.
+**Where:** `internal/lifecycle/git_stats.go:detectGitStats`.
+
+**What:** RunFast spawns 4 detector goroutines per workspace; the TUI calls
+RunFast for every workspace per refresh. With N workspaces in the global TUI,
+that's 4N concurrent goroutines each running 3+ git subprocesses. On a
+50-workspace global view, ~600 git processes per refresh. The 10-min cache
+helps `pr_status` but `git_stats` has no cache and runs every refresh.
+
+**Fix:** cache stats results with a short TTL (e.g., 30s) keyed by
+`(workspace, HEAD-sha)`, OR debounce RunFast calls per workspace, OR limit
+goroutine concurrency with a semaphore.
+
+### Kill: PID-reuse race in cwd-walk reap
+
+**Where:** `internal/tmux/session.go:Kill` reap loop.
+
+**What:** `pidsToReap` is captured before `kill-session`. After kill-session,
+the loop SIGKILLs every PID from the snapshot. If any PID exited and was
+reused before SIGKILL fires, we kill an unrelated process. Default Linux
+`pid_max` (4M) makes this rare, but on container configs with low pid_max
+(32K) or busy systems it's plausible within the ms window.
+
+**Fix:** before each SIGKILL, re-stat `/proc/<pid>/stat` or `/proc/<pid>/cwd`
+and only kill if the process still matches the recorded cwd / comm. The
+image-name gate added in v0.10 mitigates the wrong-target case, but doesn't
+fully close the race.
+
+### tailFile: scans full file (up to 10MB) per drawer open
+
+**Where:** `internal/ui/drawer.go:tailFile`.
+
+**What:** Reads the file from the start with `bufio.Scanner`, ring-buffering
+the last N lines. For lumberjack-rotated logs (10MB max, 3 backups) that's
+up to ~10MB scanned every time the user opens the drawer or presses `r`
+inside it.
+
+**Fix:** seek to a tail window first (e.g., `Seek(size - 64KB, ...)`) and
+scan from there — same pattern as `readBoundedFile` already uses for setup
+logs. Trim partial first line after seek.
+
+### Setup logs: no isSafeWorkspaceName guard
+
+**Where:** `internal/workspace/setup_log.go:openSetupLog`,
+`removeSetupLog`.
+
+**What:** `name` is interpolated directly into the on-disk path without
+validation. Today callers pass `state.Workspace.Name` which is sanitized at
+creation, so this is theoretical. But it's a defense-in-depth gap relative
+to `clog.RemoveWorkspaceLog` which DOES guard the same path family. Also:
+a workspace named `v1.2` (allowed by `git.Sanitize`'s dot keep) round-trips
+fine through setup_log.go but is rejected by `isSafeWorkspaceName`, so the
+per-workspace clog stream silently disappears for such names.
+
+**Fix:** share one validator. Move `isSafeWorkspaceName` to `internal/git`
+next to `Sanitize`, or call it from both layers. Align the dot rule across
+both layers (probably: reject dots in both, since they'd mess with file
+extensions anyway).
+
+### Drawer setup log: ANSI escapes break TUI layout
+
+**Where:** `internal/ui/drawer.go:drawerLoadCmd` setup-log section.
+
+**What:** Setup log content is displayed verbatim. If the user's setup
+script writes raw ANSI escape sequences (color, cursor moves, terminal
+resets), those escapes render in the drawer's lipgloss-styled view, breaking
+layout (cursor jumps, color bleed into the rest of the TUI).
+
+**Fix:** strip ANSI from `setupLog` before rendering, similar to projectlist's
+`stripAnsi`. Move `stripAnsi` to a shared internal helper.
+
+### BuildGlobalRows: N+1 tmux probe pattern
+
+**Where:** `internal/state/listing.go:BuildGlobalRows`.
+
+**What:** Per project: 1 HasSession call for main + 1 per workspace,
+sequential. With many projects, this accumulates. Not a v0.10 regression but
+exposed at scale by v0.10's auto-population of the load column.
+
+**Fix:** batch via `tmux list-sessions -F '#{session_name}'` once, build
+a set, look up locally. AttachedProbe already does this — extend the same
+pattern to liveness probing.
+
+### detectShipped: blank-line guard regression
+
+**Where:** `internal/lifecycle/shipped.go:detectShipped`.
+
+**What:** Old code explicitly skipped blank lines in cherry output; new
+code dropped that guard. After `strings.TrimSpace(string(cherryOut))`, the
+trimmed string can still contain a blank line in the middle (rare for
+cherry, but possible if cherry's output gains commentary in some git
+versions), which would fail the `strings.HasPrefix(line, "- ")` check and
+short-circuit to nil.
+
+**Fix:** restore the `if line == "" { continue }` skip in the cherry-output
+loop.
+
+### BareAttach: store BaseCommit on workspace creation
+
+**Where:** `internal/state/state.go:Workspace`.
+
+**What:** v0.10's `detectShipped` dropped merge-commit-style detection
+because it was a false-positive vector (couldn't distinguish "branch was
+merge-commit-merged" from "fresh fork that fell behind"). Storing the
+branch's base commit at workspace creation would let us safely detect both
+cases.
+
+**Fix:** add `BaseCommit string` to `state.Workspace`. Set at creation in
+`Manager.Create` via `git rev-parse HEAD`. Update `detectShipped` to use
+`base..HEAD == 0` (no work) vs `base..HEAD > 0 + reachable from main`
+(merged via merge-commit) vs cherry `-` lines (squash-merged).
+
+---
+
+---
+
+## ✅ DONE 2026-04-29 — `canopy debug` (subsumed into the inspect drawer)
+
+Shipped on the `tmux-health-and-resurrect` branch. The verb itself was
+not added — instead, `Manager.BareAttach(ctx, name)` lives on the
+workspace package and is invoked from the diagnostic detail drawer
+(opened with `i` in the TUI) via `b`. From the user's perspective, this
+is the same flow the original TODO described: drop into the workspace
+dir without rerunning `scripts.setup`, with `CANOPY_*` env vars set, no
+agent pane, no auto-runs — just a shell. Implementation in
+`internal/workspace/lifecycle.go` (`BareAttach`) +
+`internal/ui/drawer.go` (drawer + `b` keybind).
+
+The drawer-based shape is better than a top-level verb because the
+launch context (an `i` view of the broken workspace, with the setup
+log right there) is exactly what the user has loaded when they decide
+they want to drop in. A separate `canopy debug` verb would have
+required typing the workspace name from the shell.
+
+---
+
+## v0.6 follow-up — Background liveness probe (deferred 2026-04-29)
+
+**What:** Run a `tea.Tick` every N seconds (e.g., 10s) that re-probes
+liveness for visible TUI rows and updates `Alive` in place. Today, the
+list refreshes only on `r` keypress and TUI navigation events.
+
+**Why:** When a workspace's tmux session dies out-of-band (laptop
+sleep, manual `tmux kill-session`, OOM), the list shows the row as
+`ready` until the user presses `r`. The Enter handler now handles this
+gracefully (stale-ready → resurrect, see v0.9.x changelog), so the
+case where it bites is purely cosmetic — the column lies for a few
+seconds.
+
+**Pros:** Makes the Mem column feel alive; turns the list into a
+"current truth" view rather than a "snapshot from last keypress."
+
+**Cons:** ~10x more `tmux has-session` calls (cheap but not free),
+possible visual flicker mid-keystroke when the column re-renders, and
+the bug-fix path already handles the stale-ready case. Worth doing
+only if the staleness has actively bitten outside cosmetics.
+
+**Context:** Decided in `/plan-ceo-review` as the only deferred item
+when the diagnostic drawer + Mem column shipped. Reconsider after a
+few weeks of dogfood with the explicit-refresh-only model.
+
+**Depends on / blocked by:** none.
 
 ---
 
@@ -454,26 +622,31 @@ not the stale original.
 
 ---
 
-## v0.5 — Per-project + per-workspace logs
+## ✅ PARTIAL 2026-04-29 — Per-workspace logs (workspace + setup)
 
-**What:** Replace the single global `~/.canopy/log/canopy.log` with a project-aware tree:
+Shipped on the `tmux-health-and-resurrect` branch. Two of the three
+file types from the original entry now exist:
 
-```
-~/.canopy/log/canopy.log              # global events: state-store, project discovery
-~/.canopy/log/<project>/canopy.log    # everything tied to a project
-~/.canopy/log/<project>/<workspace>/setup.log    # raw stdout/stderr of scripts.setup, per attempt
-~/.canopy/log/<project>/<workspace>/archive.log  # raw stdout/stderr of scripts.archive
-```
+- `~/.canopy/log/canopy-<workspace>.log` — every slog record carrying
+  a `name` attribute matching a workspace is tee'd here in addition to
+  the global `canopy.log`. Implemented as a `clog.fanoutHandler` that
+  wraps the existing JSON handler and adds per-workspace fan-out
+  transparently — no call-site changes anywhere in canopy.
+- `~/.canopy/log/setup-<workspace>.log` — `scripts.setup` output is
+  captured to disk via `io.MultiWriter` in
+  `Manager.runSetupHooksOnly`. Truncated each setup run (the previous
+  attempt's output is rarely useful once a new run starts).
 
-**Why:** Today every project's lifecycle events interleave in one file, so debugging a cravd setup failure requires grepping through brain's setup chatter. Per-workspace setup logs also let the auto-detect hint flow (entry below) link directly to a small file ("see full output: `~/.canopy/log/cravd/bold-falcon/setup.log`") instead of pointing at the firehose.
+`canopy rm <ws>` removes both files. The diagnostic drawer (`i` in the
+TUI) reads them directly to show recent activity + last setup output.
 
-**Pros:** Greppability. Cleaner `tail -f` for the workspace you care about. Pairs with retry — each retry attempt rotates the setup log (`setup.log.1`, `setup.log.2`, ...) so you can compare what changed. The auto-detect hint becomes a one-line teaser that links to the full file. Easy to tar up a single project's logs to share when reporting a bug.
-
-**Cons:** Slog handler swap is straightforward; the per-workspace setup-log capture is a tee on the `stdout`/`stderr` writers passed into `runSetupHooksOnly`. Migration: existing single log file stays in place, new logs go to the new tree — no destructive rename. Disk usage: ~40 KB per setup attempt × workspaces × retries; cap at 5 rotated files per workspace.
-
-**Context:** clog package today takes a single path; refactor `clog.Init` to accept a default project hint (cwd-walk-up) so a Manager constructed via `loadManager()` automatically routes its logs into the right subdir. Per-workspace setup logs live in `internal/workspace/lifecycle.go` — wrap the stdout/stderr writers passed into `runSetupHooksOnly` with `io.MultiWriter(originalWriter, fileWriter)` where the file is opened at `<project>/<workspace>/setup.log` with O_TRUNC each time so retries always see a fresh file (rotated copy of the previous attempt kept as `setup.log.1`).
-
-**Depends on / blocked by:** v0. No blockers.
+**What's still NOT done from the original entry:** the
+`~/.canopy/log/<project>/canopy.log` per-project layer (events
+interleaved across workspaces in the same project still go to the
+global log), and `archive.log` capture for `scripts.archive`. Both are
+straightforward extensions of the fan-out handler if/when they're
+needed — the per-project layer would key on a `project` attribute the
+way the per-workspace layer keys on `name`.
 
 ---
 

@@ -466,14 +466,28 @@ func (m *Manager) runSetup(ctx context.Context, ws *state.Workspace, opts Create
 // tmux session. Shared between Create (after git worktree add) and
 // RetrySetup (where the worktree already exists). Caller is responsible
 // for ensuring ws.Path is a real, ready-to-use directory.
+//
+// Setup output is tee'd to ~/.canopy/log/setup-<workspace>.log via
+// io.MultiWriter so the diagnostic drawer can show it later when the
+// user is staring at a `broken` workspace asking "why?". The tee is
+// best-effort: if the file open fails (permission, disk full), the
+// hook still runs to completion, just without the disk capture.
 func (m *Manager) runSetupHooksOnly(ctx context.Context, ws *state.Workspace, stdout, stderr io.Writer) error {
 	if m.Cfg.Scripts.Setup != "" {
+		setupLog, closeLog := openSetupLog(ws.Name)
+		defer closeLog()
+		runStdout := stdout
+		runStderr := stderr
+		if setupLog != nil {
+			runStdout = io.MultiWriter(stdout, setupLog)
+			runStderr = io.MultiWriter(stderr, setupLog)
+		}
 		scriptPath := filepath.Join(m.Cfg.ProjectRoot, m.Cfg.Scripts.Setup)
 		if err := hooks.Run(ctx, scriptPath, hooks.Options{
 			Cwd:    ws.Path,
 			Env:    hooks.WorkspaceEnv(ws.Path, m.Cfg.ProjectRoot, ws.Port),
-			Stdout: stdout,
-			Stderr: stderr,
+			Stdout: runStdout,
+			Stderr: runStderr,
 		}); err != nil {
 			return fmt.Errorf("workspace.runSetupHooksOnly: %w: %v", ErrSetupFailed, err)
 		}
@@ -894,7 +908,16 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "warning: failed to delete branch %s: %v\n", wsCopy.Branch, err)
 	}
 
-	// 5. Drop the state row.
+	// 5. Per-workspace logs (setup output + the workspace-scoped slog
+	// fan-out file). Best-effort; missing files aren't errors. Done
+	// before the state row drop so a partial failure here still leaves
+	// the row in place for retry.
+	removeSetupLog(name)
+	if err := clog.RemoveWorkspaceLog(name); err != nil {
+		log.Warn("workspace.remove.workspace-log-failed", "name", name, "err", err)
+	}
+
+	// 6. Drop the state row.
 	return m.Store.WithLock(func(s *state.State) error {
 		return s.Remove(m.Cfg.ProjectRoot, name)
 	})
@@ -963,6 +986,99 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		return nil, err
 	}
 	return &wsCopy, nil
+}
+
+// BareAttach returns a tmux session name to attach to for a "diagnostic"
+// view of the workspace: a one-pane shell at the workspace dir with
+// CANOPY_* env vars set, but WITHOUT running scripts.setup or rebuilding
+// the standard 3-pane layout.
+//
+// Subsumes the v0.5 `canopy debug` TODO: when a workspace is broken,
+// the user wants to drop into its dir and poke (run the failing script
+// manually with bash -x, inspect intermediate state) without canopy
+// re-running the same broken setup script in a loop. The detail drawer
+// is the natural launch surface — when staring at a broken workspace,
+// you want one keystroke to get inside.
+//
+// Naming: a NEW session is always created with a "-debug" suffix to
+// avoid colliding with the workspace's normal session if it's alive.
+// If the debug session already exists, this re-attaches to it (no-op
+// session reuse). Status field on the workspace row is NOT touched —
+// debugging doesn't transition broken→ready; the user has to fix the
+// underlying issue and run retry.
+func (m *Manager) BareAttach(ctx context.Context, name string) (string, error) {
+	st, err := m.Store.Load()
+	if err != nil {
+		return "", fmt.Errorf("workspace.BareAttach: load: %w", err)
+	}
+	ws, err := st.Find(m.Cfg.ProjectRoot, name)
+	if err != nil {
+		return "", fmt.Errorf("workspace.BareAttach(%s): %w", name, ErrWorkspaceNotFound)
+	}
+	if _, err := os.Stat(ws.Path); os.IsNotExist(err) {
+		return "", fmt.Errorf("workspace.BareAttach(%s): workspace dir missing at %s — run `canopy rm %s` to drop the orphan",
+			name, ws.Path, name)
+	}
+
+	debugSession := ws.TmuxSession + "-debug"
+	exists, err := m.Tmux.HasSession(ctx, debugSession)
+	if err != nil {
+		return "", fmt.Errorf("workspace.BareAttach: probe: %w", err)
+	}
+	if exists {
+		log.Info("bare-attach.reuse", "name", name, "session", debugSession)
+		return debugSession, nil
+	}
+
+	env := hooks.WorkspaceEnv(ws.Path, m.Cfg.ProjectRoot, ws.Port)
+	// Single-pane shell, no shellCmd — drops the user at their default
+	// shell with CANOPY_* env vars set so manual hook reruns inherit
+	// the right environment. No setup, no scripts.run, no agent pane.
+	if err := m.Tmux.Create(ctx, debugSession, ws.Path, "", env...); err != nil {
+		return "", fmt.Errorf("workspace.BareAttach: tmux create: %w", err)
+	}
+	log.Info("bare-attach.created", "name", name, "session", debugSession, "path", ws.Path)
+	return debugSession, nil
+}
+
+// BareAttachMain is the main-row counterpart of BareAttach: open a
+// one-pane shell at the project root with CANOPY_* env vars set and
+// the project's main port. No scripts, no auto-running claude/nvim
+// — pure "drop me in this project's source repo with the canopy env
+// loaded" gesture.
+//
+// Distinct from BareAttach (the workspace variant) because main rows
+// have no state.json entry to look up, no worktree path on disk —
+// the cwd is the project root and the port is the project's port
+// base. Same -debug session-name suffix convention so a regular
+// `canopy main` attach doesn't collide.
+//
+// Used from the inspect drawer (`b` keybind) when the cursor is on
+// a main row. Reuses an existing -debug session if alive.
+func (m *Manager) BareAttachMain(ctx context.Context) (string, error) {
+	debugSession := m.MainSessionName() + "-debug"
+	exists, err := m.Tmux.HasSession(ctx, debugSession)
+	if err != nil {
+		return "", fmt.Errorf("workspace.BareAttachMain: probe: %w", err)
+	}
+	if exists {
+		log.Info("bare-attach-main.reuse", "session", debugSession)
+		return debugSession, nil
+	}
+
+	port, err := m.mainPort()
+	if err != nil {
+		return "", fmt.Errorf("workspace.BareAttachMain: port: %w", err)
+	}
+	env := hooks.WorkspaceEnv(m.Cfg.ProjectRoot, m.Cfg.ProjectRoot, port)
+	// Single pane, no shellCmd — drops the user at their default
+	// shell with CANOPY_* env vars set. No nvim, no claude, no
+	// auto-runs.
+	if err := m.Tmux.Create(ctx, debugSession, m.Cfg.ProjectRoot, "", env...); err != nil {
+		return "", fmt.Errorf("workspace.BareAttachMain: tmux create: %w", err)
+	}
+	log.Info("bare-attach-main.created", "session", debugSession, "path", m.Cfg.ProjectRoot)
+	return debugSession, nil
 }
 
 // List returns all workspaces for the current project. Used by `canopy

@@ -27,6 +27,39 @@ type LivenessProbe interface {
 	HasSession(ctx context.Context, name string) (bool, error)
 }
 
+// AttachedProbe returns the set of tmux session names with at least
+// one client attached. Single batch call so populating the column
+// across N rows costs one round-trip, not N. Production callers pass
+// *tmux.Client (which implements AttachedSessions); tests pass a fake.
+type AttachedProbe interface {
+	AttachedSessions(ctx context.Context) (map[string]bool, error)
+}
+
+// LoadValue is the public face of an aggregate session probe: total
+// RSS in bytes plus summed CPU percent across the pane process tree.
+// Mirrors tmux.SessionLoad without forcing a state→tmux import.
+type LoadValue struct {
+	RSS int64
+	CPU float64
+}
+
+// LoadProbe returns the aggregate RSS+CPU for one tmux session.
+// Production callers pass *tmux.Client (which implements
+// SessionLoad); tests pass a fake. The probe is wrapped in a TTL
+// cache (see LoadCache below) so refresh ticks don't spawn redundant
+// ps invocations.
+type LoadProbe interface {
+	SessionLoad(ctx context.Context, session string) (LoadValue, error)
+}
+
+// MemProbe is the legacy single-value form. Kept so older callers
+// (and any external consumers) that only want RSS don't have to
+// switch to LoadProbe. Internally, BuildGlobalRowsWithLoad uses
+// LoadProbe so the CPU number comes for free off the same ps call.
+type MemProbe interface {
+	SessionRSS(ctx context.Context, session string) (int64, error)
+}
+
 // GlobalRow is one row in the cross-project listing. Mirrors the fields the
 // CLI tabwriter and the TUI lipgloss table both render.
 //
@@ -52,6 +85,31 @@ type GlobalRow struct {
 	Path        string // worktree dir on disk (workspace rows); empty for main rows
 	TmuxSession string
 	Alive       bool
+
+	// Attached is true when at least one tmux client is currently
+	// attached to TmuxSession. Distinct from Alive: a session can be
+	// running (Alive=true) with no client (Attached=false) — that's
+	// the typical "background" state. The TUI surfaces an `⊙` glyph
+	// next to attached rows so the user can tell at a glance which
+	// workspace they're "in" right now (and therefore probably
+	// shouldn't K).
+	//
+	// Populated by BuildGlobalRowsWithAttached when an AttachedProbe
+	// is supplied; left at false for callers that don't probe it.
+	Attached bool
+
+	// MemRSS is the summed resident set size (bytes) across every
+	// process in every pane of this row's tmux session. Populated by
+	// BuildGlobalRowsWithLoad when a LoadProbe is supplied; left at
+	// 0 for callers using the older BuildGlobalRows. 0 also signals
+	// "skip rendering" — the column shows "—" rather than "0B".
+	MemRSS int64
+
+	// CPU is the summed pcpu (single-core normalized; can exceed 100
+	// on multi-core boxes) across the same process tree as MemRSS.
+	// Populated alongside MemRSS by BuildGlobalRowsWithLoad — the
+	// underlying ps probe returns both in one shot, so no extra cost.
+	CPU float64
 
 	// LastErrorHint is the auto-detected diagnosis from workspace.Diagnose,
 	// populated only when Status==broken AND canopy recognized the failure
@@ -99,6 +157,18 @@ type GlobalRow struct {
 // query for a project that's only in s.Projects (no workspaces) is the
 // reason we take the probe at all.
 func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []GlobalRow {
+	// Single batch call to enumerate which sessions have a client
+	// attached. The cost is one tmux round-trip per Build call
+	// regardless of N rows — `tmux list-sessions -F` is dirt cheap
+	// and avoids N-per-row probing. Optional: only runs if the probe
+	// also implements AttachedProbe (production *tmux.Client does;
+	// liveness-only fakes in tests opt out by not implementing).
+	attached := map[string]bool{}
+	if ap, ok := probe.(AttachedProbe); ok {
+		if got, err := ap.AttachedSessions(ctx); err == nil {
+			attached = got
+		}
+	}
 	// Deterministic project iteration order: collect roots, sort.
 	rootSet := map[string]struct{}{}
 	for _, w := range s.Workspaces {
@@ -167,6 +237,7 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 			Status:      "main",
 			TmuxSession: mainSession,
 			Alive:       alive,
+			Attached:    attached[mainSession],
 		}
 		if meta, ok := s.Projects[root]; ok {
 			mainRow.Port = meta.PortBase
@@ -186,6 +257,7 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 				Path:          w.Path,
 				TmuxSession:   w.TmuxSession,
 				Alive:         alive,
+				Attached:      attached[w.TmuxSession],
 				LastErrorHint: w.LastErrorHint,
 			})
 		}

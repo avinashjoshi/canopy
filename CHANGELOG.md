@@ -5,7 +5,190 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] - 2026-04-30 — Workspace health, diagnostics, and machine-load visibility
+
+A complete pass on workspace health and observability. The TUI list page
+now shows tmux liveness, attached-client state, memory and CPU usage per
+workspace, and per-row git stats (commits ahead/behind, dirty file count)
+at a glance. Pressing `i` opens a read-only diagnostic drawer with the
+process tree, recent log entries, and last setup-script output for the
+selected workspace. `K` kills a workspace's tmux session in place.
+Pressing Enter on a row whose tmux session was killed externally now
+resurrects automatically instead of erroring.
+
+The drawer is a drawer, not a dashboard. Read-only. No live tailing,
+no editing. The scope cap is the load-bearing constraint.
+
+### Added
+
+- **List-page row glyphs** distinguish three session states at a glance:
+  `⊙` (green) — tmux alive AND a client is attached, `○` (subtle grey)
+  — tmux alive but no client attached, blank — no tmux session (status
+  column says why).
+- **Mem + CPU column** in the TUI list. Format `320M 12%` combining
+  RSS summed across the process tree in every pane with summed CPU%
+  (sum of `pcpu` per process; can exceed 100% on multi-core boxes).
+  Heat-colored: amber > 500 MB or > 50% CPU, red > 2 GB or > 200% CPU.
+  Auto-loads on first render via Bubbletea's async tea.Cmd — no `r`
+  keypress required. Cached per-session for 5 s; invalidated on `K`
+  (kill) so a just-killed row's column flips to `—` immediately rather
+  than lagging the actual state by up to TTL seconds. CPU shown
+  consistently (including `0%`) so the cell format never varies — the
+  alternative "omit if < 1%" rule conflated "no data" with "idle."
+- **`K` keybind** kills the highlighted workspace's tmux session with
+  y/N confirm. State.json row, worktree dir, branch all survive —
+  re-pressing Enter resurrects via `Manager.Resurrect`. Works on main
+  rows too: kills the project's main session; Enter rebuilds via
+  `EnsureMainSession`. Refused only on rows with no live session.
+- **`i` keybind** opens a diagnostic detail drawer for the highlighted
+  row. Shows: process tree with RSS/CPU per pane, last 20 entries
+  from the per-workspace log, last `scripts.setup` output, env (port,
+  paths, branch), tmux-alive + attached state. Read-only. `Esc`/`q`
+  closes, `r` reloads, `b` opens a bare attach.
+- **`b` keybind in the drawer** opens a one-pane shell at the row's
+  directory with `CANOPY_*` env vars set, no auto-running claude/nvim,
+  no `scripts.setup` rerun. For workspace rows: drops into the worktree
+  path. For main rows: drops into the project root. Subsumes the v0.5
+  `canopy debug` TODO. Hidden from the drawer footer except for
+  broken workspaces and main rows (where it adds value over plain
+  Enter); for running/stopped workspaces it's redundant clutter.
+- **`Manager.BareAttach` and `Manager.BareAttachMain`** create a
+  `<session>-debug` tmux session at the row's directory.
+- **Per-workspace logs** at `~/.canopy/log/canopy-<workspace>.log` via
+  a new `clog.fanoutHandler`. slog records carrying a `name` attribute
+  are tee'd to both the global `canopy.log` and the workspace's own
+  log. The drawer reads the per-workspace file directly. The handler
+  shares a `*sinkRegistry` across all derived (`WithAttrs`/`WithGroup`)
+  clones so there's exactly ONE lumberjack writer per workspace name
+  regardless of how many `slog.With(...)` chains touch it.
+- **Per-workspace setup logs** at `~/.canopy/log/setup-<workspace>.log`.
+  `scripts.setup` output is captured to disk via `io.MultiWriter`
+  alongside the existing live stream. The drawer surfaces it so a
+  `broken` workspace tells you why on `i`.
+- **Git stats badge** on every workspace row when non-zero: `↑3 ↓1 *5`
+  for commits ahead of main / commits behind main / files with
+  uncommitted changes. Shows alongside PR badges, not under them —
+  they're complementary signals ("is this done?" vs "what's in flight
+  now?"). Zero counts hidden so clean rows stay quiet.
+- **Help legend (`?`)** documents every glyph and badge in one place:
+  presence indicators, status column, Mem/CPU column, right-side
+  badges. Reading the help once should be enough to scan rows without
+  guessing.
+- `tmux.PaneInfos`, `tmux.SessionLoad`, `tmux.SessionAttached`, and
+  `tmux.AttachedSessions` for process-tree probing and tmux-attach
+  detection.
+- `state.MemCache` (caches both RSS and CPU per session, TTL +
+  invalidate), `state.LoadProbe`, `state.GlobalRow` extended with
+  `MemRSS`, `CPU`, and `Attached` fields.
+
+### Fixed
+
+- **`nvim --embed` orphan leak on every kill.** When `Tmux.Kill(session)`
+  ran, the tmux session died but `nvim --embed` children — which
+  interactive `nvim .` forks with deliberate session-detachment so
+  they can outlive their launcher — got reparented to PID 1 and lived
+  on forever, idle. Over a 4-day workstation uptime running canopy
+  tests, this accumulated ~50 zombie processes eating ~1.5GB of RAM.
+  `Tmux.Kill` now snapshots the pane process tree AND scans
+  `/proc/*/cwd` for processes whose cwd matches a pane's cwd AND whose
+  `comm` matches a known target list (currently just `nvim`), then
+  SIGKILLs the union after `kill-session`. The image-name gate is
+  load-bearing: a bare cwd match would SIGKILL anything happening to
+  live at the workspace path, including canopy itself when launched
+  from a workspace pane via the popup keybind. Regression test in
+  `internal/tmux/reap_test.go`. Same reap added to
+  `Tmux.KillServerAndReap` for test cleanup.
+- **Stale-ready Enter bug.** Pressing Enter on a workspace row whose
+  tmux session was killed externally (e.g., `tmux kill-session -t ...`
+  from another terminal) used to fail with `tmux.AttachCmd(...): tmux:
+  session not found`. The Enter handler now re-checks `row.Alive`
+  freshly probed by `BuildGlobalRows` and routes stale-ready rows
+  through `Resurrect` automatically. Regression test in
+  `internal/ui/effective_status_test.go`.
+- **`var log = clog.Pkg(...)` package-init pattern broke the per-workspace
+  fan-out.** Go's package-init order runs `var log = clog.Pkg("name")`
+  at file scope BEFORE `main()` runs `clog.Init()`. The previous
+  implementation snapshotted `slog.Default()` at `Pkg()` call-time,
+  freezing the binding to the pre-Init stderr handler — so no
+  package's `log.Info(...)` ever reached the fan-out wired up later
+  in `Init()`, and no `canopy-<ws>.log` files were ever created in
+  production. `Pkg` now returns a forwarding handler that resolves
+  `slog.Default()` on every record. Regression test verifies fan-out
+  reachability when `Pkg` is called before `Init`.
+- **`fanoutHandler.WithAttrs`/`WithGroup` writer duplication.** Each
+  derived handler had its own `writers` map; two `slog.With(...)`
+  chains for the same workspace would open two `lumberjack.Logger`
+  instances at the same file path, racing on rotation and leaking file
+  descriptors at teardown. Hoisted writers into a shared
+  `*sinkRegistry` so all derived handlers see exactly one lumberjack
+  per workspace name.
+- **`shipped` detector false positive on fresh forks behind main.**
+  When a workspace branch had zero unique commits and main had
+  fast-forwarded past the branch's start, the merge-commit-style
+  ancestor check returned true and the badge fired "✓ shipped (local)"
+  on actively-in-progress branches. Detector now uses squash-merge
+  detection only (via `git cherry`); the merge-commit case is
+  ambiguous from current git state alone with the fresh-fork case, so
+  we don't claim shipped without recording the branch base commit
+  (future work). Squash-merge workflows (the default `gh PR merge`
+  path) keep working. Regression test:
+  `TestDetectShipped_FreshForkBehindMain`.
+- **Row position shifted right on selection.** Selected rows had a
+  `❯ ` caret + presence-glyph (4 chars before name) while non-selected
+  rows had only the presence glyph (2 chars), so moving the cursor
+  onto a row visually shifted everything 2 columns right. Both branches
+  now share the same 4-char prefix; columns stay rock-still as the
+  cursor moves. Regression test:
+  `TestRender_NameColumnAlignmentDoesNotShiftOnSelection`.
+- **`killDoneMsg` cache invalidation lied.** Comment claimed the load
+  cache was invalidated for the killed session; code didn't actually
+  call `Invalidate`. After K, a later resurrect on the same row
+  served up to TTL seconds of stale RSS/CPU from the dead session.
+  Now plumbs the session name through `killDoneMsg` and invalidates
+  on receipt.
+- **Drawer cross-project name collision.** The drawer's stale-load
+  guard checked `forName` only, not `forRoot`. In the global TUI,
+  opening drawers in quick succession on `feature-a` (project-A) →
+  close → `feature-a` (project-B) could land project-A's data in
+  project-B's drawer if the load arrived after the switch. Guard now
+  matches on `(forName, forRoot)`.
+
+### Changed
+
+- **Status column vocabulary unified across workspace and main rows.**
+  Workspace `ready` rows display as `running` (matching what main rows
+  already said). Stale-ready rows (recorded `ready` but freshly-probed
+  `Alive=false`) display as `stopped` instead of lying with `ready`.
+  `setting_up` renders with a space (`setting up`). Pure display-layer
+  changes — `state.Status` enum values are unchanged.
+- **Status glyph helper now matches the displayed status.** Previously
+  the row glyph was driven by raw `state.Status`, so stale-ready rows
+  rendered as `(blank) stopped` (ready glyph + stopped text) — visually
+  inconsistent. The new `displayGlyph(row)` mirrors `displayStatus(row)`
+  so glyph and text always agree.
+- **`shipped` badge label.** Renamed `✓ shipped (local)` → `✓ merged`
+  to reflect what we actually detect (commits in the default branch
+  via squash-merge), not "production deployment." The "(local)"
+  qualifier was an implementation detail of the detector that didn't
+  add user-facing value.
+- **Main rows are first-class for lifecycle ops.** Reified the
+  principle that `(main)` rows *are* workspaces for session-lifecycle
+  operations (kill tmux, inspect, bare attach, attach) and *aren't*
+  for identity operations (delete, retry-setup, new). `K`, `i`, and
+  `b` now work on main rows. `d` (delete) and `R` (retry) stay refused
+  on main — those operate on workspace identity, which main doesn't
+  have.
+- **`isErrSessionNotFound` uses `errors.Is`** instead of substring
+  matching. The "import cycle risk" the comment alluded to never
+  existed: the ui package already imports tmux for `*tmux.Client`.
+  Substring matching would have silently broken if tmux ever rephrased
+  the error or internationalized it.
+
+### Cleanup
+
+- `canopy rm <ws>` now removes the per-workspace log file
+  (`canopy-<ws>.log`) and setup log (`setup-<ws>.log`) alongside the
+  state row and worktree.
 
 ## [0.9.1] - 2026-04-29 — Force screen no longer fires after PR auto-merge
 

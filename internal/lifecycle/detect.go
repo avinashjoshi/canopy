@@ -36,21 +36,22 @@ import (
 
 var log = clog.Pkg("lifecycle")
 
-// RunFast runs all three detectors in parallel and returns their
-// aggregated hints. Safe to call on every TUI refresh — pr_status is
-// cached 10min so the worst-case wall time is dominated by the slowest
-// local git command (typically <50ms). On a cache miss for pr_status,
-// the gh call adds ~200-500ms to the slowest goroutine, but that only
-// happens once per branch per 10min.
+// RunFast runs all detectors in parallel and returns their aggregated
+// hints. Safe to call on every TUI refresh — pr_status is cached 10min
+// so the worst-case wall time is dominated by the slowest local git
+// command (typically <50ms). On a cache miss for pr_status, the gh
+// call adds ~200-500ms to the slowest goroutine, but that only happens
+// once per branch per 10min.
 //
 // Returned slice is unordered; callers that need stable ordering should
 // sort by Kind. Hints with Kind="" are treated as "no hint" (filtered).
 func RunFast(ctx context.Context, ws state.Workspace) []state.Hint {
+	const detectorCount = 4
 	type result struct{ h *state.Hint }
-	results := make(chan result, 3)
+	results := make(chan result, detectorCount)
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(detectorCount)
 
 	// rename_suggested: the agent should rename the branch once it
 	// understands the feature's intent.
@@ -59,9 +60,9 @@ func RunFast(ctx context.Context, ws state.Workspace) []state.Hint {
 		results <- result{h: detectRenameSuggested(ctx, ws)}
 	}()
 
-	// shipped: branch in sync with origin/<default> (or local <default>
-	// when no remote). Fallback signal for purely-local work; PR status
-	// supersedes this when present.
+	// shipped: branch squash-merged into the default branch. Surfaces
+	// the "you can rm this" signal. PR status supersedes this when
+	// present (the badge renderer hides shipped under PR).
 	go func() {
 		defer wg.Done()
 		results <- result{h: detectShipped(ctx, ws)}
@@ -74,10 +75,17 @@ func RunFast(ctx context.Context, ws state.Workspace) []state.Hint {
 		results <- result{h: detectPRStatus(ctx, ws)}
 	}()
 
+	// git_stats: ahead/behind/dirty counts. Surfaces every refresh so
+	// the user sees in-flight work at a glance regardless of PR state.
+	go func() {
+		defer wg.Done()
+		results <- result{h: detectGitStats(ctx, ws)}
+	}()
+
 	wg.Wait()
 	close(results)
 
-	out := make([]state.Hint, 0, 3)
+	out := make([]state.Hint, 0, detectorCount)
 	for r := range results {
 		if r.h != nil {
 			out = append(out, *r.h)

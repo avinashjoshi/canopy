@@ -261,7 +261,7 @@ func TestRender_HintBadges(t *testing.T) {
 
 	// Each badge text should appear exactly once for its row. Badges
 	// are styled via lipgloss but the literal text is preserved.
-	for _, want := range []string{"↻ rename", "✓ shipped", "✓ PR"} {
+	for _, want := range []string{"↻ rename", "✓ merged", "✓ PR"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered output missing badge %q\nfull output:\n%s", want, out)
 		}
@@ -312,7 +312,7 @@ func TestRender_NoHintBadges(t *testing.T) {
 	m.SetRows(sampleRows()) // sampleRows have no Hints set
 	out := m.View()
 
-	for _, badge := range []string{"↻ rename", "✓ shipped", "PR"} {
+	for _, badge := range []string{"↻ rename", "✓ merged", "PR"} {
 		if strings.Contains(out, badge) {
 			t.Errorf("unexpected badge %q in row without hints:\n%s", badge, out)
 		}
@@ -356,6 +356,69 @@ func TestEnter_AlwaysRoutesToActivate(t *testing.T) {
 	}
 }
 
+// TestRender_GitStatsBadge_AlwaysShows verifies that the git_stats
+// badge appears regardless of PR/merged state — they're complementary
+// signals (PR/merged: "is this done?"; stats: "what's in flight right
+// now?"). User feedback on 2026-04-29: "git stats which could be
+// useful in the ones with PR too."
+func TestRender_GitStatsBadge_AlwaysShows(t *testing.T) {
+	cases := []struct {
+		name  string
+		hints []state.Hint
+	}{
+		{"stats alone", []state.Hint{{Kind: "git_stats", Message: "↑3 ↓1 *5"}}},
+		{"stats + pr_status", []state.Hint{
+			{Kind: "git_stats", Message: "↑3 ↓1 *5"},
+			{Kind: "pr_status", Message: "PR #42 open; awaiting reviews"},
+		}},
+		{"stats + merged", []state.Hint{
+			{Kind: "git_stats", Message: "↑3"},
+			{Kind: "shipped"},
+		}},
+		{"stats + rename", []state.Hint{
+			{Kind: "git_stats", Message: "*2"},
+			{Kind: "rename_suggested"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(Options{})
+			m.SetRows([]state.GlobalRow{{
+				Project: "p", Name: "ws", Branch: "b", Hints: tc.hints,
+			}})
+			out := m.View()
+			// The git_stats message should appear verbatim somewhere in
+			// the output regardless of which other hints are present.
+			for _, h := range tc.hints {
+				if h.Kind != "git_stats" {
+					continue
+				}
+				if !strings.Contains(out, h.Message) {
+					t.Errorf("git_stats message %q missing from render with %d hints:\n%s",
+						h.Message, len(tc.hints), out)
+				}
+			}
+		})
+	}
+}
+
+// TestRender_GitStatsBadge_Suppressed: an empty git_stats message is
+// the contract for "no signal" (clean workspace). Renderer must skip
+// it so the row stays visually quiet rather than showing a blank pill.
+func TestRender_GitStatsBadge_Suppressed(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{
+		Project: "p", Name: "ws", Branch: "b",
+		Hints: []state.Hint{{Kind: "git_stats", Message: ""}},
+	}})
+	out := m.View()
+	// No leading arrows or asterisk should appear — empty stats should
+	// not produce visible badge chrome.
+	if strings.Contains(out, "↑") || strings.Contains(out, "↓") || strings.Contains(out, "*") {
+		t.Errorf("clean workspace rendered git_stats glyphs:\n%s", out)
+	}
+}
+
 // TestRender_PRStatusSupersedesShipped: when a row has both shipped and
 // pr_status hints, the badge column shows ONLY the PR-state badge —
 // the local "shipped" fallback is suppressed because the PR is the
@@ -374,7 +437,7 @@ func TestRender_PRStatusSupersedesShipped(t *testing.T) {
 	if !strings.Contains(out, "PR merged") {
 		t.Errorf("PR merged badge missing:\n%s", out)
 	}
-	if strings.Contains(out, "✓ shipped (local)") {
+	if strings.Contains(out, "✓ merged") {
 		t.Errorf("local shipped badge should be hidden when PR is present:\n%s", out)
 	}
 }
@@ -407,7 +470,7 @@ func TestRender_PRStatusStateBadges(t *testing.T) {
 }
 
 // TestRender_ShippedFallbackWhenNoPR: a row with only the local "shipped"
-// hint (no pr_status) shows the "✓ shipped (local)" fallback badge.
+// hint (no pr_status) shows the "✓ merged" fallback badge.
 // Critical for purely-local-repo workflows where there's no GitHub PR.
 func TestRender_ShippedFallbackWhenNoPR(t *testing.T) {
 	m := New(Options{})
@@ -415,7 +478,7 @@ func TestRender_ShippedFallbackWhenNoPR(t *testing.T) {
 		Project: "canopy", Name: "soft-fox",
 		Hints: []state.Hint{{Kind: "shipped"}},
 	}})
-	if !strings.Contains(m.View(), "✓ shipped (local)") {
+	if !strings.Contains(m.View(), "✓ merged") {
 		t.Errorf("shipped fallback badge missing:\n%s", m.View())
 	}
 }
@@ -512,31 +575,63 @@ func TestRender_IncludesRowFields(t *testing.T) {
 	m.SetRows(sampleRows())
 	out := m.View()
 
-	for _, want := range []string{"cravd", "bold-falcon", "feat/x", "ready", "3000"} {
+	// Status text is "running" for live ready rows after the
+	// 2026-04-29 vocabulary unification (was "ready"). The recorded
+	// state.Status enum is unchanged; only the display string flipped
+	// to match main rows' vocabulary.
+	for _, want := range []string{"cravd", "bold-falcon", "feat/x", "running", "3000"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered output missing %q\nfull output:\n%s", want, out)
 		}
 	}
 }
 
-// TestRender_NoAliveDot covers the legend cleanup: with the alive dot
-// dropped from the row prefix, no `●` or `○` should appear in any row
-// rendering. The status column carries that information now (running /
-// not started / ready / stopped) — the dot was redundant for 4 of 6
-// statuses and confusing alongside the status text.
-func TestRender_NoAliveDot(t *testing.T) {
+// TestRender_PresenceGlyphs locks in the three-state row-prefix glyph
+// (added 2026-04-29 in response to user feedback: "blank vs blank-with-
+// dot was confusing; can we have circle for running quietly and dotted
+// circle for actively attached?"):
+//
+//   ⊙   alive AND attached (someone's looking at this session)
+//   ○   alive AND not attached (running quietly in the background)
+//   (none) not alive (status column says why: stopped/broken/etc.)
+//
+// The previous design used a single ⊙ for attached and blank for
+// everything else, which conflated "alive but detached" with "dead."
+// The user rightly called that out as too many distinctions packed
+// into too few glyphs.
+func TestRender_PresenceGlyphs(t *testing.T) {
 	m := New(Options{})
 	m.SetRows([]state.GlobalRow{
-		{Project: "p", Name: "ws", Branch: "feat", Status: state.StatusReady, Alive: true},
-		{Project: "p", Name: "stopped-ws", Branch: "feat-2", Status: state.StatusStopped, Alive: false},
+		{Project: "p", Name: "attached-ws", Branch: "a", Status: state.StatusReady, Alive: true, Attached: true, TmuxSession: "p-attached"},
+		{Project: "p", Name: "detached-ws", Branch: "b", Status: state.StatusReady, Alive: true, Attached: false, TmuxSession: "p-detached"},
+		{Project: "p", Name: "stopped-ws", Branch: "c", Status: state.StatusStopped, Alive: false, TmuxSession: "p-stopped"},
 	})
 	m.cursor = -1
 	out := m.View()
-	if strings.Contains(out, "●") {
-		t.Errorf("rendered output still contains alive dot ●:\n%s", out)
-	}
-	if strings.Contains(out, "○") {
-		t.Errorf("rendered output still contains dead dot ○:\n%s", out)
+
+	// Each line has the row's name, so we can locate the line by name
+	// and check the glyph that precedes it.
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "attached-ws"):
+			if !strings.Contains(line, "⊙") {
+				t.Errorf("attached row missing ⊙ glyph:\n%s", line)
+			}
+			if strings.Contains(line, "○") {
+				t.Errorf("attached row should not contain ○:\n%s", line)
+			}
+		case strings.Contains(line, "detached-ws"):
+			if !strings.Contains(line, "○") {
+				t.Errorf("detached-alive row missing ○ glyph:\n%s", line)
+			}
+			if strings.Contains(line, "⊙") {
+				t.Errorf("detached row should not contain ⊙:\n%s", line)
+			}
+		case strings.Contains(line, "stopped-ws"):
+			if strings.Contains(line, "⊙") || strings.Contains(line, "○") {
+				t.Errorf("dead row should have no presence glyph (status column carries the meaning):\n%s", line)
+			}
+		}
 	}
 }
 
@@ -644,4 +739,192 @@ func TestSetSize_DoesNotPanic(t *testing.T) {
 	m.SetSize(0, 0)
 	m.SetSize(10000, 10000)
 	_ = m.View()
+}
+
+// TestMemCell_FormatsLoad covers the combined Mem+CPU cell
+// formatting. CPU is shown as integer percent on every alive row,
+// including 0% — keeping cell format consistent ("320M N%" always)
+// and avoiding the "is CPU missing because <1% or because no data?"
+// ambiguity that the previous omit-under-1% rule introduced.
+// Dead/main/zero-RSS rows render "—".
+func TestMemCell_FormatsLoad(t *testing.T) {
+	cases := []struct {
+		name string
+		row  state.GlobalRow
+		want string
+	}{
+		{"idle workspace, cpu < 1% → 320M 0%", state.GlobalRow{Status: state.StatusReady, Alive: true, MemRSS: 320 * 1024 * 1024, CPU: 0.4}, "320M 0%"},
+		{"alive workspace, cpu rounds up to 13%", state.GlobalRow{Status: state.StatusReady, Alive: true, MemRSS: 320 * 1024 * 1024, CPU: 12.5}, "320M 13%"},
+		{"alive workspace, cpu > 100% multi-core", state.GlobalRow{Status: state.StatusReady, Alive: true, MemRSS: 1024 * 1024 * 1024, CPU: 250}, "1.0G 250%"},
+		{"dead workspace → —", state.GlobalRow{Status: state.StatusStopped, Alive: false, MemRSS: 0, CPU: 0}, "—"},
+		{"main row → —", state.GlobalRow{IsMain: true, Alive: true, MemRSS: 100, CPU: 5}, "—"},
+		{"alive but probe didn't run yet (zero rss) → —", state.GlobalRow{Status: state.StatusReady, Alive: true, MemRSS: 0, CPU: 0}, "—"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := memCell(tc.row); got != tc.want {
+				t.Errorf("memCell(%+v) = %q; want %q", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDisplayGlyph_AgreesWithDisplayStatus is the regression test for
+// the "stopped without ⏸" bug. Reading the row was confusing: a stale-
+// ready row showed " stopped" (ready glyph + stopped text) because
+// the glyph helper used the recorded Status while the text helper
+// used the displayed status. The two must agree — that's why
+// displayGlyph exists alongside displayStatus.
+//
+// 2026-04-29: stale-ready rows now render with the stopped glyph
+// instead of the ready one, matching their displayStatus override.
+func TestDisplayGlyph_AgreesWithDisplayStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		row  state.GlobalRow
+	}{
+		{"workspace ready + alive", state.GlobalRow{Status: state.StatusReady, Alive: true}},
+		{"workspace ready + !alive (stale)", state.GlobalRow{Status: state.StatusReady, Alive: false}},
+		{"workspace stopped", state.GlobalRow{Status: state.StatusStopped}},
+		{"workspace broken", state.GlobalRow{Status: state.StatusBroken}},
+		{"workspace orphaned", state.GlobalRow{Status: state.StatusOrphaned}},
+		{"workspace setting up", state.GlobalRow{Status: state.StatusSettingUp}},
+		{"main alive", state.GlobalRow{IsMain: true, Alive: true}},
+		{"main dead", state.GlobalRow{IsMain: true, Alive: false}},
+	}
+	// Map status text → expected glyph. Captures the legend the help
+	// screen displays. If we add a new status, the test forces an
+	// explicit decision about its glyph.
+	textToGlyph := map[string]string{
+		"running":     " ",
+		"stopped":     "⏸",
+		"broken":      "✗",
+		"orphaned":    "!",
+		"setting up":  "…",
+		"not started": " ",
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := displayStatus(tc.row)
+			gotGlyph := displayGlyph(tc.row)
+			wantGlyph, ok := textToGlyph[text]
+			if !ok {
+				t.Fatalf("displayStatus returned %q which has no expected glyph mapping; update textToGlyph or fix the helper", text)
+			}
+			if gotGlyph != wantGlyph {
+				t.Errorf("row=%+v displayStatus=%q displayGlyph=%q; want glyph %q (glyph and text must agree)",
+					tc.row, text, gotGlyph, wantGlyph)
+			}
+		})
+	}
+}
+
+// TestDisplayStatus_VocabularyMapping locks in the 2026-04-29
+// status-vocabulary unification:
+//
+//   - workspace ready + alive → "running" (was "ready")
+//   - workspace ready + !alive → "stopped" (stale-ready override —
+//     the recorded status hasn't caught up yet but Alive probe says
+//     the session is gone)
+//   - workspace setting_up → "setting up" (display only — the enum
+//     value stays setting_up for backward compat)
+//   - main rows: unchanged ("running"/"not started")
+//   - other workspace statuses: unchanged
+//
+// Why this matters: "ready" was ambiguous between "ready to attach"
+// and "actively running"; aligning workspace + main vocabulary on
+// "running" plus letting the green ⊙ glyph carry "client attached"
+// gives one job per visual element.
+func TestDisplayStatus_VocabularyMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		row  state.GlobalRow
+		want string
+	}{
+		{
+			name: "workspace ready + alive → running",
+			row:  state.GlobalRow{Status: state.StatusReady, Alive: true},
+			want: "running",
+		},
+		{
+			name: "workspace ready + !alive (stale) → stopped",
+			row:  state.GlobalRow{Status: state.StatusReady, Alive: false},
+			want: "stopped",
+		},
+		{
+			name: "workspace setting_up → setting up (with space)",
+			row:  state.GlobalRow{Status: state.StatusSettingUp},
+			want: "setting up",
+		},
+		{
+			name: "workspace stopped → stopped (unchanged)",
+			row:  state.GlobalRow{Status: state.StatusStopped},
+			want: "stopped",
+		},
+		{
+			name: "workspace broken → broken (unchanged)",
+			row:  state.GlobalRow{Status: state.StatusBroken},
+			want: "broken",
+		},
+		{
+			name: "workspace orphaned → orphaned (unchanged)",
+			row:  state.GlobalRow{Status: state.StatusOrphaned},
+			want: "orphaned",
+		},
+		{
+			name: "main alive → running",
+			row:  state.GlobalRow{IsMain: true, Alive: true},
+			want: "running",
+		},
+		{
+			name: "main dead → not started",
+			row:  state.GlobalRow{IsMain: true, Alive: false},
+			want: "not started",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := displayStatus(tc.row); got != tc.want {
+				t.Errorf("displayStatus(%+v) = %q; want %q", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRender_NameColumnAlignmentDoesNotShiftOnSelection is the
+// regression test for the "row jumps right when I move the cursor
+// onto it" bug discovered 2026-04-29. Selected rows have a `❯ `
+// caret (2 chars); non-selected rows must pad with 2 spaces in the
+// same slot so the attach glyph + name + branch + status all stay
+// in fixed columns regardless of which row is selected.
+//
+// Reproducer for the bug: selecting a row shifted everything after
+// the caret 2 chars to the right because the non-selected branch
+// of renderTable lacked the 2-space caret slot after the attach
+// glyph addition.
+func TestRender_NameColumnAlignmentDoesNotShiftOnSelection(t *testing.T) {
+	rows := []state.GlobalRow{
+		{Project: "p", ProjectRoot: "/p", Name: "alpha", Branch: "feat/a", Status: state.StatusReady, Port: 3000, Alive: true, TmuxSession: "p-alpha"},
+		{Project: "p", ProjectRoot: "/p", Name: "bravo", Branch: "feat/b", Status: state.StatusReady, Port: 3001, Alive: true, TmuxSession: "p-bravo"},
+	}
+
+	m := New(Options{})
+	m.SetRows(rows)
+
+	// Cursor on first row by default.
+	rendered1 := m.View()
+	idxBravoSel0 := strings.Index(rendered1, "bravo")
+
+	// Move cursor down to second row.
+	m, _ = m.Update(key("down"))
+	rendered2 := m.View()
+	idxBravoSel1 := strings.Index(rendered2, "bravo")
+
+	if idxBravoSel0 == -1 || idxBravoSel1 == -1 {
+		t.Fatalf("bravo missing from one of the renders")
+	}
+	if idxBravoSel0 != idxBravoSel1 {
+		t.Errorf("REGRESSION: row position shifted on selection. cursor-on-alpha bravo@%d, cursor-on-bravo bravo@%d (expected identical column position)\n--- cursor-on-alpha ---\n%s\n--- cursor-on-bravo ---\n%s",
+			idxBravoSel0, idxBravoSel1, rendered1, rendered2)
+	}
 }

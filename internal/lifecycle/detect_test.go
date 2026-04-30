@@ -159,9 +159,13 @@ func TestDetectShipped_NotMerged(t *testing.T) {
 	}
 }
 
-// TestDetectShipped_MergedViaMergeCommit: simulate a real `git merge
-// --no-ff feature` style merge — main advances past the feature branch
-// via a merge commit whose second parent is the feature tip.
+// TestDetectShipped_MergedViaMergeCommit: a real `git merge --no-ff
+// feature` merge. Detector currently returns nil for this case
+// (squash-merge-only detection — the merge-commit case is ambiguous
+// from current git state alone with the "fresh fork that fell behind"
+// case, so we don't claim shipped without storing the branch base
+// commit). Documented limitation; future work to record BaseCommit
+// on workspace creation will let us safely detect this case too.
 //
 // Real-world shape:
 //
@@ -170,9 +174,10 @@ func TestDetectShipped_NotMerged(t *testing.T) {
 //	 \      /
 //	  o────o   feature
 //
-// After this, HEAD (= feature tip) is reachable from origin/main (via
-// the merge commit's second parent), AND origin/main has commits past
-// HEAD (the merge commit itself). Both conditions satisfied → shipped.
+// After this, HEAD (= feature tip) is reachable from origin/main, but
+// `git cherry origin/main HEAD` returns nothing (HEAD has no commits
+// past origin/main from cherry's POV — they're all reachable from
+// the merge commit). So we conservatively return nil.
 func TestDetectShipped_MergedViaMergeCommit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -226,14 +231,8 @@ func TestDetectShipped_MergedViaMergeCommit(t *testing.T) {
 
 	ws := makeWorkspace("merged-feature", "merged-feature", wt, source)
 	got := detectShipped(context.Background(), ws)
-	if got == nil {
-		t.Fatal("expected shipped hint; got nil")
-	}
-	if got.Kind != "shipped" {
-		t.Errorf("Kind = %q; want shipped", got.Kind)
-	}
-	if !strings.Contains(got.Action, "canopy rm merged-feature") {
-		t.Errorf("Action missing rm command: %q", got.Action)
+	if got != nil {
+		t.Errorf("expected nil for merge-commit-merged branch (squash-only detection); got %+v", got)
 	}
 }
 
@@ -260,7 +259,7 @@ func TestDetectShipped_FreshWorkspace(t *testing.T) {
 // TestDetectShipped_LocalRepoFallback: a workspace whose source repo
 // has NO remote (no origin/main, no origin/HEAD) — purely local —
 // should still detect "shipped" against local main when the feature
-// branch's commits are merged into it.
+// branch's commits are squash-merged into it.
 //
 // This covers the "I'm just hacking locally, no GitHub involved"
 // workflow. Without the fallback, detectShipped would return nil for
@@ -288,35 +287,86 @@ func TestDetectShipped_LocalRepoFallback(t *testing.T) {
 		"-b", "local-feature", wt).CombinedOutput(); err != nil {
 		t.Fatalf("worktree add: %v\n%s", err, out)
 	}
+	// Real (non-empty) feature commit. `merge --squash` of an empty
+	// commit collapses to nothing-to-commit, so we need a real diff.
+	if err := os.WriteFile(filepath.Join(wt, "feature.txt"), []byte("feat\n"), 0o644); err != nil {
+		t.Fatalf("write feature.txt: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", wt, "add", "feature.txt").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
 	if out, err := exec.Command("git", "-C", wt,
-		"commit", "--allow-empty", "-m", "feat").CombinedOutput(); err != nil {
+		"commit", "-m", "feat").CombinedOutput(); err != nil {
 		t.Fatalf("feat commit: %v\n%s", err, out)
 	}
 
-	// Merge feature into local main with --no-ff (real merge commit).
-	// This is the "I just merged my branch locally" workflow.
+	// Squash-merge feature into local main: one squash commit on main
+	// containing all the feature's changes; the feature's own commits
+	// are NOT in main's history but their patch IDs match the squash.
 	if out, err := exec.Command("git", "-C", source, "merge",
-		"--no-ff", "local-feature", "-m", "merged locally").CombinedOutput(); err != nil {
-		t.Fatalf("merge: %v\n%s", err, out)
+		"--squash", "local-feature").CombinedOutput(); err != nil {
+		t.Fatalf("merge --squash: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", source,
+		"commit", "-m", "squash-merged locally").CombinedOutput(); err != nil {
+		t.Fatalf("squash commit: %v\n%s", err, out)
 	}
 
 	ws := makeWorkspace("local-feature", "local-feature", wt, source)
 	got := detectShipped(context.Background(), ws)
 	if got == nil {
-		t.Fatal("expected shipped hint for locally-merged branch; got nil")
+		t.Fatal("expected shipped hint for squash-merged branch; got nil")
 	}
 	if got.Kind != "shipped" {
 		t.Errorf("Kind = %q; want shipped", got.Kind)
 	}
-	// Locality qualifier should reflect the local fallback so consumers
-	// (badge renderer) can disambiguate.
-	if !strings.Contains(got.Message, "local") {
-		t.Errorf("message should indicate local fallback: %q", got.Message)
+	if !strings.Contains(got.Action, "canopy rm local-feature") {
+		t.Errorf("Action missing rm command: %q", got.Action)
 	}
 }
 
-// TestRunFast_Parallelism: RunFast dispatches both detectors in
-// parallel. Ensures no panic when both fire on the same workspace.
+// TestDetectShipped_FreshForkBehindMain is the regression test for the
+// false positive that bit misty-marsh: a workspace that was forked
+// from main and never had unique commits, while main has fast-forwarded
+// past it. Old detector said "shipped" because HEAD was an ancestor
+// of main; the right answer is nil because the branch never had work
+// to ship.
+//
+// Replicates: branch from main, don't commit anything on the branch,
+// commit something to main directly, observe the workspace's row in
+// the TUI — should NOT show "✓ merged".
+func TestDetectShipped_FreshForkBehindMain(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "fresh-fork")
+	// Feature branch makes ZERO commits.
+
+	// Advance origin/main by simulating a new main commit. We don't
+	// actually push — just move the ref to a new commit.
+	if out, err := exec.Command("git", "-C", source, "checkout", "main").CombinedOutput(); err != nil {
+		t.Fatalf("checkout main: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", source,
+		"commit", "--allow-empty", "-m", "main advance").CombinedOutput(); err != nil {
+		t.Fatalf("main advance: %v\n%s", err, out)
+	}
+	mainSha, _ := exec.Command("git", "-C", source, "rev-parse", "main").Output()
+	if out, err := exec.Command("git", "-C", source, "update-ref",
+		"refs/remotes/origin/main", strings.TrimSpace(string(mainSha))).CombinedOutput(); err != nil {
+		t.Fatalf("update-ref: %v\n%s", err, out)
+	}
+
+	ws := makeWorkspace("fresh-fork", "fresh-fork", wt, source)
+	got := detectShipped(context.Background(), ws)
+	if got != nil {
+		t.Errorf("REGRESSION: fresh fork with no commits past advanced main returned shipped hint %+v; want nil (branch never had work to ship)", got)
+	}
+}
+
+// TestRunFast_Parallelism: RunFast dispatches all detectors in
+// parallel. Ensures no panic when multiple fire on the same workspace.
 func TestRunFast_Parallelism(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -330,12 +380,24 @@ func TestRunFast_Parallelism(t *testing.T) {
 
 	ws := makeWorkspace("ancient-hornet", "ancient-hornet", wt, source)
 	hints := RunFast(context.Background(), ws)
-	// rename_suggested fires; shipped does not (commits diverge from main).
-	if len(hints) != 1 {
-		t.Errorf("RunFast hint count = %d; want 1", len(hints))
+
+	// Two detectors should fire on this workspace shape:
+	// - rename_suggested (auto-named branch with commits past main)
+	// - git_stats (1 commit ahead → "↑1")
+	// shipped does NOT fire (cherry shows + line, not -); pr_status
+	// does not fire (no gh/PR setup in this test).
+	kinds := make(map[string]bool)
+	for _, h := range hints {
+		kinds[h.Kind] = true
 	}
-	if len(hints) > 0 && hints[0].Kind != "rename_suggested" {
-		t.Errorf("RunFast[0].Kind = %q; want rename_suggested", hints[0].Kind)
+	if !kinds["rename_suggested"] {
+		t.Errorf("RunFast missing rename_suggested hint; got kinds %v", kinds)
+	}
+	if !kinds["git_stats"] {
+		t.Errorf("RunFast missing git_stats hint; got kinds %v", kinds)
+	}
+	if kinds["shipped"] {
+		t.Errorf("RunFast unexpectedly produced shipped hint: %+v", hints)
 	}
 }
 

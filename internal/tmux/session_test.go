@@ -38,13 +38,17 @@ func requireTmux(t *testing.T) {
 }
 
 // newClient returns a Client scoped to the test socket and registers a
-// cleanup hook that kills the entire tmux server on the test socket. That
-// way no test leaves stale sessions around to confuse later tests.
+// cleanup hook that kills the entire tmux server on the test socket
+// AND reaps any pane-tree descendants left behind. KillServerAndReap
+// (rather than the bare KillServer) is required because `nvim --embed`
+// detaches from its tmux pane on launch so it can outlive the launcher —
+// killing the tmux server alone leaves it parented to PID 1, accumulating
+// across test runs. See KillServerAndReap docs.
 func newClient(t *testing.T) *tmux.Client {
 	t.Helper()
 	c := tmux.WithSocket(testSocket)
 	t.Cleanup(func() {
-		_ = c.KillServer(context.Background())
+		_ = c.KillServerAndReap(context.Background())
 	})
 	return c
 }
