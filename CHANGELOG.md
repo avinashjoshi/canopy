@@ -5,6 +5,32 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] - 2026-04-30 — `make build` DEV banner restored + TODOs queued
+
+The v0.12.1 squash merge dropped two commits that were pushed to the
+PR after the squash. v0.12.2 lands them: the dev-sentinel preservation
+fix (so `make build` binaries register as DEV again) plus the TODO
+entries for the next round of UX work.
+
+### Fixed
+- `make build` binaries now correctly register as DEV. The v0.12.0
+  versionDetails() BuildInfo fallback was overwriting the literal
+  "dev" sentinel with Go's pseudo-version (e.g.
+  "v0.0.0-20260430201846-6f65463") for in-repo builds, which tripped
+  IsDev to false. That killed the cyan DEV pill in the TUI, killed
+  the [DEV:branch] suffix in the tmux statusline, and made `canopy
+  upgrade` cheerfully offer to upgrade dev binaries instead of
+  refusing. Fixed by capturing rawVersion before the fallback runs;
+  IsDev now reads from rawVersion while d.Version can still surface
+  the pseudo for forensic display.
+
+### Documentation
+- TODOS.md gains two new entries: a P2 "surface version in canopy
+  use and canopy --help" quick-win pair, and a P3 "upgrade UX
+  overhaul" with sub-items for auto-check, TUI flow, and integration.
+  Design questions are noted on the P3 sub-items because the right
+  shape isn't obvious yet (cadence, storage, surface, dismissal).
+
 ## [0.12.1] - 2026-04-30 — `canopy upgrade` falls back to git for private repos
 
 `canopy upgrade` was hitting `HTTP 404` on the VERSION fetch because
