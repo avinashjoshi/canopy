@@ -53,6 +53,14 @@ type GlobalRow struct {
 	TmuxSession string
 	Alive       bool
 
+	// LastErrorHint is the auto-detected diagnosis from workspace.Diagnose,
+	// populated only when Status==broken AND canopy recognized the failure
+	// signature. Rendered as a "hint:" line under the table when the cursor
+	// sits on this row. Mirrors the field on the (deleted) ui.Row type;
+	// promoted to GlobalRow during v0.8 unification so cross-project rows
+	// can carry the diagnosis through to the unified TUI.
+	LastErrorHint string
+
 	// Hints are v0.6 lifecycle detector results for this row, populated
 	// when the caller wants the row decorated with badges (the global
 	// TUI). Empty when the caller skips detection (e.g., canopy ls --all
@@ -169,15 +177,16 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 		for _, w := range byProject[root] {
 			alive, _ := probe.HasSession(ctx, w.TmuxSession)
 			rows = append(rows, GlobalRow{
-				ProjectRoot: root,
-				Project:     basename,
-				Name:        w.Name,
-				Branch:      w.Branch,
-				Status:      w.Status,
-				Port:        w.Port,
-				Path:        w.Path,
-				TmuxSession: w.TmuxSession,
-				Alive:       alive,
+				ProjectRoot:   root,
+				Project:       basename,
+				Name:          w.Name,
+				Branch:        w.Branch,
+				Status:        w.Status,
+				Port:          w.Port,
+				Path:          w.Path,
+				TmuxSession:   w.TmuxSession,
+				Alive:         alive,
+				LastErrorHint: w.LastErrorHint,
 			})
 		}
 	}

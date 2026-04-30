@@ -295,41 +295,91 @@ func (m Model) renderTable() string {
 		if r.Port > 0 {
 			port = fmt.Sprintf("%d", r.Port)
 		}
-		badge := badgeFor(r.Alive)
-		statusCell := statusStyleFor(r.Status).Render(statusGlyphFor(r.Status) + " " + fmt.Sprintf("%-*s", colStatus, r.Status))
-		// Two-space indent under the project header so rows visually nest.
-		// Branch is emphasized (the renamed-intent name) when it differs
-		// from the workspace name. When they match (fresh workspace,
-		// branch hasn't been renamed yet), the branch column dims so
-		// the duplicate doesn't visually shout. Subtle distinction —
-		// the user sees at a glance which workspaces have been "named"
-		// vs which still wear their auto-generated label.
-		branchDisplay := fmt.Sprintf("%-*s", colBranch, r.Branch)
-		if r.Branch == r.Name {
-			branchDisplay = subtleHelper().Render(branchDisplay)
-		} else if r.Branch != "" && r.Branch != "—" {
-			branchDisplay = renamedBranchStyle().Render(branchDisplay)
-		}
-		line := fmt.Sprintf("    %s  %-*s  %s  %s  %*s",
-			badge,
-			colName, r.Name,
-			branchDisplay,
-			statusCell,
-			colPort, port,
-		)
-		// Append v0.6 hint badges (rename / shipped / pr_status) to the
-		// right of the row. Subtle styling so they decorate without
-		// stealing focus from the workspace's primary fields. Badges
-		// only appear when the corresponding detector fired; rows with
-		// no active hints render exactly as before.
-		if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
-			line += "  " + hintBadges
-		}
-		if i == m.cursor {
-			line = selectionStyle().Render(line)
+		isSelected := i == m.cursor
+
+		var line string
+		if isSelected {
+			// Selected row: simple `>` caret in bold white at the
+			// start, then plain content (no inner ANSI) wrapped with
+			// the selection bg padded to terminal width.
+			//
+			// The caret prefix is `>   ` (4 cells: chevron + 3 spaces),
+			// which matches non-selected rows' 4-space leading indent
+			// — columns don't shift left/right as the cursor moves.
+			//
+			// Caret is rendered as part of the same plain string so
+			// selectionStyle.Render wraps everything uniformly: bold
+			// fg comes from selectionStyle (which has Bold(true)), the
+			// bg is the same selection grey across the whole line.
+			aliveDot := "○"
+			if r.Alive {
+				aliveDot = "●"
+			}
+			plainContent := fmt.Sprintf(">   %s  %-*s  %s  %s  %*s",
+				aliveDot,
+				colName, r.Name,
+				fmt.Sprintf("%-*s", colBranch, r.Branch),
+				statusGlyphFor(r.Status)+" "+fmt.Sprintf("%-*s", colStatus, r.Status),
+				colPort, port,
+			)
+			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
+				plainContent += "  " + stripAnsi(hintBadges)
+			}
+
+			rowStyle := selectionStyle()
+			if m.width > 0 {
+				rowStyle = rowStyle.Width(m.width)
+			}
+			line = rowStyle.Render(plainContent)
+		} else {
+			// Non-selected row: full per-column styling for visual
+			// density (status colors, dimmed branch on identity name,
+			// hint badge colors).
+			statusCell := statusStyleFor(r.Status).Render(statusGlyphFor(r.Status) + " " + fmt.Sprintf("%-*s", colStatus, r.Status))
+			branchDisplay := fmt.Sprintf("%-*s", colBranch, r.Branch)
+			if r.Branch == r.Name {
+				branchDisplay = subtleHelper().Render(branchDisplay)
+			} else if r.Branch != "" && r.Branch != "—" {
+				branchDisplay = renamedBranchStyle().Render(branchDisplay)
+			}
+			line = fmt.Sprintf("    %s  %-*s  %s  %s  %*s",
+				badgeFor(r.Alive),
+				colName, r.Name,
+				branchDisplay,
+				statusCell,
+				colPort, port,
+			)
+			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
+				line += "  " + hintBadges
+			}
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// stripAnsi removes ANSI SGR escape sequences from s. Used to flatten
+// pre-styled fragments (RenderHintBadges output) before embedding them
+// inside selectionStyle, where inner ANSI codes would break the outer
+// bg propagation. Tiny inline implementation rather than a regexp —
+// canopy emits only SGR (\x1b[...m), no cursor-movement etc.
+func stripAnsi(s string) string {
+	var b strings.Builder
+	inEsc := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == 0x1b {
+			inEsc = true
+			continue
+		}
+		if inEsc {
+			if c == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		b.WriteByte(c)
 	}
 	return b.String()
 }
@@ -517,12 +567,13 @@ func subtleHelper() lipgloss.Style {
 }
 
 func selectionStyle() lipgloss.Style {
-	// Bright violet bg + near-white fg + bold. Mirrors selectedStyle in
-	// internal/ui/render.go so the selection looks identical between the
-	// project TUI and the global TUI. The previous bg=237 (dim gray)
-	// was too subtle on a lot of terminals.
+	// Soft dark-grey bg + bright white fg + bold. Lighter than the
+	// v0.7 bright-violet bg (62) which was too punchy. Bright white
+	// (231) for the fg so the inline `>` caret + row content read
+	// boldly against the grey bg — the eye snaps to the row without
+	// the bg color shouting.
 	return lipgloss.NewStyle().
-		Background(lipgloss.Color("62")).
+		Background(lipgloss.Color("237")).
 		Foreground(lipgloss.Color("231")).
 		Bold(true)
 }

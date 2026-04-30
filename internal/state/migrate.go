@@ -50,11 +50,38 @@ func (s *State) MigrateLegacyProject(basename, canonicalRoot string) {
 
 	migrated := false
 
-	// Step 1: move basename-keyed Projects entry to root-keyed.
-	if meta, ok := s.Projects[basename]; ok {
-		if _, alreadyAtRoot := s.Projects[canonicalRoot]; !alreadyAtRoot {
-			meta.Root = canonicalRoot
-			s.Projects[canonicalRoot] = meta
+	// Step 1: reconcile basename-keyed Projects entry into root-keyed form.
+	//
+	// Three cases:
+	//
+	//   a) basename key exists, root key does not → rename (the standard
+	//      v1→v2 migration).
+	//
+	//   b) basename key exists AND root key exists → the basename entry is
+	//      a stale v1 stub left from running an older canopy alongside a
+	//      newer one. Drop the basename entry; the root-keyed v2 entry is
+	//      canonical. If the v2 entry has no PortBase yet, salvage it from
+	//      the v1 stub so port allocation history isn't lost.
+	//
+	//   c) only root key exists OR neither exists → no-op for this step;
+	//      step 2 (self-heal) and step 3 (workspace backfill) handle them.
+	if v1, hasBasename := s.Projects[basename]; hasBasename {
+		if v2, hasRoot := s.Projects[canonicalRoot]; hasRoot {
+			// Case (b): both keys exist for the same project. The
+			// collision-guard (FindBasenameCollision) was about to refuse
+			// Manager construction here — but it's not really a collision,
+			// just a stale stub. Drop the v1 entry; preserve v2's PortBase
+			// (or salvage v1's if v2 is missing one).
+			if v2.PortBase == 0 && v1.PortBase != 0 {
+				v2.PortBase = v1.PortBase
+				s.Projects[canonicalRoot] = v2
+			}
+			delete(s.Projects, basename)
+			migrated = true
+		} else {
+			// Case (a): standard v1→v2 rename.
+			v1.Root = canonicalRoot
+			s.Projects[canonicalRoot] = v1
 			delete(s.Projects, basename)
 			migrated = true
 		}

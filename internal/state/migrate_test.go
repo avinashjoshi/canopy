@@ -135,6 +135,52 @@ func TestMigrateLegacyProject_AlreadyAtRootKey(t *testing.T) {
 	}
 }
 
+// TestMigrateLegacyProject_BothKeysCollapse: a state.json with BOTH the
+// legacy basename key AND the v2 root-path key for the same project (the
+// "stale stub left by an older canopy" scenario). MigrateLegacyProject
+// must drop the stale basename entry; FindBasenameCollision must then
+// not fire (it was firing pre-fix and refusing Manager construction
+// outright). PortBase from the legacy stub is salvaged when the v2
+// entry doesn't have one.
+func TestMigrateLegacyProject_BothKeysCollapse(t *testing.T) {
+	s := &State{
+		Projects: map[string]ProjectMeta{
+			"cravd":                {PortBase: 3000}, // legacy v1 stub
+			"/home/avi/Work/cravd": {Root: "/home/avi/Work/cravd"}, // v2 entry, no PortBase yet
+		},
+	}
+	s.MigrateLegacyProject("cravd", "/home/avi/Work/cravd")
+
+	if _, stillThere := s.Projects["cravd"]; stillThere {
+		t.Errorf("legacy basename entry should be removed: %v", s.Projects)
+	}
+	if got := s.Projects["/home/avi/Work/cravd"].PortBase; got != 3000 {
+		t.Errorf("PortBase not salvaged from v1 stub: got %d, want 3000", got)
+	}
+	// FindBasenameCollision must NOT fire after the migration — both
+	// keys collapsed into one.
+	if other := s.FindBasenameCollision("/home/avi/Work/cravd"); other != "" {
+		t.Errorf("FindBasenameCollision returned %q after collapse; want empty", other)
+	}
+}
+
+// TestMigrateLegacyProject_BothKeysPreservesV2PortBase: when both keys
+// exist AND the v2 entry already has a PortBase, the migration must
+// preserve it (don't overwrite from the v1 stub).
+func TestMigrateLegacyProject_BothKeysPreservesV2PortBase(t *testing.T) {
+	s := &State{
+		Projects: map[string]ProjectMeta{
+			"cravd":                {PortBase: 3000}, // legacy v1 stub
+			"/home/avi/Work/cravd": {Root: "/home/avi/Work/cravd", PortBase: 4000}, // v2 wins
+		},
+	}
+	s.MigrateLegacyProject("cravd", "/home/avi/Work/cravd")
+
+	if got := s.Projects["/home/avi/Work/cravd"].PortBase; got != 4000 {
+		t.Errorf("v2 PortBase clobbered by v1 stub: got %d, want 4000", got)
+	}
+}
+
 // TestMigrateLegacyProject_SelfHealsEmptyRoot: a Projects entry already at
 // the canonical root key but with meta.Root == "" should get its Root
 // backfilled. Covers a partial-migration recovery.

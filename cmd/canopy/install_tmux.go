@@ -37,7 +37,12 @@ const (
 	// tmuxInstallMinVersion mirrors popupMinTmuxVersion. install must
 	// refuse to write bindings the user's tmux can't run, so the bar
 	// is the same: 3.2 (display-popup support).
-	tmuxInstallMinVersion = popupMinTmuxVersion
+	// 3.2 (October 2021) is the first tmux release that supports
+	// display-popup. Older tmux returns "unknown command" for
+	// display-popup -E "...", which would surface as a confusing
+	// failure deep inside the popup keybind path. Refuse with a
+	// clear message at install time instead.
+	tmuxInstallMinVersion = "3.2"
 )
 
 var installTmuxLog = clog.Pkg("install-tmux")
@@ -230,15 +235,27 @@ func detectCanopyBlock(content string) canopyBlockState {
 // entry pointing at a different binary" case.
 func canopyBlockBody() string {
 	bin := canopyBinForBlock()
+	quoted := shellQuote(bin)
 	return tmuxConfMarkerStart + ` (managed by ` + "`canopy install tmux`" + ` — edit only outside markers)
 # Default keybind:
-#   <prefix>g  open the canopy popup (workspace switcher).
+#   <prefix>g  open the unified canopy TUI as a tmux popup (workspace switcher).
+#
+# v0.8 unification: there is no separate "popup" subcommand anymore.
+# tmux invokes ` + "`canopy`" + ` directly via display-popup -E with
+# CANOPY_IN_POPUP=1 in the env; the unified TUI flips to popup-mode
+# rendering (single-line tab bar, switch-client + tea.Quit on attach).
+#
+# -d "#{pane_current_path}" is load-bearing: it gives the popup body
+# the user's pane cwd so the workspace.ResolveCurrentProject lookup
+# finds the right project for the Local-tab filter. Without it, the
+# popup walks up from the tmux server's cwd (typically $HOME) and the
+# Local tab is empty even from inside a workspace.
 #
 # canopy run is shipped as a subcommand but NOT keybound by default —
 # the right shape (popup vs send-keys vs spawn-pane) is still being
 # explored. Bind manually if you want it; e.g.:
 #   bind X display-popup -E -d "#{pane_current_path}" "canopy run"
-bind g run-shell "` + bin + ` popup"
+bind g display-popup -E -w 80% -h 80% -d "#{pane_current_path}" "CANOPY_IN_POPUP=1 ` + quoted + `"
 # Statusline: strip any pre-existing canopy segment, then append fresh.
 # The strip+append pattern keeps reloads idempotent (set -ag alone would
 # accumulate duplicates on every source-file invocation). Pattern is
@@ -247,6 +264,54 @@ bind g run-shell "` + bin + ` popup"
 run-shell 'tmux set -gq status-right "$(tmux show -gv status-right | sed -E "s| *#\([^)]*canopy[^)]*statusline[^)]*\)||g")"'
 set -ag status-right " #(` + bin + ` statusline --format=current) "
 ` + tmuxConfMarkerEnd
+}
+
+// shellQuote wraps a path for safe inclusion in a shell command (used in
+// the tmux display-popup -E body, which the user's default shell parses).
+// Single-quote-wrap with escape for embedded single quotes — POSIX-safe
+// across bash, zsh, dash. Bare-safe paths skip wrapping for cleaner
+// generated config.
+func shellQuote(s string) string {
+	if isShellSafeBare(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// isShellSafeBare reports whether s contains only characters that don't
+// need shell quoting: alnum, slash, dash, underscore, dot, plus.
+func isShellSafeBare(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '/' || c == '-' || c == '_' || c == '.' || c == '+':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// selfBinaryPath returns the absolute path to the running canopy binary.
+// Used by canopyBinForBlock so generated tmux config points at the
+// binary that ran `canopy install tmux` — dogfood builds get their own
+// path, installed builds get theirs. Re-run install to swap.
+func selfBinaryPath() (string, error) {
+	bin, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(bin)
+	if err != nil {
+		return bin, nil
+	}
+	return resolved, nil
 }
 
 // canopyBinForBlock returns the binary path to embed in the generated

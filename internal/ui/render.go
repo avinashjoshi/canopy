@@ -58,7 +58,122 @@ var (
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).
 			Padding(0, 1)
+
+	// activeTabStyle, inactiveTabStyle, searchActiveStyle drive the
+	// unified TUI's tab bar + search-line chrome. Defined as vars not
+	// consts so lipgloss.Style methods (which return new Styles) chain
+	// cleanly.
+	activeTabStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("231")). // bright white
+			Background(lipgloss.Color("99")).  // violet, matches brand pill
+			Padding(0, 1)
+
+	inactiveTabStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("250")).
+				Background(lipgloss.Color("237")). // dark grey pill bg
+				Padding(0, 1)
+
+	searchActiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("231")).
+				Background(lipgloss.Color("236")).
+				Padding(0, 1)
+
+	// searchLabelStyle is the bright "🔍 SEARCH" pill that anchors the
+	// active search input. Bold + brand violet bg so it's unmistakable
+	// the user is in capture mode.
+	searchLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("231")).
+				Background(lipgloss.Color("99")).
+				Padding(0, 1)
+
+	// searchInputStyle is the typed-query area following the SEARCH
+	// label. Slightly dimmer bg so the label pops as the focal point
+	// but the query stays clearly readable.
+	searchInputStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("231")).
+				Background(lipgloss.Color("237")).
+				Padding(0, 1)
+
+	// brandPillStyle is the top-bar "canopy" wordmark — bright violet
+	// background, bold white text, lazyworktree-flavored. The visual
+	// anchor: tells the user what app they're looking at without
+	// occupying a whole line of header chrome.
+	brandPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("231")).
+			Background(lipgloss.Color("99")).
+			Padding(0, 1)
+
+	// scopePillStyle is the secondary top-bar pill showing current
+	// focus (project basename or "global"). Darker than the brand pill
+	// so the eye reads brand first, then scope. Same padding so the
+	// two pills sit at the same visual weight side-by-side.
+	scopePillStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("250")).
+			Background(lipgloss.Color("237")).
+			Padding(0, 1)
+
+	// keyPillStyle is the inverted-bg style for the key part of help-
+	// line entries: `[Enter] attach`. Bright bg + dark fg makes the
+	// key read as "press this," then the description follows in
+	// subtle text. Lazyworktree's bottom bar pattern.
+	keyPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("231")).
+			Background(lipgloss.Color("238")).
+			Padding(0, 1)
 )
+
+// isSubseq returns true if needle's characters appear in haystack in
+// order (not necessarily contiguous). Both are expected to be already
+// lowercased by the caller. fzf-style matching for the unified TUI's
+// fuzzy search; bounded performance (canopy expects <100 rows so the
+// O(N*M) comparison cost is trivial).
+func isSubseq(haystack, needle string) bool {
+	if needle == "" {
+		return true
+	}
+	hi, ni := 0, 0
+	for hi < len(haystack) && ni < len(needle) {
+		if haystack[hi] == needle[ni] {
+			ni++
+		}
+		hi++
+	}
+	return ni == len(needle)
+}
+
+// roundedPill renders content as a pill with rounded end-caps via the
+// powerline glyphs `` (left half-circle) and `` (right
+// half-circle). The cap glyphs are filled by their FOREGROUND color;
+// rendering them in the body's BG color makes them appear as continuous
+// extensions of the pill — the eye reads a single rounded shape, not a
+// glyph-bg-glyph sandwich.
+//
+// Requires a Nerd Font (Avi runs Ghostty + Iosevka Nerd Font per his
+// MEMORY.md). Falls back to vanilla square pills if the glyphs render
+// as tofu — the pill still works, just without the rounding.
+func roundedPill(content, fgColor, bgColor string) string {
+	cap := lipgloss.NewStyle().Foreground(lipgloss.Color(bgColor))
+	body := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(fgColor)).
+		Background(lipgloss.Color(bgColor)).
+		Bold(true)
+	return cap.Render("") + body.Render(content) + cap.Render("")
+}
+
+// roundedPillSubtle is the dimmer variant for inactive states.
+// Same shape as roundedPill but with bold off — the active/inactive
+// distinction is bg color + bold, both flipped here.
+func roundedPillSubtle(content, fgColor, bgColor string) string {
+	cap := lipgloss.NewStyle().Foreground(lipgloss.Color(bgColor))
+	body := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(fgColor)).
+		Background(lipgloss.Color(bgColor))
+	return cap.Render("") + body.Render(content) + cap.Render("")
+}
 
 // statusStyle returns the lipgloss style for a given workspace status.
 // Falls back to subtleStyle for unknown values + the synthetic "main"

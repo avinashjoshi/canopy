@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/oncactus/canopy/internal/ghx"
-	"github.com/oncactus/canopy/internal/ui/projectlist"
+	"github.com/oncactus/canopy/internal/state"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and
@@ -36,8 +36,23 @@ func (m *Model) View() string {
 		return m.renderBusyView()
 	}
 
+	if m.mode == confirmRetryMode {
+		return m.renderConfirmRetry()
+	}
+
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("canopy") + " " + subtleStyle.Render(m.projectName))
+	// Top bar: brand pill ◆ canopy + scope pill (current focus or "global").
+	// Both are rounded-end pills via powerline glyphs — the eye reads
+	// brand first, scope second, no heavy title bar eating a full line.
+	b.WriteString(roundedPill("◆ canopy", "231", "99"))      // bright white on violet
+	b.WriteString(" ")
+	b.WriteString(roundedPillSubtle(m.scopeLabel(), "250", "237")) // grey on dark grey
+	b.WriteString("\n\n")
+
+	// Tab bar + search-line on the row below the top bar.
+	b.WriteString(m.renderTabBar())
+	b.WriteString("    ")
+	b.WriteString(m.renderSearchLine())
 	b.WriteString("\n\n")
 
 	if m.err != nil {
@@ -45,11 +60,37 @@ func (m *Model) View() string {
 		b.WriteString("\n\n")
 	}
 
-	if len(m.rows) == 0 {
-		b.WriteString(subtleStyle.Render("No workspaces. Press 'n' to create one, or 'q' to quit."))
+	// Empty-tab onboarding text. projectlist's own emptyState() shows
+	// when SetRows([]) — but we want context-specific text (Local vs
+	// Global), so we override here when filteredRows is empty.
+	if len(m.filteredRows()) == 0 {
+		if m.tab == tabLocal {
+			if m.currentProject == "" {
+				b.WriteString("  " + subtleStyle.Render("You're not in a canopy project."))
+				b.WriteString("\n  ")
+				b.WriteString(subtleStyle.Render("cd to a repo and run `canopy init` to get started."))
+			} else if m.searchQuery != "" {
+				b.WriteString("  " + subtleStyle.Render(fmt.Sprintf("No matches for %q in this project.", m.searchQuery)))
+			} else if m.mgr != nil {
+				b.WriteString("  " + subtleStyle.Render("No workspaces. Press 'n' to create one."))
+			} else {
+				b.WriteString("  " + subtleStyle.Render("No workspaces in this project."))
+			}
+		} else {
+			if m.searchQuery != "" {
+				b.WriteString("  " + subtleStyle.Render(fmt.Sprintf("No matches for %q across any project.", m.searchQuery)))
+			} else {
+				b.WriteString("  " + subtleStyle.Render("No projects yet."))
+				b.WriteString("\n  ")
+				b.WriteString(subtleStyle.Render("cd to a repo and run `canopy init` to register one."))
+			}
+		}
 		b.WriteString("\n\n")
 	} else {
-		b.WriteString(m.renderTable())
+		// Delegate to the projectlist sub-component for table render.
+		// Same look as the v0.7 popup — grouped by project, indented
+		// rows, hint badges per row, selected row highlighted.
+		b.WriteString(m.list.View())
 		b.WriteString("\n")
 		if hint := m.selectedHint(); hint != "" {
 			b.WriteString("  ")
@@ -62,88 +103,166 @@ func (m *Model) View() string {
 		}
 	}
 
+	// Onboarding hint sits right above the help line — the natural
+	// "next-action" zone of the screen. Global tab only because Local
+	// already implies an existing project. Future: when there's an
+	// `[a] add project` keybind, this becomes a keybind affordance
+	// instead of a CLI suggestion.
+	if m.tab == tabGlobal {
+		b.WriteString(subtleStyle.Render("  add a project: cd to its repo and run `canopy init`"))
+		b.WriteString("\n")
+	}
 	b.WriteString(m.renderHelpLine())
 	return b.String()
 }
 
-// renderTable draws the workspace list. tabwriter would simplify column
-// alignment but doesn't play with lipgloss styled cells, so we compute
-// widths manually. Five columns: TMUX badge, NAME, BRANCH, STATUS, PORT.
-// SESSION is dropped from the TUI table (visible enough via tmux's own
-// status bar after attach) to keep the line narrow.
-func (m *Model) renderTable() string {
-	// Column widths derived from data, with sane minimums.
-	colName, colBranch, colStatus, colPort := 4, 6, 6, 4
-	for _, r := range m.rows {
-		colName = maxInt(colName, len(r.Name))
-		colBranch = maxInt(colBranch, len(r.Branch))
-		colStatus = maxInt(colStatus, len(string(r.Status)))
-		if r.Port > 0 {
-			colPort = maxInt(colPort, len(fmt.Sprintf("%d", r.Port)))
+// scopeLabel returns the secondary top-bar pill text. Shows the current
+// project's basename when focused (Local context resolved); otherwise
+// "global" so the user knows the brand pill alone isn't promising
+// project context that doesn't exist.
+func (m *Model) scopeLabel() string {
+	if m.projectName != "" {
+		return "🖥 " + m.projectName
+	}
+	return "global"
+}
+
+// renderTabBar draws the Local/Global tab bar as styled pills. Active
+// tab uses the violet brand-color bg; inactive uses a darker grey-bg
+// pill so both read as buttons, not text.
+//
+// Empty tabs (no rows under the active filter) render dimmed so the
+// user doesn't feel pulled to switch to a tab with nothing there.
+func (m *Model) renderTabBar() string {
+	hasLocal := false
+	hasGlobal := false
+	for _, r := range m.allRowsOrFallback() {
+		hasGlobal = true
+		if m.currentProject != "" && r.ProjectRoot == m.currentProject {
+			hasLocal = true
 		}
 	}
 
-	// statusCell adds 2 visible chars (glyph + space) over colStatus —
-	// pad the STATUS header by the same amount to keep PORT aligned.
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %*s",
-		colName, "NAME",
-		colBranch, "BRANCH",
-		colStatus+2, "STATUS",
-		colPort, "PORT")
+	localLabel := "Local"
+	if m.currentProject != "" {
+		// Show the project name so the user knows what "Local" means
+		// in this invocation. Truncate aggressively for narrow popups.
+		proj := m.currentProject
+		for i := len(proj) - 1; i >= 0; i-- {
+			if proj[i] == '/' {
+				proj = proj[i+1:]
+				break
+			}
+		}
+		if len(proj) > 16 {
+			proj = proj[:16]
+		}
+		localLabel = "Local: " + proj
+	}
 
+	// Pill colors: active = bright white on violet (matches brand pill);
+	// inactive = grey on dark grey. Empty tabs use a dimmer foreground
+	// so the user doesn't feel pulled to switch to nothing.
+	tabPill := func(label string, active, hasRows bool) string {
+		switch {
+		case active && hasRows:
+			return roundedPill(label, "231", "99")
+		case active && !hasRows:
+			return roundedPill(label, "250", "99") // dimmed fg on active bg
+		case !active && hasRows:
+			return roundedPillSubtle(label, "250", "237")
+		default: // !active && !hasRows
+			return roundedPillSubtle(label, "241", "237")
+		}
+	}
+
+	local := tabPill(localLabel, m.tab == tabLocal, hasLocal)
+	global := tabPill("Global", m.tab == tabGlobal, hasGlobal)
+	return local + " " + global
+}
+
+// renderSearchLine returns the search input pill (when in search mode)
+// or a persistent-filter indicator when a query is set but the user has
+// exited search mode.
+//
+// Three visual states:
+//   - active search:  `[🔍 SEARCH] foo█`         (bright; cursor blink)
+//   - persistent filter: `🔍 foo` + esc-to-clear hint (subtle)
+//   - no search:      empty                     (the help line shows / shortcut)
+func (m *Model) renderSearchLine() string {
+	if m.searchMode {
+		// Active mode: bright label pill + visible query + cursor.
+		// Cursor is `▏` (a thin vertical bar) — reads as a real
+		// blinking caret on most terminals and doesn't look like
+		// a content character the way `█` could.
+		label := searchLabelStyle.Render("🔍 SEARCH")
+		body := searchInputStyle.Render(" " + m.searchQuery + "▏")
+		return label + body
+	}
+	if m.searchQuery != "" {
+		// Persistent filter — the user typed a query then exited
+		// search mode (Enter). Show what's filtering AND how to
+		// clear, both in dim text so they don't compete with the
+		// table content.
+		return subtleStyle.Render("🔍 ") +
+			subtleStyle.Render(m.searchQuery) +
+			subtleStyle.Render("  (esc to clear)")
+	}
+	return ""
+}
+
+// allRowsOrFallback returns m.allRows; the back-compat fallback is
+// gone now that the unified TUI's refresh path always populates
+// allRows. Kept as a thin accessor so callers don't reach into
+// the field directly (decoupling internal storage from renderers).
+func (m *Model) allRowsOrFallback() []state.GlobalRow {
+	return m.allRows
+}
+
+// renderConfirmRetry renders the y/N gate for `R` on a non-broken
+// workspace (D3/CP1). Mirrors renderConfirmDelete's shape.
+func (m *Model) renderConfirmRetry() string {
 	var b strings.Builder
-	b.WriteString(subtleStyle.Render(header))
-	b.WriteString("\n")
-
-	for i, r := range m.rows {
-		port := "—"
-		if r.Port > 0 {
-			port = fmt.Sprintf("%d", r.Port)
-		}
-		badge := deadStyle.Render("○")
-		if r.Alive {
-			badge = aliveStyle.Render("●")
-		}
-		line := fmt.Sprintf("%s %-*s  %-*s  %s  %*s",
-			badge,
-			colName, r.Name,
-			colBranch, r.Branch,
-			statusCell(r.Status, colStatus),
-			colPort, port,
-		)
-		// Append v0.6 lifecycle hint badges (rename / shipped /
-		// pr_status). Reuses the same renderer as the global TUI so
-		// both surfaces produce identical output. Empty string when
-		// no hints are active — keeps rows visually unchanged for
-		// workspaces without lifecycle signals.
-		if hintBadges := projectlist.RenderHintBadges(r.Hints); hintBadges != "" {
-			line += "  " + hintBadges
-		}
-		if i == m.cursor {
-			line = selectedStyle.Render(line)
-		}
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
+	b.WriteString(titleStyle.Render("canopy") + " " + subtleStyle.Render(m.projectName))
+	b.WriteString("\n\n")
+	b.WriteString(brokenStyle.Render("Retry setup on healthy workspace?"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  %s is not in `broken` status.\n", m.retryTarget))
+	b.WriteString("  Re-running scripts.setup may clobber state\n")
+	b.WriteString("  that setup mutates (db reseed, env regen, etc.).\n\n")
+	b.WriteString("  Press y to force retry, any other key to cancel.\n")
 	return b.String()
 }
 
-// renderHelpLine is the one-line keybind cheat at the bottom of the
-// main view. The full help (?) shows more.
+// renderTable + hasMultipleProjects were the unified TUI's hand-rolled
+// table renderer. Removed in favor of the projectlist sub-component,
+// whose grouped-by-project layout matches the v0.7 popup look that
+// users built muscle memory around.
+
+// renderHelpLine is the bottom-bar keybind cheatsheet. Each binding
+// renders as `[key] desc` — key in inverted-bg pill, desc in subtle
+// text. Lazyworktree-flavored. Driven by listModeBindings + Available
+// predicates so e.g. `n` and `o` appear/disappear contextually.
+//
+// Up/down/g/G fold into one nav entry; rendering each individually
+// would overflow narrow popups with little signal.
 func (m *Model) renderHelpLine() string {
-	keys := []string{
-		"↑/↓ navigate",
-		"enter attach",
-		"n new",
-		"d delete",
-		"R retry",
-		"r refresh",
+	var parts []string
+	parts = append(parts, keyPillStyle.Render("↑/↓")+" "+subtleStyle.Render("nav"))
+
+	skip := map[string]bool{"up": true, "down": true, "g": true, "G": true}
+	for _, b := range listModeBindings {
+		if !b.IsAvailable(m) {
+			continue
+		}
+		keys := b.K.Keys()
+		if len(keys) == 0 || skip[keys[0]] {
+			continue
+		}
+		h := b.K.Help()
+		parts = append(parts, keyPillStyle.Render(h.Key)+" "+subtleStyle.Render(h.Desc))
 	}
-	if m.fromGlobal {
-		keys = append(keys, "b back")
-	}
-	keys = append(keys, "? help", "q quit")
-	return subtleStyle.Render(strings.Join(keys, "  ·  "))
+	return strings.Join(parts, "  ")
 }
 
 // renderNewPicker is step 1 of the new-workspace flow — the variant
@@ -729,9 +848,6 @@ func (m *Model) renderHelp() string {
 		"",
 		"  ?              this help",
 	}
-	if m.fromGlobal {
-		lines = append(lines, "  b, esc         back to canopy global")
-	}
 	lines = append(lines,
 		"  q, ctrl-c      quit",
 		"",
@@ -745,10 +861,10 @@ func (m *Model) renderHelp() string {
 // captured. Empty otherwise so the caller can skip the whole hint
 // line. Defensive against an empty rows slice.
 func (m *Model) selectedHint() string {
-	if len(m.rows) == 0 {
+	r, ok := m.list.CursorRow()
+	if !ok {
 		return ""
 	}
-	r := m.rows[m.cursor]
 	if r.IsMain || r.Status != "broken" || r.LastErrorHint == "" {
 		return ""
 	}
