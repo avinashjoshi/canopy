@@ -170,6 +170,59 @@ func TestAttachVerb_switchesByTmuxEnv(t *testing.T) {
 	}
 }
 
+// TestAttachCmd_AutoDetachFlag asserts that AttachCmd appends `-d` to
+// the attach verb so the resulting tmux invocation kicks any other
+// client off the target session before we attach. Without `-d`, two
+// terminals attached to the same session mirror keystrokes and confuse
+// the user about which one is "real."
+//
+// Only the `attach` verb (outside-tmux path) takes `-d`. The
+// switch-client verb (inside-tmux path) doesn't accept `-d`; the
+// detach-client preflight in detachOtherClients handles that case.
+//
+// CANOPY_NO_DETACH=1 is the documented escape hatch for
+// pair-programming or "second terminal mirroring this for reference."
+func TestAttachCmd_AutoDetachFlag(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	if err := c.Create(ctx, "detach-test", t.TempDir(), ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		tmuxEnv  string
+		noDetach string
+		wantD    bool
+	}{
+		{"outside_tmux_default", "", "", true},
+		{"outside_tmux_opt_out", "", "1", false},
+		{"inside_tmux_default", "/tmp/tmux-1000/default,1234,0", "", false}, // switch-client never has -d
+		{"inside_tmux_opt_out", "/tmp/tmux-1000/default,1234,0", "1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMUX", tc.tmuxEnv)
+			t.Setenv("CANOPY_NO_DETACH", tc.noDetach)
+			cmd, err := c.AttachCmd(ctx, "detach-test")
+			if err != nil {
+				t.Fatalf("AttachCmd: %v", err)
+			}
+			hasD := false
+			for _, a := range cmd.Args {
+				if a == "-d" {
+					hasD = true
+					break
+				}
+			}
+			if hasD != tc.wantD {
+				t.Errorf("args=%v: -d present=%v; want %v", cmd.Args, hasD, tc.wantD)
+			}
+		})
+	}
+}
+
 // TestDisplayPopup_noServer covers the error path when tmux isn't running.
 // display-popup needs a client/server, so against an empty socket it must
 // surface an error rather than silently succeeding.

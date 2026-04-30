@@ -295,6 +295,8 @@ func (c *Client) Attach(ctx context.Context, name string) error {
 		return fmt.Errorf("tmux.Attach(%s): %w", name, ErrSessionNotFound)
 	}
 
+	c.detachOtherClients(ctx, name, verb)
+
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
 		return fmt.Errorf("tmux.Attach: tmux not on PATH: %w", err)
@@ -302,6 +304,13 @@ func (c *Client) Attach(ctx context.Context, name string) error {
 
 	args := []string{"tmux"}
 	args = append(args, c.args(verb, "-t", name)...)
+	// attach-session supports `-d` to detach other clients on the target
+	// session before our client attaches. switch-client doesn't take
+	// `-d` (different verb shape), so detachOtherClients above handles
+	// the inside-tmux path explicitly.
+	if verb == "attach" && shouldDetachOthers() {
+		args = append(args, "-d")
+	}
 	return syscall.Exec(tmuxPath, args, os.Environ())
 }
 
@@ -322,7 +331,61 @@ func (c *Client) AttachCmd(ctx context.Context, name string) (*exec.Cmd, error) 
 	if !exists {
 		return nil, fmt.Errorf("tmux.AttachCmd(%s): %w", name, ErrSessionNotFound)
 	}
-	return exec.CommandContext(ctx, "tmux", c.args(attachVerbForCurrentEnv(), "-t", name)...), nil
+	verb := attachVerbForCurrentEnv()
+	c.detachOtherClients(ctx, name, verb)
+
+	args := c.args(verb, "-t", name)
+	if verb == "attach" && shouldDetachOthers() {
+		args = append(args, "-d")
+	}
+	return exec.CommandContext(ctx, "tmux", args...), nil
+}
+
+// detachOtherClients runs `tmux detach-client -s <name>` to kick any
+// clients currently attached to the target session. Solo-dev workflow
+// default: only one terminal should display a workspace at a time —
+// without this, switching to a workspace from a second terminal leaves
+// both terminals attached to the same session, mirroring keystrokes
+// and confusing the user about which is "real."
+//
+// The attach-session verb has a `-d` flag for the same behavior, but
+// switch-client (used when canopy is invoked from inside tmux) does
+// not, so we run an explicit detach-client beforehand for that path.
+// We call this for both verbs for symmetry and because detach-client
+// is a no-op when the target has no clients.
+//
+// We deliberately do NOT pass `-E` to inject a notice. The `-E`
+// command only fires when the kicked-out tmux client fully exits
+// (which can be much later — the TUI lives inside a pane), and the
+// notice then accumulates on whatever shell prompt eventually shows.
+// Worse, it can pile up across multiple detaches. Better to let tmux
+// show its standard "[detached]" and call it done. The initiating
+// TUI is a more natural place to surface a "took over from <client>"
+// message if we want one in the future.
+//
+// Errors are intentionally ignored: detach-client returns non-zero on
+// "no current client" and similar harmless states. Failure to detach
+// shouldn't block attach. Caller's calling client (the one running
+// canopy) is on a different session at this point, so it doesn't kick
+// itself.
+//
+// Skip entirely when CANOPY_NO_DETACH=1 is set — escape hatch for
+// pair-programming or "second terminal mirroring this for reference."
+func (c *Client) detachOtherClients(ctx context.Context, name, verb string) {
+	if !shouldDetachOthers() {
+		return
+	}
+	args := c.args("detach-client", "-s", name)
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	_ = cmd.Run()
+	log.Debug("tmux.detach-others", "session", name, "verb", verb)
+}
+
+// shouldDetachOthers gates the auto-detach behavior on CANOPY_NO_DETACH.
+// Default is "yes, detach others"; set CANOPY_NO_DETACH=1 to opt back
+// into tmux's default of allowing multiple clients per session.
+func shouldDetachOthers() bool {
+	return os.Getenv("CANOPY_NO_DETACH") != "1"
 }
 
 // attachVerbForCurrentEnv returns the right tmux verb for "make this

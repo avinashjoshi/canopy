@@ -79,6 +79,11 @@ func (c *Client) PaneCwd(ctx context.Context, pane string) (string, error) {
 func (c *Client) SwitchClient(ctx context.Context, target string) error {
 	log.Info("tmux.switch-client", "target", target)
 
+	// Detach any existing clients on the target session before our
+	// client switches in. Solo-dev default — see detachOtherClients
+	// in session.go for full rationale + opt-out env var.
+	c.detachOtherClients(ctx, target, "switch-client")
+
 	args := c.args("switch-client", "-t", target)
 	cmd := exec.CommandContext(ctx, "tmux", args...)
 	var stderr strings.Builder
