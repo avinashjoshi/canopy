@@ -213,6 +213,50 @@ func TestVersionInfo_compatTuple(t *testing.T) {
 	}
 }
 
+// TestVersionDetails_devSentinelSurvivesBuildInfoFallback covers the
+// regression that v0.12.0 shipped with: BuildInfo would overwrite a
+// literal "dev" version with a pseudo-version like
+// "v0.0.0-20260430-6f65463" for `make build` binaries (in-repo go
+// build), which tripped IsDev to false. That made the TUI DEV pill
+// disappear, the statusline DEV suffix vanish, and `canopy upgrade`
+// stop refusing dev binaries — defeating the whole release/dev
+// distinction the design depends on.
+//
+// Fix: rawVersion is captured before the fallback runs, and IsDev
+// reads from rawVersion. d.Version can still surface the pseudo for
+// forensic display, but the dev/release classification stays honest.
+func TestVersionDetails_devSentinelSurvivesBuildInfoFallback(t *testing.T) {
+	prev := version
+	t.Cleanup(func() { version = prev })
+	version = "dev"
+
+	d := versionDetails()
+
+	// IsDev must be true regardless of what BuildInfo did to d.Version.
+	// The Go test harness builds binaries with ldflags-less go build,
+	// so BuildInfo here typically returns a real Main.Version (the
+	// test binary's pseudo). That's fine — we just need IsDev right.
+	if !d.IsDev {
+		t.Errorf("dev sentinel must keep IsDev=true after BuildInfo fallback; got Version=%q IsDev=%v", d.Version, d.IsDev)
+	}
+}
+
+// TestVersionDetails_releaseSentinelStaysRelease: the inverse case.
+// When ldflags inject a real version (the `make install` path),
+// IsDev must be false. Defends against an over-correction where
+// rawVersion-based IsDev computation might drift from intent.
+func TestVersionDetails_releaseSentinelStaysRelease(t *testing.T) {
+	prev := version
+	t.Cleanup(func() { version = prev })
+	version = "v0.12.1+abc1234"
+
+	d := versionDetails()
+
+	if d.IsDev {
+		t.Errorf("ldflags-injected version must keep IsDev=false; got Version=%q IsDev=%v", d.Version, d.IsDev)
+	}
+}
+
 // --- test helpers (package-private, used only by version_test.go) ---
 
 func mkdirAllForTest(t *testing.T, dir string) error {
