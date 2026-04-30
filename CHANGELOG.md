@@ -5,6 +5,29 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-04-30 — `canopy upgrade` falls back to git for private repos
+
+`canopy upgrade` was hitting `HTTP 404` on the VERSION fetch because
+canopy's repo is private and raw.githubusercontent.com 404s anonymous
+requests for private content. Fixed by adding a git-based fallback:
+when HTTP fails, run `git fetch origin main && git show origin/main:VERSION`
+in the local `~/.canopy/src` clone. The clone has working auth (that's
+how install.sh succeeded), so the git path always works regardless of
+repo visibility.
+
+### Fixed
+- `canopy upgrade` now works for private repos. The HTTP path stays as
+  the fast-path for public repos; git is the fallback for private. When
+  the repo eventually goes public, the HTTP path takes over automatically
+  with no code changes needed — strictly faster, no git fetch overhead.
+- Same fallback applies to the optional CHANGELOG preview before the
+  pull, so users on private repos still see "What's new" diffs.
+
+### Added
+- `upgradeGitFetchFile` package-level var as the git path's testability
+  seam (mirrors `upgradeFetchVersion`'s shape). Tests for both happy-
+  path-via-git and dual-failure scenarios.
+
 ## [0.12.0] - 2026-04-30 — Source-based install, `canopy use` switcher, and visible release/DEV indicators
 
 End-user install + dev-loop ergonomics. One curl line installs canopy from
