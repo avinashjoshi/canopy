@@ -49,6 +49,12 @@ func main() {
 		// destructive subcommands (new, rm, retry) which DO spawn or
 		// modify tmux sessions and shouldn't run nested.
 		Annotations: map[string]string{allowInTmuxAnnotation: "true"},
+		// Suppress cobra's usage dump on RunE errors. RunE failures are
+		// almost always "couldn't find canopy.json" / "tmux missing" /
+		// state-related — surfacing the flag table for those is noise
+		// that buries the real message. Errors still print (we don't
+		// SilenceErrors); just no usage block under them.
+		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Guard first: if canopy is running inside an existing tmux
 			// session (and isn't an explicitly-allowed subcommand like
