@@ -1051,54 +1051,20 @@ The v0.5 boundary ("global is read-only, project owns destructive") made sense b
 
 ---
 
-## P2 — Surface version in `canopy use` and `canopy --help` (deferred from v0.12.0 ship 2026-04-30)
+## ✅ DONE 2026-04-30 — Surface version in `canopy use` and `canopy --help` (v0.12.3)
 
-Two small UX gaps that make "which canopy am I running" still take an
-extra step. Group as one ship since they share the same versionDetails()
-plumbing and ldflags injection.
+Both sub-items shipped on the `surface-version-in-use-and-help` branch.
 
-### `canopy use` listing should show version per target
+`canopy use` listing has a VERSION column: release row execs
+`canopy.bin version` once (2s timeout) and parses the first line; dev
+workspace rows show plain "DEV" without forking; missing binaries
+show "—". `canopy --help` leads with `canopy v0.12.2+<sha>` for
+releases or `canopy DEV (workspace-name)` for dev builds, computed
+once at process start via `versionDetails()`.
 
-**Where:** `cmd/canopy/use.go:printUseList`.
-
-**What:** Today the no-args output lists each target with PATH and
-BUILT timestamp, but not version. The release row is the most useful
-case — a user running `canopy use` to decide whether to switch wants
-to see "release: v0.12.1+abc1234" not just "release: canopy.bin built
-3h ago." Dev workspaces are less load-bearing (they're "DEV" by
-convention) but still informative.
-
-**Fix:** for the `release` row, exec `canopy.bin version` once and
-parse the first line. For workspace rows, exec each `<worktree>/canopy
-version` (cap at 5 forks, parallelize via errgroup). Or skip exec for
-dev rows and just append "(DEV)" since `make build` produces dev
-binaries by convention. Total cost: ~50ms for an interactive command.
-
-**Sketch:**
-
-```
-Active: ~/.local/bin/canopy -> canopy.bin (v0.12.1+abc1234, release)
-
-Available targets:
-  TARGET           PATH                                   VERSION              BUILT
-  release          ~/.local/bin/canopy.bin                v0.12.1+abc1234      built 3h ago
-  smooth-fawn      ~/.canopy/.../smooth-fawn/canopy       DEV                  built 5m ago
-  feature-X        ~/.canopy/.../feature-X/canopy         DEV (stale: 12h)     built 12h ago
-```
-
-### `canopy --help` should include the version line
-
-**Where:** `cmd/canopy/main.go:main` — root cobra command's `Long` field.
-
-**What:** Cobra surfaces the version via `--version`, but the standard
-help output (which most users hit first) doesn't show it. Common CLI
-convention is to show "$tool $version" at the top of the help block.
-We already compute the version label for the TUI pill — can reuse it.
-
-**Fix:** in `main()`, compute `versionDetails()` once before constructing
-root, prepend `canopy {version}` to the existing ASCII-logo + intro
-paragraph in `Long`. Or override cobra's help template. Either is
-~5 lines.
+The "(stale: 12h)" suffix from the original sketch did not ship —
+the BUILT column already conveys recency, and a separate stale
+threshold needs design. Punt to a future round if anyone wants it.
 
 ---
 

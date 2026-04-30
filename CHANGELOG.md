@@ -5,6 +5,26 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-04-30 — Surface version in `canopy use` and `canopy --help`
+
+Two small UX gaps closed: "which canopy am I running" should never
+take an extra step. The release version now surfaces in both the
+`canopy use` listing (per-target column) and at the top of `canopy
+--help`, so the answer is always one command away — no more chasing
+it through `canopy version`.
+
+### Added
+- `canopy use` listing gains a VERSION column. The release row execs
+  `canopy.bin version` once and parses the version label; dev workspace
+  rows show "DEV" without forking (make build is dev-by-convention).
+  Missing binaries show "—". Capped at 2s per release exec so a wedged
+  binary can't hang the listing.
+- `canopy --help` leads with a one-line version banner — `canopy
+  v0.12.2+abc1234` for releases, `canopy DEV (workspace-name)` for
+  dev builds inside a known worktree, plain `canopy DEV` otherwise.
+  Reuses the existing `versionDetails()` plumbing; one extra resolve
+  at process start.
+
 ## [0.12.2] - 2026-04-30 — `make build` DEV banner restored + TODOs queued
 
 The v0.12.1 squash merge dropped two commits that were pushed to the
