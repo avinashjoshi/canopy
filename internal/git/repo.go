@@ -38,6 +38,27 @@ func IsRepo(ctx context.Context, dir string) (bool, error) {
 	return strings.TrimSpace(string(out)) == "true", nil
 }
 
+// CurrentBranch returns the current branch name of the worktree at dir.
+// Used by Reconcile to detect post-create renames (`git branch -m newname`)
+// so the TUI's branch column reflects the live name instead of the
+// branch recorded at workspace-create time.
+//
+// Detached HEAD returns ("", nil) — no branch is checked out, but it's
+// not an error condition (canopy never creates detached worktrees, but
+// a user might detach manually). Callers treat empty as "leave the
+// recorded branch alone."
+//
+// Errors (git missing, dir gone) return ("", err); callers should log
+// and skip rather than fail the whole reconcile pass over one bad row.
+func CurrentBranch(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "branch", "--show-current")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // SourceRepoFromWorktree returns the absolute path of the source repo
 // that owns the given worktree directory. Used by the global TUI's
 // "open project" keybind to find the project's root even when the

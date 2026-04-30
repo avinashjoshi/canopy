@@ -43,21 +43,62 @@ func (m *Manager) SafetyPreflight(ctx context.Context, name string) ([]string, e
 // safetyChecks is the package-private worker. Takes path + branch
 // directly so callers can run the checks without first calling Find
 // (e.g., when they already have ws in hand from a prior load).
+//
+// PR state gates the unpushed check: if gh reports the PR as MERGED,
+// the local "ahead of origin/main" commits are work that's already
+// landed in a squashed/rebased shape — flagging them as data-loss
+// risk is wrong and was the user-reported "PR says merged but rm
+// still warns about losing work" confusion. We read PR state once
+// up front and skip the unpushed check when MERGED.
 func safetyChecks(ctx context.Context, worktreePath, branch string) []string {
 	if worktreePath == "" {
 		return nil // no path to check; orphaned-row safe path
 	}
+	prState := readPRState(ctx, worktreePath, branch)
+
 	var hangs []string
 	if msg := checkUncommitted(ctx, worktreePath); msg != "" {
 		hangs = append(hangs, msg)
 	}
-	if msg := checkUnpushed(ctx, worktreePath); msg != "" {
-		hangs = append(hangs, msg)
+	if prState != "MERGED" {
+		if msg := checkUnpushed(ctx, worktreePath); msg != "" {
+			hangs = append(hangs, msg)
+		}
 	}
-	if msg := checkOpenPR(ctx, worktreePath, branch); msg != "" {
-		hangs = append(hangs, msg)
+	if prState == "OPEN" {
+		if msg := checkOpenPR(ctx, worktreePath, branch); msg != "" {
+			hangs = append(hangs, msg)
+		}
 	}
 	return hangs
+}
+
+// readPRState returns the gh-reported PR state for the branch, or empty
+// when gh is missing / no PR exists / lookup fails. Used by safetyChecks
+// to gate which downstream checks fire. Single gh call shared across
+// the unpushed and open-PR gates.
+func readPRState(ctx context.Context, worktreePath, branch string) string {
+	if _, err := exec.LookPath("gh"); err != nil {
+		return ""
+	}
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch,
+		"--json", "state,number")
+	cmd.Dir = worktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	const tag = `"state":"`
+	i := strings.Index(string(out), tag)
+	if i < 0 {
+		return ""
+	}
+	rest := string(out)[i+len(tag):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 // checkUncommitted: empty git status --porcelain output = clean tree.

@@ -1091,6 +1091,22 @@ func (m *Manager) Reconcile(ctx context.Context) ([]ReconcileChange, error) {
 				})
 				w.Status = newStatus
 			}
+
+			// Refresh branch from the worktree. CLAUDE.md tells agents
+			// to `git branch -m <intent>` on first turn, and users do
+			// the same manually — without this re-read, the TUI's
+			// Branch column stays frozen at workspace-create time.
+			// Skip if the dir is gone (orphaned) or HEAD is detached
+			// (current returns ""): leave the recorded branch alone
+			// rather than blanking it.
+			if newStatus != state.StatusOrphaned {
+				if branch, err := git.CurrentBranch(ctx, w.Path); err != nil {
+					log.Warn("reconcile.branch-read-failed", "name", w.Name, "err", err)
+				} else if branch != "" && branch != w.Branch {
+					log.Info("reconcile.branch-renamed", "name", w.Name, "from", w.Branch, "to", branch)
+					w.Branch = branch
+				}
+			}
 		}
 		return nil
 	})
