@@ -7,6 +7,20 @@ and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-04-29 — Force screen no longer fires after PR auto-merge
+
+When GitHub auto-deletes the remote branch on PR merge (the default
+"Automatically delete head branches" flow), `canopy rm` no longer shows
+the red force-delete screen warning about "unpushed commits." The
+local commits past `origin/main` are work that already landed in
+squashed form before the branch was retired — flagging them as
+data-loss risk was the bug. The new check also covers the case where
+`gh` is unavailable, unauthenticated, or rate-limited, so a missing
+gh signal alone can't trigger a false force-screen.
+
+### Fixed
+- **`canopy rm` no longer false-positives on auto-deleted branches.** The safety preflight now treats "upstream was tracked, remote-tracking ref is now gone" as a "merged" signal, alongside the existing `gh pr view → MERGED` check. Either signal is sufficient. Reads `branch.<name>.{remote,merge}` directly from `.git/config` rather than `@{u}`, since `@{u}` itself fails once the remote ref is pruned — which was hiding exactly the state we needed to detect.
+
 ## [0.9.0] - 2026-04-29 — TUI polish pass
 
 A round of usability fixes and visual polish on top of the v0.8 unified TUI.

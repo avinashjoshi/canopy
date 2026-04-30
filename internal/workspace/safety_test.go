@@ -102,6 +102,94 @@ func TestSafetyChecks_UnpushedCommits(t *testing.T) {
 	}
 }
 
+// TestSafetyChecks_UpstreamDeleted_NoUnpushedHang: simulates the
+// post-merge auto-delete-branch flow. The local feature branch was
+// pushed (has upstream config + a remote-tracking ref), then the
+// remote-tracking ref disappears (e.g. after `git fetch --prune`
+// following GitHub's auto-delete on PR merge). safetyChecks should
+// NOT flag the unpushed commits as hanging work — they were pushed,
+// landed, and the branch was retired.
+func TestSafetyChecks_UpstreamDeleted_NoUnpushedHang(t *testing.T) {
+	wt := setupCleanWorktreeForSafety(t, "feature")
+
+	// Make a commit on the feature branch.
+	if out, err := exec.Command("git", "-C", wt,
+		"commit", "--allow-empty", "-m", "feature work").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+
+	// Wire upstream tracking: configure remote.origin.fetch (so git
+	// can map refs/heads/* on origin to refs/remotes/origin/*),
+	// branch.feature.{remote,merge}, and create an actual
+	// remote-tracking ref. Then delete the remote-tracking ref to
+	// simulate GitHub's post-merge auto-delete + a local prune.
+	for _, args := range [][]string{
+		{"-C", wt, "config", "remote.origin.url", "."},
+		{"-C", wt, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"},
+		{"-C", wt, "config", "branch.feature.remote", "origin"},
+		{"-C", wt, "config", "branch.feature.merge", "refs/heads/feature"},
+		{"-C", wt, "update-ref", "refs/remotes/origin/feature", "HEAD"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// Sanity-check upstream resolves.
+	if out, err := exec.Command("git", "-C", wt,
+		"rev-parse", "--abbrev-ref", "@{u}").CombinedOutput(); err != nil {
+		t.Fatalf("upstream not configured: %v\n%s", err, out)
+	}
+	// Now delete the remote-tracking ref → upstream config still
+	// points at origin/feature, but the ref itself is gone.
+	if out, err := exec.Command("git", "-C", wt,
+		"update-ref", "-d", "refs/remotes/origin/feature").CombinedOutput(); err != nil {
+		t.Fatalf("delete ref: %v\n%s", err, out)
+	}
+
+	hangs := safetyChecks(context.Background(), wt, "feature")
+	for _, h := range hangs {
+		if strings.Contains(h, "unpushed") || strings.Contains(h, "no upstream") {
+			t.Errorf("unpushed/no-upstream hang must NOT fire after remote branch was auto-deleted; got %v", hangs)
+		}
+	}
+}
+
+// TestWasUpstreamDeleted: helper-level coverage for the three cases
+// (no upstream configured, upstream alive, upstream deleted).
+func TestWasUpstreamDeleted(t *testing.T) {
+	// Case 1: no upstream configured → false.
+	wt := setupCleanWorktreeForSafety(t, "no-upstream")
+	if wasUpstreamDeleted(context.Background(), wt) {
+		t.Errorf("branch with no upstream configured should report false")
+	}
+
+	// Case 2: upstream configured AND alive → false.
+	wt2 := setupCleanWorktreeForSafety(t, "alive")
+	for _, args := range [][]string{
+		{"-C", wt2, "config", "remote.origin.url", "."},
+		{"-C", wt2, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"},
+		{"-C", wt2, "config", "branch.alive.remote", "origin"},
+		{"-C", wt2, "config", "branch.alive.merge", "refs/heads/alive"},
+		{"-C", wt2, "update-ref", "refs/remotes/origin/alive", "HEAD"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if wasUpstreamDeleted(context.Background(), wt2) {
+		t.Errorf("branch with live upstream should report false")
+	}
+
+	// Case 3: upstream configured but ref gone → true.
+	if out, err := exec.Command("git", "-C", wt2,
+		"update-ref", "-d", "refs/remotes/origin/alive").CombinedOutput(); err != nil {
+		t.Fatalf("delete ref: %v\n%s", err, out)
+	}
+	if !wasUpstreamDeleted(context.Background(), wt2) {
+		t.Errorf("branch with deleted upstream ref should report true")
+	}
+}
+
 // TestSafetyChecks_OrphanWorktree: worktree dir gone → safetyChecks
 // returns no hangs (degrades gracefully — never blocks rm).
 //
