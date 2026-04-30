@@ -1048,3 +1048,135 @@ The v0.5 boundary ("global is read-only, project owns destructive") made sense b
 **Effort:** S (CC ~45 min).
 **Priority:** P3.
 **Depends on / blocked by:** v0.8 TUI unification.
+
+---
+
+## P2 — Surface version in `canopy use` and `canopy --help` (deferred from v0.12.0 ship 2026-04-30)
+
+Two small UX gaps that make "which canopy am I running" still take an
+extra step. Group as one ship since they share the same versionDetails()
+plumbing and ldflags injection.
+
+### `canopy use` listing should show version per target
+
+**Where:** `cmd/canopy/use.go:printUseList`.
+
+**What:** Today the no-args output lists each target with PATH and
+BUILT timestamp, but not version. The release row is the most useful
+case — a user running `canopy use` to decide whether to switch wants
+to see "release: v0.12.1+abc1234" not just "release: canopy.bin built
+3h ago." Dev workspaces are less load-bearing (they're "DEV" by
+convention) but still informative.
+
+**Fix:** for the `release` row, exec `canopy.bin version` once and
+parse the first line. For workspace rows, exec each `<worktree>/canopy
+version` (cap at 5 forks, parallelize via errgroup). Or skip exec for
+dev rows and just append "(DEV)" since `make build` produces dev
+binaries by convention. Total cost: ~50ms for an interactive command.
+
+**Sketch:**
+
+```
+Active: ~/.local/bin/canopy -> canopy.bin (v0.12.1+abc1234, release)
+
+Available targets:
+  TARGET           PATH                                   VERSION              BUILT
+  release          ~/.local/bin/canopy.bin                v0.12.1+abc1234      built 3h ago
+  smooth-fawn      ~/.canopy/.../smooth-fawn/canopy       DEV                  built 5m ago
+  feature-X        ~/.canopy/.../feature-X/canopy         DEV (stale: 12h)     built 12h ago
+```
+
+### `canopy --help` should include the version line
+
+**Where:** `cmd/canopy/main.go:main` — root cobra command's `Long` field.
+
+**What:** Cobra surfaces the version via `--version`, but the standard
+help output (which most users hit first) doesn't show it. Common CLI
+convention is to show "$tool $version" at the top of the help block.
+We already compute the version label for the TUI pill — can reuse it.
+
+**Fix:** in `main()`, compute `versionDetails()` once before constructing
+root, prepend `canopy {version}` to the existing ASCII-logo + intro
+paragraph in `Long`. Or override cobra's help template. Either is
+~5 lines.
+
+---
+
+## P3 — Upgrade UX overhaul (deferred from v0.12.0 ship 2026-04-30)
+
+The v0.12.0 `canopy upgrade` is functional but spartan: explicit
+invocation only, plain stdout, no proactive surface for available
+updates. Three sub-items, design questions noted on each.
+
+### Auto-check for available upgrades
+
+**Where:** new helper, surfaced via `canopy ls` / TUI status / tmux statusline.
+
+**What:** Avi originally said "no need for background" during v0.12.0
+planning, then changed his mind after dogfooding. The right shape
+isn't obvious — needs design.
+
+**Design questions:**
+- **Cadence:** check on every `canopy` invocation (cheap if cached)?
+  Stat-on-launch with daily TTL? Background daemon (rejected by
+  prior canopy design pattern — no daemon)?
+- **Storage:** cache result in `~/.canopy/upgrade-check.json` with
+  `{checked_at, latest_version, dismissed_until}`. TTL maybe 24h.
+- **Surface:** where does "v0.13.0 available" show up?
+  - Top-bar pill in the TUI (third pill alongside scope and version)?
+  - One-line hint in `canopy ls` output?
+  - Toast in the status bar that auto-dismisses?
+  - Tmux statusline suffix ("[upgrade available]")?
+- **Dismissal:** if user runs `canopy upgrade --check` and decides
+  not to upgrade, suppress the hint until next version. Or for N days.
+- **Network failures:** silent (just don't show the hint) — never
+  block canopy on a failed check.
+
+**Fix sketch:**
+- New `cmd/canopy/upgrade_check.go` with `cachedRemoteVersion(ctx)`
+  that reads/writes the cache file with TTL.
+- Hook into the unified TUI `RunUnified` path: after `versionDetails`,
+  call `cachedRemoteVersion` async; if result lands and remote >
+  current, set a model field that the view renders.
+- New `canopy upgrade --dismiss` flag to suppress the hint.
+
+**Effort:** M (CC ~1-2h once design is settled).
+**Priority:** P3 (nice-to-have, not blocking).
+
+### TUI flow for `canopy upgrade`
+
+**Where:** new `internal/ui/upgrade.go` (or popup mode of unified TUI).
+
+**What:** Today `canopy upgrade` is plain stdout: prints versions, the
+CHANGELOG diff, runs the shell, prints success. A TUI flow would
+let users:
+- See the CHANGELOG in a scrollable pane (long entries get truncated
+  in plain stdout)
+- Confirm before proceeding (currently auto-runs on `canopy upgrade`)
+- See live progress during `git pull` + `make install` (not just
+  silent block-and-wait)
+- Surface specific failures (compile error, conflict) inline rather
+  than dumping at the end
+
+**Design questions:**
+- Always TUI, or `--tui` flag, or auto-switch when stdout is a tty?
+- Reuse the popup chrome (lipgloss-styled box) or fullscreen?
+- How to render `git pull` / `make install` output streams — pipe to a
+  scrolling log view?
+
+**Fix sketch:**
+- Default behavior unchanged when stdout is not a tty (CI, scripts).
+- Tty + interactive: open a Bubbletea program that owns the upgrade
+  flow end-to-end. Streams stdout/stderr from the shell commands into
+  a viewport.
+- Confirm gate before running shell. ESC cancels.
+
+**Effort:** M-L (CC ~2-3h, depends on how rich the streaming gets).
+**Priority:** P3.
+
+### Auto-check + TUI together
+
+If both ship, the auto-check hint becomes a "press U to upgrade now"
+action that drops into the TUI flow. That's the satisfying user
+experience: notification → action → done, without leaving the TUI.
+Doable as a follow-up once both above are in.
