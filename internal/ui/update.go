@@ -15,6 +15,7 @@ import (
 	"github.com/oncactus/canopy/internal/config"
 	"github.com/oncactus/canopy/internal/ghx"
 	"github.com/oncactus/canopy/internal/git"
+	"github.com/oncactus/canopy/internal/lifecycle"
 	"github.com/oncactus/canopy/internal/state"
 	"github.com/oncactus/canopy/internal/tmux"
 	"github.com/oncactus/canopy/internal/workspace"
@@ -319,12 +320,21 @@ func actionHelpToggle(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Explicit refresh: user asked for fresh data, so bust the entire
-	// Mem cache. The 5s TTL is for steady-state cheap reads; `r` means
-	// "I want truth right now," not "respect the TTL."
+	// Explicit refresh: user asked for fresh data, so bust every cache
+	// that gates fresh reads. `r` means "I want truth right now," not
+	// "respect the TTL." Without the pr_status cache bust, a user who
+	// just merged a PR or pushed a review change would still see the
+	// stale "PR #142 awaiting review" hint for up to 10 minutes —
+	// classic "I refreshed and nothing happened" bug. Same intent as
+	// memCache.InvalidateAll() right next to it.
+	//
+	// Background ticks and reconcile do NOT invalidate; they keep the
+	// 10-min TTL to stay inside the GitHub API budget. Only deliberate
+	// user action busts.
 	if m.memCache != nil {
 		m.memCache.InvalidateAll()
 	}
+	lifecycle.ResetPRStatusCache()
 	return m, m.refresh()
 }
 
