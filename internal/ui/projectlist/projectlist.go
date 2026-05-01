@@ -562,6 +562,7 @@ func stripAnsi(s string) string {
 //	stuck_state                  →  ⚠ rebasing / ⚠ merging / ⚠ pick / ⚠ detached
 //	rename_suggested             →  ↻ rename
 //	mergeability                 →  ⚠ conflict        (orange, attention)
+//	push_state                   →  ⇡N / ⇅            (orange, "remote is out of sync")
 //	pr_status (open)             →  PR open
 //	pr_status (approved)         →  PR approved
 //	pr_status (changes-requested)→  PR changes
@@ -570,12 +571,16 @@ func stripAnsi(s string) string {
 //	shipped (no PR)              →  ✓ shipped (local)
 //
 // Multiple hints surface as space-separated badges. Order is:
-// stuck_state → rename → mergeability → git_stats → pr_status / shipped.
-// stuck_state sits leftmost because mid-rebase / mid-merge / detached
-// states are easy to forget across parallel workspaces and become the
-// most actionable thing the user can do — finish the in-flight git op
-// first. Mergeability sits left of git_stats so the "this won't merge
-// clean" warning reads next to the divergence counts that explain why.
+// stuck_state → rename → mergeability → git_stats → push_state →
+// pr_status / shipped. stuck_state sits leftmost because mid-rebase /
+// mid-merge / detached states are easy to forget across parallel
+// workspaces and become the most actionable thing the user can do —
+// finish the in-flight git op first. Mergeability sits left of
+// git_stats so the "this won't merge clean" warning reads next to the
+// divergence counts that explain why. push_state sits right of
+// git_stats so the "is my work on origin?" answer reads next to the
+// "ahead of main" count — different axes (origin/<branch> vs
+// origin/<default>) but related divergence story.
 //
 // Precedence rule (v0.14 closeout): when stuck_state fires, git_stats
 // is suppressed. The ahead/behind/dirty numbers are unstable while git
@@ -583,8 +588,10 @@ func stripAnsi(s string) string {
 // merge — showing `↑3 ↓1 *5` next to `⚠ rebasing` adds noise without
 // adding signal because the user can't act on those numbers until the
 // in-flight op resolves. Other badges (rename, mergeability,
-// pr_status, shipped) keep rendering — they describe distinct facts
-// about the branch that don't move under git's feet during a rebase.
+// push_state, pr_status, shipped) keep rendering — they describe
+// distinct facts about the branch (its name, its mergeability against
+// main, its relationship to origin/<branch>, its PR state) that don't
+// move under git's feet during a local rebase.
 func RenderHintBadges(hints []state.Hint) string {
 	if len(hints) == 0 {
 		return ""
@@ -638,6 +645,17 @@ func RenderHintBadges(hints []state.Hint) string {
 			if h.Kind == "git_stats" && h.Message != "" {
 				parts = append(parts, gitStatsStyle().Render(h.Message))
 			}
+		}
+	}
+	// push_state next — answers the question git_stats does not: "is
+	// my work backed up on origin/<branch>?" Distinct from `↑N`
+	// (ahead of default) because a PR-ready branch can be ↑5 *0 yet
+	// ⇡5 (unpushed) at the same time. Detector emits this only when
+	// the local branch has commits not in upstream, so the badge
+	// always represents real "you should push" state.
+	for _, h := range hints {
+		if h.Kind == "push_state" && h.Message != "" {
+			parts = append(parts, pushStateStyle().Render(h.Message))
 		}
 	}
 	// Then the lifecycle-state badge: PR if present, shipped fallback
@@ -808,6 +826,17 @@ func mergeabilityStyle() lipgloss.Style {
 // sits in the row's "loud action required" palette slot.
 func stuckStateStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+}
+
+// pushStateStyle: cyan + bold. "Your work isn't on origin" is
+// informational-but-actionable — not destructive like a stuck rebase
+// or a merge conflict, but the user almost certainly wants to act on
+// it (push). Distinct hue from the orange "warning" tier so the eye
+// can scan a row of badges and tell at a glance which are "fix this
+// before continuing" (orange) and which are "remember to push"
+// (cyan).
+func pushStateStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Bold(true)
 }
 
 // hintPRStyle: cyan — informational, not urgent.

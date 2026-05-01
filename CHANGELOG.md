@@ -59,6 +59,85 @@ changes; the bump is purely narrative.
   (origin/&lt;branch&gt;, origin/&lt;default&gt;) that don't move during a
   local rebase. Re-evaluate if dogfooding shows otherwise.
 
+## [0.13.5.0] - 2026-04-30 — Workspace hints: ⇡N / ⇅ push state (Lane C of 3)
+
+Third and final detector slice of the workspace-hints expansion
+designed in `docs/design/v0.14-workspace-hints.md`. Surfaces the
+question users actually ask 20× a day — *"is my work backed up on
+origin?"* — which the existing `↑N` (ahead-of-default) badge does
+NOT answer. Closes the three-lane series; the render-precedence
+overhaul now becomes the v0.14 follow-up.
+
+### Added
+
+- **`⇡N` / `⇅` push_state badges.** A new `push_state` detector
+  resolves the local branch's upstream tracking ref via
+  `git rev-parse --abbrev-ref @{upstream}` and counts commits in
+  each direction. Three shapes:
+  - `⇡N` — local has N commits the upstream doesn't (action:
+    `git push`).
+  - `⇅` — local and upstream have both diverged (action:
+    `git fetch && git push --force-with-lease`).
+  - `⇡N` *with no upstream configured* — falls back to counting
+    commits past the default branch and emits a `git push -u
+    origin <branch>` action so first-push wires upstream cleanly.
+    Same glyph; the action carries the meaning so the badge column
+    doesn't sprout a separate symbol.
+- **Cyan + bold style** (`pushStateStyle`) — distinct from the
+  orange "warning" tier (mergeability, stuck_state). Push-state is
+  informational-but-actionable: nothing is broken, but the user
+  almost certainly wants to push. Different hue lets the eye scan
+  a row of badges and tell at a glance which are "fix this before
+  continuing" vs "remember to push."
+
+### Changed
+
+- **`detect.RunFast` now spans 7 detectors instead of 6.** The new
+  detector is purely-local (one `rev-parse @{upstream}` plus two
+  `rev-list --count` invocations on the upstream-known path; one
+  fewer call when no upstream is configured). Well under 30ms per
+  workspace; runs in the same parallel goroutine pool as the
+  others.
+- **Badge order** in `RenderHintBadges`: stuck_state → rename →
+  mergeability → git_stats → **push_state** → pr_status / shipped.
+  push_state sits right of git_stats so the "ahead of main" count
+  reads next to the "is my work on origin" answer — different axes
+  (origin/&lt;default&gt; vs origin/&lt;branch&gt;) but related divergence
+  story.
+
+### Why this matters
+
+A PR-ready workspace can show `↑5 *0` (five commits past main, clean
+working tree) AND `⇡5` (those same five commits not yet on
+origin/&lt;branch&gt;) at the same time. Without push_state, the
+existing `↑5` falsely implies "the work is on origin"; the user
+discovers their commits aren't backed up only when their laptop
+crashes or a teammate asks for the branch. The new badge collapses
+that gap.
+
+The render-precedence overhaul (where stuck_state would also
+preempt git_stats and width-aware truncation kicks in) is the
+remaining item from the v0.14 design doc and ships separately.
+
+## [0.13.4.1] - 2026-04-30 — UX: clearer wording for the `R` keybind
+
+### Changed
+
+- **"retry scripts.setup" → "re-run setup" everywhere a user reads it.**
+  The old wording was opaque on its own ("retry what?") and the
+  prefix `scripts.` leaked an internal config path into copy meant
+  for newcomers. The keybind, the broken-row hint in the help legend,
+  the inline hint shown on a broken row, and the error message you
+  get when you press Enter on a broken workspace all now say "re-run
+  setup." Behavior unchanged; the keybind is still `R`. The CLI
+  subcommand `canopy retry` is unchanged so muscle memory and any
+  scripts pointing at it keep working.
+
+This is a precursor to the larger workspace-actions menu designed in
+TODOS.md (v0.15+) — that's where re-runnable per-project actions
+(reseed, migrate, tail logs) get a proper home. Until then the
+clearer wording does the user-facing work.
+
 ## [0.13.4.0] - 2026-04-30 — Workspace hints: ⚠ stuck state (Lane B of 3)
 
 Second slice of the workspace-hints expansion designed in

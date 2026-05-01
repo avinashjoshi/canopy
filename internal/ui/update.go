@@ -1061,7 +1061,7 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 		return m, resurrectAndAttachCmd(mgr, row.Name)
 
 	case state.StatusBroken:
-		m.err = fmt.Errorf("workspace %q is broken — see ~/.canopy/log/canopy.log; press R to retry scripts.setup, or `canopy rm %s` to drop it",
+		m.err = fmt.Errorf("workspace %q is broken — see ~/.canopy/log/canopy.log; press R to re-run setup, or `canopy rm %s` to drop it",
 			row.Name, row.Name)
 		return m, nil
 
