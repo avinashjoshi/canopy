@@ -1562,3 +1562,50 @@ But the **`--prompt` half alone, no detach**, is a small ship by
 itself: ~50 lines plumbing through the existing flow, gated to claude
 launcher only at first. Worth doing as a precursor if the bigger
 background flow is too far out.
+
+---
+
+## P3 — Defensive TestMain reap for crashed-runner stragglers (2026-05-01)
+
+**Where:** `internal/tmux/session_test.go:TestMain` and
+`internal/workspace/lifecycle_test.go:TestMain`.
+
+**What:** The symmetric reap fix shipped today (extract `cwdScanForReap`
+into a shared helper, wire it into both `Client.Kill` and
+`KillServerAndReap`) closes the per-test leak path. It does NOT close the
+**crashed-runner** leak path: when `go test` is itself SIGKILLed (Ctrl-C,
+OOM, panic outside a recoverable goroutine), `t.Cleanup` never runs and
+the test's tmux server is left orphaned to systemd-user.
+
+Evidence (today): three orphan tmux servers from past runs were still
+alive on the (since-removed) `canopy-test` socket — `TestSession_HappyPath`
+(1d 12h old), `TestCreate_AlreadyExists` (1d 1h), `TestSelectPaneDirection`
+(22h). They held tiny RAM individually but represent a real test-flakiness
+hazard: tmux's "attach to existing server if socket present" semantics
+mean the next `tmux.WithSocket("canopy-test-tmux")` call could inherit
+state from a crashed predecessor.
+
+**Fix:** in each tmux-using package's `TestMain`, before `m.Run()`:
+1. Walk `/proc/*/cmdline` for processes whose comm is `tmux` and whose
+   cmdline contains `-L canopy-test-tmux` (or `-L canopy-test-workspace`
+   for the workspace package).
+2. SIGKILL each. They have no live socket file by definition (old socket
+   was either removed or replaced) so signaling is the only reach.
+3. Also `rm -f /tmp/tmux-$UID/canopy-test-tmux` defensively, to handle
+   the rare case where a test left the socket file on disk but the server
+   inside it is dead.
+
+~20-30 LOC each. Mirrors the pattern in `cwdScanForReap`. Test would be:
+spawn a fake `tmux -L canopy-test-tmux` server in a sub-test, call the
+helper, verify the server is dead — but this is overkill for hygiene
+code; manual verification by introducing a deliberate `os.Exit(1)` mid-test
+once during dev should be enough.
+
+**Why deferred:** the symptom is rare (only manifests on crashed runners),
+the impact is small (test flakiness, not user-facing), and bundling it
+into the symmetric-reap PR widens the diff into a different kind of
+change (test-harness hygiene vs. tmux primitive correctness). Right-sized
+diff principle: ship the correctness fix with clean validation, defend
+against the crash path separately.
+
+**Depends on / blocked by:** nothing. Self-contained.

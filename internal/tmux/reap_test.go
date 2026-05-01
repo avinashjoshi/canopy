@@ -65,6 +65,58 @@ func TestKill_ReapsDetachedNvimEmbed(t *testing.T) {
 	t.Errorf("nvim --embed (PID %d) still alive 2s after Kill — reap regressed (workspace would leak this process to PID 1)", embedPID)
 }
 
+// TestKillServerAndReap_ReapsDetachedNvimEmbed: regression test for
+// the symmetric leak path discovered 2026-05-01 (~12 orphans, ~3.5GB
+// of zombie RAM accumulated from canopy's own e2e suite).
+//
+// Client.Kill (production workspace removal) routes the detach-on-
+// launch reap through cwdScanForReap. KillServerAndReap (test
+// cleanup) historically did NOT — it only collected pane-tree PIDs.
+// Result: every e2e test that spawned an `nvim .` pane leaked one
+// nvim --embed orphan to systemd-user. The fix unifies both paths
+// on cwdScanForReap; this test guards the union.
+//
+// Without the cwd-scan in KillServerAndReap, this test fails the same
+// way TestKill_ReapsDetachedNvimEmbed would without it: the embed
+// child outlives the kill-server cascade and shows up as a 700MB+
+// zombie a day later.
+func TestKillServerAndReap_ReapsDetachedNvimEmbed(t *testing.T) {
+	requireTmux(t)
+	if _, err := exec.LookPath("nvim"); err != nil {
+		t.Skip("nvim not on PATH; skipping reap test")
+	}
+	c := newClient(t)
+	ctx := context.Background()
+
+	cwd := t.TempDir()
+	session := "reap-server-test"
+	if err := c.Create(ctx, session, cwd, "nvim ."); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Same 200ms settle window as the Kill variant — nvim's startup is
+	// dominated by plugin loading, the --embed fork itself is microseconds.
+	time.Sleep(200 * time.Millisecond)
+
+	embedPID := findNvimEmbedAtCWD(t, cwd)
+	if embedPID == 0 {
+		t.Skip("no nvim --embed child found within 200ms — nvim may have failed to launch in this minimal env; skipping")
+	}
+
+	if err := c.KillServerAndReap(ctx); err != nil {
+		t.Fatalf("KillServerAndReap: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !pidAlive(embedPID) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("nvim --embed (PID %d) still alive 2s after KillServerAndReap — symmetric reap regressed (e2e tests would leak this process to systemd-user)", embedPID)
+}
+
 // findNvimEmbedAtCWD walks /proc looking for a process whose comm is
 // "nvim" and whose cwd points at the given path. Returns 0 if not
 // found. Useful because the embed PID isn't known up front; nvim

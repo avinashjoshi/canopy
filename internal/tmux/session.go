@@ -340,17 +340,11 @@ func isReapableComm(pidStr string) bool {
 }
 
 // collectPanePIDs walks a session's pane tree and returns every PID
-// to kill, using PaneInfos PLUS a CWD-based scan to catch processes
-// that detached from their pane on launch (notably nvim --embed,
-// which deliberately detaches its session so it can outlive its
-// launcher).
-//
-// Strategy: enumerate panes, take each pane's cwd as a probe, then
-// walk /proc/*/cwd to find any process — regardless of parent —
-// whose working directory matches a pane cwd. The pane's normal
-// process tree is also collected via PaneInfos. Union of both is
-// returned. Best-effort: enumeration failures return an empty
-// slice rather than an error.
+// to kill, using PaneInfos PLUS a CWD-based scan (cwdScanForReap) to
+// catch processes that detached from their pane on launch (notably
+// nvim --embed, which deliberately detaches its session so it can
+// outlive its launcher). Best-effort: enumeration failures return an
+// empty slice rather than an error.
 func (c *Client) collectPanePIDs(ctx context.Context, session string) []int {
 	infos, err := c.PaneInfos(ctx, session)
 	if err != nil {
@@ -362,8 +356,8 @@ func (c *Client) collectPanePIDs(ctx context.Context, session string) []int {
 		for _, proc := range p.Tree {
 			pidSet[proc.PID] = struct{}{}
 		}
-		// Resolve the pane's working directory so we can match
-		// detached children below.
+		// Resolve the pane's working directory so cwdScanForReap can
+		// match detached children below.
 		args := c.args("display-message", "-t", session+"."+strconv.Itoa(p.Index), "-p", "#{pane_current_path}")
 		out, err := exec.CommandContext(ctx, "tmux", args...).Output()
 		if err == nil {
@@ -374,47 +368,8 @@ func (c *Client) collectPanePIDs(ctx context.Context, session string) []int {
 		}
 	}
 
-	// Scan /proc for processes whose cwd matches any pane cwd AND
-	// whose comm matches a known target list. The motivating case is
-	// `nvim --embed` (interactive nvim's editor backend), which
-	// detaches from its pane on launch — the regular pane process
-	// tree misses it.
-	//
-	// Image-name gating is load-bearing: a bare cwd match would
-	// SIGKILL anything happening to live at the workspace path.
-	// Specifically, `canopy` itself (when launched from a workspace
-	// pane via the popup keybind) has cwd=workspace-path and would
-	// kill itself mid-keystroke if not filtered out. Only known
-	// detach-on-launch programs go on this list.
-	if len(cwds) > 0 {
-		entries, err := os.ReadDir("/proc")
-		if err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-				pid, err := strconv.Atoi(entry.Name())
-				if err != nil {
-					continue
-				}
-				cwd, err := os.Readlink("/proc/" + entry.Name() + "/cwd")
-				if err != nil {
-					continue
-				}
-				// Strip the " (deleted)" suffix the kernel appends
-				// when the cwd's underlying inode has been unlinked
-				// — happens when a test's t.TempDir cleanup runs
-				// before the process exits.
-				cwd = strings.TrimSuffix(cwd, " (deleted)")
-				if _, ok := cwds[cwd]; !ok {
-					continue
-				}
-				if !isReapableComm(entry.Name()) {
-					continue
-				}
-				pidSet[pid] = struct{}{}
-			}
-		}
+	for _, pid := range cwdScanForReap(cwds) {
+		pidSet[pid] = struct{}{}
 	}
 
 	out := make([]int, 0, len(pidSet))
@@ -422,6 +377,62 @@ func (c *Client) collectPanePIDs(ctx context.Context, session string) []int {
 		out = append(out, pid)
 	}
 	return out
+}
+
+// cwdScanForReap walks /proc and returns PIDs whose cwd matches any of
+// the given cwds AND whose comm is in the isReapableComm allowlist.
+// The motivating case is `nvim --embed` (interactive nvim's editor
+// backend), which detaches from its pane on launch — the regular pane
+// process tree misses it.
+//
+// Image-name gating via isReapableComm is load-bearing: a bare cwd
+// match would SIGKILL anything happening to live at the workspace
+// path. Specifically, `canopy` itself (when launched from a workspace
+// pane via the popup keybind) has cwd=workspace-path and would kill
+// itself mid-keystroke if not filtered out. Only known detach-on-launch
+// programs go on the allowlist.
+//
+// Shared between Client.Kill (via collectPanePIDs) and
+// KillServerAndReap so the two paths can never diverge — historically
+// they did, and that gap leaked one nvim --embed orphan per e2e test
+// run for weeks until it surfaced as ~3.5 GiB of zombie RAM.
+//
+// Best-effort: empty cwds or /proc read failure return nil. Caller's
+// kill proceeds without the scanned PIDs.
+func cwdScanForReap(cwds map[string]struct{}) []int {
+	if len(cwds) == 0 {
+		return nil
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		cwd, err := os.Readlink("/proc/" + entry.Name() + "/cwd")
+		if err != nil {
+			continue
+		}
+		// Strip the " (deleted)" suffix the kernel appends when the
+		// cwd's underlying inode has been unlinked — happens when a
+		// test's t.TempDir cleanup runs before the process exits.
+		cwd = strings.TrimSuffix(cwd, " (deleted)")
+		if _, ok := cwds[cwd]; !ok {
+			continue
+		}
+		if !isReapableComm(entry.Name()) {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
 }
 
 // Attach hands the current process off to `tmux attach -t <name>`. On
@@ -585,23 +596,34 @@ func (c *Client) KillServer(ctx context.Context) error {
 
 // KillServerAndReap is KillServer plus aggressive orphan cleanup.
 // Before killing the server, it enumerates every session's pane
-// process tree via PaneInfos and collects the descendant PIDs.
-// After the server dies, it SIGKILLs anything from that PID set
-// still alive — catching nvim --embed and any other process that
-// detached from its tmux pane.
+// process tree via PaneInfos AND scans /proc via cwdScanForReap to
+// catch processes that detached from their pane on launch (notably
+// nvim --embed). After the server dies, it SIGKILLs anything from
+// that union still alive.
 //
 // Use this instead of KillServer in test cleanup. Production code
 // shouldn't need it: real workspace lifecycle uses Manager.Remove
 // which runs scripts.archive (the user's chance to gracefully shut
 // down dev servers etc.) before kill-session.
 //
+// Symmetry with Client.Kill is intentional: both paths route the
+// detach-on-launch reap through cwdScanForReap so the allowlist and
+// /proc walk live in exactly one place. An earlier version of this
+// function only collected pane-tree PIDs (no cwd-scan) and leaked
+// one nvim --embed orphan per e2e test run.
+//
 // Best-effort: errors enumerating panes don't block the kill. The
 // tmux server going down is the load-bearing part; the reap is
 // belt-and-suspenders.
 func (c *Client) KillServerAndReap(ctx context.Context) error {
 	// Collect every PID under every pane in every session BEFORE
-	// killing the server (the server dying loses our enumeration handle).
-	var pidsToReap []int
+	// killing the server (the server dying loses our enumeration
+	// handle). Also collect every pane cwd into a single set so we
+	// can run one cwdScanForReap across the union after the loop —
+	// the /proc walk is O(processes), pointless to repeat per session.
+	pidSet := map[int]struct{}{}
+	cwds := map[string]struct{}{}
+
 	sessionsCmd := exec.CommandContext(ctx, "tmux", c.args("list-sessions", "-F", "#{session_name}")...)
 	if out, err := sessionsCmd.Output(); err == nil {
 		for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -614,10 +636,21 @@ func (c *Client) KillServerAndReap(ctx context.Context) error {
 			}
 			for _, p := range infos {
 				for _, proc := range p.Tree {
-					pidsToReap = append(pidsToReap, proc.PID)
+					pidSet[proc.PID] = struct{}{}
+				}
+				args := c.args("display-message", "-t", name+"."+strconv.Itoa(p.Index), "-p", "#{pane_current_path}")
+				if cwdOut, err := exec.CommandContext(ctx, "tmux", args...).Output(); err == nil {
+					cwd := strings.TrimSpace(string(cwdOut))
+					if cwd != "" {
+						cwds[cwd] = struct{}{}
+					}
 				}
 			}
 		}
+	}
+
+	for _, pid := range cwdScanForReap(cwds) {
+		pidSet[pid] = struct{}{}
 	}
 
 	// Now kill the server.
@@ -627,7 +660,7 @@ func (c *Client) KillServerAndReap(ctx context.Context) error {
 	// Use SIGKILL not SIGTERM — these are zombies from a forced server
 	// shutdown; we want them gone immediately, not given a chance to
 	// "gracefully exit" (which is what got us here in the first place).
-	for _, pid := range pidsToReap {
+	for pid := range pidSet {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
 	return nil

@@ -5,6 +5,31 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0.3] - 2026-05-01 — Fix: e2e test cleanup symmetric with workspace removal
+
+`Client.Kill` (production workspace removal) walks `/proc` for processes
+whose cwd matches a pane cwd, catching `nvim --embed` children that
+deliberately detach on launch. `KillServerAndReap` (used by every e2e
+test's `t.Cleanup`) was missing that cwd-scan, it only collected the
+pane process tree. Result: every e2e run leaked one `nvim --embed`
+orphan to systemd-user. Stragglers piled up to ~3.5 GiB of zombie RAM
+across two days of dogfooding before anyone noticed. The two paths now
+share `cwdScanForReap`, so they cannot diverge again.
+
+### Fixed
+
+- **`KillServerAndReap` now reaps detached children.** Extracted the
+  /proc cwd-scan from `collectPanePIDs` into a package-level helper
+  `cwdScanForReap`. Both `Client.Kill` and `KillServerAndReap` call it.
+  Behavior of `Client.Kill` is unchanged; `KillServerAndReap` gains the
+  reap of detach-on-launch children that the pane-tree enumeration
+  misses. Test suite leaks 0 `nvim --embed` orphans per full e2e run
+  (was ~12).
+- **Regression test for the symmetric path.**
+  `TestKillServerAndReap_ReapsDetachedNvimEmbed` mirrors the existing
+  `TestKill_*` test so future divergence between the two reap paths
+  fails in CI.
+
 ## [0.14.0.2] - 2026-05-01 — Fix: lazy port base on freshly-initialized projects
 
 `canopy init` registers a project with `port_base: 0` and lets `canopy new`
