@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -324,7 +325,32 @@ type Model struct {
 	// pill normally.
 	versionLabel string
 	devWorkspace string
+
+	// upgradeAvailable is the bare semver of a newer canopy release
+	// that's available, or "" when no upgrade is available / has
+	// been dismissed / running on a DEV build. Mutates the version
+	// pill from "v0.12.3" to "v0.12.3 ⇑ v0.13.0" (yellow arrow).
+	// Set by SetUpgradeAvailable on startup (sync read from the
+	// auto-check cache) and updated mid-session by the async
+	// refresh tea.Cmd when the cache was stale at startup.
+	upgradeAvailable string
+
+	// upgradeRefreshFn is the closure that performs the async
+	// network fetch when the auto-check cache is missing or stale.
+	// Called from Init() as a tea.Cmd; result lands as
+	// upgradeCheckedMsg and updates upgradeAvailable. Nil when the
+	// caller didn't wire it (tests, etc.) — Init then skips the
+	// refresh and just renders whatever was set up front.
+	upgradeRefreshFn UpgradeRefreshFn
 }
+
+// UpgradeRefreshFn performs the async cache refresh: fetches the
+// latest VERSION from upstream, writes the cache, returns the
+// upgrade-available semver (or "" when the user is up to date or
+// has dismissed the latest). Network errors surface here so the
+// caller (the UI) can log; the UI does NOT change pill state on
+// error — the existing cached value stays visible.
+type UpgradeRefreshFn func(ctx context.Context) (latest string, err error)
 
 // SetVersionInfo records the running binary's version surface for the
 // top-bar pill. Called by cmd/canopy after constructing the model so
@@ -334,6 +360,52 @@ type Model struct {
 func (m *Model) SetVersionInfo(versionLabel, devWorkspace string) {
 	m.versionLabel = versionLabel
 	m.devWorkspace = devWorkspace
+}
+
+// SetUpgradeAvailable records the bare semver of an available newer
+// canopy release. Empty string suppresses the upgrade-arrow branch on
+// the version pill. Caller is responsible for the gating logic
+// (DEV-binary check, dismissal, version equality) — this setter just
+// stores the value the renderer should display.
+//
+// Called by RunUnified on startup (sync read from
+// ~/.canopy/upgrade-check.json) and updated mid-session by the
+// upgradeCheckedMsg handler when the async refresh lands.
+func (m *Model) SetUpgradeAvailable(latest string) {
+	m.upgradeAvailable = latest
+}
+
+// SetUpgradeRefreshFn wires the async refresh closure that fires
+// from Init() when the auto-check cache was missing or stale at
+// startup. Pass nil to skip refresh entirely (tests, popup mode
+// where we want minimal startup work, etc.).
+func (m *Model) SetUpgradeRefreshFn(fn UpgradeRefreshFn) {
+	m.upgradeRefreshFn = fn
+}
+
+// upgradeCheckedMsg lands when the async refresh started by Init
+// completes. Carries the new latest_version (or "" if up-to-date).
+// Errors from the refresh are not propagated — they're logged at
+// the closure layer; the UI just doesn't update pill state on
+// failure.
+type upgradeCheckedMsg struct {
+	latest string
+}
+
+// upgradeRefreshCmd wraps the closure in a tea.Cmd. Returns nil when
+// no refresh fn is wired (test path, or the caller intentionally
+// suppressed it). Uses a 10s timeout so a stalled HTTP/git fetch
+// can't hang Bubbletea forever.
+func upgradeRefreshCmd(fn UpgradeRefreshFn) tea.Cmd {
+	if fn == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		latest, _ := fn(ctx)
+		return upgradeCheckedMsg{latest: latest}
+	}
 }
 
 // tabKind identifies which top-level tab is active in the unified TUI.
@@ -502,11 +574,18 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 // Model.SetVersionInfo. Pass empty strings to suppress the pill (no
 // observable behavior change — the chrome just doesn't gain the pill).
 //
+// initialUpgrade is the cache-only-read upgrade pill state at startup
+// ("" when no upgrade is available or running on DEV). refreshFn is
+// the async closure fired from Init() when the auto-check cache was
+// stale or missing; pass nil to skip refresh entirely.
+//
 // In popup mode (CANOPY_IN_POPUP=1) we omit MouseCellMotion since the
 // popup is keyboard-driven and mouse handling adds latency.
-func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, devWorkspace string) error {
+func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, devWorkspace, initialUpgrade string, refreshFn UpgradeRefreshFn) error {
 	m := NewUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
 	m.SetVersionInfo(versionLabel, devWorkspace)
+	m.SetUpgradeAvailable(initialUpgrade)
+	m.SetUpgradeRefreshFn(refreshFn)
 	opts := []tea.ProgramOption{tea.WithAltScreen()}
 	if !m.inPopup {
 		opts = append(opts, tea.WithMouseCellMotion())
@@ -548,7 +627,15 @@ func (m *Model) Init() tea.Cmd {
 	// triggers a re-render with the populated values. No explicit `r`
 	// gesture required — the column "just works" the way every other
 	// column does.
-	return m.refresh()
+	cmds := []tea.Cmd{m.refresh()}
+	// Async upgrade check refresh. Only fires when route.go wired
+	// the closure (skipped for tests, popup mode, and DEV builds
+	// where the closure is intentionally nil). The result lands as
+	// upgradeCheckedMsg and updates the pill mid-session.
+	if cmd := upgradeRefreshCmd(m.upgradeRefreshFn); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 // rowsLoadedMsg is the result of a refresh. Carries the new rows or an

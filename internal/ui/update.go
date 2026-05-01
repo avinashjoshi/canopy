@@ -41,6 +41,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list.SetSize(msg.Width, msg.Height-reserve)
 		return m, nil
 
+	case upgradeCheckedMsg:
+		// Async upgrade refresh landed. Update pill state — empty
+		// latest means "no upgrade available after refresh" (cleared)
+		// or "fetch failed" (closure swallows errors). Either way,
+		// trust what the closure returned. Re-render is automatic.
+		m.upgradeAvailable = msg.latest
+		return m, nil
+
 	case rowsLoadedMsg:
 		// Refresh result. Apply rows to allRows + push the filtered
 		// (tab + search) subset to projectlist for rendering.

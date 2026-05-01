@@ -355,6 +355,64 @@ func printUpgradeHint(out io.Writer) {
 	fmt.Fprintf(out, "\ncanopy v%s available — run `canopy upgrade`.\n", cache.LatestVersion)
 }
 
+// initialUpgradeForUI is the synchronous cache-only read used by
+// RunUnified to populate the initial pill state. Returns ("", true)
+// when the TUI should schedule an async refresh (cache missing or
+// stale). Returns (latest, false) when the cache was fresh and no
+// fetch is needed this invocation.
+//
+// Never blocks on the network. The async refresh is the UI's job
+// (via the refresh fn passed to SetUpgradeRefreshFn) — keeping the
+// network call out of the startup path means a flaky connection
+// never delays the TUI rendering.
+//
+// Suppresses for DEV builds: the pill never shows on DEV, so we
+// don't even bother reading the cache.
+func initialUpgradeForUI(d VersionDetails) (latest string, needsRefresh bool) {
+	if d.IsDev {
+		return "", false
+	}
+	path, err := upgradeCheckPath()
+	if err != nil {
+		return "", false
+	}
+	cache, err := readUpgradeCheck(path)
+	if err != nil || cache == nil {
+		// Missing or malformed → empty pill, schedule a refresh.
+		return "", true
+	}
+	if upgradeAvailable(d.Version, d.IsDev, cache) {
+		latest = cache.LatestVersion
+	}
+	return latest, !cache.fresh()
+}
+
+// refreshUpgradeForUI is the async refresh closure passed into the
+// UI. Performs the network fetch + cache write, returns the new
+// latest_version (or "" when no upgrade is available after refresh).
+//
+// Errors are surfaced so the UI can log; UI rendering does not change
+// on error (the previous pill state stays). Network failures here are
+// silent in the UI; the next canopy startup will retry.
+func refreshUpgradeForUI(ctx context.Context, srcDir string, d VersionDetails) (latest string, err error) {
+	if d.IsDev {
+		return "", nil
+	}
+	path, perr := upgradeCheckPath()
+	if perr != nil {
+		return "", perr
+	}
+	prev, _ := readUpgradeCheck(path)
+	next, ferr := refreshUpgradeCheckCache(ctx, srcDir, prev)
+	if ferr != nil {
+		return "", ferr
+	}
+	if upgradeAvailable(d.Version, d.IsDev, next) {
+		return next.LatestVersion, nil
+	}
+	return "", nil
+}
+
 // upgradeAvailable is the single decision function used by every
 // surface (pill, ls hint, U-key gate). Returns true when there's a
 // genuine new version the user hasn't dismissed.

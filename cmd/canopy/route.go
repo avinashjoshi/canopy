@@ -143,7 +143,31 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 		// hands rendering control to devWorkspace below.
 		versionLabel = ""
 	}
-	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, d.DevWorkspace)
+
+	// Auto-check pill state. initialUpgradeForUI is a synchronous
+	// cache-only read; it never blocks on the network. needsRefresh
+	// is true when the cache was stale or missing — the UI fires
+	// the closure as a tea.Cmd from Init(), so the network call
+	// happens after the TUI is already on screen.
+	initialUpgrade, needsRefresh := initialUpgradeForUI(d)
+	var refreshFn ui.UpgradeRefreshFn
+	if needsRefresh {
+		refreshFn = func(ctx context.Context) (string, error) {
+			srcDir, err := upgradeSrcDir()
+			if err != nil {
+				return "", err
+			}
+			// Refuse cleanly if ~/.canopy/src is missing — auto-check
+			// can't fall back to git without it. Treat as a no-op
+			// (silent) so users without a working install.sh don't
+			// see noise.
+			if rerr := ensureSrcDirReady(srcDir); rerr != nil {
+				return "", rerr
+			}
+			return refreshUpgradeForUI(ctx, srcDir, d)
+		}
+	}
+	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, d.DevWorkspace, initialUpgrade, refreshFn)
 }
 
 // resolveProjectContext picks the canonical current-project root for the

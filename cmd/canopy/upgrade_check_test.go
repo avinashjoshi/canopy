@@ -861,3 +861,164 @@ func TestRunUpgrade_checkPreservesDismissal(t *testing.T) {
 		t.Errorf("--check stomped on DismissedVersion: got %q, want 0.13.0", got.DismissedVersion)
 	}
 }
+
+// TestInitialUpgradeForUI covers the cache-only-read path used by
+// route.go: returns the upgrade-available semver to render
+// immediately and a needsRefresh flag telling the UI whether to
+// schedule the async fetch.
+func TestInitialUpgradeForUI(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	now := time.Now().UTC()
+	prevNow := upgradeCheckNow
+	t.Cleanup(func() { upgradeCheckNow = prevNow })
+	upgradeCheckNow = func() time.Time { return now }
+
+	t.Run("DEV always empty + no refresh", func(t *testing.T) {
+		latest, refresh := initialUpgradeForUI(VersionDetails{IsDev: true, Version: "dev"})
+		if latest != "" || refresh {
+			t.Errorf("DEV should suppress; got (%q, %v)", latest, refresh)
+		}
+	})
+
+	t.Run("missing cache → empty + needs refresh", func(t *testing.T) {
+		path, _ := upgradeCheckPath()
+		_ = os.Remove(path)
+		latest, refresh := initialUpgradeForUI(VersionDetails{Version: "v0.12.3+abc"})
+		if latest != "" {
+			t.Errorf("missing cache should yield empty latest; got %q", latest)
+		}
+		if !refresh {
+			t.Error("missing cache should trigger refresh")
+		}
+	})
+
+	t.Run("fresh cache w/ upgrade → latest, no refresh", func(t *testing.T) {
+		path, _ := upgradeCheckPath()
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now.Add(-1 * time.Hour),
+			LatestVersion: "0.13.0",
+		})
+		latest, refresh := initialUpgradeForUI(VersionDetails{Version: "v0.12.3+abc"})
+		if latest != "0.13.0" {
+			t.Errorf("latest = %q, want 0.13.0", latest)
+		}
+		if refresh {
+			t.Error("fresh cache should NOT trigger refresh")
+		}
+	})
+
+	t.Run("stale cache → render cached, schedule refresh", func(t *testing.T) {
+		path, _ := upgradeCheckPath()
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now.Add(-7 * time.Hour),
+			LatestVersion: "0.13.0",
+		})
+		latest, refresh := initialUpgradeForUI(VersionDetails{Version: "v0.12.3+abc"})
+		if latest != "0.13.0" {
+			t.Errorf("stale cache should still render; got %q", latest)
+		}
+		if !refresh {
+			t.Error("stale cache should trigger refresh")
+		}
+	})
+
+	t.Run("dismissed → empty pill, no refresh schedule (cache fresh)", func(t *testing.T) {
+		path, _ := upgradeCheckPath()
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:        now,
+			LatestVersion:    "0.13.0",
+			DismissedVersion: "0.13.0",
+		})
+		latest, refresh := initialUpgradeForUI(VersionDetails{Version: "v0.12.3+abc"})
+		if latest != "" {
+			t.Errorf("dismissed should yield empty pill; got %q", latest)
+		}
+		if refresh {
+			t.Error("fresh-and-dismissed should NOT refresh")
+		}
+	})
+}
+
+// TestRefreshUpgradeForUI: the network-fetch closure used by the UI.
+// Stubs the HTTP fetcher; verifies cache rewrite, dismissal preservation,
+// and the DEV no-op.
+func TestRefreshUpgradeForUI(t *testing.T) {
+	prevFetch := upgradeFetchVersion
+	t.Cleanup(func() { upgradeFetchVersion = prevFetch })
+
+	t.Run("DEV no-op", func(t *testing.T) {
+		upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+			t.Error("DEV path should NOT fetch")
+			return "", nil
+		}
+		latest, err := refreshUpgradeForUI(context.Background(), "/tmp/no-such-dir", VersionDetails{IsDev: true})
+		if err != nil {
+			t.Errorf("DEV should be a silent no-op; got err=%v", err)
+		}
+		if latest != "" {
+			t.Errorf("DEV latest = %q, want empty", latest)
+		}
+	})
+
+	t.Run("happy path returns latest, writes cache", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+			return "0.14.0", nil
+		}
+		latest, err := refreshUpgradeForUI(context.Background(), tmp, VersionDetails{Version: "v0.13.0+abc"})
+		if err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		if latest != "0.14.0" {
+			t.Errorf("latest = %q, want 0.14.0", latest)
+		}
+		path, _ := upgradeCheckPath()
+		got, _ := readUpgradeCheck(path)
+		if got == nil || got.LatestVersion != "0.14.0" {
+			t.Errorf("disk LatestVersion = %v, want 0.14.0", got)
+		}
+	})
+
+	t.Run("running == latest returns empty (up-to-date)", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+			return "0.13.0", nil
+		}
+		latest, err := refreshUpgradeForUI(context.Background(), tmp, VersionDetails{Version: "v0.13.0+abc"})
+		if err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		if latest != "" {
+			t.Errorf("up-to-date latest = %q, want empty", latest)
+		}
+	})
+
+	t.Run("dismissal preserved across refresh", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		path, _ := upgradeCheckPath()
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:        time.Now().Add(-7 * time.Hour),
+			LatestVersion:    "0.13.0",
+			DismissedVersion: "0.13.0",
+		})
+		upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+			return "0.13.0", nil // same as dismissed
+		}
+		latest, err := refreshUpgradeForUI(context.Background(), tmp, VersionDetails{Version: "v0.12.3+abc"})
+		if err != nil {
+			t.Fatalf("refresh: %v", err)
+		}
+		// Dismissed → upgradeAvailable returns false → empty latest.
+		if latest != "" {
+			t.Errorf("dismissed latest = %q, want empty", latest)
+		}
+		got, _ := readUpgradeCheck(path)
+		if got.DismissedVersion != "0.13.0" {
+			t.Errorf("DismissedVersion lost across refresh; got %q", got.DismissedVersion)
+		}
+	})
+}
