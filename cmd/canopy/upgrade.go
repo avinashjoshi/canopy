@@ -207,12 +207,6 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// runUpgradeCheckOnly is also where checkOnly successfully exits, but
-// we want --check to populate the cache too (so the next non-check
-// invocation sees a fresh value). Hooked into the checkOnly path
-// above by writing the cache before returning. Done as a side effect
-// in runUpgrade rather than refactoring into a separate function so
-// the existing flow stays linear.
 
 // upgradeSrcDir resolves to ~/.canopy/src. Single source of truth
 // shared with install.sh via the upgradeSrcSubdir constant.

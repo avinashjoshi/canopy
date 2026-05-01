@@ -365,7 +365,7 @@ type Model struct {
 	upgradeCancel        context.CancelFunc
 	upgradeChangelogFn   UpgradeChangelogFn
 	upgradeShellFn       UpgradeShellFn
-	upgradeDismissFn     func() error
+	upgradeDismissFn     UpgradeDismissFn
 }
 
 // UpgradeRefreshFn performs the async cache refresh: fetches the
@@ -605,7 +605,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 //
 // In popup mode (CANOPY_IN_POPUP=1) we omit MouseCellMotion since the
 // popup is keyboard-driven and mouse handling adds latency.
-func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, devWorkspace, initialUpgrade string, refreshFn UpgradeRefreshFn, changelogFn UpgradeChangelogFn, shellFn UpgradeShellFn, dismissFn func() error) error {
+func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, devWorkspace, initialUpgrade string, refreshFn UpgradeRefreshFn, changelogFn UpgradeChangelogFn, shellFn UpgradeShellFn, dismissFn UpgradeDismissFn) error {
 	m := NewUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
 	m.SetVersionInfo(versionLabel, devWorkspace)
 	m.SetUpgradeAvailable(initialUpgrade)

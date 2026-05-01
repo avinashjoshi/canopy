@@ -213,35 +213,18 @@ func (m *Model) renderVersionPill() string {
 	}
 	if m.upgradeAvailable != "" {
 		// Release pill body stays gray; build the content with an
-		// inline yellow arrow + new version. The body string is one
-		// pill (single rounded shape with continuous bg); the arrow
-		// is colored within the body, not as a separate pill, so
-		// the visual "pill" still reads as one rounded unit.
+		// inline yellow arrow + new version. The arrow is styled
+		// with matching pill background so it sits visually inside
+		// the rounded shape — eye reads one continuous pill, not a
+		// pill+segment+pill sandwich.
 		arrow := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("220")).
-			Background(lipgloss.Color("237")). // match pill bg so it sits inside
+			Background(lipgloss.Color("237")).
 			Bold(true).
 			Render(" ⇑ v" + m.upgradeAvailable)
-		// roundedPillSubtle wraps content in caps. We pre-build the
-		// content (versionLabel + arrow) then render through the
-		// subtle pill style so the arrow's bg lines up with the
-		// pill body bg.
-		return roundedPillSubtleRich(m.versionLabel+arrow, "245", "237")
+		return roundedPillSubtle(m.versionLabel+arrow, "245", "237")
 	}
 	return roundedPillSubtle(m.versionLabel, "245", "237") // gray on dark gray
-}
-
-// roundedPillSubtle renders a pill whose body string is plain text;
-// roundedPillSubtleRich is the variant that lets the body string
-// include pre-styled lipgloss output (e.g., a colored arrow segment
-// inside the pill). The cap glyphs still use bgColor so the eye
-// reads a single rounded shape.
-func roundedPillSubtleRich(content, fgColor, bgColor string) string {
-	cap := lipgloss.NewStyle().Foreground(lipgloss.Color(bgColor))
-	body := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(fgColor)).
-		Background(lipgloss.Color(bgColor))
-	return cap.Render("") + body.Render(content) + cap.Render("")
 }
 
 // statusStyle returns the lipgloss style for a given workspace status.

@@ -665,25 +665,6 @@ func TestFormatScrollHint(t *testing.T) {
 	}
 }
 
-// TestIntToStr is the local int formatter — bounded to 0..100 in
-// production. Verify the boundary inputs.
-func TestIntToStr(t *testing.T) {
-	cases := []struct {
-		n    int
-		want string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{42, "42"},
-		{100, "100"},
-	}
-	for _, tc := range cases {
-		if got := intToStr(tc.n); got != tc.want {
-			t.Errorf("intToStr(%d) = %q, want %q", tc.n, got, tc.want)
-		}
-	}
-}
-
 // TestRenderUpgrade_previewWithViewport exercises the viewport
 // render branch when content + size are wired. The previous
 // "preview state with content" case in TestRenderUpgrade doesn't

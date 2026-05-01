@@ -23,6 +23,7 @@ package ui
 import (
 	"context"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,13 +64,11 @@ type UpgradeChangelogFn func(ctx context.Context) (preview string, err error)
 // the seam is just for keeping internal/ui types out of cmd/canopy.
 type UpgradeShellFn func(ctx context.Context, w io.Writer) error
 
-// upgradeFlowFields are the per-flow state carried on Model. Grouped
-// here for readability — every field resets to zero when the user
-// dismisses out of the upgrade flow back to listMode.
-//
-// Held by value on Model rather than as a *upgradeFlow pointer
-// because the lifetime is the same as the model and the field set
-// is small. resetUpgrade() returns to zero in one assignment.
+// UpgradeDismissFn writes dismissed_version into the auto-check cache
+// so the pill stops showing for the current release. Returns an error
+// if the cache write fails; the caller decides whether to surface it
+// (today the TUI just logs and clears the in-memory pill anyway).
+type UpgradeDismissFn func() error
 
 // SetUpgradeChangelogFn wires the network closure used for the
 // preview state. Pass nil to disable the in-TUI flow entirely
@@ -88,7 +87,7 @@ func (m *Model) SetUpgradeShellFn(fn UpgradeShellFn) {
 // SetUpgradeDismissFn wires the persistence closure for the D key
 // (TUI dismissal). Implementation lives in cmd/canopy because the
 // cache file path + write logic are package-main details.
-func (m *Model) SetUpgradeDismissFn(fn func() error) {
+func (m *Model) SetUpgradeDismissFn(fn UpgradeDismissFn) {
 	m.upgradeDismissFn = fn
 }
 
@@ -307,6 +306,23 @@ func actionDismissUpgrade(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // (Update) is responsible for the type assertion to tea.Model.
 func (m *Model) handleUpgradeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+
+	// Global ctrl+c handling. In the running state, cancel the
+	// subprocess but stay in the flow so the user can read the
+	// resulting "canceled" error before dismissing. In every other
+	// state, ctrl+c quits canopy entirely — matches the convention
+	// that ctrl+c is the global escape hatch, fixing the silent-
+	// absorb in loading/preview that breaks user expectations.
+	if key == "ctrl+c" {
+		if m.upgradeState == upgradeStateRunning {
+			if m.upgradeCancel != nil {
+				m.upgradeCancel()
+			}
+			return m, nil
+		}
+		return m, tea.Quit
+	}
+
 	switch m.upgradeState {
 	case upgradeStateLoading:
 		// Loading is fast (one HTTP fetch). Esc cancels back to the
@@ -359,15 +375,9 @@ func (m *Model) handleUpgradeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case upgradeStateRunning:
-		// Ctrl-C cancels the subprocess via context. The goroutine
-		// returns with a "context canceled" error → flips to
-		// doneError. Other keys are ignored to prevent accidental
-		// dismissal mid-build.
-		if key == "ctrl+c" {
-			if m.upgradeCancel != nil {
-				m.upgradeCancel()
-			}
-		}
+		// All non-ctrl+c keys are ignored to prevent accidental
+		// dismissal mid-build. Ctrl+c is handled by the global
+		// escape hatch above (cancel subprocess + tea.Quit).
 		return m, nil
 
 	case upgradeStateDoneOK, upgradeStateDoneError:
@@ -531,9 +541,11 @@ func upgradeScrollIndicator(vp *viewport.Model) string {
 		Render(formatScrollHint(pct))
 }
 
-// formatScrollHint returns "scroll: top" / "scroll: 42%" / "scroll: bottom"
-// for the indicator line. Wrapper so the percentage display is testable
-// without rendering through lipgloss.
+// formatScrollHint returns the percentage indicator for the scroll
+// position. Three cases: at top (with "more below" cue so the user
+// knows they can scroll), in the middle (percentage), at bottom.
+// Pure-string wrapper so the output is testable without rendering
+// through lipgloss.
 func formatScrollHint(pct int) string {
 	switch {
 	case pct <= 0:
@@ -541,24 +553,7 @@ func formatScrollHint(pct int) string {
 	case pct >= 100:
 		return "scroll: bottom"
 	default:
-		return "scroll: " + intToStr(pct) + "%"
+		return "scroll: " + strconv.Itoa(pct) + "%"
 	}
-}
-
-// intToStr is a tiny stdlib-only int formatter so this file doesn't
-// pull strconv just for percentage rendering. Bounded 0..100 input
-// from ScrollPercent so the simple loop is sufficient.
-func intToStr(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [4]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
 
