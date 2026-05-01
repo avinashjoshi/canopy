@@ -5,6 +5,25 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.4.1] - 2026-04-30 — UX: clearer wording for the `R` keybind
+
+### Changed
+
+- **"retry scripts.setup" → "re-run setup" everywhere a user reads it.**
+  The old wording was opaque on its own ("retry what?") and the
+  prefix `scripts.` leaked an internal config path into copy meant
+  for newcomers. The keybind, the broken-row hint in the help legend,
+  the inline hint shown on a broken row, and the error message you
+  get when you press Enter on a broken workspace all now say "re-run
+  setup." Behavior unchanged; the keybind is still `R`. The CLI
+  subcommand `canopy retry` is unchanged so muscle memory and any
+  scripts pointing at it keep working.
+
+This is a precursor to the larger workspace-actions menu designed in
+TODOS.md (v0.15+) — that's where re-runnable per-project actions
+(reseed, migrate, tail logs) get a proper home. Until then the
+clearer wording does the user-facing work.
+
 ## [0.13.4.0] - 2026-04-30 — Workspace hints: ⚠ stuck state (Lane B of 3)
 
 Second slice of the workspace-hints expansion designed in

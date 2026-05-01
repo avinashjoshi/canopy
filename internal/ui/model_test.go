@@ -858,6 +858,27 @@ func TestRenderHelpLine_TabSwitch(t *testing.T) {
 	})
 }
 
+// TestRenderHelp_RKeybindCopy locks in the user-facing wording for the
+// `R` keybind. The original "retry scripts.setup" wording was ambiguous
+// ("retry what?") — readers of the help screen could not tell what
+// pressing R actually did. The fix is to say "re-run setup" everywhere
+// the keybind is described to a user. This test guards against the
+// older wording silently creeping back in.
+func TestRenderHelp_RKeybindCopy(t *testing.T) {
+	m := newTestModel(false)
+	out := stripAnsi(m.renderHelp())
+
+	if !strings.Contains(out, "re-run setup on a broken workspace") {
+		t.Errorf("help screen missing new R-keybind copy 're-run setup on a broken workspace':\n%s", out)
+	}
+	if !strings.Contains(out, "press R to re-run setup") {
+		t.Errorf("help legend missing broken-row hint 'press R to re-run setup':\n%s", out)
+	}
+	if strings.Contains(out, "retry scripts.setup") {
+		t.Errorf("help screen still uses old ambiguous 'retry scripts.setup' wording:\n%s", out)
+	}
+}
+
 // stripAnsi removes ANSI SGR escape sequences from s. Tiny inline impl
 // rather than pulling in a dep; canopy's help-line render only emits
 // SGR (\x1b[...m), no cursor-movement codes.
