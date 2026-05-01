@@ -589,35 +589,74 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	return m
 }
 
+// RunUnifiedOptions groups the optional knobs passed into RunUnified.
+// All fields are optional; the zero value gives the bare TUI with no
+// version pill, no auto-check, no in-TUI upgrade flow.
+//
+// Lives next to RunUnified rather than being separately documented
+// because it exists solely as RunUnified's options bag — when the
+// next field is added, it lands here and RunUnified's call sites
+// don't shift positionally.
+type RunUnifiedOptions struct {
+	// VersionLabel is the human-friendly version string for the
+	// top-bar pill ("v0.13.0+abc1234"). Empty suppresses the pill.
+	VersionLabel string
+
+	// DevWorkspace is the canopy workspace name when the running
+	// canopy is a DEV build inside a known worktree. Non-empty
+	// triggers the cyan DEV pill regardless of VersionLabel.
+	DevWorkspace string
+
+	// InitialUpgrade is the bare semver of an available newer
+	// canopy release, read synchronously from the auto-check cache
+	// at startup. Empty when no upgrade is available, the cache
+	// is missing, the user has dismissed, or running on DEV.
+	InitialUpgrade string
+
+	// RefreshFn is the async closure fired from Init() when the
+	// auto-check cache was stale or missing at startup. Result
+	// lands as upgradeCheckedMsg and updates the pill mid-session.
+	// Nil skips the refresh entirely.
+	RefreshFn UpgradeRefreshFn
+
+	// ChangelogFn fetches the CHANGELOG slice for the in-TUI
+	// upgrade flow's preview state. Nil disables the U key.
+	ChangelogFn UpgradeChangelogFn
+
+	// ShellFn runs git pull + make install for the in-TUI upgrade
+	// flow's running state. Nil disables the U key.
+	ShellFn UpgradeShellFn
+
+	// DismissFn writes dismissed_version into the auto-check cache
+	// for the D key. Nil disables D.
+	DismissFn UpgradeDismissFn
+}
+
 // RunUnified is the v0.8 public entry point used by cmd/canopy/route.go.
 // Single bubbletea program for every canopy invocation: project, global,
 // popup. mgr is optional — nil when invoked from outside a registered
 // project. currentProject is the resolved Local-tab filter root.
 //
-// versionLabel + devWorkspace populate the top-bar version pill via
-// Model.SetVersionInfo. Pass empty strings to suppress the pill (no
-// observable behavior change — the chrome just doesn't gain the pill).
-//
-// initialUpgrade is the cache-only-read upgrade pill state at startup
-// ("" when no upgrade is available or running on DEV). refreshFn is
-// the async closure fired from Init() when the auto-check cache was
-// stale or missing; pass nil to skip refresh entirely.
+// Optional knobs (version pill, auto-check, in-TUI upgrade flow) live
+// in RunUnifiedOptions to keep the positional signature short and
+// guard against argument-order bugs as more features land. Pass the
+// zero value for the bare TUI.
 //
 // In popup mode (CANOPY_IN_POPUP=1) we omit MouseCellMotion since the
 // popup is keyboard-driven and mouse handling adds latency.
-func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, devWorkspace, initialUpgrade string, refreshFn UpgradeRefreshFn, changelogFn UpgradeChangelogFn, shellFn UpgradeShellFn, dismissFn UpgradeDismissFn) error {
+func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace string, opts RunUnifiedOptions) error {
 	m := NewUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
-	m.SetVersionInfo(versionLabel, devWorkspace)
-	m.SetUpgradeAvailable(initialUpgrade)
-	m.SetUpgradeRefreshFn(refreshFn)
-	m.SetUpgradeChangelogFn(changelogFn)
-	m.SetUpgradeShellFn(shellFn)
-	m.SetUpgradeDismissFn(dismissFn)
-	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	m.SetVersionInfo(opts.VersionLabel, opts.DevWorkspace)
+	m.SetUpgradeAvailable(opts.InitialUpgrade)
+	m.SetUpgradeRefreshFn(opts.RefreshFn)
+	m.SetUpgradeChangelogFn(opts.ChangelogFn)
+	m.SetUpgradeShellFn(opts.ShellFn)
+	m.SetUpgradeDismissFn(opts.DismissFn)
+	teaOpts := []tea.ProgramOption{tea.WithAltScreen()}
 	if !m.inPopup {
-		opts = append(opts, tea.WithMouseCellMotion())
+		teaOpts = append(teaOpts, tea.WithMouseCellMotion())
 	}
-	p := tea.NewProgram(m, opts...)
+	p := tea.NewProgram(m, teaOpts...)
 	_, err := p.Run()
 	return err
 }

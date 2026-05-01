@@ -174,7 +174,7 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 	// pill never shows on DEV anyway, so the keys never bind).
 	var changelogFn ui.UpgradeChangelogFn
 	var shellFn ui.UpgradeShellFn
-	var dismissFn func() error
+	var dismissFn ui.UpgradeDismissFn
 	if !d.IsDev {
 		changelogFn = func(ctx context.Context) (string, error) {
 			srcDir, err := upgradeSrcDir()
@@ -230,7 +230,15 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 			return err
 		}
 	}
-	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, d.DevWorkspace, initialUpgrade, refreshFn, changelogFn, shellFn, dismissFn)
+	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace, ui.RunUnifiedOptions{
+		VersionLabel:   versionLabel,
+		DevWorkspace:   d.DevWorkspace,
+		InitialUpgrade: initialUpgrade,
+		RefreshFn:      refreshFn,
+		ChangelogFn:    changelogFn,
+		ShellFn:        shellFn,
+		DismissFn:      dismissFn,
+	})
 }
 
 
