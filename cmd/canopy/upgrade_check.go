@@ -31,6 +31,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -404,6 +405,7 @@ func printUpgradeStatus(out io.Writer) error {
 		}
 	}
 	fmt.Fprintln(out)
+	running := normalizeRunningVersion(d.Version)
 	switch {
 	case d.IsDev:
 		fmt.Fprintln(out, "Pill state: suppressed (DEV exempt)")
@@ -411,8 +413,13 @@ func printUpgradeStatus(out io.Writer) error {
 		fmt.Fprintln(out, "Pill state: suppressed (no latest version cached)")
 	case cache.dismissed():
 		fmt.Fprintf(out, "Pill state: suppressed (v%s dismissed; un-dismisses on next release)\n", cache.LatestVersion)
-	case normalizeRunningVersion(d.Version) == cache.LatestVersion:
+	case running == cache.LatestVersion:
 		fmt.Fprintln(out, "Pill state: suppressed (running version matches latest)")
+	case compareSemver(running, cache.LatestVersion) > 0:
+		// User shipped outside canopy and the cache is stale.
+		// Press r in the TUI (or run --check) to refresh.
+		fmt.Fprintf(out, "Pill state: suppressed (running %s is AHEAD of cached latest %s — cache is stale)\n",
+			running, cache.LatestVersion)
 	default:
 		fmt.Fprintf(out, "Pill state: SHOWING (v%s available)\n", cache.LatestVersion)
 	}
@@ -540,14 +547,22 @@ func refreshUpgradeForUI(ctx context.Context, srcDir string, d VersionDetails) (
 
 // upgradeAvailable is the single decision function used by every
 // surface (pill, ls hint, U-key gate). Returns true when there's a
-// genuine new version the user hasn't dismissed.
+// genuine NEWER version the user hasn't dismissed.
 //
-// All four conditions must hold:
+// All five conditions must hold:
 //   - cache exists and has a non-empty LatestVersion
-//   - LatestVersion differs from the running normalized version
+//   - cached LatestVersion is strictly GREATER than the running
+//     normalized version (just-different isn't enough — running
+//     ahead of cache means we shipped outside canopy and the cache
+//     is stale, not that there's an upgrade available)
 //   - LatestVersion is NOT the dismissed version
 //   - the running binary is NOT a DEV build (DEV is exempt — canopy
 //     upgrade refuses on DEV, so showing the pill would be misleading)
+//
+// The strict-greater check prevents the regression spotted in v0.13.2:
+// after `make install` of a new version, the cache (which only updates
+// every 6h) can lag behind running. Without ordering, the pill would
+// fire and offer a "downgrade" — confusing UX.
 func upgradeAvailable(running string, isDev bool, cache *upgradeCheck) bool {
 	if isDev || cache == nil || cache.LatestVersion == "" {
 		return false
@@ -555,5 +570,45 @@ func upgradeAvailable(running string, isDev bool, cache *upgradeCheck) bool {
 	if cache.dismissed() {
 		return false
 	}
-	return normalizeRunningVersion(running) != cache.LatestVersion
+	return compareSemver(normalizeRunningVersion(running), cache.LatestVersion) < 0
+}
+
+// compareSemver compares two dotted-number version strings lexically
+// by integer-valued components. Returns -1 if a < b, 0 if equal, 1
+// if a > b. Both inputs are expected to be the bare 4-digit form
+// (MAJOR.MINOR.PATCH.MICRO) with no v-prefix or +sha suffix —
+// callers should normalize first via normalizeRunningVersion.
+//
+// Tolerant of trailing zeros and length differences: "0.13" compares
+// equal to "0.13.0.0" (missing components default to 0). Non-numeric
+// components compare as 0 — defensive against malformed cache data,
+// not a feature.
+//
+// Avoids a real semver library because canopy's version format isn't
+// strict semver (4 digits, no pre-release/build metadata at the
+// pill-comparison level) and the standard libraries don't fit it
+// natively. ~25 lines is cheaper than a dependency.
+func compareSemver(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	n := len(aParts)
+	if len(bParts) > n {
+		n = len(bParts)
+	}
+	for i := 0; i < n; i++ {
+		var ai, bi int
+		if i < len(aParts) {
+			ai, _ = strconv.Atoi(aParts[i])
+		}
+		if i < len(bParts) {
+			bi, _ = strconv.Atoi(bParts[i])
+		}
+		if ai < bi {
+			return -1
+		}
+		if ai > bi {
+			return 1
+		}
+	}
+	return 0
 }
