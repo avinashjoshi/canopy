@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -133,6 +134,8 @@ func (m *Model) enterUpgradeMode() tea.Cmd {
 func (m *Model) resetUpgradeMode() {
 	m.upgradeState = upgradeStateNone
 	m.upgradeChangelog = ""
+	m.upgradeChangelogInit = false
+	m.upgradeShipped = ""
 	m.upgradeOutput = ""
 	m.upgradeErr = nil
 	m.upgradeBuf = nil
@@ -142,6 +145,29 @@ func (m *Model) resetUpgradeMode() {
 		m.upgradeCancel()
 	}
 	m.upgradeCancel = nil
+}
+
+// initUpgradeViewport sizes the changelog scroll pane and loads the
+// content. Reserves vertical space for: title (2 lines), version
+// header (2 lines), footer hint (2 lines). Width gets a 4-column
+// margin so text doesn't crowd the terminal edges.
+//
+// Falls back to 80x20 when WindowSizeMsg hasn't fired yet — that
+// shouldn't happen in practice (Bubbletea sends it on program start
+// before any user keypress) but defends against test paths that
+// build a *Model literal without dispatching messages.
+func (m *Model) initUpgradeViewport() {
+	w := m.width - 4
+	if w < 20 {
+		w = 76
+	}
+	h := m.height - 8
+	if h < 5 {
+		h = 16
+	}
+	m.upgradeChangelogVP = viewport.New(w, h)
+	m.upgradeChangelogVP.SetContent(m.upgradeChangelog)
+	m.upgradeChangelogInit = true
 }
 
 // changelogLoadedMsg lands when loadChangelogCmd's network fetch
@@ -321,6 +347,15 @@ func (m *Model) handleUpgradeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = listMode
 			return m, nil
 		}
+		// All other keys forward to the changelog viewport so
+		// j/k/PgUp/PgDn/space/g/G all scroll the preview. Confirm/
+		// cancel keys are handled above (they short-circuit) — only
+		// scroll-style keys reach here.
+		if m.upgradeChangelogInit {
+			var cmd tea.Cmd
+			m.upgradeChangelogVP, cmd = m.upgradeChangelogVP.Update(msg)
+			return m, cmd
+		}
 		return m, nil
 
 	case upgradeStateRunning:
@@ -367,7 +402,19 @@ func (m *Model) renderUpgrade() string {
 		b.WriteString("\n\n")
 		if m.upgradeChangelog == "" {
 			b.WriteString(subtleStyle.Render("  (changelog unavailable — upgrading anyway is fine)"))
+		} else if m.upgradeChangelogInit {
+			b.WriteString(m.upgradeChangelogVP.View())
+			// Scroll position indicator only when there's more
+			// content than fits — keeps the chrome quiet for
+			// short changelogs.
+			if m.upgradeChangelogVP.TotalLineCount() > m.upgradeChangelogVP.Height {
+				b.WriteString("\n")
+				b.WriteString(subtleStyle.Render(upgradeScrollIndicator(&m.upgradeChangelogVP)))
+			}
 		} else {
+			// WindowSizeMsg hadn't fired before changelog loaded —
+			// fall back to plain output. Rare path; viewport
+			// always initializes once size lands.
 			b.WriteString(m.upgradeChangelog)
 		}
 		b.WriteString("\n\n")
@@ -387,7 +434,25 @@ func (m *Model) renderUpgrade() string {
 		return b.String()
 
 	case upgradeStateDoneOK:
-		b.WriteString(readyStyle.Render("✓ Upgraded to v" + m.upgradeAvailable))
+		// upgradeAvailable was cleared by the doneOK transition; pull
+		// the version we shipped from the success message context.
+		// Fallback to "the new version" when the field was already
+		// reset (defensive — should always have a value here).
+		shipped := m.upgradeShipped
+		if shipped == "" {
+			shipped = "the new version"
+		} else {
+			shipped = "v" + shipped
+		}
+		b.WriteString(readyStyle.Render("✓ Upgraded to " + shipped))
+		b.WriteString("\n\n")
+		// Important UX note: the running canopy process is the OLD
+		// binary still in memory (Linux/Mac keep the inode alive
+		// after the file is replaced). New `canopy` invocations get
+		// the new binary; this session does not. Tell the user.
+		b.WriteString(subtleStyle.Render("  This canopy session is still running the old binary."))
+		b.WriteString("\n")
+		b.WriteString(subtleStyle.Render("  Press q to quit, then re-run canopy to use " + shipped + "."))
 		b.WriteString("\n\n")
 		if m.upgradeOutput != "" {
 			b.WriteString(subtleStyle.Render("Output:"))
@@ -439,14 +504,61 @@ func upgradePreviewHeader(m *Model) string {
 }
 
 // upgradeFooterPreview renders the action hint line for the preview
-// state. Three actions: Enter to upgrade (recommended, bright), Esc
-// to cancel, D to dismiss this version.
+// state. Three primary actions plus the scroll hint when the
+// changelog is taller than the viewport.
 func upgradeFooterPreview() string {
 	return "  " +
 		keyPillStyle.Render("Enter") + subtleStyle.Render(" upgrade") +
 		"   " +
 		keyPillStyle.Render("Esc") + subtleStyle.Render(" cancel") +
 		"   " +
-		keyPillStyle.Render("D") + subtleStyle.Render(" dismiss this version")
+		keyPillStyle.Render("D") + subtleStyle.Render(" dismiss this version") +
+		"   " +
+		keyPillStyle.Render("j/k") + subtleStyle.Render(" scroll") +
+		"   " +
+		keyPillStyle.Render("PgUp/PgDn") + subtleStyle.Render(" page")
+}
+
+// upgradeScrollIndicator renders a "[X-Y / N]" line at the bottom of
+// the changelog viewport so the user knows there's more content
+// above or below. Suppressed when content fits — chrome should
+// disappear when not load-bearing.
+func upgradeScrollIndicator(vp *viewport.Model) string {
+	pct := int(vp.ScrollPercent() * 100)
+	return "  " + lipgloss.NewStyle().
+		Foreground(lipgloss.Color("241")).
+		Italic(true).
+		Render(formatScrollHint(pct))
+}
+
+// formatScrollHint returns "scroll: top" / "scroll: 42%" / "scroll: bottom"
+// for the indicator line. Wrapper so the percentage display is testable
+// without rendering through lipgloss.
+func formatScrollHint(pct int) string {
+	switch {
+	case pct <= 0:
+		return "scroll: top — more below"
+	case pct >= 100:
+		return "scroll: bottom"
+	default:
+		return "scroll: " + intToStr(pct) + "%"
+	}
+}
+
+// intToStr is a tiny stdlib-only int formatter so this file doesn't
+// pull strconv just for percentage rendering. Bounded 0..100 input
+// from ScrollPercent so the simple loop is sufficient.
+func intToStr(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [4]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }
 

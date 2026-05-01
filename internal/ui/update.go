@@ -39,6 +39,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			reserve = 5 // single-line tab bar + tighter chrome
 		}
 		m.list.SetSize(msg.Width, msg.Height-reserve)
+		// Resize the upgrade viewport too if it's currently in use.
+		// initUpgradeViewport reads m.width/m.height, so this re-fits
+		// the changelog pane when the terminal resizes mid-preview.
+		if m.upgradeChangelogInit {
+			m.initUpgradeViewport()
+		}
 		return m, nil
 
 	case upgradeCheckedMsg:
@@ -59,6 +65,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.upgradeChangelog = msg.preview
 		m.upgradeState = upgradeStatePreview
+		m.initUpgradeViewport()
 		return m, nil
 
 	case upgradeShellStartedMsg:
@@ -98,6 +105,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.upgradeErr = msg.err
 		if msg.err == nil {
 			m.upgradeState = upgradeStateDoneOK
+			// Capture the shipped version for the doneOK message
+			// before clearing the pill. The renderer needs this
+			// to tell the user "you shipped v0.13.0; quit + restart
+			// to use it."
+			m.upgradeShipped = m.upgradeAvailable
 			// Pill clears immediately on success — the running
 			// canopy IS the just-installed binary (well, the
 			// next invocation will be; this process is doomed to

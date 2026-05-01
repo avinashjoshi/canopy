@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
@@ -353,15 +354,18 @@ type Model struct {
 	// In-TUI upgrade flow state. Active only when mode == upgradeMode.
 	// Reset to zero on dismiss (resetUpgradeMode). Lives in upgrade.go
 	// alongside the state machine.
-	upgradeState       upgradeState
-	upgradeChangelog   string
-	upgradeOutput      string
-	upgradeErr         error
-	upgradeBuf         *safeBuffer
-	upgradeCancel      context.CancelFunc
-	upgradeChangelogFn UpgradeChangelogFn
-	upgradeShellFn     UpgradeShellFn
-	upgradeDismissFn   func() error
+	upgradeState         upgradeState
+	upgradeChangelog     string
+	upgradeChangelogVP   viewport.Model // scrollable preview pane
+	upgradeChangelogInit bool           // viewport sized + content set
+	upgradeShipped       string         // version that just installed (for doneOK message)
+	upgradeOutput        string
+	upgradeErr           error
+	upgradeBuf           *safeBuffer
+	upgradeCancel        context.CancelFunc
+	upgradeChangelogFn   UpgradeChangelogFn
+	upgradeShellFn       UpgradeShellFn
+	upgradeDismissFn     func() error
 }
 
 // UpgradeRefreshFn performs the async cache refresh: fetches the

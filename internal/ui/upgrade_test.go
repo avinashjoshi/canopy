@@ -201,6 +201,13 @@ func TestUpdate_upgradeShellDoneMsg(t *testing.T) {
 		if got.upgradeAvailable != "" {
 			t.Errorf("post-success pill not cleared; upgradeAvailable=%q", got.upgradeAvailable)
 		}
+		// upgradeShipped captures the version we just installed —
+		// the renderer needs this to tell the user what shipped
+		// (the pill field is cleared at this point so the
+		// success message can't read it back).
+		if got.upgradeShipped != "0.13.0" {
+			t.Errorf("upgradeShipped not captured at doneOK; got %q, want 0.13.0", got.upgradeShipped)
+		}
 	})
 
 	t.Run("error", func(t *testing.T) {
@@ -422,10 +429,23 @@ func TestRenderUpgrade(t *testing.T) {
 			"doneOK with output",
 			func(m *Model) {
 				m.upgradeState = upgradeStateDoneOK
-				m.upgradeAvailable = "0.13.0"
+				// upgradeShipped is what gets shown — captured at the
+				// doneOK transition before upgradeAvailable was cleared.
+				m.upgradeShipped = "0.13.0"
 				m.upgradeOutput = "build complete"
 			},
-			[]string{"Upgraded to v0.13.0", "build complete", "Press any key"},
+			[]string{"Upgraded to v0.13.0", "build complete", "Press any key", "still running the old binary"},
+			nil,
+		},
+		{
+			"doneOK without shipped version (defensive fallback)",
+			func(m *Model) {
+				m.upgradeState = upgradeStateDoneOK
+				// Defensive: shouldn't happen in real flow but the
+				// renderer falls back to "the new version" if unset.
+				m.upgradeShipped = ""
+			},
+			[]string{"Upgraded to the new version", "still running the old binary"},
 			nil,
 		},
 		{
@@ -561,4 +581,127 @@ func TestUpgradeProgressTickCmd(t *testing.T) {
 	// can't easily simulate the timer in a unit test, but we can
 	// verify the cmd is non-nil. The real tick behavior is
 	// covered by integration smoke when running canopy upgrade.
+}
+
+// TestInitUpgradeViewport sizes the viewport against m.width/m.height
+// (with reserve for chrome) and loads the changelog content.
+func TestInitUpgradeViewport(t *testing.T) {
+	m := &Model{}
+	m.width = 100
+	m.height = 30
+	m.upgradeChangelog = "## v0.13.0\n- thing\n- other thing\n"
+	m.initUpgradeViewport()
+	if !m.upgradeChangelogInit {
+		t.Fatal("init flag not set after initUpgradeViewport")
+	}
+	if m.upgradeChangelogVP.Width != 96 { // 100 - 4 margin
+		t.Errorf("viewport width = %d, want 96", m.upgradeChangelogVP.Width)
+	}
+	if m.upgradeChangelogVP.Height != 22 { // 30 - 8 reserve
+		t.Errorf("viewport height = %d, want 22", m.upgradeChangelogVP.Height)
+	}
+	view := m.upgradeChangelogVP.View()
+	if !strings.Contains(view, "v0.13.0") {
+		t.Errorf("viewport view missing changelog content; got %q", view)
+	}
+}
+
+// TestInitUpgradeViewport_fallbackSize: when WindowSizeMsg hasn't
+// fired, m.width/height are 0. Fallback to 76x16 so the viewport
+// is still usable.
+func TestInitUpgradeViewport_fallbackSize(t *testing.T) {
+	m := &Model{}
+	m.upgradeChangelog = "content"
+	m.initUpgradeViewport()
+	if m.upgradeChangelogVP.Width < 20 {
+		t.Errorf("fallback width too small: %d", m.upgradeChangelogVP.Width)
+	}
+	if m.upgradeChangelogVP.Height < 5 {
+		t.Errorf("fallback height too small: %d", m.upgradeChangelogVP.Height)
+	}
+}
+
+// TestHandleUpgradeKey_previewScrollForward: any non-action key in
+// preview state forwards to the viewport. We can't easily simulate
+// ScrollPercent changes in a unit test (the viewport uses an
+// internal cursor that responds to specific tea.KeyMsg shapes), so
+// we just verify the call doesn't panic and returns a model.
+func TestHandleUpgradeKey_previewScrollForward(t *testing.T) {
+	m := &Model{}
+	m.mode = upgradeMode
+	m.upgradeState = upgradeStatePreview
+	m.upgradeChangelog = strings.Repeat("line\n", 100)
+	m.width = 100
+	m.height = 30
+	m.initUpgradeViewport()
+
+	keyJ := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
+	updated, _ := m.handleUpgradeKey(keyJ)
+	got := updated.(*Model)
+	if got.upgradeState != upgradeStatePreview {
+		t.Errorf("scroll key should not change state; got %v", got.upgradeState)
+	}
+	if got.mode != upgradeMode {
+		t.Errorf("scroll key should not change mode; got %v", got.mode)
+	}
+}
+
+// TestFormatScrollHint covers the three boundary states.
+func TestFormatScrollHint(t *testing.T) {
+	cases := []struct {
+		pct  int
+		want string
+	}{
+		{0, "scroll: top — more below"},
+		{1, "scroll: 1%"},
+		{42, "scroll: 42%"},
+		{99, "scroll: 99%"},
+		{100, "scroll: bottom"},
+	}
+	for _, tc := range cases {
+		if got := formatScrollHint(tc.pct); got != tc.want {
+			t.Errorf("formatScrollHint(%d) = %q, want %q", tc.pct, got, tc.want)
+		}
+	}
+}
+
+// TestIntToStr is the local int formatter — bounded to 0..100 in
+// production. Verify the boundary inputs.
+func TestIntToStr(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{42, "42"},
+		{100, "100"},
+	}
+	for _, tc := range cases {
+		if got := intToStr(tc.n); got != tc.want {
+			t.Errorf("intToStr(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestRenderUpgrade_previewWithViewport exercises the viewport
+// render branch when content + size are wired. The previous
+// "preview state with content" case in TestRenderUpgrade doesn't
+// initialize the viewport, so it goes through the fallback branch.
+// This covers the happy path explicitly.
+func TestRenderUpgrade_previewWithViewport(t *testing.T) {
+	m := &Model{}
+	m.upgradeState = upgradeStatePreview
+	m.versionLabel = "v0.12.3"
+	m.upgradeAvailable = "0.13.0"
+	m.upgradeChangelog = "## v0.13.0\n- thing\n"
+	m.width = 100
+	m.height = 30
+	m.initUpgradeViewport()
+	out := m.renderUpgrade()
+	for _, want := range []string{"v0.12.3", "0.13.0", "thing", "Enter", "j/k"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q; got:\n%s", want, out)
+		}
+	}
 }
