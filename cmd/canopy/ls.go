@@ -63,10 +63,22 @@ func lsCmd() *cobra.Command {
 			// Decide mode. --all forces global; missing canopy.json
 			// gracefully falls back to global.
 			global := lsFlags.all || cfg == nil
+			out := cmd.OutOrStdout()
+			var lsErr error
 			if global {
-				return lsGlobal(cmd.Context(), cmd.OutOrStdout())
+				lsErr = lsGlobal(cmd.Context(), out)
+			} else {
+				lsErr = lsProject(cmd.Context(), out, cfg.ProjectRoot, cfg.Project)
 			}
-			return lsProject(cmd.Context(), cmd.OutOrStdout(), cfg.ProjectRoot, cfg.Project)
+			if lsErr != nil {
+				return lsErr
+			}
+			// Non-blocking auto-check hint. Cache-only read (no
+			// network) so ls latency stays unchanged for users who
+			// don't run the TUI. The TUI refresh path is what keeps
+			// the cache warm; ls just consumes whatever's there.
+			printUpgradeHint(out)
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&lsFlags.all, "all", false,

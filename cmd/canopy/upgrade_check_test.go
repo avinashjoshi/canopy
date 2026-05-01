@@ -480,3 +480,384 @@ func TestClearUpgradeCheck(t *testing.T) {
 		t.Errorf("CheckedAt = %v, want %v", got.CheckedAt, now)
 	}
 }
+
+// TestWriteCachedRemote: --check path opportunistically populates
+// the cache from a value already in hand. Preserves DismissedVersion
+// so --check doesn't undo a prior dismiss.
+func TestWriteCachedRemote(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	prevNow := upgradeCheckNow
+	t.Cleanup(func() { upgradeCheckNow = prevNow })
+	upgradeCheckNow = func() time.Time { return now }
+
+	path, _ := upgradeCheckPath()
+	if err := writeUpgradeCheck(path, &upgradeCheck{
+		CheckedAt:        now.Add(-100 * time.Hour),
+		LatestVersion:    "0.12.0",
+		DismissedVersion: "0.12.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeCachedRemote("0.13.0"); err != nil {
+		t.Fatalf("writeCachedRemote: %v", err)
+	}
+	got, err := readUpgradeCheck(path)
+	if err != nil || got == nil {
+		t.Fatalf("readback: %v %v", err, got)
+	}
+	if got.LatestVersion != "0.13.0" {
+		t.Errorf("LatestVersion = %q, want 0.13.0", got.LatestVersion)
+	}
+	if got.DismissedVersion != "0.12.0" {
+		t.Errorf("DismissedVersion = %q, want 0.12.0 (preserved)", got.DismissedVersion)
+	}
+	if !got.CheckedAt.Equal(now) {
+		t.Errorf("CheckedAt = %v, want %v", got.CheckedAt, now)
+	}
+}
+
+// TestWriteCachedRemote_noCacheYet covers first-run via --check:
+// no prior cache, write should still succeed and create the file.
+func TestWriteCachedRemote_noCacheYet(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if err := writeCachedRemote("0.13.0"); err != nil {
+		t.Fatalf("first-run --check: %v", err)
+	}
+	path, _ := upgradeCheckPath()
+	got, err := readUpgradeCheck(path)
+	if err != nil || got == nil {
+		t.Fatalf("readback: %v %v", err, got)
+	}
+	if got.LatestVersion != "0.13.0" || got.DismissedVersion != "" {
+		t.Errorf("got %+v, want LatestVersion=0.13.0 DismissedVersion=\"\"", got)
+	}
+}
+
+// TestPrintUpgradeHint covers all gate branches of the canopy ls
+// hint line: DEV exempt, missing cache, dismissed version, version
+// equal to running, and the happy path. Every other CLI surface
+// will probably be added later (canopy version, etc) and they'll
+// all read through this same function.
+func TestPrintUpgradeHint(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	now := time.Now().UTC()
+	prevNow := upgradeCheckNow
+	t.Cleanup(func() { upgradeCheckNow = prevNow })
+	upgradeCheckNow = func() time.Time { return now }
+
+	prevVersion := version
+	t.Cleanup(func() { version = prevVersion })
+
+	path, _ := upgradeCheckPath()
+
+	t.Run("missing cache prints nothing", func(t *testing.T) {
+		var buf strings.Builder
+		version = "v0.12.3+abc"
+		printUpgradeHint(&buf)
+		if buf.Len() != 0 {
+			t.Errorf("missing cache should print nothing; got %q", buf.String())
+		}
+	})
+
+	t.Run("upgrade available prints hint", func(t *testing.T) {
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now,
+			LatestVersion: "0.13.0",
+		})
+		var buf strings.Builder
+		version = "v0.12.3+abc"
+		printUpgradeHint(&buf)
+		got := buf.String()
+		if !strings.Contains(got, "v0.13.0 available") {
+			t.Errorf("hint missing version; got %q", got)
+		}
+		if !strings.Contains(got, "canopy upgrade") {
+			t.Errorf("hint missing action; got %q", got)
+		}
+	})
+
+	t.Run("dismissed prints nothing", func(t *testing.T) {
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:        now,
+			LatestVersion:    "0.13.0",
+			DismissedVersion: "0.13.0",
+		})
+		var buf strings.Builder
+		version = "v0.12.3+abc"
+		printUpgradeHint(&buf)
+		if buf.Len() != 0 {
+			t.Errorf("dismissed should print nothing; got %q", buf.String())
+		}
+	})
+
+	t.Run("equal to running prints nothing", func(t *testing.T) {
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now,
+			LatestVersion: "0.13.0",
+		})
+		var buf strings.Builder
+		version = "v0.13.0+abc"
+		printUpgradeHint(&buf)
+		if buf.Len() != 0 {
+			t.Errorf("up-to-date should print nothing; got %q", buf.String())
+		}
+	})
+
+	// DEV path is harder to test in-process because versionDetails
+	// reads multiple sources (BuildInfo, ldflags, executable path)
+	// and we can only override the literal `version` string. But
+	// when version == "dev", IsDev resolves true. Verify that path
+	// silences the hint.
+	t.Run("dev binary prints nothing", func(t *testing.T) {
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now,
+			LatestVersion: "0.13.0",
+		})
+		var buf strings.Builder
+		version = "dev"
+		printUpgradeHint(&buf)
+		if buf.Len() != 0 {
+			t.Errorf("DEV binary should suppress hint; got %q", buf.String())
+		}
+	})
+}
+
+// TestRunUpgrade_dismissFlag exercises the --dismiss path end-to-end
+// through cobra. Refusal cases first (DEV, no cache), then happy path.
+func TestRunUpgrade_dismissFlag(t *testing.T) {
+	prevVersion := version
+	t.Cleanup(func() { version = prevVersion })
+
+	t.Run("dev refuses", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		version = "dev"
+		cmd := newUpgradeCmd()
+		cmd.SetArgs([]string{"--dismiss"})
+		cmd.SetOut(new(strings.Builder))
+		cmd.SetContext(context.Background())
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "dev binary") {
+			t.Errorf("DEV --dismiss should refuse with dev-binary message; got %v", err)
+		}
+	})
+
+	t.Run("no cache refuses", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		version = "v0.12.3+abc"
+		cmd := newUpgradeCmd()
+		cmd.SetArgs([]string{"--dismiss"})
+		cmd.SetOut(new(strings.Builder))
+		cmd.SetContext(context.Background())
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "no cached upgrade") {
+			t.Errorf("--dismiss with no cache should refuse; got %v", err)
+		}
+	})
+
+	t.Run("happy path writes cache", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		version = "v0.12.3+abc"
+		now := time.Now().UTC()
+		path, _ := upgradeCheckPath()
+		if err := writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now,
+			LatestVersion: "0.13.0",
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := newUpgradeCmd()
+		cmd.SetArgs([]string{"--dismiss"})
+		var out strings.Builder
+		cmd.SetOut(&out)
+		cmd.SetContext(context.Background())
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if !strings.Contains(out.String(), "Dismissed v0.13.0") {
+			t.Errorf("output missing dismissal confirmation; got %q", out.String())
+		}
+		got, err := readUpgradeCheck(path)
+		if err != nil || got == nil {
+			t.Fatalf("readback: %v %v", err, got)
+		}
+		if got.DismissedVersion != "0.13.0" {
+			t.Errorf("DismissedVersion = %q, want 0.13.0", got.DismissedVersion)
+		}
+	})
+}
+
+// TestRunUpgrade_clearsCacheOnSuccess: after a successful upgrade
+// the auto-check cache should be rewritten so the pill disappears
+// immediately without waiting for the next 6h refresh. Stubs the
+// shell so the test stays self-contained.
+func TestRunUpgrade_clearsCacheOnSuccess(t *testing.T) {
+	prevFetch := upgradeFetchVersion
+	prevGitFetch := upgradeGitFetchFile
+	prevShell := upgradeRunShell
+	prevVersion := version
+	t.Cleanup(func() {
+		upgradeFetchVersion = prevFetch
+		upgradeGitFetchFile = prevGitFetch
+		upgradeRunShell = prevShell
+		version = prevVersion
+	})
+
+	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+		// Both VERSION and CHANGELOG go through this stub. Return
+		// the bare semver for VERSION; CHANGELOG returns empty
+		// (best-effort, optional).
+		if strings.Contains(url, "CHANGELOG") {
+			return "", nil
+		}
+		return "0.13.0", nil
+	}
+	upgradeRunShell = func(ctx context.Context, srcDir string) error { return nil }
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	version = "v0.12.3+abc"
+
+	srcDir := filepath.Join(tmp, ".canopy", "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-existing cache with a dismissal that should be cleared.
+	now := time.Now().UTC()
+	path, _ := upgradeCheckPath()
+	if err := writeUpgradeCheck(path, &upgradeCheck{
+		CheckedAt:        now.Add(-24 * time.Hour),
+		LatestVersion:    "0.13.0",
+		DismissedVersion: "0.13.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newUpgradeCmd()
+	cmd.SetArgs([]string{})
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	got, err := readUpgradeCheck(path)
+	if err != nil || got == nil {
+		t.Fatalf("readback: %v %v", err, got)
+	}
+	if got.LatestVersion != "0.13.0" {
+		t.Errorf("LatestVersion = %q, want 0.13.0", got.LatestVersion)
+	}
+	if got.DismissedVersion != "" {
+		t.Errorf("DismissedVersion = %q, want empty (cleared post-upgrade)", got.DismissedVersion)
+	}
+}
+
+// TestRunUpgrade_checkOnlyWritesCache: --check is a free network
+// call we already make; piggyback the cache write so the next
+// non-check invocation sees a fresh value without re-fetching.
+func TestRunUpgrade_checkOnlyWritesCache(t *testing.T) {
+	prevFetch := upgradeFetchVersion
+	prevShell := upgradeRunShell
+	prevVersion := version
+	t.Cleanup(func() {
+		upgradeFetchVersion = prevFetch
+		upgradeRunShell = prevShell
+		version = prevVersion
+	})
+
+	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+		return "0.13.0", nil
+	}
+	upgradeRunShell = func(ctx context.Context, srcDir string) error {
+		t.Error("--check must NOT run shell")
+		return nil
+	}
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	version = "v0.12.3+abc"
+	srcDir := filepath.Join(tmp, ".canopy", "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newUpgradeCmd()
+	cmd.SetArgs([]string{"--check"})
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	path, _ := upgradeCheckPath()
+	got, err := readUpgradeCheck(path)
+	if err != nil || got == nil {
+		t.Fatalf("--check should populate cache; readback: %v %v", err, got)
+	}
+	if got.LatestVersion != "0.13.0" {
+		t.Errorf("LatestVersion = %q, want 0.13.0", got.LatestVersion)
+	}
+}
+
+// TestRunUpgrade_checkPreservesDismissal: --check rewrites the
+// LatestVersion + CheckedAt but must NOT touch DismissedVersion.
+// Otherwise running --check after dismissing would un-dismiss.
+func TestRunUpgrade_checkPreservesDismissal(t *testing.T) {
+	prevFetch := upgradeFetchVersion
+	prevShell := upgradeRunShell
+	prevVersion := version
+	t.Cleanup(func() {
+		upgradeFetchVersion = prevFetch
+		upgradeRunShell = prevShell
+		version = prevVersion
+	})
+
+	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+		return "0.13.0", nil
+	}
+	upgradeRunShell = func(ctx context.Context, srcDir string) error { return nil }
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	version = "v0.12.3+abc"
+	srcDir := filepath.Join(tmp, ".canopy", "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-existing dismissal.
+	path, _ := upgradeCheckPath()
+	if err := writeUpgradeCheck(path, &upgradeCheck{
+		CheckedAt:        time.Now().Add(-24 * time.Hour),
+		LatestVersion:    "0.13.0",
+		DismissedVersion: "0.13.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newUpgradeCmd()
+	cmd.SetArgs([]string{"--check"})
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	got, err := readUpgradeCheck(path)
+	if err != nil || got == nil {
+		t.Fatalf("readback: %v %v", err, got)
+	}
+	if got.DismissedVersion != "0.13.0" {
+		t.Errorf("--check stomped on DismissedVersion: got %q, want 0.13.0", got.DismissedVersion)
+	}
+}

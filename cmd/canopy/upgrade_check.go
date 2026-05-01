@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -249,6 +250,32 @@ func refreshUpgradeCheckCache(ctx context.Context, srcDir string, prev *upgradeC
 	return next, nil
 }
 
+// writeCachedRemote updates LatestVersion + CheckedAt in the cache
+// from a value the caller already has in hand (e.g. `canopy upgrade
+// --check` already fetched VERSION; no point re-fetching to populate
+// the cache). Preserves the existing DismissedVersion field so this
+// path doesn't accidentally undo a prior dismiss.
+//
+// Used by `canopy upgrade --check` to avoid a double network call.
+// Distinct from refreshUpgradeCheckCache (which fetches) and
+// clearUpgradeCheck (which both rewrites latest AND clears
+// dismissal).
+func writeCachedRemote(latest string) error {
+	path, err := upgradeCheckPath()
+	if err != nil {
+		return err
+	}
+	prev, _ := readUpgradeCheck(path) // malformed treated as missing
+	next := &upgradeCheck{
+		CheckedAt:     upgradeCheckNow().UTC(),
+		LatestVersion: strings.TrimSpace(latest),
+	}
+	if prev != nil {
+		next.DismissedVersion = prev.DismissedVersion
+	}
+	return writeUpgradeCheck(path, next)
+}
+
 // dismissUpgradeCheck writes dismissed_version = latest_version into
 // the cache. Used by `canopy upgrade --dismiss` and the TUI D key.
 //
@@ -294,6 +321,38 @@ func clearUpgradeCheck(current string) error {
 		LatestVersion: strings.TrimSpace(current),
 	}
 	return writeUpgradeCheck(path, next)
+}
+
+// printUpgradeHint writes the one-line "canopy vX.Y.Z available" hint
+// to out, but only when an upgrade is genuinely available (gates same
+// as upgradeAvailable: not DEV, cache present, version differs, not
+// dismissed). Pure cache read — no network, no fetch fallback. ls
+// must never block on the network; the TUI refresh path is what
+// keeps the cache warm.
+//
+// Suppresses silently in every "no" case so adding the call to other
+// CLI commands is safe by default. Errors reading the cache are
+// silently swallowed (a noisy "couldn't check for updates" line on
+// every ls would be worse than no hint).
+func printUpgradeHint(out io.Writer) {
+	d := versionDetails()
+	if d.IsDev {
+		return
+	}
+	path, err := upgradeCheckPath()
+	if err != nil {
+		return
+	}
+	cache, err := readUpgradeCheck(path)
+	if err != nil || cache == nil {
+		return
+	}
+	if !upgradeAvailable(d.Version, d.IsDev, cache) {
+		return
+	}
+	// Dim hint, single line, ends with action. Plain text: no ANSI
+	// chrome (ls output gets piped frequently).
+	fmt.Fprintf(out, "\ncanopy v%s available — run `canopy upgrade`.\n", cache.LatestVersion)
 }
 
 // upgradeAvailable is the single decision function used by every

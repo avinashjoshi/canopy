@@ -92,16 +92,27 @@ Network-only flags: --check (compare versions but skip the upgrade),
 	}
 	cmd.Flags().Bool("check", false, "compare versions but don't upgrade")
 	cmd.Flags().Bool("force", false, "run git pull + make install even if versions match")
+	// --dismiss writes dismissed_version = latest_version into the
+	// auto-check cache so the top-bar pill / canopy ls hint stops
+	// nagging. Per-version dismissal: a new release un-dismisses
+	// automatically because the field changes underneath. Refuses on
+	// DEV (no auto-check fires on DEV) and refuses if no cached
+	// latest exists (nothing to dismiss yet).
+	cmd.Flags().Bool("dismiss", false, "stop showing 'upgrade available' until the next release")
 	return cmd
 }
 
 func runUpgrade(cmd *cobra.Command, _ []string) error {
 	checkOnly, _ := cmd.Flags().GetBool("check")
 	force, _ := cmd.Flags().GetBool("force")
+	dismiss, _ := cmd.Flags().GetBool("dismiss")
 	out := cmd.OutOrStdout()
 
 	// Refuse on dev binaries. Upgrading from "dev" doesn't have a
 	// sensible target — you're already running uncommitted local code.
+	// The dismiss path also refuses: dismissing the auto-check pill
+	// for a DEV binary is meaningless because DEV binaries never
+	// trigger auto-check in the first place.
 	d := versionDetails()
 	if d.IsDev {
 		return errors.New(
@@ -109,6 +120,18 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 				"  Switch to the released canopy first:\n" +
 				"    canopy use release\n" +
 				"  Then re-run canopy upgrade.")
+	}
+
+	// --dismiss is a pure cache write; no network, no shell, no src
+	// dir requirement. Handle it before the other guards so users
+	// can dismiss without having a working ~/.canopy/src.
+	if dismiss {
+		latest, err := dismissUpgradeCheck()
+		if err != nil {
+			return fmt.Errorf("canopy upgrade --dismiss: %w", err)
+		}
+		fmt.Fprintf(out, "Dismissed v%s. Pill will reappear when a newer version ships.\n", latest)
+		return nil
 	}
 
 	srcDir, err := upgradeSrcDir()
@@ -144,6 +167,13 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	}
 
 	if checkOnly {
+		// Opportunistically refresh the cache from the value we
+		// already fetched. Avoids a double network call. Preserves
+		// any existing dismissed_version so --check doesn't undo a
+		// previous dismiss.
+		if perr := writeCachedRemote(remote); perr != nil {
+			upgradeLog.Warn("upgrade.check_cache_write_failed", "err", perr)
+		}
 		fmt.Fprintf(out, "\nUpgrade available: %s -> v%s\n", current, remote)
 		fmt.Fprintln(out, "Run 'canopy upgrade' (without --check) to apply.")
 		return nil
@@ -165,9 +195,24 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("canopy upgrade: %w", err)
 	}
 	upgradeLog.Info("upgrade.success", "from", current, "to", remote, "src", srcDir)
+	// Rewrite the auto-check cache so the pill / ls hint disappears
+	// immediately instead of waiting for the next 6h refresh. Failure
+	// here is non-fatal: the upgrade itself succeeded; a stale pill
+	// for one cycle is acceptable. Log so it's debuggable if it
+	// becomes a pattern.
+	if err := clearUpgradeCheck(remote); err != nil {
+		upgradeLog.Warn("upgrade.cache_clear_failed", "err", err)
+	}
 	fmt.Fprintf(out, "\nUpgraded to v%s\n", remote)
 	return nil
 }
+
+// runUpgradeCheckOnly is also where checkOnly successfully exits, but
+// we want --check to populate the cache too (so the next non-check
+// invocation sees a fresh value). Hooked into the checkOnly path
+// above by writing the cache before returning. Done as a side effect
+// in runUpgrade rather than refactoring into a separate function so
+// the existing flow stays linear.
 
 // upgradeSrcDir resolves to ~/.canopy/src. Single source of truth
 // shared with install.sh via the upgradeSrcSubdir constant.
