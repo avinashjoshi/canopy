@@ -239,15 +239,38 @@ func cachedRemoteVersion(ctx context.Context, srcDir string) (latest, dismissed 
 	return remote.LatestVersion, remote.DismissedVersion, true, nil
 }
 
+// buildUpgradeCheck assembles a fresh cache struct for any of the
+// three write paths. CheckedAt is always now (UTC); LatestVersion is
+// the trimmed input. DismissedVersion is preserved from prev when
+// non-nil, dropped otherwise — so:
+//
+//   - prev=read-from-disk → "preserve dismissal" semantics (--check)
+//   - prev=passed-in       → "preserve across refresh" (refresh path)
+//   - prev=nil             → "clear dismissal" (post-upgrade)
+//
+// Centralizes the CheckedAt + TrimSpace boilerplate that was
+// duplicated across refreshUpgradeCheckCache, writeCachedRemote, and
+// clearUpgradeCheck.
+func buildUpgradeCheck(latest string, prev *upgradeCheck) *upgradeCheck {
+	next := &upgradeCheck{
+		CheckedAt:     upgradeCheckNow().UTC(),
+		LatestVersion: strings.TrimSpace(latest),
+	}
+	if prev != nil {
+		// Preserve dismissal verbatim. Even when LatestVersion
+		// changes, dismissed() compares the two and decides
+		// whether to suppress — so we don't need to invalidate
+		// here; the comparison handles it.
+		next.DismissedVersion = prev.DismissedVersion
+	}
+	return next
+}
+
 // refreshUpgradeCheckCache fetches the latest VERSION from upstream,
 // merges it with any preserved fields from the previous cache (so the
 // dismissed_version survives a refresh), and atomically rewrites the
 // file. Used by both the synchronous cachedRemoteVersion path and the
 // async TUI refresh tea.Cmd.
-//
-// Pure function over the cache file: idempotent within the same TTL
-// window (well, almost — CheckedAt updates every call, but that's
-// harmless).
 //
 // The previous cache is passed in (rather than re-read) so the caller
 // controls when the read happens. Callers that don't have a previous
@@ -258,22 +281,11 @@ func refreshUpgradeCheckCache(ctx context.Context, srcDir string, prev *upgradeC
 	if err != nil {
 		return nil, err
 	}
-	next := &upgradeCheck{
-		CheckedAt:     upgradeCheckNow().UTC(),
-		LatestVersion: strings.TrimSpace(body),
-	}
-	if prev != nil {
-		// Preserve dismissal, but only if it still makes sense:
-		// dismissing v0.13.0 should NOT silence v0.14.0. We keep
-		// the field set even when LatestVersion changes — the
-		// dismissed() helper compares the two and decides to
-		// suppress or not — so the field can stay verbatim here.
-		next.DismissedVersion = prev.DismissedVersion
-	}
 	path, perr := upgradeCheckPath()
 	if perr != nil {
 		return nil, perr
 	}
+	next := buildUpgradeCheck(body, prev)
 	if werr := writeUpgradeCheck(path, next); werr != nil {
 		return nil, werr
 	}
@@ -288,22 +300,14 @@ func refreshUpgradeCheckCache(ctx context.Context, srcDir string, prev *upgradeC
 //
 // Used by `canopy upgrade --check` to avoid a double network call.
 // Distinct from refreshUpgradeCheckCache (which fetches) and
-// clearUpgradeCheck (which both rewrites latest AND clears
-// dismissal).
+// clearUpgradeCheck (which clears dismissal post-upgrade).
 func writeCachedRemote(latest string) error {
 	path, err := upgradeCheckPath()
 	if err != nil {
 		return err
 	}
 	prev, _ := readUpgradeCheck(path) // malformed treated as missing
-	next := &upgradeCheck{
-		CheckedAt:     upgradeCheckNow().UTC(),
-		LatestVersion: strings.TrimSpace(latest),
-	}
-	if prev != nil {
-		next.DismissedVersion = prev.DismissedVersion
-	}
-	return writeUpgradeCheck(path, next)
+	return writeUpgradeCheck(path, buildUpgradeCheck(latest, prev))
 }
 
 // dismissUpgradeCheck writes dismissed_version = latest_version into
@@ -342,15 +346,13 @@ func dismissUpgradeCheck() (latest string, err error) {
 // continue since the upgrade itself already succeeded; the pill just
 // disappears one cycle late.
 func clearUpgradeCheck(current string) error {
-	path, perr := upgradeCheckPath()
-	if perr != nil {
-		return perr
+	path, err := upgradeCheckPath()
+	if err != nil {
+		return err
 	}
-	next := &upgradeCheck{
-		CheckedAt:     upgradeCheckNow().UTC(),
-		LatestVersion: strings.TrimSpace(current),
-	}
-	return writeUpgradeCheck(path, next)
+	// prev=nil: dismissal is intentionally dropped post-upgrade so
+	// the pill disappears immediately.
+	return writeUpgradeCheck(path, buildUpgradeCheck(current, nil))
 }
 
 // printUpgradeHint writes the one-line "canopy vX.Y.Z available" hint
