@@ -5,6 +5,21 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2.1] - 2026-05-01 — Fix: pill no longer offers a downgrade
+
+### Fixed
+
+- **Don't offer a downgrade when the cache is stale.** If you
+  `make install`-ed a newer canopy outside the upgrade flow (e.g.
+  from your `~/Work/canopy` clone), the auto-check cache could lag
+  6h before noticing. During that window the pill used string
+  inequality (`!=`) to decide whether to fire, so it would happily
+  show `v0.13.2.0 ⇑ v0.13.1.0` — i.e. an offer to downgrade.
+  Switched to integer-component semver ordering: pill only fires
+  when running is strictly less than cached latest. `--status`
+  output explicitly names the "running is AHEAD of cached latest"
+  state for self-diagnosis.
+
 ## [0.13.2.0] - 2026-05-01 — Upgrade UX polish: confirm gate, force-refresh, hints
 
 Round of polish on the v0.13 upgrade flow surfaced by first-day

@@ -1245,3 +1245,104 @@ func TestRunUpgrade_statusFlag(t *testing.T) {
 		t.Errorf("--status output missing 'Cache file:'; got %q", out.String())
 	}
 }
+
+// TestCompareSemver covers the integer-component lexical comparator
+// used by upgradeAvailable to decide whether running is strictly
+// less than cached latest. Equal-length, missing-component, and
+// 4-digit cases all need to round-trip correctly.
+func TestCompareSemver(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"0.13.0.0", "0.13.0.0", 0},
+		{"0.13.0", "0.13.0.0", 0},   // missing components default to 0
+		{"0.13", "0.13.0.0", 0},     // ditto
+		{"0.13.1.0", "0.13.0.0", 1}, // patch greater
+		{"0.13.0.0", "0.13.1.0", -1},
+		{"0.13.0.0", "0.13.0.1", -1}, // micro greater
+		{"0.13.0.1", "0.13.0.0", 1},
+		{"0.13.10.0", "0.13.2.0", 1}, // numeric not lexical (10 > 2)
+		{"0.12.999.0", "0.13.0.0", -1},
+		{"1.0.0.0", "0.99.99.99", 1}, // major dominates
+		{"", "0.13.0.0", -1},         // empty < anything > 0
+		{"0.13.0.0", "", 1},
+		{"", "", 0},
+		{"0.13.x.0", "0.13.0.0", 0},  // non-numeric → treat as 0
+	}
+	for _, tc := range cases {
+		t.Run(tc.a+"_vs_"+tc.b, func(t *testing.T) {
+			if got := compareSemver(tc.a, tc.b); got != tc.want {
+				t.Errorf("compareSemver(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUpgradeAvailable_runningAheadSuppressed: regression for v0.13.2
+// dogfooding finding. After `make install`-ing a new release outside
+// canopy, the cache lags: running > cached.LatestVersion. The pill
+// must NOT fire (and definitely not offer a "downgrade" to the older
+// cached version).
+func TestUpgradeAvailable_runningAheadSuppressed(t *testing.T) {
+	now := time.Now().UTC()
+	cases := []struct {
+		name    string
+		running string
+		latest  string
+		want    bool
+	}{
+		{"running == latest → suppressed", "v0.13.2.0", "0.13.2.0", false},
+		{"running > latest → suppressed (regression case)", "v0.13.2.0", "0.13.1.0", false},
+		{"running > latest by major → suppressed", "v1.0.0.0", "0.13.2.0", false},
+		{"running < latest → SHOWING", "v0.13.1.0", "0.13.2.0", true},
+		{"running < latest by minor → SHOWING", "v0.12.4.0", "0.13.0.0", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := &upgradeCheck{LatestVersion: tc.latest, CheckedAt: now}
+			if got := upgradeAvailable(tc.running, false, cache); got != tc.want {
+				t.Errorf("upgradeAvailable(%q vs latest=%q) = %v, want %v",
+					tc.running, tc.latest, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPrintUpgradeStatus_runningAhead: --status output explicitly
+// names the "cache is stale" state when running > cached so users
+// can self-diagnose.
+func TestPrintUpgradeStatus_runningAhead(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	prevVersion := version
+	t.Cleanup(func() { version = prevVersion })
+	version = "v0.13.2.0+abc"
+
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	prevNow := upgradeCheckNow
+	t.Cleanup(func() { upgradeCheckNow = prevNow })
+	upgradeCheckNow = func() time.Time { return now }
+
+	path, _ := upgradeCheckPath()
+	_ = writeUpgradeCheck(path, &upgradeCheck{
+		CheckedAt:     now.Add(-1 * time.Hour),
+		LatestVersion: "0.13.1.0", // older than running
+	})
+
+	var buf strings.Builder
+	if err := printUpgradeStatus(&buf); err != nil {
+		t.Fatalf("printUpgradeStatus: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "AHEAD") {
+		t.Errorf("output should mention running is AHEAD of cached; got:\n%s", got)
+	}
+	if !strings.Contains(got, "stale") {
+		t.Errorf("output should mention cache is stale; got:\n%s", got)
+	}
+	// Importantly, must NOT say "SHOWING" — that's the bug we fixed.
+	if strings.Contains(got, "SHOWING") {
+		t.Errorf("output should NOT say SHOWING when running > latest; got:\n%s", got)
+	}
+}
