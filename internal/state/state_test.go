@@ -259,6 +259,39 @@ func TestEnsureProjectBase(t *testing.T) {
 	}
 }
 
+// TestEnsureProjectBase_LazyInitEntry covers the bug where `canopy init`
+// pre-registers a project with PortBase=0 (lazy allocation by design) and
+// the first `canopy new` should allocate a real base instead of returning
+// 0 — which would feed port.Allocate the privileged-port range [10, 999]
+// and fail with "no ports available".
+func TestEnsureProjectBase_LazyInitEntry(t *testing.T) {
+	t.Parallel()
+	st := &state.State{
+		SchemaVersion: state.SchemaVersion,
+		Projects: map[string]state.ProjectMeta{
+			"/Work/cravd": {Root: "/Work/cravd", PortBase: 3000},
+			// init pre-registered fizzy with a zero base.
+			"/Work/fizzy": {Root: "/Work/fizzy"},
+		},
+	}
+
+	base, isNew, err := st.EnsureProjectBase("/Work/fizzy", 3000, 1000, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !isNew {
+		t.Errorf("isNew=false; want true (this is the first allocation for fizzy)")
+	}
+	// Should skip 3000 (cravd's base) and not collide with the zero in
+	// fizzy's pre-existing entry — 4000 is the next free slot.
+	if base != 4000 {
+		t.Errorf("base=%d; want 4000 (skip cravd's 3000, ignore fizzy's lazy zero)", base)
+	}
+	if got := st.Projects["/Work/fizzy"].PortBase; got != 4000 {
+		t.Errorf("persisted PortBase=%d; want 4000", got)
+	}
+}
+
 // TestEnsureProjectBase_Exhaustion: maxProjects guard kicks in.
 func TestEnsureProjectBase_Exhaustion(t *testing.T) {
 	t.Parallel()

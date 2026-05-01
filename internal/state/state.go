@@ -270,7 +270,11 @@ func (s *State) EnsureProjectBase(projectRoot string, firstBase, stride, maxProj
 	if s.Projects == nil {
 		s.Projects = map[string]ProjectMeta{}
 	}
-	if meta, ok := s.Projects[projectRoot]; ok {
+	// PortBase==0 means `canopy init` registered the project but never
+	// allocated a base (lazy allocation by design). Fall through to the
+	// allocation path; the existing entry's other fields will be replaced
+	// when we write the new ProjectMeta below. Any non-zero PortBase wins.
+	if meta, ok := s.Projects[projectRoot]; ok && meta.PortBase != 0 {
 		// Self-heal: an old v1 entry that got migrated may have left the
 		// Root field empty. Backfill on next access.
 		if meta.Root == "" {
@@ -281,6 +285,9 @@ func (s *State) EnsureProjectBase(projectRoot string, firstBase, stride, maxProj
 	}
 	used := make(map[int]struct{}, len(s.Projects))
 	for _, m := range s.Projects {
+		if m.PortBase == 0 {
+			continue
+		}
 		used[m.PortBase] = struct{}{}
 	}
 	for i := 0; i < maxProjects; i++ {
