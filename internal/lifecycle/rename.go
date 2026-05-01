@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // detectRenameSuggested returns a Hint when:

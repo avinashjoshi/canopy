@@ -19,7 +19,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/oncactus/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/clog"
 )
 
 var log = clog.Pkg("config")

@@ -88,7 +88,7 @@ version`) make it impossible to forget which canopy is active.
   prints the exact install command if any is missing, clones to
   `~/.canopy/src`, and runs `make install`. Idempotent: re-running on
   an already-installed machine prints "run canopy upgrade" and exits 0.
-  One-liner: `curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh`.
+  One-liner: `curl -fsSL https://raw.githubusercontent.com/avinashjoshi/canopy/main/install.sh | sh`.
 - `canopy upgrade` — fetches `~/.canopy/src` to latest main and runs
   `make install`. Reads VERSION from raw.githubusercontent.com and
   string-compares with the running binary, prints CHANGELOG diff before
@@ -682,6 +682,6 @@ cycle):
   `docs/migrate-from-conductor.md`, `docs/troubleshooting.md`,
   `docs/architecture.md`, `docs/design/v0-canopy.md`.
 
-[Unreleased]: https://github.com/oncactus/canopy/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/oncactus/canopy/releases/tag/v0.8.0
-[0.1.0]: https://github.com/oncactus/canopy/releases/tag/v0.1.0
+[Unreleased]: https://github.com/avinashjoshi/canopy/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/avinashjoshi/canopy/releases/tag/v0.8.0
+[0.1.0]: https://github.com/avinashjoshi/canopy/releases/tag/v0.1.0

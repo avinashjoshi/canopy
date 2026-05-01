@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/clog"
-	"github.com/oncactus/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/config"
 )
 
 func TestMain(m *testing.M) {

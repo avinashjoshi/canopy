@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // TestStatuslineGlyph covers all five workspace statuses + the unknown

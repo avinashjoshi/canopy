@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // switchCmd returns the `canopy switch <name>` cobra subcommand.

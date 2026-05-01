@@ -8,8 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/oncactus/canopy/internal/state"
-	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/tmux"
 )
 
 // TestActionKill_OpensModalForMainRow: K on a live main row opens

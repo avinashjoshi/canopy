@@ -32,17 +32,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oncactus/canopy/internal/agent"
-	"github.com/oncactus/canopy/internal/clog"
-	"github.com/oncactus/canopy/internal/config"
-	"github.com/oncactus/canopy/internal/git"
-	"github.com/oncactus/canopy/internal/hooks"
-	"github.com/oncactus/canopy/internal/lifecycle"
-	"github.com/oncactus/canopy/internal/namegen"
-	"github.com/oncactus/canopy/internal/port"
-	"github.com/oncactus/canopy/internal/settings"
-	"github.com/oncactus/canopy/internal/state"
-	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/agent"
+	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/git"
+	"github.com/avinashjoshi/canopy/internal/hooks"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
+	"github.com/avinashjoshi/canopy/internal/namegen"
+	"github.com/avinashjoshi/canopy/internal/port"
+	"github.com/avinashjoshi/canopy/internal/settings"
+	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/tmux"
 )
 
 var log = clog.Pkg("workspace")

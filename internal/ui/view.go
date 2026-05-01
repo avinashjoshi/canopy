@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 
-	"github.com/oncactus/canopy/internal/ghx"
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and

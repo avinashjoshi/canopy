@@ -5,7 +5,7 @@ A 5-minute tour. Assumes Linux (Arch / Omarchy ideal), `git >= 2.30`, `tmux >= 3
 ## Install
 
 ```bash
-git clone https://github.com/oncactus/canopy.git
+git clone https://github.com/avinashjoshi/canopy.git
 cd canopy
 make install
 ```

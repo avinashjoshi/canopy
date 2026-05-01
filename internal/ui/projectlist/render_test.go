@@ -3,7 +3,7 @@ package projectlist
 import (
 	"testing"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // statusGlyphFor mirrors render.statusGlyph in the parent ui package.

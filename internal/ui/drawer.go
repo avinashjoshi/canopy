@@ -28,8 +28,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/oncactus/canopy/internal/tmux"
-	"github.com/oncactus/canopy/internal/workspace"
+	"github.com/avinashjoshi/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 // actionInspect opens the diagnostic detail drawer for the cursor row.

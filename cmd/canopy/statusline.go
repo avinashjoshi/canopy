@@ -28,9 +28,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/oncactus/canopy/internal/clog"
-	"github.com/oncactus/canopy/internal/state"
-	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/tmux"
 )
 
 const (

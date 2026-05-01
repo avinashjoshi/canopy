@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // statusGlyph must return a distinct shape per non-healthy status and a

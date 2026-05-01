@@ -11,7 +11,7 @@ Thanks for the interest. Canopy is small enough that any contribution is appreci
 ## Development setup
 
 ```bash
-git clone https://github.com/oncactus/canopy.git
+git clone https://github.com/avinashjoshi/canopy.git
 cd canopy
 go test ./...                   # fast unit tests (<5s)
 go test -tags=e2e ./...         # full E2E (real tmux, scratch repos, slow)

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/state"
-	"github.com/oncactus/canopy/internal/workspace"
+	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 // TestMain lives in lifecycle_test.go for this package.

@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/oncactus/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/clog"
 )
 
 var log = clog.Pkg("hooks")

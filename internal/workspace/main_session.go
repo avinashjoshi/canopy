@@ -12,9 +12,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/oncactus/canopy/internal/hooks"
-	"github.com/oncactus/canopy/internal/state"
-	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/hooks"
+	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/tmux"
 )
 
 // MainSessionName returns the tmux session name canopy uses for the

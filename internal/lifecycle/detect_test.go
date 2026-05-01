@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // setupSourceRepo builds a fresh "source" git repo with a main branch

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // detectGitStats returns a Hint with the workspace's "what's in flight"

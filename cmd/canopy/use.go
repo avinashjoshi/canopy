@@ -34,8 +34,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/oncactus/canopy/internal/clog"
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 var useLog = clog.Pkg("use")
@@ -170,7 +170,7 @@ func switchToWorkspace(ctx context.Context, name string, build bool, symlinkPath
 			"canopy use %s: workspace %q exists but isn't a canopy source worktree.\n"+
 				"  Project: %s\n"+
 				"  Path:    %s\n"+
-				"  canopy use only works with worktrees of github.com/oncactus/canopy itself.\n"+
+				"  canopy use only works with worktrees of github.com/avinashjoshi/canopy itself.\n"+
 				"  Run 'canopy use' (no args) to see canopy worktrees you can switch to.",
 			name, name, ws.Project, ws.Path)
 	}

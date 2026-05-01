@@ -9,9 +9,9 @@
                          |_|    |___/
 ```
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/oncactus/canopy.svg)](https://pkg.go.dev/github.com/oncactus/canopy)
-[![Go Report Card](https://goreportcard.com/badge/github.com/oncactus/canopy)](https://goreportcard.com/report/github.com/oncactus/canopy)
-[![Tests](https://github.com/oncactus/canopy/actions/workflows/test.yml/badge.svg)](https://github.com/oncactus/canopy/actions/workflows/test.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/avinashjoshi/canopy.svg)](https://pkg.go.dev/github.com/avinashjoshi/canopy)
+[![Go Report Card](https://goreportcard.com/badge/github.com/avinashjoshi/canopy)](https://goreportcard.com/report/github.com/avinashjoshi/canopy)
+[![Tests](https://github.com/avinashjoshi/canopy/actions/workflows/test.yml/badge.svg)](https://github.com/avinashjoshi/canopy/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **TUI for managing git worktrees with paired tmux sessions and per-project setup hooks.**
@@ -42,7 +42,7 @@ The pitch in one sentence: `canopy new` and ten seconds later you're attached to
 ### One-liner install (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/avinashjoshi/canopy/main/install.sh | sh
 ```
 
 That clones canopy to `~/.canopy/src`, runs `make install` (which writes the binary to `~/.local/bin/canopy.bin` and symlinks `~/.local/bin/canopy` at it), and prints a PATH hint if `~/.local/bin` isn't on your shell's PATH.

@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/oncactus/canopy/internal/tmux"
-	"github.com/oncactus/canopy/internal/workspace"
+	"github.com/avinashjoshi/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 // mainCmd returns the `canopy main` cobra subcommand.

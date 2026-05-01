@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/clog"
-	canopygit "github.com/oncactus/canopy/internal/git"
+	"github.com/avinashjoshi/canopy/internal/clog"
+	canopygit "github.com/avinashjoshi/canopy/internal/git"
 )
 
 // TestMain initializes clog once for the whole test binary so package-level

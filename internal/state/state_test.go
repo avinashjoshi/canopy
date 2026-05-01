@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oncactus/canopy/internal/clog"
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 func TestMain(m *testing.M) {

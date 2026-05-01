@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // TestAtomicSymlink_replacesExisting: a pre-existing symlink to one
@@ -313,7 +313,7 @@ func TestSwitchToWorkspace_notACanopyWorktree(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected refusal for non-canopy worktree")
 	}
-	for _, want := range []string{"isn't a canopy source worktree", "Project: cravd", "github.com/oncactus/canopy"} {
+	for _, want := range []string{"isn't a canopy source worktree", "Project: cravd", "github.com/avinashjoshi/canopy"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error missing %q; got %v", want, err)
 		}

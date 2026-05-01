@@ -148,7 +148,7 @@ Logs include the project, command, sub-step, and elapsed ms per step — useful 
 
 ## Still stuck?
 
-File an issue at https://github.com/oncactus/canopy/issues with:
+File an issue at https://github.com/avinashjoshi/canopy/issues with:
 
 - `canopy version` output
 - `cat ~/.canopy/state.json` (redact paths if sensitive)

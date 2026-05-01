@@ -16,7 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/oncactus/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/clog"
 )
 
 // debugFlag is the --debug switch on the root command. When true, the log

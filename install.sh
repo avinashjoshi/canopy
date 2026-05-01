@@ -3,7 +3,7 @@
 # canopy installer — clones the source to ~/.canopy/src, builds via
 # make install, and reports the next step. Designed to be invoked as:
 #
-#   curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/avinashjoshi/canopy/main/install.sh | sh
 #
 # Source-based distribution (matches gstack/gbrain). Audience is devs
 # comfortable with shells; we expect git + tmux 3.2+ + Go 1.22+ to be
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/oncactus/canopy.git"
+REPO_URL="https://github.com/avinashjoshi/canopy.git"
 SRC_DIR="$HOME/.canopy/src"
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
@@ -144,13 +144,13 @@ clone_or_skip() {
       info "  canopy upgrade"
       info ""
       info "(Or if the existing clone is broken, remove it and re-run install.sh:"
-      info "  rm -rf $SRC_DIR && curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh)"
+      info "  rm -rf $SRC_DIR && curl -fsSL https://raw.githubusercontent.com/avinashjoshi/canopy/main/install.sh | sh)"
       exit 0
     fi
     die "$SRC_DIR exists but is not a git clone.
   Remove it and re-run install.sh:
     rm -rf $SRC_DIR
-    curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh"
+    curl -fsSL https://raw.githubusercontent.com/avinashjoshi/canopy/main/install.sh | sh"
   fi
   info "Cloning canopy to $SRC_DIR..."
   mkdir -p "$(dirname "$SRC_DIR")"

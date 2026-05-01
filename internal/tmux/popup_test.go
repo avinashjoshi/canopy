@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/tmux"
 )
 
 // TestCompareVersions covers the version comparator used by canopy popup

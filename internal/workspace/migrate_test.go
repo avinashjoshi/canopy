@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/config"
-	"github.com/oncactus/canopy/internal/state"
-	"github.com/oncactus/canopy/internal/workspace"
+	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 // TestNew_RunsMigrationOnV1State proves that workspace.New triggers the

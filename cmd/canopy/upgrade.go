@@ -4,7 +4,7 @@
 // source lives or what targets to invoke.
 //
 // Distribution model: source-based (matches gstack/gbrain). The
-// install.sh one-liner clones github.com/oncactus/canopy to
+// install.sh one-liner clones github.com/avinashjoshi/canopy to
 // ~/.canopy/src; canopy upgrade git-pulls that clone and rebuilds.
 // VERSION file in the repo root is the comparison key — we curl
 // raw.githubusercontent.../main/VERSION, string-compare, and skip the
@@ -39,7 +39,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/oncactus/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/clog"
 )
 
 var upgradeLog = clog.Pkg("upgrade")
@@ -49,12 +49,12 @@ const (
 	// raw.githubusercontent.com is the no-infra hosting path: no domain
 	// to set up, no CDN to maintain, just a stable URL backed by the
 	// main branch of the repo.
-	upgradeVersionURL = "https://raw.githubusercontent.com/oncactus/canopy/main/VERSION"
+	upgradeVersionURL = "https://raw.githubusercontent.com/avinashjoshi/canopy/main/VERSION"
 
 	// upgradeChangelogURL is fetched (best-effort) so the user can see
 	// what's new before the pull. A failed fetch here is non-fatal —
 	// the upgrade still proceeds, just without the changelog preview.
-	upgradeChangelogURL = "https://raw.githubusercontent.com/oncactus/canopy/main/CHANGELOG.md"
+	upgradeChangelogURL = "https://raw.githubusercontent.com/avinashjoshi/canopy/main/CHANGELOG.md"
 
 	// upgradeFetchTimeout caps the network calls. canopy upgrade is
 	// interactive, not a hot loop, so a generous-but-not-infinite
@@ -188,7 +188,7 @@ func ensureSrcDirReady(srcDir string) error {
 		return fmt.Errorf(
 			"canopy upgrade: source clone missing at %s\n"+
 				"  Run install.sh first to set it up:\n"+
-				"    curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh",
+				"    curl -fsSL https://raw.githubusercontent.com/avinashjoshi/canopy/main/install.sh | sh",
 			srcDir)
 	}
 	if err != nil {
@@ -202,7 +202,7 @@ func ensureSrcDirReady(srcDir string) error {
 			"canopy upgrade: %s is not a git clone (no .git directory)\n"+
 				"  Remove it and re-run install.sh:\n"+
 				"    rm -rf %s\n"+
-				"    curl -fsSL https://raw.githubusercontent.com/oncactus/canopy/main/install.sh | sh",
+				"    curl -fsSL https://raw.githubusercontent.com/avinashjoshi/canopy/main/install.sh | sh",
 			srcDir, srcDir)
 	}
 	return nil

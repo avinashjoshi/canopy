@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/clog"
 )
 
 // TestPkg_FanoutReachable_AfterInit is the regression test for the

@@ -8,7 +8,7 @@ body:
       value: |
         Canopy's design philosophy is "calm and focused beats feature-dense" — we'd rather do a smaller set of things really well than accumulate options. That means features are evaluated as much on what they take *away* as on what they add.
 
-        Before filing, scan [`TODOS.md`](https://github.com/oncactus/canopy/blob/main/TODOS.md) — your idea may already be queued.
+        Before filing, scan [`TODOS.md`](https://github.com/avinashjoshi/canopy/blob/main/TODOS.md) — your idea may already be queued.
 
   - type: textarea
     id: use-case

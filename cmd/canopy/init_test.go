@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // TestRunInit_Fresh: cwd has no canopy.json. runInit writes it, registers

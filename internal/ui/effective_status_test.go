@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oncactus/canopy/internal/lifecycle"
-	"github.com/oncactus/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // TestEffectiveStatus_StaleReadyResurrects is the regression test for

@@ -12,12 +12,12 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/oncactus/canopy/internal/config"
-	"github.com/oncactus/canopy/internal/ghx"
-	"github.com/oncactus/canopy/internal/state"
-	"github.com/oncactus/canopy/internal/tmux"
-	"github.com/oncactus/canopy/internal/ui/projectlist"
-	"github.com/oncactus/canopy/internal/workspace"
+	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 // newTestModel builds a minimal *Model for unit-testing keymap and render
