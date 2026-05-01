@@ -5,6 +5,22 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1.0] - 2026-05-01 — `canopy upgrade --status` diagnostic flag
+
+Adds a debugging surface for the v0.13 auto-check feature. Useful for
+answering "why isn't the pill showing?" or "did my dismissal take?"
+without grepping JSON.
+
+### Added
+
+- **`canopy upgrade --status`** prints the auto-check cache contents:
+  cache file path, running version, build mode (DEV vs release),
+  cached `latest_version`, `dismissed_version`, time since last
+  successful fetch, TTL remaining (or "expired"), and the resulting
+  pill state with the suppression reason when relevant. Works on DEV
+  builds (DEV doesn't auto-check, but inspecting the cache file is
+  still useful diagnostically). Pure read — no network, no shell.
+
 ## [0.13.0.0] - 2026-04-30 — Upgrade UX overhaul
 
 Canopy now tells you when there's a newer version, and lets you upgrade

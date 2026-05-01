@@ -355,6 +355,80 @@ func clearUpgradeCheck(current string) error {
 	return writeUpgradeCheck(path, buildUpgradeCheck(current, nil))
 }
 
+// printUpgradeStatus writes a multi-line diagnostic dump of the
+// auto-check cache to out. Used by `canopy upgrade --status` so users
+// can debug "why isn't the pill showing?" / "did my --dismiss take?"
+// / "when does the cache refresh?" without grepping JSON.
+//
+// Pure read; no network, no DEV gate. The output is human-readable
+// not machine-parseable — when scripts need this data they should
+// read upgrade-check.json directly.
+func printUpgradeStatus(out io.Writer) error {
+	d := versionDetails()
+	path, err := upgradeCheckPath()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Cache file: %s\n", path)
+	fmt.Fprintf(out, "Running:    %s\n", d.Version)
+	if d.IsDev {
+		fmt.Fprintln(out, "Mode:       DEV (auto-check is disabled on DEV builds)")
+	} else {
+		fmt.Fprintln(out, "Mode:       release")
+	}
+	cache, rerr := readUpgradeCheck(path)
+	if rerr != nil {
+		fmt.Fprintf(out, "\nCache:      malformed (%v)\n", rerr)
+		fmt.Fprintln(out, "            Next successful fetch will overwrite.")
+		return nil
+	}
+	if cache == nil {
+		fmt.Fprintln(out, "\nCache:      empty (no auto-check has run yet)")
+		fmt.Fprintln(out, "            Will populate on the next TUI launch (release build).")
+		return nil
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Latest:     %s\n", emptyOrDash(cache.LatestVersion))
+	fmt.Fprintf(out, "Dismissed:  %s\n", emptyOrDash(cache.DismissedVersion))
+	if cache.CheckedAt.IsZero() {
+		fmt.Fprintln(out, "Checked at: —")
+	} else {
+		age := upgradeCheckNow().Sub(cache.CheckedAt).Round(time.Second)
+		fmt.Fprintf(out, "Checked at: %s (%s ago)\n",
+			cache.CheckedAt.Format(time.RFC3339), age)
+		ttlLeft := upgradeCheckTTL - age
+		if ttlLeft > 0 {
+			fmt.Fprintf(out, "TTL:        %s remaining (refreshes after that)\n", ttlLeft.Round(time.Second))
+		} else {
+			fmt.Fprintln(out, "TTL:        expired (next TUI launch will refresh)")
+		}
+	}
+	fmt.Fprintln(out)
+	switch {
+	case d.IsDev:
+		fmt.Fprintln(out, "Pill state: suppressed (DEV exempt)")
+	case cache.LatestVersion == "":
+		fmt.Fprintln(out, "Pill state: suppressed (no latest version cached)")
+	case cache.dismissed():
+		fmt.Fprintf(out, "Pill state: suppressed (v%s dismissed; un-dismisses on next release)\n", cache.LatestVersion)
+	case normalizeRunningVersion(d.Version) == cache.LatestVersion:
+		fmt.Fprintln(out, "Pill state: suppressed (running version matches latest)")
+	default:
+		fmt.Fprintf(out, "Pill state: SHOWING (v%s available)\n", cache.LatestVersion)
+	}
+	return nil
+}
+
+// emptyOrDash returns s, or "—" when s is empty. Tiny helper for
+// printUpgradeStatus's display so empty fields render as a clear
+// "no value" instead of an awkward blank line.
+func emptyOrDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
 // printUpgradeHint writes the one-line "canopy vX.Y.Z available" hint
 // to out, but only when an upgrade is genuinely available (gates same
 // as upgradeAvailable: not DEV, cache present, version differs, not
