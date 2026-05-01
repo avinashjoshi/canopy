@@ -167,8 +167,72 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 			return refreshUpgradeForUI(ctx, srcDir, d)
 		}
 	}
-	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, d.DevWorkspace, initialUpgrade, refreshFn)
+
+	// Closures for the in-TUI upgrade flow (U key). These bridge
+	// the network + shell layers without leaking package internals
+	// across the cmd/canopy ↔ internal/ui boundary. nil on DEV (the
+	// pill never shows on DEV anyway, so the keys never bind).
+	var changelogFn ui.UpgradeChangelogFn
+	var shellFn ui.UpgradeShellFn
+	var dismissFn func() error
+	if !d.IsDev {
+		changelogFn = func(ctx context.Context) (string, error) {
+			srcDir, err := upgradeSrcDir()
+			if err != nil {
+				return "", err
+			}
+			if err := ensureSrcDirReady(srcDir); err != nil {
+				return "", err
+			}
+			body, err := fetchRemoteFile(ctx, srcDir, upgradeChangelogURL, "CHANGELOG.md")
+			if err != nil {
+				return "", err
+			}
+			current := normalizeRunningVersion(d.Version)
+			// Use upgradeAvailable from the cache for the slice's
+			// upper bound. If the cache is empty here something
+			// went sideways (we shouldn't be in the flow without
+			// it), fall back to slicing from current to "no end".
+			path, perr := upgradeCheckPath()
+			if perr != nil {
+				return "", perr
+			}
+			cache, _ := readUpgradeCheck(path)
+			if cache == nil || cache.LatestVersion == "" {
+				return "", nil
+			}
+			return changelogSlice(body, current, cache.LatestVersion), nil
+		}
+		shellFn = func(ctx context.Context, w io.Writer) error {
+			srcDir, err := upgradeSrcDir()
+			if err != nil {
+				return err
+			}
+			if err := ensureSrcDirReady(srcDir); err != nil {
+				return err
+			}
+			err = upgradeRunShellStreaming(ctx, srcDir, w)
+			if err == nil {
+				// Mirror the CLI flow's post-success cache rewrite.
+				// Failure here is non-fatal (upgrade succeeded;
+				// stale pill for one cycle is acceptable).
+				path, _ := upgradeCheckPath()
+				if cache, _ := readUpgradeCheck(path); cache != nil && cache.LatestVersion != "" {
+					if cerr := clearUpgradeCheck(cache.LatestVersion); cerr != nil {
+						upgradeLog.Warn("upgrade.cache_clear_failed", "err", cerr)
+					}
+				}
+			}
+			return err
+		}
+		dismissFn = func() error {
+			_, err := dismissUpgradeCheck()
+			return err
+		}
+	}
+	return ui.RunUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, d.DevWorkspace, initialUpgrade, refreshFn, changelogFn, shellFn, dismissFn)
 }
+
 
 // resolveProjectContext picks the canonical current-project root for the
 // unified TUI launch given a cwd. ResolveCurrentProject (workspace-path

@@ -96,6 +96,13 @@ const (
 	// for the load-bearing scope cap rationale.
 	drawerMode
 	busyMode
+	// upgradeMode is the in-TUI canopy-upgrade flow. Reachable via
+	// the `U` key from listMode when the auto-check pill is showing.
+	// Owns the screen end-to-end while the upgrade runs (no top-bar
+	// pills) and dispatches to its own four-state sub-flow:
+	// loading → preview → running → doneOK/doneError. See
+	// internal/ui/upgrade.go for the state machine and key handling.
+	upgradeMode
 )
 
 // inNewFlow reports whether the current mode is any step of the
@@ -342,6 +349,19 @@ type Model struct {
 	// caller didn't wire it (tests, etc.) — Init then skips the
 	// refresh and just renders whatever was set up front.
 	upgradeRefreshFn UpgradeRefreshFn
+
+	// In-TUI upgrade flow state. Active only when mode == upgradeMode.
+	// Reset to zero on dismiss (resetUpgradeMode). Lives in upgrade.go
+	// alongside the state machine.
+	upgradeState       upgradeState
+	upgradeChangelog   string
+	upgradeOutput      string
+	upgradeErr         error
+	upgradeBuf         *safeBuffer
+	upgradeCancel      context.CancelFunc
+	upgradeChangelogFn UpgradeChangelogFn
+	upgradeShellFn     UpgradeShellFn
+	upgradeDismissFn   func() error
 }
 
 // UpgradeRefreshFn performs the async cache refresh: fetches the
@@ -581,11 +601,14 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 //
 // In popup mode (CANOPY_IN_POPUP=1) we omit MouseCellMotion since the
 // popup is keyboard-driven and mouse handling adds latency.
-func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, devWorkspace, initialUpgrade string, refreshFn UpgradeRefreshFn) error {
+func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace, versionLabel, devWorkspace, initialUpgrade string, refreshFn UpgradeRefreshFn, changelogFn UpgradeChangelogFn, shellFn UpgradeShellFn, dismissFn func() error) error {
 	m := NewUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
 	m.SetVersionInfo(versionLabel, devWorkspace)
 	m.SetUpgradeAvailable(initialUpgrade)
 	m.SetUpgradeRefreshFn(refreshFn)
+	m.SetUpgradeChangelogFn(changelogFn)
+	m.SetUpgradeShellFn(shellFn)
+	m.SetUpgradeDismissFn(dismissFn)
 	opts := []tea.ProgramOption{tea.WithAltScreen()}
 	if !m.inPopup {
 		opts = append(opts, tea.WithMouseCellMotion())

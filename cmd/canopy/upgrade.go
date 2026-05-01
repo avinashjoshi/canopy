@@ -377,6 +377,36 @@ var upgradeFetchVersion = func(ctx context.Context, url string) (string, error) 
 	return string(body), nil
 }
 
+// upgradeRunShellStreaming is the io.Writer variant of upgradeRunShell
+// for the in-TUI flow. Same two-step shell (`git pull --ff-only` then
+// `make install`) with the same --ff-only invariant, but stdout and
+// stderr both pipe into the caller-supplied writer so the TUI can
+// surface live progress via safeBuffer + progressTick.
+//
+// The error message on failure includes the same hint structure as
+// upgradeRunShell — by the time we've streamed the output, the
+// returned error just needs to identify which step failed; the
+// detailed stderr is already in the user's view via the writer.
+//
+// Exposed as a package-level var so tests can stub the streaming
+// path independently of the CLI's upgradeRunShell.
+var upgradeRunShellStreaming = func(ctx context.Context, srcDir string, w io.Writer) error {
+	pull := exec.CommandContext(ctx, "git", "-C", srcDir, "pull", "--ff-only")
+	pull.Stdout = w
+	pull.Stderr = w
+	if err := pull.Run(); err != nil {
+		return fmt.Errorf("git pull --ff-only failed in %s: %w", srcDir, err)
+	}
+
+	makeInstall := exec.CommandContext(ctx, "make", "-C", srcDir, "install")
+	makeInstall.Stdout = w
+	makeInstall.Stderr = w
+	if err := makeInstall.Run(); err != nil {
+		return fmt.Errorf("make install failed in %s: %w", srcDir, err)
+	}
+	return nil
+}
+
 // upgradeRunShell runs `git pull --ff-only && make install` in srcDir.
 // Two-step shell with explicit error wrapping so users can tell which
 // step failed. Stderr is captured and surfaced — when make install
