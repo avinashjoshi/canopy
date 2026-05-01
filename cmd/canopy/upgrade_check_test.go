@@ -556,6 +556,10 @@ func TestPrintUpgradeHint(t *testing.T) {
 	path, _ := upgradeCheckPath()
 
 	t.Run("missing cache prints nothing", func(t *testing.T) {
+		// Hermetic: clear any leftover cache from a sibling subtest
+		// so this test passes under `go test -shuffle=on` regardless
+		// of the order it runs in.
+		_ = os.Remove(path)
 		var buf strings.Builder
 		version = "v0.12.3+abc"
 		printUpgradeHint(&buf)
@@ -1021,4 +1025,70 @@ func TestRefreshUpgradeForUI(t *testing.T) {
 			t.Errorf("DismissedVersion lost across refresh; got %q", got.DismissedVersion)
 		}
 	})
+}
+
+// TestWriteUpgradeCheck_concurrentDoesNotCorrupt: two goroutines
+// writing to the same cache must NOT collide on a fixed .tmp name.
+// The randomized suffix from os.CreateTemp lets each writer atomic-
+// rename without stomping the other's in-flight tmp.
+//
+// Note: the LAST writer wins (POSIX rename semantics), which is fine
+// for cache files. We just need to prove no partial files leak and
+// no orphan tmp files survive.
+func TestWriteUpgradeCheck_concurrentDoesNotCorrupt(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	path, _ := upgradeCheckPath()
+
+	const writers = 10
+	done := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		i := i
+		go func() {
+			done <- writeUpgradeCheck(path, &upgradeCheck{
+				CheckedAt:     time.Now().UTC(),
+				LatestVersion: "0." + intToStrLocal(i) + ".0",
+			})
+		}()
+	}
+	for i := 0; i < writers; i++ {
+		if err := <-done; err != nil {
+			t.Errorf("concurrent write %d failed: %v", i, err)
+		}
+	}
+
+	// File on disk parses cleanly (no partial-write corruption).
+	got, err := readUpgradeCheck(path)
+	if err != nil || got == nil {
+		t.Fatalf("post-concurrent readback: err=%v cache=%v", err, got)
+	}
+
+	// No orphan .tmp files in the dir. CreateTemp uses
+	// `.upgrade-check.*.tmp` pattern, so this catches leaks.
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".upgrade-check.") && strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("orphan tmp file leaked: %s", e.Name())
+		}
+	}
+}
+
+// intToStrLocal is a tiny helper for the concurrent-writes test —
+// kept local so we don't depend on imports outside this file.
+func intToStrLocal(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [4]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }

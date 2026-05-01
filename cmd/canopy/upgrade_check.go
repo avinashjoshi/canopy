@@ -133,12 +133,18 @@ func readUpgradeCheck(path string) (*upgradeCheck, error) {
 // writeUpgradeCheck saves the cache atomically via tempfile + rename.
 // POSIX rename within the same filesystem is atomic, so a reader
 // either sees the previous file or the new one — never a partial.
-// Mirrors state.Save's pattern exactly.
+//
+// The temp file uses os.CreateTemp for a per-call randomized suffix
+// rather than a fixed `path + ".tmp"`, so two canopy processes (e.g.
+// a TUI in one terminal + `canopy ls` in another) racing on the
+// cache can't clobber each other's in-flight tmp or have one's
+// error-path Remove delete the other's success.
 //
 // Creates the parent directory if missing (first-run case where
 // ~/.canopy itself doesn't exist yet).
 func writeUpgradeCheck(path string, u *upgradeCheck) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("upgrade-check: mkdir parent: %w", err)
 	}
 	data, err := json.MarshalIndent(u, "", "  ")
@@ -146,12 +152,36 @@ func writeUpgradeCheck(path string, u *upgradeCheck) error {
 		return fmt.Errorf("upgrade-check: marshal: %w", err)
 	}
 	data = append(data, '\n')
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+
+	// Randomized temp file in the same dir as the target so the
+	// rename stays within one filesystem (rename across filesystems
+	// is not atomic). Pattern is `.upgrade-check.*.tmp` — leading
+	// dot keeps it hidden in `ls`, the `*` is the random suffix
+	// CreateTemp generates.
+	f, err := os.CreateTemp(dir, ".upgrade-check.*.tmp")
+	if err != nil {
+		return fmt.Errorf("upgrade-check: create tmp: %w", err)
+	}
+	tmp := f.Name()
+	// Defensive cleanup: if we return without renaming (any error
+	// below), try to remove the orphan tmp file. Idempotent — Remove
+	// after a successful Rename is a no-op since the file's gone.
+	defer func() { _ = os.Remove(tmp) }()
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("upgrade-check: write tmp: %w", err)
 	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("upgrade-check: close tmp: %w", err)
+	}
+	// CreateTemp opens at 0o600. Cache file isn't sensitive — match
+	// the broader-readable convention so other tools (e.g. `cat`
+	// from a different shell) can read it without surprise.
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return fmt.Errorf("upgrade-check: chmod tmp: %w", err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
 		return fmt.Errorf("upgrade-check: rename: %w", err)
 	}
 	return nil

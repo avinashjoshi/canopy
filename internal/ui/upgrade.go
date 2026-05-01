@@ -155,6 +155,13 @@ func (m *Model) resetUpgradeMode() {
 // shouldn't happen in practice (Bubbletea sends it on program start
 // before any user keypress) but defends against test paths that
 // build a *Model literal without dispatching messages.
+//
+// Content is sanitized via stripTerminalControl before SetContent.
+// CHANGELOG.md comes from GitHub raw and renders directly into the
+// terminal; a maliciously-crafted (or replay-attacked) changelog
+// containing ANSI escape sequences could otherwise reposition the
+// cursor or paint over canopy's chrome. The repo trust model
+// (HTTPS + maintainer-only push) makes this defensive, not urgent.
 func (m *Model) initUpgradeViewport() {
 	w := m.width - 4
 	if w < 20 {
@@ -165,8 +172,91 @@ func (m *Model) initUpgradeViewport() {
 		h = 16
 	}
 	m.upgradeChangelogVP = viewport.New(w, h)
-	m.upgradeChangelogVP.SetContent(m.upgradeChangelog)
+	m.upgradeChangelogVP.SetContent(stripTerminalControl(m.upgradeChangelog))
 	m.upgradeChangelogInit = true
+}
+
+// stripTerminalControl removes ANSI escape sequences and other
+// terminal control bytes from s, returning a sanitized copy safe to
+// render into a TUI viewport. Allowlist is intentionally narrow:
+//
+//   - All printable Unicode (anything >= 0x20 except 0x7f)
+//   - Newline, tab, carriage return (legitimate markdown formatting)
+//
+// Everything else gets dropped. The escape parser handles three
+// shapes that cover the vast majority of attack-relevant sequences:
+//
+//   - CSI: `ESC [ <params> <final byte in 0x40-0x7E>` — colors,
+//     cursor positioning, screen clear (`\x1b[2J`).
+//   - OSC: `ESC ] <params> <BEL or ST>` — window title, hyperlinks.
+//   - Single-char: `ESC <one char>` — older 2-byte sequences.
+//
+// CHANGELOG.md has no legitimate reason to use any of these, so the
+// allowlist is safe and tight. Defends against a maliciously-crafted
+// or replay-attacked CHANGELOG manipulating the user's terminal
+// (cursor reposition, painting over canopy chrome, fake prompts).
+func stripTerminalControl(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+
+	// Parser state.
+	const (
+		stateNormal   = 0
+		stateAfterEsc = 1 // just saw 0x1b
+		stateInCSI    = 2 // ESC [ ... — skip until final byte
+		stateInOSC    = 3 // ESC ] ... — skip until BEL or ST
+	)
+	state := stateNormal
+
+	for _, r := range s {
+		switch state {
+		case stateAfterEsc:
+			switch r {
+			case '[':
+				state = stateInCSI
+			case ']':
+				state = stateInOSC
+			default:
+				// Single-char ESC sequence — this byte is the
+				// sequence content and gets consumed too.
+				state = stateNormal
+			}
+			continue
+		case stateInCSI:
+			// CSI sequences end with a byte in 0x40..0x7E.
+			if r >= '@' && r <= '~' {
+				state = stateNormal
+			}
+			continue
+		case stateInOSC:
+			// OSC commonly terminates with BEL (0x07). The
+			// proper terminator is ST (`ESC \`); seeing the next
+			// ESC also ends the current OSC.
+			if r == 0x07 {
+				state = stateNormal
+				continue
+			}
+			if r == 0x1b {
+				state = stateAfterEsc
+			}
+			continue
+		}
+
+		// stateNormal
+		if r == 0x1b {
+			state = stateAfterEsc
+			continue
+		}
+		if r == '\n' || r == '\t' || r == '\r' {
+			b.WriteRune(r)
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // changelogLoadedMsg lands when loadChangelogCmd's network fetch

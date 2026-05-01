@@ -686,3 +686,35 @@ func TestRenderUpgrade_previewWithViewport(t *testing.T) {
 		}
 	}
 }
+
+// TestStripTerminalControl: defensive sanitizer for changelog content
+// rendered into the terminal. Allowlist is plain text + \n/\t/\r;
+// everything else (ESC sequences, control bytes) gets dropped.
+func TestStripTerminalControl(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain text passes through", "## v0.13.0\n- thing\n", "## v0.13.0\n- thing\n"},
+		{"unicode passes through", "→ ⇑ — em dash", "→ ⇑ — em dash"},
+		{"tabs preserved", "\tindented", "\tindented"},
+		{"CRLF preserved", "line\r\nnext", "line\r\nnext"},
+		{"strips bell", "ding\x07ding", "dingding"},
+		{"strips backspace", "oops\x08\x08", "oops"},
+		{"strips null bytes", "before\x00after", "beforeafter"},
+		{"strips DEL", "abc\x7fdef", "abcdef"},
+		{"strips simple ESC sequence", "before\x1b[31mRED\x1b[0mafter", "beforeREDafter"},
+		{"strips cursor positioning", "\x1b[2J\x1b[H clear screen attempt", " clear screen attempt"},
+		{"strips OSC-style", "\x1b]0;evil title\x07ok", "ok"},
+		{"empty input", "", ""},
+		{"only control bytes", "\x00\x07\x1b[31m", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripTerminalControl(tc.in); got != tc.want {
+				t.Errorf("stripTerminalControl(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
