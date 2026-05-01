@@ -1159,3 +1159,406 @@ If both ship, the auto-check hint becomes a "press U to upgrade now"
 action that drops into the TUI flow. That's the satisfying user
 experience: notification → action → done, without leaving the TUI.
 Doable as a follow-up once both above are in.
+
+---
+
+## v0.15+ — Workspace actions menu (replace ambiguous `R retry`)
+
+Captured 2026-04-30 from user feedback. Today the only re-run path is
+`R` (retry scripts.setup), and the verb is opaque — "retry what?"
+Meanwhile users have project-specific re-runnable operations (reseed
+DB, run migrations, tail dev logs, restart server, refresh
+fixtures…) with no first-class home in canopy. They live as ad-hoc
+shell commands the user has to remember and type.
+
+### Shape
+
+Replace the single `R` keybind with an **actions menu** (`A` key, or
+`R` repurposed). Opens a small picker over the workspace row listing
+every action available for the current workspace. Built-in actions:
+
+- **Re-run setup** (today's `R retry`, gated to broken+force as today)
+- **Restart server** (kill scripts.run pane, relaunch)
+- **Open in editor** (the freed-up keybind from the v0.8 unification —
+  see deferred entry below)
+
+User-defined actions come from a new `actions` block in canopy.json:
+
+```json
+{
+  "scripts": { "setup": "...", "run": "...", "archive": "..." },
+  "actions": {
+    "reseed":   { "command": "bin/reseed",            "window": true,  "destructive": true,  "label": "Reseed DB" },
+    "migrate":  { "command": "bin/rails db:migrate",  "window": true,                         "label": "Run migrations" },
+    "logs":     { "command": "tail -f log/dev.log",   "window": true,                         "label": "Tail dev logs" }
+  }
+}
+```
+
+Field semantics:
+- `command` — string, executed via `exec.CommandContext` (same env vars
+  as scripts.setup: CANOPY_WORKSPACE_PATH, CANOPY_ROOT_PATH, CANOPY_PORT)
+- `window: true` — spawn in a NEW tmux window inside the workspace
+  session (visible to user, scrollable, non-blocking). Default false
+  (= run inline, stream to drawer like setup does today).
+- `destructive: true` — show confirm gate before running.
+- `label` — display name in the picker; falls back to action key.
+
+### Why `window: true` matters
+
+This is the unlock the user is asking about. Today scripts.setup
+output streams to the inspect drawer — fine for one-shot setup but
+useless for `tail -f` or anything you want to watch alongside dev
+work. Spawning in a new tmux window means:
+
+- Dev pane keeps running undisturbed
+- User can tab to the action window with the standard tmux next-window
+  binding to watch progress
+- Output stays around as long as the window stays open
+- Long-running actions (rails console, bin/console, log streams) get a
+  natural home
+
+### Why this beats keeping `R retry`
+
+1. **Discoverability.** The picker lists everything available; users
+   don't have to remember which keys do what.
+2. **Composability.** Every project has its own re-run rituals; shoving
+   them into a single hardcoded verb doesn't scale.
+3. **Naming.** The picker entry says "Re-run setup" not "retry," which
+   answers "retry what?" without a glossary.
+
+### Implementation sketch
+
+- `internal/config/config.go` — add `Actions map[string]Action` field
+  with validation (no key collisions with built-ins, command is
+  non-empty).
+- `internal/workspace/actions.go` — new package-level dispatcher.
+  Built-ins map to existing lifecycle calls; user-defined actions
+  shell out via `exec.CommandContext` with the same env contract.
+- `internal/tmux/session.go` — add `NewWindow(session, name, cwd, cmd)`
+  helper if not already present.
+- `internal/ui/` — new picker mode (model state + view + update).
+  Reuse the popup chrome from v0.11.0.
+- Migration: keep `R` as a hidden alias for "Re-run setup" for one
+  release so muscle memory survives.
+
+### Deferred subquestions
+
+- **Sequencing.** Should actions run serially (block) or fire-and-forget
+  if `window: true`? Lean fire-and-forget when windowed, blocking when
+  inline.
+- **Status surfacing.** Action exit codes — where do they show up?
+  Probably a transient toast in the TUI plus a line in canopy.log.
+- **Keybind shortcuts.** Eventually each action could declare a
+  one-key shortcut (e.g. `r` → reseed) for power users. Defer to v0.16+.
+
+---
+
+## v0.15+ — Onboarding wizard + global config
+
+Captured 2026-04-30 from user feedback. Canopy has no global config
+file today — every customizable surface is either hardcoded (pane
+layout, editor=nvim, port range 3000-3999, default agent fallback) or
+lives only per-project in canopy.json. There's no first-run flow,
+no "change my defaults" verb, and new users discover canopy.json
+schema by reading the README.
+
+### Comprehensive settings inventory
+
+This is what onboarding needs to surface. Some exist today, some are
+new and would need to land alongside this feature.
+
+#### Per-project settings (canopy.json, exists today)
+
+| Setting | Today | Notes |
+|---------|-------|-------|
+| `scripts.setup` | ✅ required | runs once on workspace creation |
+| `scripts.run` | ✅ required | server pane command, re-launched on resurrect |
+| `scripts.archive` | ✅ required | runs on workspace removal |
+| `scripts.agent` | ✅ optional | power-user override for agent launcher |
+| `agent.type` | ✅ optional | claude / codex / opencode / aider, default claude |
+| `agent.briefing` | ✅ optional | inline project notes appended to AGENT.md |
+| `agent.briefing_file` | ✅ optional | path to a .md briefing (wins over inline) |
+| `actions.<name>` | ❌ new | from the actions-menu feature above |
+| `layout` | ❌ new | tmux pane layout override (see below) |
+| `port_range` | ❌ new | currently hardcoded 3000-3999; e.g. Rails wants 3000s, Next wants 4000s |
+| `default_base_branch` | ❌ new | currently inferred from origin/HEAD |
+
+#### Global settings (~/.canopy/config.json, NEW — does not exist today)
+
+| Setting | Notes |
+|---------|-------|
+| `default_agent` | machine-wide default when canopy.json doesn't set agent.type |
+| `editor` | currently hardcoded to nvim in the editor pane; could be helix, code, zed, etc. |
+| `multiplexer` | currently tmux-only; pluggable backend opens zellij/kitty (see v1 entry) |
+| `pane_layout` | preset name: `4pane` (today's default), `tdl` (omarchy's terminal-dev-layout), `minimal` (just server + editor), `custom` |
+| `pane_layout_custom` | full pane spec for the `custom` layout |
+| `theme` | TUI palette: dark / light / high-contrast / protanopia (already implemented per #3 PR — surface as setting) |
+| `upgrade_check.enabled` | bool; today implicit "on" |
+| `upgrade_check.interval_hours` | today hardcoded 6h |
+| `tmux.statusline_install` | bool; today implicit "on at first run" |
+| `tmux.popup_install` | bool; today implicit "on at first run" |
+| `shell_completion` | which shells canopy installed completion for (bash/zsh/fish) |
+| `tdl_integration` | bool; if true, use omarchy's `tdl` instead of canopy's own pane builder |
+
+The `tdl` integration is the user's specific ask — omarchy already has
+a terminal-dev-layout helper that opens a known pane structure. If
+canopy can defer to `tdl` when configured, users on omarchy get one
+layout system instead of two competing ones.
+
+#### State (~/.canopy/state.json, exists today)
+
+NOT user-configurable — this is the workspace registry. Mentioned for
+completeness so the onboarding flow doesn't accidentally claim it.
+
+### Shape
+
+`canopy onboard` — a TUI wizard, re-runnable any time. Three sections:
+
+1. **Agent** — pick default AI tool; show each launcher's status (binary
+   on PATH? authed?). Set `default_agent` in global config.
+2. **Layout** — pick pane preset. Live preview by spawning a throwaway
+   tmux session, screenshotting `tmux capture-pane`, killing it. (Or
+   just ASCII-render the layout for v1.)
+3. **Editor** — pick `nvim` / `helix` / `$EDITOR` / custom command.
+4. **Advanced** — upgrade check, tmux integrations, theme, tdl mode.
+
+For per-project: `canopy onboard --project` walks the canopy.json
+schema, prompting for each field with the current value as default.
+Useful for greenfield setup AND for migrating an existing canopy.json
+to a new schema (e.g. adopting the actions-menu fields above).
+
+### Auto-trigger on first run
+
+If `~/.canopy/config.json` doesn't exist when canopy starts, prompt
+once: "first time using canopy — want to run the 5-min onboarding
+wizard? [Y/n/never]". `never` writes `{"onboarded": true}` so we
+don't ask again. Skipping is fine — defaults stay as today.
+
+### Implementation sketch
+
+- `internal/config/global.go` — new file. Loads/writes
+  `~/.canopy/config.json` with the schema above. All fields optional;
+  zero values mean "use the canopy default."
+- Every hardcoded constant today (`nvim`, `3000-3999`, `6h`, the
+  4-pane builder) reads through a getter that consults global config
+  with a code-default fallback. No flag-day rewrite — gradual.
+- `cmd/canopy/onboard.go` — new subcommand. TUI flow built on the
+  existing Bubbletea model patterns; reuse the picker chrome.
+- Tests: a happy-path table-driven test for global config load/save +
+  a unit test per getter that asserts both "no global config" and
+  "global config overrides default" branches.
+
+### Sequencing
+
+Best landed AFTER the actions-menu feature (above), because actions
+benefit from being introduced via the onboarding wizard ("here are
+the actions your project supports — want to add one?"). Until both
+ship, the global config is the more valuable half — it unblocks every
+hardcoded-constant complaint a user has had so far.
+
+---
+
+## v0.15+ — Offboard / delete a project completely
+
+Captured 2026-04-30 from user feedback. Today `canopy rm <workspace>`
+removes ONE workspace. There's no verb for "I'm done with this
+project — clean up everything canopy did for it." The user has to:
+
+1. `canopy rm` every workspace one by one
+2. Manually edit `~/.canopy/state.json` to remove the project entry
+3. Manually `rm -rf ~/.canopy/workspaces/<project>/` if it persists
+4. Maybe remove `canopy.json` from the repo (or not — depends on intent)
+5. Maybe undo the tmux statusline / popup hooks (they're global, so
+   probably not, but unclear)
+
+That's manual, error-prone, and racy if any workspace tmux session is
+still running.
+
+### User intents (each shapes the verb differently)
+
+1. **"I'm done with this project."** Drop all workspaces, drop project
+   from state, leave the repo + canopy.json alone.
+2. **"This project moved (renamed / migrated to org)."** Re-register
+   under the new identity. Workspaces should ideally re-attach.
+3. **"Wipe everything canopy did."** All of #1 plus removing canopy.json
+   from the repo and any project-specific tmux artifacts.
+4. **"I never want canopy globally."** Uninstall flow. Out of scope
+   here — that's `make uninstall` + manual ~/.canopy purge.
+
+### Proposed shape
+
+`canopy offboard <project>` — interactive, default-safe.
+
+```
+canopy offboard cravd
+
+The following will be removed:
+  - 3 workspaces (still-salmon, dapper-hare, mute-otter)
+    · 1 has open uncommitted changes (still-salmon, *4 dirty)
+    · 1 has tmux session running (mute-otter)
+  - project entry in ~/.canopy/state.json
+  - workspace dir ~/.canopy/workspaces/cravd/
+
+Will NOT remove:
+  - canopy.json in the repo (use --remove-config to also delete)
+  - ~/.canopy/log/canopy.log (shared across all projects)
+
+Continue? [y/N]
+```
+
+### Safety design
+
+- **Default refuses** if any workspace has uncommitted changes OR a
+  running tmux session. `--force` overrides.
+- **Per-workspace archive runs.** Each workspace's `scripts.archive`
+  fires before its worktree is removed (DB drops, server kills, etc.)
+  — same contract as `canopy rm`.
+- **Atomic state update.** Acquire the state.json flock once, do all
+  the removals, write the new state, release. No half-offboarded state
+  if the user Ctrl-C's mid-flow.
+- **Dry-run.** `--dry-run` prints the plan without doing anything.
+
+### Flag set
+
+- `--force` — proceed past dirty workspaces / running sessions.
+- `--remove-config` — also delete canopy.json from the project root.
+- `--dry-run` — print plan, change nothing.
+- `--keep-workspaces` — drop project from state but leave worktrees on
+  disk (escape hatch for users who want manual control).
+
+### Implementation sketch
+
+- `cmd/canopy/offboard.go` — new subcommand.
+- `internal/workspace/offboard.go` — orchestration. Reuses
+  `Manager.Remove` per workspace; new `dropProject` method on the
+  state package for the registry surgery.
+- `internal/state/state.go` — add `RemoveProject(root string) error`.
+  Delete entries, garbage-collect empty Projects map keys.
+- TUI surface: in the Global tab, a project-row action `O offboard`
+  next to the workspace-row actions. Today the Global tab is
+  workspace-rows only; this also implies a project-roll-up row above
+  each project's workspaces. (Possibly nicer as a separate Projects
+  tab — open question.)
+
+### Deferred subquestions
+
+- **Project rename intent (#2).** Should `canopy offboard --rename
+  <new>` exist, or is rename a separate verb? Lean separate verb
+  (`canopy reproject`?) — different consequences (offboard is
+  destructive, rename is not).
+- **Re-onboarding.** What happens if someone offboards then re-runs
+  `canopy new` from inside the same repo? Should "just work" — re-add
+  the project to state on first workspace creation, like a fresh setup.
+  Confirm this in the test plan.
+
+---
+
+## v0.16+ — Kick-off-with-prompt + background workspaces (idea pool)
+
+Captured 2026-04-30 from user feedback. Today `canopy new <branch>`
+creates a workspace, runs scripts.setup, launches the agent with the
+standard AGENT.md briefing, and drops you into the tmux session. The
+agent sits at an empty prompt waiting for you to type the first
+message. That's a missed beat — half the time the user already KNOWS
+what they want the agent to do; they just want to fire and forget.
+
+### The unlock
+
+Pair two capabilities:
+
+1. **Initial prompt** passed to the agent as the first user message.
+2. **Detached/background kick-off** that creates the workspace, fires
+   the prompt, and returns the user to the TUI without entering the
+   session.
+
+Together: "I have an idea. Open three workspaces, give each a
+different angle on it, let them run while I'm at lunch." Real
+parallel-AI workflow.
+
+### CLI surface
+
+```
+canopy new add-oauth --prompt "Add OAuth login via GitHub. Read CONTRIBUTING.md first."
+canopy new add-oauth --prompt-file ideas/oauth.md
+canopy new add-oauth --prompt "..." --detach     # don't switch into session
+canopy new add-oauth --prompt "..." --detach --notify   # notify on idle/done
+```
+
+### TUI surface
+
+The `n` (new workspace) modal grows two optional fields:
+
+- **Initial prompt** — multiline text input, optional. Empty = today's
+  behavior.
+- **Detach checkbox** — "Run in background, return to project list"
+
+For longer prompts the modal could open `$EDITOR` (like git commit)
+when the user presses a key — keeps the modal compact while supporting
+real ideas, not just one-liners.
+
+### Idea-bank workflow this unlocks
+
+The user's framing: "kick off an idea in the background." This is the
+seed of a richer flow:
+
+- Maintain an `ideas/` dir in the project (gitignored or a separate
+  branch). Each idea is one .md file.
+- `canopy new --prompt-file ideas/X.md` per idea
+- Run them in parallel detached
+- TUI Global tab shows each one's progress (the existing PR/dirty/git
+  hints already cover this — they just need to be informative for an
+  in-flight agent run)
+- A future `canopy idea <name>` shortcut wraps it: pick from the dir,
+  spawn workspace, kick off agent, detach
+
+### Implementation sketch
+
+- **Launcher contract.** Each `internal/agent/launchers.go` entry
+  accepts an optional `InitialMessage string`. Launchers convert it
+  to whatever the underlying CLI wants:
+  - `claude` — pass via positional arg (or stdin pipe; verify which is
+    cleanest)
+  - `codex` — `codex --prompt "..."` if supported, else stdin
+  - `aider` — `aider --message "..."`
+  - `opencode` — TBD; check the binary's flag
+- **Plumbing.** New `--prompt` / `--prompt-file` flags on `canopy new`,
+  passed through to `workspace.Manager.Create`, threaded into the
+  launcher invocation. Mirror in the TUI new-workspace flow.
+- **Detach.** Already partially in place — the v0.11.x detach pattern
+  (spawn detached subprocess, `tmux detach-client`) generalizes. The
+  new `--detach` flag means "skip the auto-switch-into-session step
+  after creation"; tmux session stays alive in the background, scripts
+  keep running.
+- **State surfacing.** A workspace running an agent in the background
+  needs to be distinguishable in the TUI. New status? Or an extra
+  hint badge (`◷ running` next to the row)? Defer to design pass —
+  could land as a follow-up after the basic primitive ships.
+
+### Risks / open questions
+
+- **Cost surprise.** Kicking off three Opus workspaces in parallel
+  burns tokens fast. Maybe a confirm gate above N=2 backgrounded
+  workspaces, or a per-project budget hint. Small, but worth thinking
+  through before this becomes one-button-easy.
+- **Idle detection.** Knowing when a backgrounded agent is "done" vs
+  "stuck waiting on something" is a hard problem. v1 punt: treat all
+  backgrounded sessions as in-progress until the user explicitly
+  switches in to check. v2: pane-tail heuristics (no output for 30s
+  with no in-flight tool call = idle).
+- **Prompt-injection surface.** The initial prompt is just a user
+  message — same trust boundary as anything the user types into
+  claude themselves. No new exposure beyond what claude already has.
+
+### Sequencing
+
+Sits well AFTER:
+- Actions menu (above) — gives a natural home for "send a follow-up
+  prompt to a running agent" as another action.
+- Global config (above) — `default_agent` lands first so the
+  `--prompt` flag knows which launcher to talk to.
+
+But the **`--prompt` half alone, no detach**, is a small ship by
+itself: ~50 lines plumbing through the existing flow, gated to claude
+launcher only at first. Worth doing as a precursor if the bigger
+background flow is too far out.

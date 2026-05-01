@@ -114,7 +114,7 @@ func (m *Model) View() string {
 			b.WriteString(" ")
 			b.WriteString(hint)
 			b.WriteString("\n  ")
-			b.WriteString(subtleStyle.Render("press R to retry scripts.setup against the existing worktree"))
+			b.WriteString(subtleStyle.Render("press R to re-run setup against the existing worktree"))
 			b.WriteString("\n\n")
 		}
 	}
@@ -1094,7 +1094,7 @@ func (m *Model) renderHelp() string {
 		"  K              kill tmux session (state survives; Enter rebuilds)",
 		"  n              new workspace",
 		"  d              delete selected workspace (with confirmation)",
-		"  R              retry scripts.setup on a broken workspace",
+		"  R              re-run setup on a broken workspace",
 		"  o              focus project (Global tab only)",
 		"  p              open PR in browser (when row has PR hint)",
 		"  r              refresh state (Mem column + upgrade-check cache)",
@@ -1110,7 +1110,7 @@ func (m *Model) renderHelp() string {
 		"  status column:",
 		"    running        tmux session alive, processes running",
 		"    stopped  ⏸     tmux session is dead (was killed or crashed)",
-		"    broken   ✗     scripts.setup failed; press R to retry",
+		"    broken   ✗     scripts.setup failed; press R to re-run setup",
 		"    setting up  …  workspace is being created right now",
 		"    orphaned !     workspace dir is missing on disk",
 		"    not started    main session: no tmux session yet",
