@@ -5,6 +5,23 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0.2] - 2026-05-01 — Fix: lazy port base on freshly-initialized projects
+
+`canopy init` registers a project with `port_base: 0` and lets `canopy new`
+allocate the real base on first use. The lazy lookup wasn't honoring that
+contract — it returned the stored zero verbatim, so `port.Allocate` was
+asked to find a free port in the privileged range `[10, 999]` and
+predictably came back with "no ports available." Newly-onboarded projects
+looked broken on their very first `canopy new`.
+
+### Fixed
+
+- **Empty project entries now allocate on first `canopy new`.**
+  `state.EnsureProjectBase` treats `PortBase == 0` as "not yet allocated"
+  and falls through to the allocation path instead of returning the zero.
+  The zero is also excluded from the `used` set so it doesn't shadow a
+  real candidate. Existing projects with valid bases are unaffected.
+
 ## [0.14.0.1] - 2026-05-01 — README polish for public launch
 
 The repo went public, so the README needed to read like an open-source
