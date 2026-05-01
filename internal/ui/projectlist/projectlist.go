@@ -560,6 +560,7 @@ func stripAnsi(s string) string {
 // Badge mapping (kept short to fit on a single row):
 //
 //	rename_suggested  →  ↻ rename
+//	mergeability                 →  ⚠ conflict   (orange, attention)
 //	pr_status (open)             →  PR open
 //	pr_status (approved)         →  PR approved
 //	pr_status (changes-requested)→  PR changes
@@ -567,8 +568,10 @@ func stripAnsi(s string) string {
 //	pr_status (closed)           →  PR closed
 //	shipped (no PR)              →  ✓ shipped (local)
 //
-// Multiple hints surface as space-separated badges; order is rename →
-// pr_status / shipped so the "what next action" badge stays rightmost.
+// Multiple hints surface as space-separated badges. Order is:
+// rename → mergeability → git_stats → pr_status / shipped. Mergeability
+// sits left of git_stats so the "this won't merge clean" warning is
+// visually adjacent to the divergence counts that explain why.
 func RenderHintBadges(hints []state.Hint) string {
 	if len(hints) == 0 {
 		return ""
@@ -585,6 +588,16 @@ func RenderHintBadges(hints []state.Hint) string {
 	for _, h := range hints {
 		if h.Kind == "rename_suggested" {
 			parts = append(parts, hintRenameStyle().Render("↻ rename"))
+		}
+	}
+	// Mergeability next — loud, attention-grabbing, sits left of the
+	// numeric divergence counts so the warning reads before the
+	// explanation. Detector emits this only when the simulated merge
+	// against origin/<default> would conflict, so the badge always
+	// represents real action-required state.
+	for _, h := range hints {
+		if h.Kind == "mergeability" && h.Message != "" {
+			parts = append(parts, mergeabilityStyle().Render(h.Message))
 		}
 	}
 	// Then git stats — show always (regardless of PR/merged state) so
@@ -749,6 +762,13 @@ func renamedBranchStyle() lipgloss.Style {
 // hintShippedStyle: green — "this is good, ready to close out."
 func hintShippedStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true)
+}
+
+// mergeabilityStyle: orange + bold. Conflicts are blocking work — louder
+// than the informational grey of git_stats, on par with rename/PR-changes
+// to slot into the existing "attention required" tier of the palette.
+func mergeabilityStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
 }
 
 // hintPRStyle: cyan — informational, not urgent.

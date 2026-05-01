@@ -5,6 +5,43 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3.0] - 2026-04-30 — Workspace hints: ⚠ conflict (Lane A of 3)
+
+First slice of the workspace-hints expansion designed in
+`docs/design/v0.14-workspace-hints.md`. The TUI's hint column now
+warns you BEFORE you try to ship that your branch would conflict
+with main, so you fix it on your own clock instead of discovering
+it at the worst possible moment.
+
+### Added
+
+- **`⚠ conflict` hint badge.** Every workspace gets a new
+  `mergeability` detector that simulates `git merge origin/<default>`
+  via `git merge-tree --write-tree` (no working tree side effects)
+  and emits an orange-bold badge if the merge would conflict.
+  Singular form is `⚠ conflict`; multi-conflict shows the count
+  (`⚠ 3 conflicts`). Sits between the rename and git_stats badges
+  so the warning reads next to the divergence counts that explain
+  why.
+- **Action hint for the agent.** The hint carries a suggested
+  command (`git fetch origin && git rebase origin/<default>`) so
+  the AGENT.md briefing and any future hover/popover have a
+  ready-made fix to point at.
+
+### Changed
+
+- **`detect.RunFast` now spans 5 detectors instead of 4.** The new
+  detector runs in the same parallel goroutine pool as the others;
+  wall-clock for the full hint pass stays bounded. In steady state,
+  most workspaces hit a `merge-base --is-ancestor` short-circuit
+  (~10ms) and never call `merge-tree` at all. Diverged workspaces
+  add ~30-80ms but don't extend the parallel pool's wall time.
+
+This is Lane A of a three-lane series. Lanes B (`stuck_state`:
+mid-rebase / mid-merge / detached HEAD) and C (`push_state`:
+unpushed-to-origin separated from ahead-of-main) ship from their
+own canopy workspaces and arrive in subsequent versions.
+
 ## [0.13.2.1] - 2026-05-01 — Fix: pill no longer offers a downgrade
 
 ### Fixed

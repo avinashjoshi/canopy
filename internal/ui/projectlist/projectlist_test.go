@@ -980,3 +980,104 @@ func TestRender_NameColumnAlignmentDoesNotShiftOnSelection(t *testing.T) {
 			idxBravoSel0, idxBravoSel1, rendered1, rendered2)
 	}
 }
+
+// TestRender_MergeabilityBadge: a row carrying a mergeability hint
+// renders "⚠ conflict" verbatim. Plural form rendered as well so the
+// count survives lipgloss styling intact.
+func TestRender_MergeabilityBadge(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{"singular", "⚠ conflict", "⚠ conflict"},
+		{"plural", "⚠ 3 conflicts", "⚠ 3 conflicts"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(Options{})
+			m.SetRows([]state.GlobalRow{{
+				Project: "p", Name: "ws", Branch: "b",
+				Hints: []state.Hint{{Kind: "mergeability", Message: tc.msg}},
+			}})
+			out := m.View()
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("mergeability badge %q missing from render:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+// TestRender_MergeabilityBadge_AlongsideGitStats: the mergeability badge
+// is complementary to git_stats (the warning AND the divergence count
+// should be visible together — knowing you'll conflict means more in
+// context with how-far-diverged-am-i). Mergeability does NOT preempt
+// git_stats.
+func TestRender_MergeabilityBadge_AlongsideGitStats(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{
+		Project: "p", Name: "ws", Branch: "b",
+		Hints: []state.Hint{
+			{Kind: "mergeability", Message: "⚠ conflict"},
+			{Kind: "git_stats", Message: "↑3 ↓2 *1"},
+		},
+	}})
+	out := m.View()
+	if !strings.Contains(out, "⚠ conflict") {
+		t.Errorf("mergeability badge missing:\n%s", out)
+	}
+	if !strings.Contains(out, "↑3 ↓2 *1") {
+		t.Errorf("git_stats badge missing (should not be preempted):\n%s", out)
+	}
+	// And mergeability should appear LEFT of git_stats so the warning
+	// reads first when scanning the row.
+	mergeIdx := strings.Index(out, "⚠ conflict")
+	statsIdx := strings.Index(out, "↑3 ↓2 *1")
+	if mergeIdx == -1 || statsIdx == -1 {
+		t.Fatalf("badge index lookup failed: merge=%d stats=%d", mergeIdx, statsIdx)
+	}
+	if mergeIdx > statsIdx {
+		t.Errorf("expected mergeability LEFT of git_stats (merge@%d, stats@%d):\n%s",
+			mergeIdx, statsIdx, out)
+	}
+}
+
+// TestRender_MergeabilityBadge_Suppressed: an empty message must not
+// render badge chrome. Mirrors the contract for git_stats — empty
+// message = no signal.
+func TestRender_MergeabilityBadge_Suppressed(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{
+		Project: "p", Name: "ws", Branch: "b",
+		Hints: []state.Hint{{Kind: "mergeability", Message: ""}},
+	}})
+	out := m.View()
+	if strings.Contains(out, "⚠") {
+		t.Errorf("empty mergeability message rendered ⚠ glyph:\n%s", out)
+	}
+}
+
+// TestRender_MergeabilityBadge_OrderRelativeToRename: when both rename
+// and mergeability are active, rename sits leftmost (it's the
+// "name your branch" prerequisite to all other action), then
+// mergeability.
+func TestRender_MergeabilityBadge_OrderRelativeToRename(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{
+		Project: "p", Name: "ws", Branch: "b",
+		Hints: []state.Hint{
+			{Kind: "mergeability", Message: "⚠ conflict"},
+			{Kind: "rename_suggested", Message: "rename me"},
+		},
+	}})
+	out := m.View()
+	renameIdx := strings.Index(out, "↻ rename")
+	mergeIdx := strings.Index(out, "⚠ conflict")
+	if renameIdx == -1 || mergeIdx == -1 {
+		t.Fatalf("badge missing: rename=%d merge=%d\n%s", renameIdx, mergeIdx, out)
+	}
+	if renameIdx > mergeIdx {
+		t.Errorf("expected rename LEFT of mergeability (rename@%d, merge@%d):\n%s",
+			renameIdx, mergeIdx, out)
+	}
+}
