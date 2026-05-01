@@ -5,6 +5,38 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4] - 2026-04-30 — Revert org move: `oncactus/canopy` → `avinashjoshi/canopy`
+
+Reverses v0.6's transfer of canopy to the `oncactus` org. Repo is back at
+`github.com/avinashjoshi/canopy` for now while the brand strategy settles.
+Mechanical change only — no behavior diff. Module path, every Go import,
+README install one-liner + badges, install.sh, CHANGELOG compare links,
+issue templates, and CLAUDE.md all repointed. Existing oncactus URLs keep
+working via GitHub's transfer-redirect.
+
+The historical migration plan at `docs/design/v0.6-org-move.md` and the
+TODOS.md decision context are intentionally preserved verbatim — they
+describe a past decision, not a current one. Contributor email
+`avinash@oncactus.com` is also untouched.
+
+### Changed
+- Module path: `github.com/oncactus/canopy` → `github.com/avinashjoshi/canopy`.
+  All Go imports, internal package references, and user-facing strings
+  in `cmd/canopy/use.go` updated to match.
+- README.md install one-liner, Go Reference badge, Go Report Card badge,
+  Tests workflow badge, and `go install` examples now point at the
+  avinashjoshi address.
+- `install.sh` clones from `https://github.com/avinashjoshi/canopy`.
+  `canopy upgrade` reads `VERSION` from
+  `raw.githubusercontent.com/avinashjoshi/canopy/main/VERSION`.
+- CHANGELOG.md compare links and release-tag links rewritten so the
+  "see diff since last release" link in each entry now resolves.
+- `.github/ISSUE_TEMPLATE/config.yml` + `feature.yml`, `CONTRIBUTING.md`,
+  `docs/getting-started.md`, `docs/troubleshooting.md`, and `CLAUDE.md`
+  all repointed.
+- Local `git remote set-url origin` flipped on the source clone, which
+  applies to every canopy worktree automatically.
+
 ## [0.12.3] - 2026-04-30 — Surface version in `canopy use` and `canopy --help`
 
 Two small UX gaps closed: "which canopy am I running" should never
@@ -682,6 +714,7 @@ cycle):
   `docs/migrate-from-conductor.md`, `docs/troubleshooting.md`,
   `docs/architecture.md`, `docs/design/v0-canopy.md`.
 
-[Unreleased]: https://github.com/avinashjoshi/canopy/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/avinashjoshi/canopy/compare/v0.12.4...HEAD
+[0.12.4]: https://github.com/avinashjoshi/canopy/releases/tag/v0.12.4
 [0.8.0]: https://github.com/avinashjoshi/canopy/releases/tag/v0.8.0
 [0.1.0]: https://github.com/avinashjoshi/canopy/releases/tag/v0.1.0
