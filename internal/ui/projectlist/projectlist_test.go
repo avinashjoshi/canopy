@@ -454,6 +454,73 @@ func TestRender_GitStatsBadge_AlwaysShows(t *testing.T) {
 	}
 }
 
+// TestRender_PushStateBadge: push_state hint surfaces as its own
+// badge (⇡N or ⇅) and sits alongside git_stats rather than replacing
+// it. The two answer different questions ("ahead of main" vs
+// "ahead of origin/<branch>") so both should be visible together
+// when both fire — that's the entire reason push_state was carved
+// out of git_stats in the design.
+func TestRender_PushStateBadge(t *testing.T) {
+	cases := []struct {
+		name        string
+		hints       []state.Hint
+		wantSubstrs []string
+	}{
+		{
+			name: "unpushed alone",
+			hints: []state.Hint{
+				{Kind: "push_state", Message: "⇡3"},
+			},
+			wantSubstrs: []string{"⇡3"},
+		},
+		{
+			name: "diverged alone",
+			hints: []state.Hint{
+				{Kind: "push_state", Message: "⇅"},
+			},
+			wantSubstrs: []string{"⇅"},
+		},
+		{
+			name: "alongside git_stats — both visible",
+			hints: []state.Hint{
+				{Kind: "git_stats", Message: "↑5 *2"},
+				{Kind: "push_state", Message: "⇡5"},
+			},
+			wantSubstrs: []string{"↑5 *2", "⇡5"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(Options{})
+			m.SetRows([]state.GlobalRow{{
+				Project: "p", Name: "ws", Branch: "b", Hints: tc.hints,
+			}})
+			out := m.View()
+			for _, want := range tc.wantSubstrs {
+				if !strings.Contains(out, want) {
+					t.Errorf("missing %q in render:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestRender_PushStateBadge_Suppressed: empty push_state message —
+// the "no signal" contract — must not produce a visible glyph. The
+// detector returns a hint with empty Message to mean "branch is
+// fully synced"; the renderer suppresses to keep clean rows quiet.
+func TestRender_PushStateBadge_Suppressed(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{
+		Project: "p", Name: "ws", Branch: "b",
+		Hints: []state.Hint{{Kind: "push_state", Message: ""}},
+	}})
+	out := m.View()
+	if strings.Contains(out, "⇡") || strings.Contains(out, "⇅") {
+		t.Errorf("synced workspace rendered push_state glyph:\n%s", out)
+	}
+}
+
 // TestRender_GitStatsBadge_Suppressed: an empty git_stats message is
 // the contract for "no signal" (clean workspace). Renderer must skip
 // it so the row stays visually quiet rather than showing a blank pill.
