@@ -1097,7 +1097,7 @@ func (m *Model) renderHelp() string {
 		"  R              retry scripts.setup on a broken workspace",
 		"  o              focus project (Global tab only)",
 		"  p              open PR in browser (when row has PR hint)",
-		"  r              refresh state (also enables Mem column)",
+		"  r              refresh state (Mem column + upgrade-check cache)",
 		"",
 		"  U              upgrade canopy (only when an upgrade is available)",
 		"  D              dismiss the 'upgrade available' pill until next release",

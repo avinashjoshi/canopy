@@ -26,6 +26,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -105,6 +106,12 @@ Network-only flags: --check (compare versions but skip the upgrade),
 	// shell. Works on DEV (DEV doesn't auto-check, but inspecting
 	// any leftover cache file is still useful diagnostically).
 	cmd.Flags().Bool("status", false, "print the auto-check cache contents (debugging aid)")
+	// --yes / -y skips the confirmation prompt for non-interactive
+	// invocations. Stdin auto-detection also skips the prompt when
+	// stdin isn't a tty (CI, pipes), so this flag is explicit-only.
+	// --force also implies --yes — forcing the upgrade IS the
+	// confirmation in that case.
+	cmd.Flags().BoolP("yes", "y", false, "skip the confirmation prompt (implied by --force)")
 	return cmd
 }
 
@@ -113,6 +120,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	force, _ := cmd.Flags().GetBool("force")
 	dismiss, _ := cmd.Flags().GetBool("dismiss")
 	status, _ := cmd.Flags().GetBool("status")
+	yes, _ := cmd.Flags().GetBool("yes")
 	out := cmd.OutOrStdout()
 
 	// --status is a pure cache read — no network, no shell, no DEV
@@ -201,6 +209,24 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		if preview != "" {
 			fmt.Fprintln(out, "\nWhat's new:")
 			fmt.Fprint(out, preview)
+		}
+	}
+
+	// Confirmation gate. The TUI flow (U key) has an explicit "Enter
+	// to upgrade, Esc to cancel" preview state; the CLI used to just
+	// barrel through and run shell after printing the changelog.
+	// That made it impossible to actually READ the changelog before
+	// the upgrade started.
+	//
+	// Skip the prompt when:
+	//   - --yes / -y was passed (explicit non-interactive intent)
+	//   - --force was passed (force IS the confirmation)
+	//   - stdin isn't a tty (CI, scripts, pipes — a prompt would
+	//     either hang on Read or read piped garbage)
+	if !yes && !force && upgradeIsTerminal(os.Stdin) {
+		if !upgradePromptYesNo(cmd.InOrStdin(), out) {
+			fmt.Fprintln(out, "Cancelled. Run `canopy upgrade --yes` to skip the prompt next time.")
+			return nil
 		}
 	}
 
@@ -383,6 +409,54 @@ var upgradeFetchVersion = func(ctx context.Context, url string) (string, error) 
 		return "", err
 	}
 	return string(body), nil
+}
+
+// upgradeIsTerminal reports whether the given file is connected to
+// an interactive terminal (vs a pipe, file, or other non-tty source).
+// Used to gate the confirmation prompt: when stdin is piped or
+// redirected, we auto-confirm rather than blocking on a Read that
+// would either hang or consume piped data the user didn't mean as
+// a yes/no answer.
+//
+// Stdlib-only: stat the fd and check ModeCharDevice. Avoids pulling
+// golang.org/x/term for one syscall. Exposed as a package-level var
+// so tests can stub it without setting up real ttys.
+var upgradeIsTerminal = func(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// upgradePromptYesNo prints "Apply this upgrade? [Y/n]:" and reads
+// one line from in. Returns true on yes (Y, y, yes, empty/Enter —
+// because the [Y/n] capitalization signals Y as the default), false
+// on no (N, n, no). Anything else re-prompts up to 3 times before
+// giving up and returning false.
+//
+// Exposed as a package-level var so tests can stub the prompt with
+// a canned input source instead of hooking up real stdin.
+var upgradePromptYesNo = func(in io.Reader, out io.Writer) bool {
+	reader := bufio.NewReader(in)
+	for attempt := 0; attempt < 3; attempt++ {
+		fmt.Fprint(out, "\nApply this upgrade? [Y/n]: ")
+		line, err := reader.ReadString('\n')
+		if err != nil && line == "" {
+			// EOF or read error with no input — treat as cancel
+			// rather than guessing. Keeps the contract honest.
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "", "y", "yes":
+			return true
+		case "n", "no":
+			return false
+		default:
+			fmt.Fprintln(out, "Please answer y or n.")
+		}
+	}
+	return false
 }
 
 // upgradeRunShellStreaming is the io.Writer variant of upgradeRunShell

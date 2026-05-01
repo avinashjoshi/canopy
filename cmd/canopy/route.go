@@ -146,12 +146,17 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 
 	// Auto-check pill state. initialUpgradeForUI is a synchronous
 	// cache-only read; it never blocks on the network. needsRefresh
-	// is true when the cache was stale or missing — the UI fires
-	// the closure as a tea.Cmd from Init(), so the network call
+	// is true when the cache was stale or missing — Init() fires
+	// the closure as a tea.Cmd in that case, so the network call
 	// happens after the TUI is already on screen.
+	//
+	// The closure itself is wired UNCONDITIONALLY (when not DEV) so
+	// the `r` key can force a refresh even when the cache was fresh
+	// at startup. The needsRefresh flag is passed via
+	// RefreshOnInit so Init() can decide whether to fire on launch.
 	initialUpgrade, needsRefresh := initialUpgradeForUI(d)
 	var refreshFn ui.UpgradeRefreshFn
-	if needsRefresh {
+	if !d.IsDev {
 		refreshFn = func(ctx context.Context) (string, error) {
 			srcDir, err := upgradeSrcDir()
 			if err != nil {
@@ -235,6 +240,7 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 		DevWorkspace:   d.DevWorkspace,
 		InitialUpgrade: initialUpgrade,
 		RefreshFn:      refreshFn,
+		RefreshOnInit:  needsRefresh,
 		ChangelogFn:    changelogFn,
 		ShellFn:        shellFn,
 		DismissFn:      dismissFn,

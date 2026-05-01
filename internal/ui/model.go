@@ -344,12 +344,18 @@ type Model struct {
 	upgradeAvailable string
 
 	// upgradeRefreshFn is the closure that performs the async
-	// network fetch when the auto-check cache is missing or stale.
-	// Called from Init() as a tea.Cmd; result lands as
-	// upgradeCheckedMsg and updates upgradeAvailable. Nil when the
-	// caller didn't wire it (tests, etc.) — Init then skips the
-	// refresh and just renders whatever was set up front.
+	// network fetch. Wired unconditionally by route.go (when not
+	// DEV) so the `r` key can force a refresh regardless of whether
+	// the cache was fresh at startup. Init() decides whether to
+	// fire it on launch via upgradeRefreshOnInit.
 	upgradeRefreshFn UpgradeRefreshFn
+
+	// upgradeRefreshOnInit gates whether Init() fires the refresh
+	// closure on TUI startup. True when the auto-check cache was
+	// missing or stale (TTL expired) at construction. False when
+	// the cache was fresh — we trust the cached value at startup
+	// and only refresh on explicit user action (`r` key).
+	upgradeRefreshOnInit bool
 
 	// In-TUI upgrade flow state. Active only when mode == upgradeMode.
 	// Reset to zero on dismiss (resetUpgradeMode). Lives in upgrade.go
@@ -613,11 +619,20 @@ type RunUnifiedOptions struct {
 	// is missing, the user has dismissed, or running on DEV.
 	InitialUpgrade string
 
-	// RefreshFn is the async closure fired from Init() when the
-	// auto-check cache was stale or missing at startup. Result
-	// lands as upgradeCheckedMsg and updates the pill mid-session.
-	// Nil skips the refresh entirely.
+	// RefreshFn is the async closure that performs the network
+	// fetch + cache write. Result lands as upgradeCheckedMsg and
+	// updates the pill mid-session. Wired unconditionally so the
+	// `r` key can force a refresh; Init() only fires it on launch
+	// when RefreshOnInit is also true. Nil disables refresh.
 	RefreshFn UpgradeRefreshFn
+
+	// RefreshOnInit gates whether Init() fires RefreshFn at TUI
+	// launch. True when the auto-check cache was stale or missing
+	// at construction (caller derived this from initialUpgradeForUI).
+	// False when the cache was fresh — startup uses the cached
+	// value and skips the network call. The `r` key fires RefreshFn
+	// regardless of this flag.
+	RefreshOnInit bool
 
 	// ChangelogFn fetches the CHANGELOG slice for the in-TUI
 	// upgrade flow's preview state. Nil disables the U key.
@@ -649,6 +664,7 @@ func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	m.SetVersionInfo(opts.VersionLabel, opts.DevWorkspace)
 	m.SetUpgradeAvailable(opts.InitialUpgrade)
 	m.SetUpgradeRefreshFn(opts.RefreshFn)
+	m.upgradeRefreshOnInit = opts.RefreshOnInit
 	m.SetUpgradeChangelogFn(opts.ChangelogFn)
 	m.SetUpgradeShellFn(opts.ShellFn)
 	m.SetUpgradeDismissFn(opts.DismissFn)
@@ -694,12 +710,18 @@ func (m *Model) Init() tea.Cmd {
 	// gesture required — the column "just works" the way every other
 	// column does.
 	cmds := []tea.Cmd{m.refresh()}
-	// Async upgrade check refresh. Only fires when route.go wired
-	// the closure (skipped for tests, popup mode, and DEV builds
-	// where the closure is intentionally nil). The result lands as
-	// upgradeCheckedMsg and updates the pill mid-session.
-	if cmd := upgradeRefreshCmd(m.upgradeRefreshFn); cmd != nil {
-		cmds = append(cmds, cmd)
+	// Async upgrade check refresh. Two gates: closure must be wired
+	// (skipped for tests, popup mode, DEV builds), AND the caller
+	// must have flagged the cache as stale/missing via
+	// upgradeRefreshOnInit. Fresh-cache startup uses the cached value
+	// and skips the network call to keep TUI launch quiet. The `r`
+	// key fires the closure unconditionally (see actionRefresh) so
+	// users can force a refresh even when the cache was fresh at
+	// startup.
+	if m.upgradeRefreshOnInit {
+		if cmd := upgradeRefreshCmd(m.upgradeRefreshFn); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 	return tea.Batch(cmds...)
 }

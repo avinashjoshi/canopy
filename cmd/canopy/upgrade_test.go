@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -361,7 +362,8 @@ func TestRunUpgrade_httpFailsGitSucceeds(t *testing.T) {
 	}
 
 	cmd := newUpgradeCmd()
-	cmd.SetArgs([]string{})
+	// --yes skips the confirm prompt; see TestRunUpgrade_happyPath.
+	cmd.SetArgs([]string{"--yes"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
@@ -488,7 +490,10 @@ func TestRunUpgrade_happyPath(t *testing.T) {
 	}
 
 	cmd := newUpgradeCmd()
-	cmd.SetArgs([]string{})
+	// --yes bypasses the new confirm prompt that would otherwise hang
+	// the test waiting on stdin. Real interactive use of the prompt is
+	// covered separately by TestUpgradePromptYesNo.
+	cmd.SetArgs([]string{"--yes"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
@@ -514,5 +519,182 @@ func TestRunUpgrade_happyPath(t *testing.T) {
 	}
 	if len(fetchURLs) < 2 {
 		t.Errorf("expected at least 2 fetches (VERSION + CHANGELOG); got %d: %v", len(fetchURLs), fetchURLs)
+	}
+}
+
+// TestUpgradePromptYesNo covers the inline prompt: empty Enter and
+// "y"/"yes" return true; "n"/"no" return false; bogus input
+// re-prompts up to 3 times then gives up.
+func TestUpgradePromptYesNo(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty Enter is yes (default)", "\n", true},
+		{"y is yes", "y\n", true},
+		{"Y is yes", "Y\n", true},
+		{"yes is yes", "yes\n", true},
+		{"YES is yes", "YES\n", true},
+		{"trailing whitespace ignored", "  y  \n", true},
+		{"n is no", "n\n", false},
+		{"N is no", "N\n", false},
+		{"no is no", "no\n", false},
+		{"bogus then yes", "huh?\ny\n", true},
+		{"bogus three times gives up", "a\nb\nc\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			got := upgradePromptYesNo(strings.NewReader(tc.in), &out)
+			if got != tc.want {
+				t.Errorf("upgradePromptYesNo(%q) = %v, want %v\noutput:\n%s",
+					tc.in, got, tc.want, out.String())
+			}
+		})
+	}
+}
+
+// TestRunUpgrade_promptCancelsCleanly: when the prompt returns false
+// (user said no), the shell must NOT run and the exit must be clean
+// (nil error, "Cancelled" message printed).
+func TestRunUpgrade_promptCancelsCleanly(t *testing.T) {
+	prevFetch := upgradeFetchVersion
+	prevShell := upgradeRunShell
+	prevPrompt := upgradePromptYesNo
+	prevTty := upgradeIsTerminal
+	prevVersion := version
+	t.Cleanup(func() {
+		upgradeFetchVersion = prevFetch
+		upgradeRunShell = prevShell
+		upgradePromptYesNo = prevPrompt
+		upgradeIsTerminal = prevTty
+		version = prevVersion
+	})
+
+	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+		return "0.13.0", nil
+	}
+	shellCalls := 0
+	upgradeRunShell = func(ctx context.Context, srcDir string) error {
+		shellCalls++
+		return nil
+	}
+	upgradeIsTerminal = func(*os.File) bool { return true } // pretend tty
+	upgradePromptYesNo = func(io.Reader, io.Writer) bool {
+		return false // user said no
+	}
+	version = "v0.12.0+test1234"
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srcDir := filepath.Join(tmp, ".canopy", "src")
+	_ = os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755)
+
+	cmd := newUpgradeCmd()
+	cmd.SetArgs([]string{}) // no --yes, no --force, prompt fires
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v (cancellation should be clean)", err)
+	}
+	if shellCalls != 0 {
+		t.Errorf("shell ran despite prompt cancel; got %d calls", shellCalls)
+	}
+	if !strings.Contains(out.String(), "Cancelled") {
+		t.Errorf("output missing 'Cancelled'; got:\n%s", out.String())
+	}
+}
+
+// TestRunUpgrade_yesFlagSkipsPrompt confirms --yes prevents the
+// prompt from firing (otherwise the test would hang on Stdin).
+func TestRunUpgrade_yesFlagSkipsPrompt(t *testing.T) {
+	prevFetch := upgradeFetchVersion
+	prevShell := upgradeRunShell
+	prevPrompt := upgradePromptYesNo
+	prevTty := upgradeIsTerminal
+	prevVersion := version
+	t.Cleanup(func() {
+		upgradeFetchVersion = prevFetch
+		upgradeRunShell = prevShell
+		upgradePromptYesNo = prevPrompt
+		upgradeIsTerminal = prevTty
+		version = prevVersion
+	})
+
+	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+		return "0.13.0", nil
+	}
+	upgradeRunShell = func(ctx context.Context, srcDir string) error { return nil }
+	upgradeIsTerminal = func(*os.File) bool { return true } // pretend tty
+	promptCalled := false
+	upgradePromptYesNo = func(io.Reader, io.Writer) bool {
+		promptCalled = true
+		return true
+	}
+	version = "v0.12.0+test1234"
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srcDir := filepath.Join(tmp, ".canopy", "src")
+	_ = os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755)
+
+	cmd := newUpgradeCmd()
+	cmd.SetArgs([]string{"--yes"})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if promptCalled {
+		t.Error("--yes should NOT trigger the prompt")
+	}
+}
+
+// TestRunUpgrade_nonTtyAutoConfirms: when stdin is not a tty (CI,
+// pipes), the prompt is bypassed and the upgrade proceeds. Makes
+// `canopy upgrade < /dev/null` and `echo y | canopy upgrade` both
+// just work.
+func TestRunUpgrade_nonTtyAutoConfirms(t *testing.T) {
+	prevFetch := upgradeFetchVersion
+	prevShell := upgradeRunShell
+	prevPrompt := upgradePromptYesNo
+	prevTty := upgradeIsTerminal
+	prevVersion := version
+	t.Cleanup(func() {
+		upgradeFetchVersion = prevFetch
+		upgradeRunShell = prevShell
+		upgradePromptYesNo = prevPrompt
+		upgradeIsTerminal = prevTty
+		version = prevVersion
+	})
+
+	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+		return "0.13.0", nil
+	}
+	upgradeRunShell = func(ctx context.Context, srcDir string) error { return nil }
+	upgradeIsTerminal = func(*os.File) bool { return false } // non-tty
+	promptCalled := false
+	upgradePromptYesNo = func(io.Reader, io.Writer) bool {
+		promptCalled = true
+		return true
+	}
+	version = "v0.12.0+test1234"
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	srcDir := filepath.Join(tmp, ".canopy", "src")
+	_ = os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755)
+
+	cmd := newUpgradeCmd()
+	cmd.SetArgs([]string{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if promptCalled {
+		t.Error("non-tty stdin should NOT trigger the prompt")
 	}
 }

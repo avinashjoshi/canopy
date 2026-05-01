@@ -465,7 +465,17 @@ func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.memCache.InvalidateAll()
 	}
 	lifecycle.ResetPRStatusCache()
-	return m, m.refresh()
+
+	// Force-refresh the upgrade-check cache too. The auto-check has a
+	// 6h TTL; if the user just shipped a new release outside canopy
+	// (manual `git pull && make install`), the pill won't notice
+	// until the next TTL window without this. `r` should mean "I want
+	// truth right now" across every cache, including upgrade.
+	cmds := []tea.Cmd{m.refresh()}
+	if cmd := upgradeRefreshCmd(m.upgradeRefreshFn); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
 }
 
 // actionTabSwitch flips Local ↔ Global. The new filtered set is pushed

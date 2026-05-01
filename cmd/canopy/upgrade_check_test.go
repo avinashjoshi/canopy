@@ -747,7 +747,9 @@ func TestRunUpgrade_clearsCacheOnSuccess(t *testing.T) {
 	}
 
 	cmd := newUpgradeCmd()
-	cmd.SetArgs([]string{})
+	// --yes skips the confirm prompt; the test exercises the full
+	// upgrade path including post-success cache rewrite.
+	cmd.SetArgs([]string{"--yes"})
 	cmd.SetOut(new(strings.Builder))
 	cmd.SetContext(context.Background())
 	if err := cmd.Execute(); err != nil {
