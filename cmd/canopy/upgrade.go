@@ -99,6 +99,12 @@ Network-only flags: --check (compare versions but skip the upgrade),
 	// DEV (no auto-check fires on DEV) and refuses if no cached
 	// latest exists (nothing to dismiss yet).
 	cmd.Flags().Bool("dismiss", false, "stop showing 'upgrade available' until the next release")
+	// --status prints the auto-check cache contents so users can
+	// debug "why isn't the pill showing?" / "did dismiss take?" /
+	// "when does the cache refresh?". Pure read, no network, no
+	// shell. Works on DEV (DEV doesn't auto-check, but inspecting
+	// any leftover cache file is still useful diagnostically).
+	cmd.Flags().Bool("status", false, "print the auto-check cache contents (debugging aid)")
 	return cmd
 }
 
@@ -106,7 +112,15 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 	checkOnly, _ := cmd.Flags().GetBool("check")
 	force, _ := cmd.Flags().GetBool("force")
 	dismiss, _ := cmd.Flags().GetBool("dismiss")
+	status, _ := cmd.Flags().GetBool("status")
 	out := cmd.OutOrStdout()
+
+	// --status is a pure cache read — no network, no shell, no DEV
+	// gate. Handle it before any of the upgrade-flavored guards so
+	// users can inspect the cache regardless of binary state.
+	if status {
+		return printUpgradeStatus(out)
+	}
 
 	// Refuse on dev binaries. Upgrading from "dev" doesn't have a
 	// sensible target — you're already running uncommitted local code.

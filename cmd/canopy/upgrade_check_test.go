@@ -1092,3 +1092,154 @@ func intToStrLocal(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// TestPrintUpgradeStatus covers the diagnostic output produced by
+// `canopy upgrade --status`. Five cache states (missing, malformed,
+// fresh+available, fresh+dismissed, fresh+up-to-date) drive the
+// load-bearing branches in the renderer.
+func TestPrintUpgradeStatus(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	prevVersion := version
+	t.Cleanup(func() { version = prevVersion })
+	version = "v0.13.0+abc1234"
+
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	prevNow := upgradeCheckNow
+	t.Cleanup(func() { upgradeCheckNow = prevNow })
+	upgradeCheckNow = func() time.Time { return now }
+
+	path, _ := upgradeCheckPath()
+
+	t.Run("missing cache shows empty state", func(t *testing.T) {
+		_ = os.Remove(path)
+		var buf strings.Builder
+		if err := printUpgradeStatus(&buf); err != nil {
+			t.Fatalf("printUpgradeStatus: %v", err)
+		}
+		got := buf.String()
+		for _, want := range []string{"Cache:      empty", "v0.13.0+abc1234", "release"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q; got:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("malformed cache surfaces parse error", func(t *testing.T) {
+		// Parent dir may not exist yet on a fresh TempDir; MkdirAll
+		// before the malformed write so readUpgradeCheck hits the
+		// parse-error branch instead of ErrNotExist.
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, []byte("{not json"), 0o644)
+		var buf strings.Builder
+		_ = printUpgradeStatus(&buf)
+		got := buf.String()
+		if !strings.Contains(got, "malformed") {
+			t.Errorf("output missing 'malformed'; got:\n%s", got)
+		}
+	})
+
+	t.Run("upgrade available shows pill SHOWING", func(t *testing.T) {
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now.Add(-2 * time.Hour),
+			LatestVersion: "0.14.0",
+		})
+		var buf strings.Builder
+		_ = printUpgradeStatus(&buf)
+		got := buf.String()
+		for _, want := range []string{"Latest:     0.14.0", "Pill state: SHOWING", "v0.14.0 available", "TTL:"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q; got:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("dismissed shows suppressed reason", func(t *testing.T) {
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:        now.Add(-1 * time.Hour),
+			LatestVersion:    "0.14.0",
+			DismissedVersion: "0.14.0",
+		})
+		var buf strings.Builder
+		_ = printUpgradeStatus(&buf)
+		got := buf.String()
+		if !strings.Contains(got, "dismissed") {
+			t.Errorf("output should mention dismissal; got:\n%s", got)
+		}
+	})
+
+	t.Run("up-to-date shows suppressed match", func(t *testing.T) {
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now.Add(-1 * time.Hour),
+			LatestVersion: "0.13.0",
+		})
+		var buf strings.Builder
+		_ = printUpgradeStatus(&buf)
+		got := buf.String()
+		if !strings.Contains(got, "matches latest") {
+			t.Errorf("output should mention version match; got:\n%s", got)
+		}
+	})
+
+	t.Run("DEV mode shows DEV exempt", func(t *testing.T) {
+		version = "dev"
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now,
+			LatestVersion: "0.13.0",
+		})
+		var buf strings.Builder
+		_ = printUpgradeStatus(&buf)
+		got := buf.String()
+		for _, want := range []string{"Mode:       DEV", "Pill state: suppressed (DEV exempt)"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q; got:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("expired TTL shows refresh hint", func(t *testing.T) {
+		version = "v0.13.0+abc"
+		_ = writeUpgradeCheck(path, &upgradeCheck{
+			CheckedAt:     now.Add(-7 * time.Hour), // beyond 6h TTL
+			LatestVersion: "0.14.0",
+		})
+		var buf strings.Builder
+		_ = printUpgradeStatus(&buf)
+		got := buf.String()
+		if !strings.Contains(got, "TTL:        expired") {
+			t.Errorf("output should mention expired TTL; got:\n%s", got)
+		}
+	})
+}
+
+// TestRunUpgrade_statusFlag exercises the --status flag end-to-end
+// through cobra. Confirms it doesn't trip the DEV guard or fetch
+// anything.
+func TestRunUpgrade_statusFlag(t *testing.T) {
+	prevVersion := version
+	prevFetch := upgradeFetchVersion
+	t.Cleanup(func() {
+		version = prevVersion
+		upgradeFetchVersion = prevFetch
+	})
+	upgradeFetchVersion = func(ctx context.Context, url string) (string, error) {
+		t.Error("--status must NOT fetch")
+		return "", nil
+	}
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	version = "dev" // even on DEV, --status should work
+
+	cmd := newUpgradeCmd()
+	cmd.SetArgs([]string{"--status"})
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(out.String(), "Cache file:") {
+		t.Errorf("--status output missing 'Cache file:'; got %q", out.String())
+	}
+}
