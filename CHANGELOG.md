@@ -5,6 +5,49 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.4.0] - 2026-04-30 — Workspace hints: ⚠ stuck state (Lane B of 3)
+
+Second slice of the workspace-hints expansion designed in
+`docs/design/v0.14-workspace-hints.md`. Catches workspaces in
+mid-rebase, mid-merge, mid-cherry-pick, or detached-HEAD state —
+all easy to forget when juggling parallel canopy workspaces and
+all surfaced now as a leftmost orange badge in the hint column.
+
+### Added
+
+- **`⚠ rebasing` / `⚠ merging` / `⚠ pick` / `⚠ detached` badges.**
+  A new `stuck_state` detector resolves the per-worktree gitdir
+  via `git rev-parse --git-dir` (necessary because `<ws.Path>/.git`
+  is a *file* in canopy worktrees, not a directory) and stats
+  marker files git leaves during in-progress operations:
+  `rebase-merge/`, `rebase-apply/`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`.
+  HEAD detached separately via `rev-parse --symbolic-full-name`.
+  First-match-wins precedence; rebase preempts detached so an
+  interactive rebase parking HEAD detached surfaces the more
+  actionable signal.
+- **Action hints per stuck state.** Each badge carries a continue/
+  switch command (`git rebase --continue`, `git merge --continue`,
+  `git cherry-pick --continue`, `git switch <branch>`) so the
+  AGENT.md briefing and any future hover/popover surface a
+  ready-made fix.
+- **Leftmost row position.** The stuck_state badge sits before
+  rename / mergeability / git_stats so the "finish your in-flight
+  git op first" signal is the first thing the user reads when
+  scanning across parallel workspaces.
+
+### Changed
+
+- **`detect.RunFast` now spans 6 detectors instead of 5.** The new
+  detector is purely-local (a few stat calls + one `git rev-parse`),
+  well under 10ms per workspace, and runs in the same parallel
+  goroutine pool as the others.
+
+Lane C (`push_state`: unpushed-to-origin separated from
+ahead-of-main) ships from its own canopy workspace and arrives in
+a subsequent version. The render-precedence overhaul (where
+stuck_state would also preempt git_stats) lands separately once
+all three lanes are in.
+
 ## [0.13.3.0] - 2026-04-30 — Workspace hints: ⚠ conflict (Lane A of 3)
 
 First slice of the workspace-hints expansion designed in

@@ -1058,9 +1058,9 @@ func TestRender_MergeabilityBadge_Suppressed(t *testing.T) {
 }
 
 // TestRender_MergeabilityBadge_OrderRelativeToRename: when both rename
-// and mergeability are active, rename sits leftmost (it's the
-// "name your branch" prerequisite to all other action), then
-// mergeability.
+// and mergeability are active, rename sits left of mergeability.
+// stuck_state would preempt both, but absent that, rename is the
+// "name your branch" prerequisite badge.
 func TestRender_MergeabilityBadge_OrderRelativeToRename(t *testing.T) {
 	m := New(Options{})
 	m.SetRows([]state.GlobalRow{{
@@ -1079,5 +1079,72 @@ func TestRender_MergeabilityBadge_OrderRelativeToRename(t *testing.T) {
 	if renameIdx > mergeIdx {
 		t.Errorf("expected rename LEFT of mergeability (rename@%d, merge@%d):\n%s",
 			renameIdx, mergeIdx, out)
+	}
+}
+
+// TestRender_StuckStateBadge_AllStates: each of the four stuck_state
+// messages renders verbatim through the row pipeline. Lipgloss styling
+// must not corrupt the glyphs or text.
+func TestRender_StuckStateBadge_AllStates(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"rebasing", "⚠ rebasing"},
+		{"merging", "⚠ merging"},
+		{"pick", "⚠ pick"},
+		{"detached", "⚠ detached"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(Options{})
+			m.SetRows([]state.GlobalRow{{
+				Project: "p", Name: "ws", Branch: "b",
+				Hints: []state.Hint{{Kind: "stuck_state", Message: tc.msg}},
+			}})
+			out := m.View()
+			if !strings.Contains(out, tc.msg) {
+				t.Errorf("stuck_state badge %q missing from render:\n%s", tc.msg, out)
+			}
+		})
+	}
+}
+
+// TestRender_StuckStateBadge_Suppressed: an empty message suppresses
+// the badge. Mirrors git_stats / mergeability — empty = no signal,
+// don't render orphan chrome.
+func TestRender_StuckStateBadge_Suppressed(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{
+		Project: "p", Name: "ws", Branch: "b",
+		Hints: []state.Hint{{Kind: "stuck_state", Message: ""}},
+	}})
+	out := m.View()
+	if strings.Contains(out, "⚠") {
+		t.Errorf("empty stuck_state message rendered ⚠ glyph:\n%s", out)
+	}
+}
+
+// TestRender_StuckStateBadge_LeftmostOfRename: stuck_state preempts
+// attention because the user can't act on rename / git_stats while
+// mid-rebase. Verify it sits left of the rename badge in the row.
+func TestRender_StuckStateBadge_LeftmostOfRename(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{
+		Project: "p", Name: "ws", Branch: "b",
+		Hints: []state.Hint{
+			{Kind: "rename_suggested", Message: "rename me"},
+			{Kind: "stuck_state", Message: "⚠ rebasing"},
+		},
+	}})
+	out := m.View()
+	stuckIdx := strings.Index(out, "⚠ rebasing")
+	renameIdx := strings.Index(out, "↻ rename")
+	if stuckIdx == -1 || renameIdx == -1 {
+		t.Fatalf("badge missing: stuck=%d rename=%d\n%s", stuckIdx, renameIdx, out)
+	}
+	if stuckIdx > renameIdx {
+		t.Errorf("expected stuck_state LEFT of rename (stuck@%d, rename@%d):\n%s",
+			stuckIdx, renameIdx, out)
 	}
 }

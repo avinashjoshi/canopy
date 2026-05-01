@@ -559,8 +559,9 @@ func stripAnsi(s string) string {
 //
 // Badge mapping (kept short to fit on a single row):
 //
-//	rename_suggested  →  ↻ rename
-//	mergeability                 →  ⚠ conflict   (orange, attention)
+//	stuck_state                  →  ⚠ rebasing / ⚠ merging / ⚠ pick / ⚠ detached
+//	rename_suggested             →  ↻ rename
+//	mergeability                 →  ⚠ conflict        (orange, attention)
 //	pr_status (open)             →  PR open
 //	pr_status (approved)         →  PR approved
 //	pr_status (changes-requested)→  PR changes
@@ -569,9 +570,12 @@ func stripAnsi(s string) string {
 //	shipped (no PR)              →  ✓ shipped (local)
 //
 // Multiple hints surface as space-separated badges. Order is:
-// rename → mergeability → git_stats → pr_status / shipped. Mergeability
-// sits left of git_stats so the "this won't merge clean" warning is
-// visually adjacent to the divergence counts that explain why.
+// stuck_state → rename → mergeability → git_stats → pr_status / shipped.
+// stuck_state sits leftmost because mid-rebase / mid-merge / detached
+// states are easy to forget across parallel workspaces and become the
+// most actionable thing the user can do — finish the in-flight git op
+// first. Mergeability sits left of git_stats so the "this won't merge
+// clean" warning reads next to the divergence counts that explain why.
 func RenderHintBadges(hints []state.Hint) string {
 	if len(hints) == 0 {
 		return ""
@@ -584,7 +588,17 @@ func RenderHintBadges(hints []state.Hint) string {
 		}
 	}
 	parts := make([]string, 0, len(hints))
-	// Render rename first so it sits left of the lifecycle-state badge.
+	// stuck_state goes first — orange + bold, leftmost. The user can't
+	// reason about ahead/behind/dirty while mid-rebase, so this badge
+	// preempts attention even before rename. Detector emits this only
+	// when the worktree is genuinely stuck mid-operation, so the badge
+	// always represents real action-required state.
+	for _, h := range hints {
+		if h.Kind == "stuck_state" && h.Message != "" {
+			parts = append(parts, stuckStateStyle().Render(h.Message))
+		}
+	}
+	// Render rename next so it sits left of the lifecycle-state badge.
 	for _, h := range hints {
 		if h.Kind == "rename_suggested" {
 			parts = append(parts, hintRenameStyle().Render("↻ rename"))
@@ -768,6 +782,14 @@ func hintShippedStyle() lipgloss.Style {
 // than the informational grey of git_stats, on par with rename/PR-changes
 // to slot into the existing "attention required" tier of the palette.
 func mergeabilityStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+}
+
+// stuckStateStyle: orange + bold. Mid-rebase / mid-merge / mid-pick /
+// detached HEAD are blocking — the user can't do useful work until the
+// in-flight git op is resolved. Same intensity tier as mergeability;
+// sits in the row's "loud action required" palette slot.
+func stuckStateStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
 }
 
