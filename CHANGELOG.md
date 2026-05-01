@@ -5,6 +5,66 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0.0] - 2026-04-30 — Upgrade UX overhaul
+
+Canopy now tells you when there's a newer version, and lets you upgrade
+without leaving the TUI.
+
+### Added
+
+- **Auto-check pill in the top bar.** When a newer canopy is available,
+  the version pill mutates from `v0.12.3` to `v0.12.3 ⇑ v0.13.0` (yellow
+  arrow). Synchronous read on TUI startup keeps launch zero-latency on
+  cache hits; stale cache triggers an async refresh that lands as the
+  TUI is already on screen, so the network never blocks rendering.
+- **In-TUI upgrade flow (press `U`).** Four states: loading the
+  changelog from GitHub, preview with the changelog rendered in a
+  scrollable viewport (`j`/`k`/PgUp/PgDn/g/G), running with live-tailed
+  `git pull` + `make install` output, done with success or stderr-tailed
+  failure. Esc cancels pre-run; Ctrl-C cancels the running subprocess
+  but stays in the flow so you can read what happened.
+- **`canopy ls` hint line.** When an upgrade is available, plain `canopy
+  ls` output ends with one dim line: `canopy v0.13.0 available — run
+  canopy upgrade`. Pure cache read, never blocks.
+- **Per-version dismissal.** Press `D` in the TUI or run `canopy upgrade
+  --dismiss` to silence the pill until a newer version ships. Dismissal
+  is automatic on the next release because the cache compares
+  per-version, not by snooze timer.
+- **Post-success restart hint.** The doneOK screen now reads "This
+  canopy session is still running the old binary. Press q to quit, then
+  re-run canopy to use v0.13.0." Linux/Mac keep the running inode alive
+  after `make install` replaces the file; new invocations get the new
+  binary, but the active TUI does not.
+- **Global Ctrl-C in the upgrade flow.** Loading and preview states
+  used to silently absorb Ctrl-C, breaking the convention that Ctrl-C
+  always quits canopy. Now Ctrl-C quits from any pre-run state and
+  cancels the subprocess from the running state.
+
+### Changed
+
+- `canopy upgrade --check` now writes the fetched VERSION into the
+  auto-check cache so the next non-check invocation sees fresh data
+  without re-fetching. Existing dismissed_version is preserved across
+  --check.
+- Successful `canopy upgrade` rewrites the cache to mark the running
+  version as latest, with dismissal cleared. Pill disappears
+  immediately instead of waiting for the next 6h refresh.
+
+### Infrastructure
+
+- New `~/.canopy/upgrade-check.json` cache (3 fields: `checked_at`,
+  `latest_version`, `dismissed_version`), 6h TTL, atomic tempfile+rename
+  writes. Mirrors the `state.json` pattern.
+- New public types in `internal/ui` for the closure boundary between
+  `cmd/canopy` and the TUI: `UpgradeRefreshFn`, `UpgradeChangelogFn`,
+  `UpgradeShellFn`, `UpgradeDismissFn`. Keeps unexported types
+  (`safeBuffer`) inside the package and lets `cmd/canopy` supply
+  network/shell layers without import cycles.
+- `RunUnified` signature gained 5 params for the upgrade closures
+  (`initialUpgrade`, `refreshFn`, `changelogFn`, `shellFn`, `dismissFn`).
+
+Design doc committed at `docs/design/v0.13-upgrade-ux.md`.
+
 ## [0.12.4] - 2026-04-30 — Revert org move: `oncactus/canopy` → `avinashjoshi/canopy`
 
 Reverses v0.6's transfer of canopy to the `oncactus` org. Repo is back at
