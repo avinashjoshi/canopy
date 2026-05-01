@@ -576,15 +576,27 @@ func stripAnsi(s string) string {
 // most actionable thing the user can do — finish the in-flight git op
 // first. Mergeability sits left of git_stats so the "this won't merge
 // clean" warning reads next to the divergence counts that explain why.
+//
+// Precedence rule (v0.14 closeout): when stuck_state fires, git_stats
+// is suppressed. The ahead/behind/dirty numbers are unstable while git
+// is rewriting history (rebase) or while the index holds a partial
+// merge — showing `↑3 ↓1 *5` next to `⚠ rebasing` adds noise without
+// adding signal because the user can't act on those numbers until the
+// in-flight op resolves. Other badges (rename, mergeability,
+// pr_status, shipped) keep rendering — they describe distinct facts
+// about the branch that don't move under git's feet during a rebase.
 func RenderHintBadges(hints []state.Hint) string {
 	if len(hints) == 0 {
 		return ""
 	}
 	hasPR := false
+	hasStuck := false
 	for _, h := range hints {
 		if h.Kind == "pr_status" {
 			hasPR = true
-			break
+		}
+		if h.Kind == "stuck_state" && h.Message != "" {
+			hasStuck = true
 		}
 	}
 	parts := make([]string, 0, len(hints))
@@ -614,13 +626,18 @@ func RenderHintBadges(hints []state.Hint) string {
 			parts = append(parts, mergeabilityStyle().Render(h.Message))
 		}
 	}
-	// Then git stats — show always (regardless of PR/merged state) so
-	// the user sees in-flight commit counts + dirty file count at a
-	// glance. Detector returns nil when all three counts are zero, so
+	// Then git stats — show whenever there's a non-empty message, EXCEPT
+	// when stuck_state has fired. During a rebase / mid-merge / mid-
+	// cherry-pick the ahead/behind/dirty numbers reflect git's transient
+	// internal state (rewritten HEAD, partial index) and are not signals
+	// the user can act on; the actionable signal is "finish that op
+	// first." Detector returns nil when all three counts are zero, so
 	// clean workspaces don't get a noisy "↑0 ↓0 *0" badge.
-	for _, h := range hints {
-		if h.Kind == "git_stats" && h.Message != "" {
-			parts = append(parts, gitStatsStyle().Render(h.Message))
+	if !hasStuck {
+		for _, h := range hints {
+			if h.Kind == "git_stats" && h.Message != "" {
+				parts = append(parts, gitStatsStyle().Render(h.Message))
+			}
 		}
 	}
 	// Then the lifecycle-state badge: PR if present, shipped fallback

@@ -5,6 +5,60 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0.0] - 2026-04-30 — Workspace hints: render-precedence overhaul (v0.14 closeout)
+
+Closes the v0.14 workspace-hints expansion designed in
+`docs/design/v0.14-workspace-hints.md`. With Lanes A/B/C all in
+(`⚠ conflict`, `⚠ rebasing` / `merging` / `pick` / `detached`,
+`⇡N` / `⇅`), the hint column had grown to seven distinct badges and
+some combinations were noisy. This release applies the precedence
+rule the design called out as the post-lanes follow-up.
+
+### Changed
+
+- **`stuck_state` preempts `git_stats`.** When a row carries a
+  stuck_state hint (mid-rebase, mid-merge, mid-cherry-pick, detached
+  HEAD), the renderer now suppresses the `↑N ↓N *N` git_stats badge
+  for that row. The ahead/behind/dirty numbers reflect git's
+  transient internal state during these operations — rebase rewrites
+  HEAD, merge holds a partial index — so they're not signals the
+  user can act on. The actionable signal is "finish that op first,"
+  which `⚠ rebasing` (etc.) already conveys; the numbers were just
+  noise.
+- **Other badges keep rendering during stuck states.** rename_suggested,
+  mergeability, push_state, pr_status, and shipped describe distinct
+  facts about the branch (its name, its mergeability against main,
+  its relationship to origin/&lt;branch&gt;, its PR state) that don't move
+  under git's feet during a rebase, so they stay visible. Only
+  git_stats is suppressed because it's the only badge whose numbers
+  are computed off the unstable HEAD/index pair.
+- **Defensive guard.** An empty `stuck_state.Message` (the detector's
+  "no signal" contract) does NOT trigger the preempt — git_stats
+  keeps rendering. Locked in by a regression test alongside the
+  precedence test.
+
+### Why a 0.14.0.0 milestone bump
+
+The three preceding ships (0.13.3.0 Lane A, 0.13.4.0 Lane B,
+0.13.5.0 Lane C) plus this precedence pass complete the v0.14
+design end-to-end. The minor bump signals the milestone closeout
+in the version stream so users (and `canopy upgrade --status`) can
+see at a glance which release the design landed under. No breaking
+changes; the bump is purely narrative.
+
+### NOT in this PR (deferred to follow-ups)
+
+- **Width-aware truncation.** The design doc proposed dropping
+  low-priority badges when the row exceeds terminal width. That's a
+  bigger change (renderer needs terminal width + a priority list +
+  drop logic) and ships separately as a v0.14.1+ ergonomics pass.
+  Tracked in TODOS.md.
+- **stuck preempts push_state / mergeability.** Same reasoning could
+  argue for hiding push_state and mergeability under a stuck_state
+  preempt; rejected for now because both surface stable refs
+  (origin/&lt;branch&gt;, origin/&lt;default&gt;) that don't move during a
+  local rebase. Re-evaluate if dogfooding shows otherwise.
+
 ## [0.13.4.0] - 2026-04-30 — Workspace hints: ⚠ stuck state (Lane B of 3)
 
 Second slice of the workspace-hints expansion designed in

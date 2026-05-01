@@ -454,6 +454,91 @@ func TestRender_GitStatsBadge_AlwaysShows(t *testing.T) {
 	}
 }
 
+// TestRender_StuckStatePreemptsGitStats locks in the v0.14 closeout
+// precedence rule: when a row carries a stuck_state hint, the
+// git_stats badge is suppressed even if the detector emitted one.
+// During a rebase / merge / cherry-pick the ahead/behind/dirty
+// counts reflect git's transient internal state and are not
+// actionable; the only thing the user can usefully do is finish
+// the in-flight op. Other badges (rename, mergeability, pr_status,
+// shipped) keep rendering because they describe distinct facts
+// that don't move during a rebase.
+func TestRender_StuckStatePreemptsGitStats(t *testing.T) {
+	t.Run("stuck + git_stats → only stuck", func(t *testing.T) {
+		m := New(Options{})
+		m.SetRows([]state.GlobalRow{{
+			Project: "p", Name: "ws", Branch: "b",
+			Hints: []state.Hint{
+				{Kind: "stuck_state", Message: "⚠ rebasing"},
+				{Kind: "git_stats", Message: "↑3 ↓1 *5"},
+			},
+		}})
+		out := m.View()
+		if !strings.Contains(out, "⚠ rebasing") {
+			t.Errorf("stuck_state badge missing:\n%s", out)
+		}
+		if strings.Contains(out, "↑3") || strings.Contains(out, "↓1") || strings.Contains(out, "*5") {
+			t.Errorf("git_stats glyphs leaked through stuck_state preempt:\n%s", out)
+		}
+	})
+
+	t.Run("stuck + rename + mergeability + git_stats → all but stats", func(t *testing.T) {
+		m := New(Options{})
+		m.SetRows([]state.GlobalRow{{
+			Project: "p", Name: "ws", Branch: "b",
+			Hints: []state.Hint{
+				{Kind: "stuck_state", Message: "⚠ merging"},
+				{Kind: "rename_suggested", Message: "branch needs rename"},
+				{Kind: "mergeability", Message: "⚠ conflict"},
+				{Kind: "git_stats", Message: "↑2 *4"},
+			},
+		}})
+		out := m.View()
+		for _, want := range []string{"⚠ merging", "↻ rename", "⚠ conflict"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q under stuck_state precedence:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "↑2") || strings.Contains(out, "*4") {
+			t.Errorf("git_stats survived stuck_state preempt:\n%s", out)
+		}
+	})
+
+	t.Run("git_stats alone (no stuck) → unchanged", func(t *testing.T) {
+		// Regression guard: the precedence rule must NOT fire when
+		// stuck_state is absent. git_stats is a primary surface in the
+		// common case and must keep rendering.
+		m := New(Options{})
+		m.SetRows([]state.GlobalRow{{
+			Project: "p", Name: "ws", Branch: "b",
+			Hints: []state.Hint{{Kind: "git_stats", Message: "↑3 *2"}},
+		}})
+		out := m.View()
+		if !strings.Contains(out, "↑3 *2") {
+			t.Errorf("git_stats should render when stuck_state absent:\n%s", out)
+		}
+	})
+
+	t.Run("stuck with empty message does NOT preempt", func(t *testing.T) {
+		// Defensive: an empty stuck_state.Message is the detector's
+		// "no signal" contract. It should NOT trigger the preempt
+		// because the badge column will be empty for that hint and
+		// the user is owed the git_stats info.
+		m := New(Options{})
+		m.SetRows([]state.GlobalRow{{
+			Project: "p", Name: "ws", Branch: "b",
+			Hints: []state.Hint{
+				{Kind: "stuck_state", Message: ""},
+				{Kind: "git_stats", Message: "↑1"},
+			},
+		}})
+		out := m.View()
+		if !strings.Contains(out, "↑1") {
+			t.Errorf("empty stuck_state should not preempt git_stats:\n%s", out)
+		}
+	})
+}
+
 // TestRender_GitStatsBadge_Suppressed: an empty git_stats message is
 // the contract for "no signal" (clean workspace). Renderer must skip
 // it so the row stays visually quiet rather than showing a blank pill.
