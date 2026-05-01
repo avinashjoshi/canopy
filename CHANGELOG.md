@@ -5,6 +5,51 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0.1] - 2026-05-01 — README polish for public launch
+
+The repo went public, so the README needed to read like an open-source
+project landing page instead of a private build log. Mostly a copy and
+structure pass, plus the first hero screenshot.
+
+### Added
+
+- **Hero screenshot.** `docs/images/tui-global.png` shows the Global tab
+  with workspaces across four projects, embedded under the README
+  tagline so visitors see the product before they read about installing
+  it.
+- **"Why canopy?" section.** Two sentences framing the parallel-agent
+  use case, with a link to `docs/landscape.md` for the longer take.
+- **CHANGELOG link** in the Documentation section.
+
+### Changed
+
+- **Status banner updated.** Was "pre-v0.1, in active development. Not
+  yet usable end-to-end" — out of date by ten minor releases. Now reads
+  "v0.14, daily-driven by the author."
+- **Section order.** Features now come before Install (you should know
+  what canopy does before you install it). Install leads with the curl
+  one-liner; per-platform prereqs collapsed into a bullet list.
+- **"What works today" → "Features".** Same content, less apologetic
+  framing for a public README.
+
+### Fixed
+
+- **3-pane vs 4-pane confusion.** The README claimed both. Reconciled to
+  3-pane (nvim, claude, shell), matching what `internal/workspace/
+  lifecycle.go` actually creates — `scripts.run` is launched on demand
+  via `canopy run`, not auto-started.
+- **Stale `scripts.run` claim.** "Reserved for a future on-demand
+  invocation" was true at v0.7 and false ever since. Replaced with a
+  pointer to the current `canopy run` / `<prefix>r` flow.
+- **Version examples** bumped from v0.12 / v0.13 to v0.14 throughout
+  the verify and upgrade sections.
+
+### Removed
+
+- **Cravd Inc. copyright.** Replaced with personal copyright in
+  `LICENSE` (MIT requires a named holder); README license line now
+  just links to `LICENSE`.
+
 ## [0.14.0.0] - 2026-04-30 — Workspace hints: render-precedence overhaul (v0.14 closeout)
 
 Closes the v0.14 workspace-hints expansion designed in
