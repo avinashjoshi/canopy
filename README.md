@@ -78,9 +78,12 @@ canopy upgrade
 
 That fetches the latest VERSION from `main`, compares with what you're running, prints the CHANGELOG diff, and runs `git pull --ff-only && make install` in `~/.canopy/src`. Refuses cleanly if you're on a dev binary (`canopy use release` first) or if `~/.canopy/src` is missing/corrupt (re-run install.sh).
 
-Two flags:
+Three flags:
 - `canopy upgrade --check` — compare versions without upgrading
 - `canopy upgrade --force` — run `git pull` + `make install` even when versions match
+- `canopy upgrade --dismiss` — silence the in-TUI upgrade pill until the next release ships
+
+Canopy also auto-checks once every 6 hours in the background. When a newer release is out, the TUI's top-bar version pill mutates from `v0.13.0` to `v0.13.0 ⇑ v0.13.1` (yellow arrow), and `canopy ls` ends with one dim hint line. Press `U` inside the TUI to read the changelog in a scrollable viewport and run the upgrade without leaving canopy. Press `D` to dismiss the current available version.
 
 ### Uninstall
 
@@ -206,7 +209,7 @@ Plus operational glue:
 
 Workspaces live at `~/.canopy/workspaces/<project>/<name>` — canopy owns the storage so the source repo stays clean. Each workspace gets a 4-pane tmux session (nvim, claude, shell, your dev server) and a unique TCP port via `CANOPY_PORT`.
 
-`canopy` with no args launches a Bubbletea TUI — the same workspace list with arrow-key navigation, `enter` to attach, `n` to create, `d` to delete (with confirmation), `?` for help. CLI subcommands work alongside it; both call into the same `workspace.Manager` underneath.
+`canopy` with no args launches a Bubbletea TUI — the same workspace list with arrow-key navigation, `enter` to attach, `n` to create, `d` to delete (with confirmation), `U` to upgrade canopy itself when a newer version is available, `?` for help. CLI subcommands work alongside it; both call into the same `workspace.Manager` underneath.
 
 ### tmux integration (v0.7+)
 
