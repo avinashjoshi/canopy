@@ -5,6 +5,41 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2.0] - 2026-05-01 — Upgrade UX polish: confirm gate, force-refresh, hints
+
+Round of polish on the v0.13 upgrade flow surfaced by first-day
+dogfooding.
+
+### Added
+
+- **`canopy upgrade` confirmation gate.** The CLI used to barrel
+  through and run shell immediately after printing the changelog,
+  making it impossible to actually read what was about to change.
+  Now it prompts `Apply this upgrade? [Y/n]` after the changelog
+  preview. Pass `--yes` (or `-y`) to skip; non-interactive stdin
+  (CI, pipes, redirects) auto-confirms; `--force` continues to
+  imply yes since forcing IS the confirmation.
+- **`r` in the TUI also force-refreshes the auto-check cache.**
+  The 6h TTL means that if you ship a release outside canopy
+  (`make install` from `~/Work/canopy`), the pill won't notice
+  until the next TTL window. Pressing `r` now busts the upgrade
+  cache too — same intent as the existing "I want truth right
+  now" semantic for workspace state.
+- **`canopy upgrade --status` includes manual escape hatches.**
+  The status output now ends with three hint lines documenting
+  `canopy upgrade --check` (force refresh), `canopy upgrade
+  --dismiss` (silence pill), and the in-TUI `r` / `D` keys. Makes
+  `--status` the single answer to "why isn't the pill doing what
+  I expect?"
+
+### Infrastructure
+
+- `RunUnifiedOptions` gains `RefreshOnInit bool`. The auto-check
+  closure is now wired unconditionally (when not DEV) so the `r`
+  key can use it; `RefreshOnInit` separately gates whether Init()
+  fires it on launch. Caller (route.go) sets it from the same
+  `needsRefresh` flag that previously gated wiring at all.
+
 ## [0.13.1.0] - 2026-05-01 — `canopy upgrade --status` diagnostic flag
 
 Adds a debugging surface for the v0.13 auto-check feature. Useful for

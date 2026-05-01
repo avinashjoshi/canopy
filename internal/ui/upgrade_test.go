@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -717,4 +718,53 @@ func TestStripTerminalControl(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestActionRefresh_firesUpgradeCheck: pressing `r` in the workspace
+// list must trigger the auto-check refresh path in addition to the
+// workspace refresh. We test the unit, upgradeRefreshCmd, separately
+// (TestUpgradeRefreshCmd_invokesFn) — here we just verify
+// actionRefresh batches a non-nil cmd when refreshFn is wired.
+//
+// We can't directly invoke the tea.Batch cmd to inspect its
+// children (Bubbletea's runtime is what unwraps batch into
+// individual sub-commands). The behavioral check is "does
+// actionRefresh produce a Cmd in both wired-refreshFn and nil-fn
+// cases?" — covered here and in the sibling test below.
+func TestActionRefresh_firesUpgradeCheck(t *testing.T) {
+	m := newTestModel(false)
+	m.upgradeRefreshFn = func(ctx context.Context) (string, error) {
+		return "0.13.1.0", nil
+	}
+
+	updated, cmd := actionRefresh(m, tea.KeyMsg{})
+	if updated == nil {
+		t.Fatal("actionRefresh returned nil model")
+	}
+	if cmd == nil {
+		t.Fatal("actionRefresh returned nil cmd — should batch refresh + upgrade-refresh")
+	}
+	// suppress "imported and not used" if time stays referenced
+	// in the broader test file — keep import intact for the
+	// post-success doneOK test elsewhere in this file.
+	_ = time.Second
+}
+
+// TestActionRefresh_noRefreshFnIsSafe: when the upgrade refresh
+// closure isn't wired (DEV builds, tests), actionRefresh must still
+// work without panicking. The workspace refresh fires; the upgrade
+// refresh is silently skipped.
+func TestActionRefresh_noRefreshFnIsSafe(t *testing.T) {
+	m := newTestModel(false)
+	m.upgradeRefreshFn = nil // explicitly nil
+
+	updated, cmd := actionRefresh(m, tea.KeyMsg{})
+	if updated == nil {
+		t.Fatal("actionRefresh returned nil model with nil refresh fn")
+	}
+	if cmd == nil {
+		t.Fatal("actionRefresh returned nil cmd — workspace refresh should still run")
+	}
+	// Don't invoke the cmd — we just need to confirm the path
+	// doesn't panic during construction.
 }

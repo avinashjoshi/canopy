@@ -416,7 +416,26 @@ func printUpgradeStatus(out io.Writer) error {
 	default:
 		fmt.Fprintf(out, "Pill state: SHOWING (v%s available)\n", cache.LatestVersion)
 	}
+
+	// Document the manual escape hatches inline. The 6h TTL means
+	// users who just shipped + installed a new version may not see
+	// the pill until either the cache expires or they force a
+	// refresh. Surfacing these here makes --status the single answer
+	// to "why isn't the pill doing what I expect?"
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, subtleHint("To force a refresh:    canopy upgrade --check"))
+	fmt.Fprintln(out, subtleHint("To dismiss the pill:   canopy upgrade --dismiss"))
+	fmt.Fprintln(out, subtleHint("Inside the TUI:        press r to refresh, D to dismiss"))
 	return nil
+}
+
+// subtleHint indents a hint line under the diagnostic output so the
+// data fields ("Cache file:", "Pill state:", etc.) read first and
+// the next-action hints sit visually below them. Plain string for
+// CLI output — no lipgloss styling since this is meant to render
+// in any terminal including pipes.
+func subtleHint(s string) string {
+	return "  " + s
 }
 
 // emptyOrDash returns s, or "—" when s is empty. Tiny helper for
