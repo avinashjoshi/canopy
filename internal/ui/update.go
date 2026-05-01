@@ -39,6 +39,90 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			reserve = 5 // single-line tab bar + tighter chrome
 		}
 		m.list.SetSize(msg.Width, msg.Height-reserve)
+		// Resize the upgrade viewport too if it's currently in use.
+		// initUpgradeViewport reads m.width/m.height, so this re-fits
+		// the changelog pane when the terminal resizes mid-preview.
+		if m.upgradeChangelogInit {
+			m.initUpgradeViewport()
+		}
+		return m, nil
+
+	case upgradeCheckedMsg:
+		// Async upgrade refresh landed. Update pill state — empty
+		// latest means "no upgrade available after refresh" (cleared)
+		// or "fetch failed" (closure swallows errors). Either way,
+		// trust what the closure returned. Re-render is automatic.
+		m.upgradeAvailable = msg.latest
+		return m, nil
+
+	case changelogLoadedMsg:
+		// Changelog fetch returned. Even on error we flip to preview —
+		// the changelog is best-effort, the upgrade flow proceeds
+		// without it. The renderer surfaces "(changelog unavailable)"
+		// when preview is empty.
+		if msg.err != nil {
+			log.Warn("upgrade.changelog_fetch_failed", "err", msg.err)
+		}
+		m.upgradeChangelog = msg.preview
+		m.upgradeState = upgradeStatePreview
+		m.initUpgradeViewport()
+		return m, nil
+
+	case upgradeShellStartedMsg:
+		// Lazy-spawn bridge from runUpgradeShellCmd. Latch the
+		// buffer + cancel func, flip to running state, and dispatch
+		// the streaming + completion cmds (same shape as the
+		// create / remove flows).
+		m.upgradeBuf = msg.buf
+		m.upgradeCancel = msg.cancel
+		m.upgradeState = upgradeStateRunning
+		m.upgradeOutput = ""
+		return m, tea.Batch(
+			upgradeProgressTickCmd(msg.buf),
+			waitUpgradeShellDoneCmd(msg.done),
+		)
+
+	case upgradeProgressTickMsg:
+		// Stream tail. Append the new chunk and reschedule the next
+		// tick unless the upgrade already finished. Mirrors busyMode's
+		// progressTickMsg handling exactly.
+		if msg.chunk != "" {
+			m.upgradeOutput += msg.chunk
+		}
+		if m.upgradeState != upgradeStateRunning {
+			return m, nil
+		}
+		return m, upgradeProgressTickCmd(msg.buf)
+
+	case upgradeShellDoneMsg:
+		// Terminal state. Append any trailing buffer content the
+		// final tick missed; flip to doneOK or doneError so the
+		// renderer shows the success/failure summary. The user
+		// presses any key to return to listMode (handleUpgradeKey).
+		if msg.output != "" {
+			m.upgradeOutput += msg.output
+		}
+		m.upgradeErr = msg.err
+		if msg.err == nil {
+			m.upgradeState = upgradeStateDoneOK
+			// Capture the shipped version for the doneOK message
+			// before clearing the pill. The renderer needs this
+			// to tell the user "you shipped v0.13.0; quit + restart
+			// to use it."
+			m.upgradeShipped = m.upgradeAvailable
+			// Pill clears immediately on success — the running
+			// canopy IS the just-installed binary (well, the
+			// next invocation will be; this process is doomed to
+			// be replaced). Setting upgradeAvailable to "" keeps
+			// the pill from leaking the old "v0.13 available"
+			// signal during the brief window between done and
+			// any-key dismiss.
+			m.upgradeAvailable = ""
+		} else {
+			m.upgradeState = upgradeStateDoneError
+		}
+		// Drop the cancel ref; the goroutine has already returned.
+		m.upgradeCancel = nil
 		return m, nil
 
 	case rowsLoadedMsg:
@@ -325,6 +409,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDrawerKey(msg)
 	case busyMode:
 		return m.handleBusyModeKey(msg)
+	case upgradeMode:
+		return m.handleUpgradeKey(msg)
 	}
 
 	// Search-mode keystrokes: capture into searchQuery, refilter on each

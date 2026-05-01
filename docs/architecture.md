@@ -14,6 +14,8 @@ cmd/canopy/                    Cobra root + every subcommand. One file per cmd.
   rm.go                        canopy rm (confirm prompt, -y to skip)
   reconcile.go                 canopy reconcile
   main_session.go              canopy main (tmux at project root)
+  upgrade.go                   canopy upgrade (--check, --force, --dismiss)
+  upgrade_check.go             ~/.canopy/upgrade-check.json cache + 6h auto-check
   manager.go                   loadManager / loadConfig / getCwd helpers
 
 internal/clog/                 Structured logging via slog + lumberjack rotation.

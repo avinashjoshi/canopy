@@ -2066,3 +2066,84 @@ func TestRenderFilterPill_PlaceholderShownWhenEmpty(t *testing.T) {
 		}
 	})
 }
+
+// TestUpgradeCheckedMsg_updatesPill: the async refresh result lands
+// as upgradeCheckedMsg; Update must apply the new latest into the
+// model so the pill re-renders with the fresh value.
+func TestUpgradeCheckedMsg_updatesPill(t *testing.T) {
+	m := &Model{}
+	m.SetVersionInfo("v0.12.3+abc", "")
+	m.SetUpgradeAvailable("") // initial: no upgrade visible
+
+	// Simulate the async refresh result.
+	updated, _ := m.Update(upgradeCheckedMsg{latest: "0.13.0"})
+	got := updated.(*Model)
+	if got.upgradeAvailable != "0.13.0" {
+		t.Errorf("upgradeAvailable = %q, want 0.13.0", got.upgradeAvailable)
+	}
+}
+
+// TestUpgradeCheckedMsg_clearsPill: an empty latest string clears
+// the pill (e.g., user just upgraded; refresh detects no newer
+// version is available).
+func TestUpgradeCheckedMsg_clearsPill(t *testing.T) {
+	m := &Model{}
+	m.SetUpgradeAvailable("0.13.0") // initial: pill showing
+	updated, _ := m.Update(upgradeCheckedMsg{latest: ""})
+	got := updated.(*Model)
+	if got.upgradeAvailable != "" {
+		t.Errorf("upgradeAvailable = %q, want empty after refresh cleared", got.upgradeAvailable)
+	}
+}
+
+// TestUpgradeRefreshCmd_nilFnReturnsNil: when no refresh fn is wired
+// (test path, popup mode, etc.), upgradeRefreshCmd must not panic
+// and must not produce a tea.Cmd. Init relies on this so it can
+// safely append the result to its tea.Batch.
+func TestUpgradeRefreshCmd_nilFnReturnsNil(t *testing.T) {
+	if cmd := upgradeRefreshCmd(nil); cmd != nil {
+		t.Errorf("nil fn should produce nil cmd; got %T", cmd)
+	}
+}
+
+// TestUpgradeRefreshCmd_invokesFn: closure is called when wired,
+// and its return value flows into the upgradeCheckedMsg.
+func TestUpgradeRefreshCmd_invokesFn(t *testing.T) {
+	called := false
+	fn := func(ctx context.Context) (string, error) {
+		called = true
+		return "0.13.0", nil
+	}
+	cmd := upgradeRefreshCmd(fn)
+	if cmd == nil {
+		t.Fatal("non-nil fn should produce a cmd")
+	}
+	msg := cmd()
+	if !called {
+		t.Error("fn was not invoked")
+	}
+	got, ok := msg.(upgradeCheckedMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want upgradeCheckedMsg", msg)
+	}
+	if got.latest != "0.13.0" {
+		t.Errorf("got.latest = %q, want 0.13.0", got.latest)
+	}
+}
+
+// TestUpgradeRefreshCmd_swallowsError: closure errors must NOT
+// propagate to upgradeCheckedMsg (which has no err field) — they're
+// silently absorbed and the msg carries the empty latest the fn
+// returned. Ensures a transient network failure doesn't crash the
+// TUI mid-session.
+func TestUpgradeRefreshCmd_swallowsError(t *testing.T) {
+	fn := func(ctx context.Context) (string, error) {
+		return "", fmt.Errorf("network down")
+	}
+	cmd := upgradeRefreshCmd(fn)
+	msg := cmd()
+	got := msg.(upgradeCheckedMsg)
+	if got.latest != "" {
+		t.Errorf("latest on error = %q, want empty", got.latest)
+	}
+}

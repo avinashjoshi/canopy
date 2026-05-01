@@ -116,3 +116,61 @@ func TestRenderVersionPill_suppressed(t *testing.T) {
 		t.Errorf("explicit-empty SetVersionInfo should suppress pill; got %q", pill)
 	}
 }
+
+// TestRenderVersionPill_upgradeAvailable: 4th branch added in v0.13.
+// Release pill mutates to include "⇑ v<latest>" when upgradeAvailable
+// is set. Pill is still rendered (not suppressed); the version label
+// is still present.
+func TestRenderVersionPill_upgradeAvailable(t *testing.T) {
+	m := &Model{}
+	m.SetVersionInfo("v0.12.3+abc1234", "")
+	m.SetUpgradeAvailable("0.13.0")
+	pill := m.renderVersionPill()
+	if pill == "" {
+		t.Fatal("upgrade-available pill must render")
+	}
+	if !strings.Contains(pill, "v0.12.3+abc1234") {
+		t.Errorf("upgrade pill missing current version; got %q", pill)
+	}
+	if !strings.Contains(pill, "⇑ v0.13.0") {
+		t.Errorf("upgrade pill missing arrow + new version; got %q", pill)
+	}
+	if strings.Contains(pill, "DEV") {
+		t.Errorf("upgrade pill should not contain DEV; got %q", pill)
+	}
+}
+
+// TestRenderVersionPill_upgradeNotAvailable: setting upgradeAvailable
+// to "" reverts to the plain release pill (no arrow, no new version).
+// Covers the "post-upgrade clears the pill" path where we want the
+// arrow to disappear after the user upgrades.
+func TestRenderVersionPill_upgradeNotAvailable(t *testing.T) {
+	m := &Model{}
+	m.SetVersionInfo("v0.13.0+abc", "")
+	m.SetUpgradeAvailable("") // explicit empty
+	pill := m.renderVersionPill()
+	if !strings.Contains(pill, "v0.13.0") {
+		t.Errorf("plain release pill missing version; got %q", pill)
+	}
+	if strings.Contains(pill, "⇑") {
+		t.Errorf("upgrade arrow leaked into plain release pill; got %q", pill)
+	}
+}
+
+// TestRenderVersionPill_devWinsOverUpgrade: DEV pill wins even when
+// upgradeAvailable is set (which it shouldn't be for DEV anyway, but
+// defensive). Belt-and-suspenders: route.go won't set
+// upgradeAvailable on DEV builds, but if it ever did, the renderer
+// suppresses the upgrade arrow to avoid confusion.
+func TestRenderVersionPill_devWinsOverUpgrade(t *testing.T) {
+	m := &Model{}
+	m.SetVersionInfo("dev", "feature-A")
+	m.SetUpgradeAvailable("0.13.0") // shouldn't happen, but if it does...
+	pill := m.renderVersionPill()
+	if !strings.Contains(pill, "DEV: feature-A") {
+		t.Errorf("DEV pill must win; got %q", pill)
+	}
+	if strings.Contains(pill, "⇑") {
+		t.Errorf("DEV pill must NOT show upgrade arrow; got %q", pill)
+	}
+}

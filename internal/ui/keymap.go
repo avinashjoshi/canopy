@@ -146,6 +146,25 @@ var listModeBindings = []Binding{
 		Action: actionRefresh,
 	},
 	{
+		// U opens the in-TUI canopy upgrade flow. Only bound when an
+		// upgrade is available and the closures are wired (via
+		// availableUpgrade); pressing U otherwise is silently
+		// ignored. The flow is full-screen and owned by upgradeMode.
+		K:         key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "upgrade")),
+		Available: availableUpgrade,
+		Action:    actionUpgrade,
+	},
+	{
+		// D dismisses the current "upgrade available" pill. Only
+		// bound when an upgrade is available + dismissal closure
+		// wired (via availableDismissUpgrade). Lowercase d is
+		// already taken by delete; capital D matches the convention
+		// of K-for-kill being the "deliberate keypress" case.
+		K:         key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "dismiss upgrade")),
+		Available: availableDismissUpgrade,
+		Action:    actionDismissUpgrade,
+	},
+	{
 		K:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Action: actionHelpToggle,
 	},

@@ -40,6 +40,8 @@ func (m *Model) View() string {
 		return m.renderDrawer()
 	case busyMode:
 		return m.renderBusyView()
+	case upgradeMode:
+		return m.renderUpgrade()
 	}
 
 	if m.mode == confirmRetryMode {
@@ -1096,6 +1098,9 @@ func (m *Model) renderHelp() string {
 		"  o              focus project (Global tab only)",
 		"  p              open PR in browser (when row has PR hint)",
 		"  r              refresh state (also enables Mem column)",
+		"",
+		"  U              upgrade canopy (only when an upgrade is available)",
+		"  D              dismiss the 'upgrade available' pill until next release",
 		"",
 		"  ?              this help",
 		"  q, ctrl-c      quit",

@@ -177,7 +177,7 @@ func roundedPillSubtle(content, fgColor, bgColor string) string {
 }
 
 // renderVersionPill returns the top-bar version pill string, or "" to
-// suppress the pill entirely. Three cases (in priority order):
+// suppress the pill entirely. Four cases (in priority order):
 //
 //  1. devWorkspace non-empty → cyan "DEV: <workspace>" pill. The DEV
 //     pill always wins when the binary is a dev build inside a known
@@ -189,17 +189,40 @@ func roundedPillSubtle(content, fgColor, bgColor string) string {
 //     known worktree (path heuristic + git fallback both missed).
 //     We prefer no pill over a bare "DEV" pill that would surprise
 //     the user with an active state they didn't request.
-//  3. versionLabel non-empty → muted gray release pill.
+//  3. upgradeAvailable non-empty → release pill mutates to show
+//     "vX.Y.Z ⇑ vA.B.C" with a yellow up-arrow indicating an upgrade
+//     is available. The pill body color stays gray (so it doesn't
+//     clash with the violet brand pill or cyan DEV pill); only the
+//     arrow + new-version segment renders in yellow (220) for the
+//     eye to catch. Suppressed for DEV builds at the SetUpgradeAvailable
+//     layer — DEV never sets this field.
+//  4. versionLabel non-empty (no upgrade) → muted gray release pill.
 //
 // Color choices: cyan (51) for DEV is loud enough to catch the eye
 // without clashing with the violet brand pill; gray-on-dark-gray
-// (245/237) for release matches the scope pill's existing palette.
+// (245/237) for release matches the scope pill's existing palette;
+// yellow (220) for the upgrade arrow is the standard "attention"
+// signal in the canopy palette without clashing with the existing
+// status colors.
 func (m *Model) renderVersionPill() string {
 	if m.devWorkspace != "" {
 		return roundedPill("DEV: "+m.devWorkspace, "0", "51") // black on bright cyan
 	}
 	if m.versionLabel == "" {
 		return ""
+	}
+	if m.upgradeAvailable != "" {
+		// Release pill body stays gray; build the content with an
+		// inline yellow arrow + new version. The arrow is styled
+		// with matching pill background so it sits visually inside
+		// the rounded shape — eye reads one continuous pill, not a
+		// pill+segment+pill sandwich.
+		arrow := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("220")).
+			Background(lipgloss.Color("237")).
+			Bold(true).
+			Render(" ⇑ v" + m.upgradeAvailable)
+		return roundedPillSubtle(m.versionLabel+arrow, "245", "237")
 	}
 	return roundedPillSubtle(m.versionLabel, "245", "237") // gray on dark gray
 }

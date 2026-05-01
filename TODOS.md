@@ -1068,7 +1068,20 @@ threshold needs design. Punt to a future round if anyone wants it.
 
 ---
 
-## P3 — Upgrade UX overhaul (deferred from v0.12.0 ship 2026-04-30)
+## ✅ DONE 2026-04-30 — Upgrade UX overhaul (v0.13.0.0)
+
+Shipped per design doc at `docs/design/v0.13-upgrade-ux.md`. All three
+sub-items below landed in the same PR: auto-check pill + cache file,
+in-TUI U-key flow with scrollable changelog viewport, and the
+"press U to upgrade" integration. The deferred P3 entry's design
+questions were resolved interactively during /plan-eng-review and
+locked in the design doc.
+
+Original P3 brief preserved below for historical context.
+
+---
+
+## P3 (HISTORICAL) — Upgrade UX overhaul (deferred from v0.12.0 ship 2026-04-30)
 
 The v0.12.0 `canopy upgrade` is functional but spartan: explicit
 invocation only, plain stdout, no proactive surface for available
