@@ -11,14 +11,15 @@
 //
 // Detector cost classes:
 //
-//   - local (RunFast): rename_suggested, shipped, pr_status. The first
-//     two are pure-local git reads (rev-list, merge-base). pr_status
-//     shells out to gh but is cached 10min in-memory per (project, branch),
-//     so the worst case is one gh call per workspace per 10min — well
-//     inside the GitHub API budget. Cache key includes the current branch
-//     so a `git branch -m` invalidates cleanly via mismatched key.
+//   - local (RunFast): rename_suggested, shipped, git_stats, mergeability,
+//     pr_status. The first four are local git reads (rev-list, merge-base,
+//     status, merge-tree). pr_status shells out to gh but is cached 10min
+//     in-memory per (project, branch), so the worst case is one gh call
+//     per workspace per 10min — well inside the GitHub API budget. Cache
+//     key includes the current branch so a `git branch -m` invalidates
+//     cleanly via mismatched key.
 //
-// All three run on every TUI refresh + every reconcile. Earlier versions
+// All five run on every TUI refresh + every reconcile. Earlier versions
 // gated pr_status behind a manual `r` keystroke to "save the API budget,"
 // but the cache makes that safety unnecessary and the gating produced a
 // confusing UX where local "shipped" appeared before authoritative PR
@@ -46,7 +47,7 @@ var log = clog.Pkg("lifecycle")
 // Returned slice is unordered; callers that need stable ordering should
 // sort by Kind. Hints with Kind="" are treated as "no hint" (filtered).
 func RunFast(ctx context.Context, ws state.Workspace) []state.Hint {
-	const detectorCount = 4
+	const detectorCount = 5
 	type result struct{ h *state.Hint }
 	results := make(chan result, detectorCount)
 
@@ -80,6 +81,15 @@ func RunFast(ctx context.Context, ws state.Workspace) []state.Hint {
 	go func() {
 		defer wg.Done()
 		results <- result{h: detectGitStats(ctx, ws)}
+	}()
+
+	// mergeability: would `git merge origin/<default>` conflict?
+	// Cheap when target is already an ancestor of HEAD (most synced
+	// workspaces); ~30-80ms for diverged ones. Surfaces "⚠ conflict"
+	// before /ship time so the user fixes it on their own clock.
+	go func() {
+		defer wg.Done()
+		results <- result{h: detectMergeability(ctx, ws)}
 	}()
 
 	wg.Wait()
