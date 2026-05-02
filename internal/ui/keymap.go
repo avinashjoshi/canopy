@@ -112,9 +112,25 @@ var listModeBindings = []Binding{
 		Action:    actionFocusProject,
 	},
 	{
-		K:         key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "open PR")),
+		// P (capital) opens the cursor row's PR in the browser. Lower-
+		// case p is unbound: a stray `p` press used to fire an external
+		// `gh` invocation, which made the lowercase key feel hostile to
+		// the same muscle memory that uses k for cursor-up. Shift-key
+		// friction matches K (kill) and B (browser) — destructive or
+		// side-effecting verbs require a deliberate keypress.
+		K:         key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "open PR")),
 		Available: availableOpenPR,
 		Action:    actionOpenPR,
+	},
+	{
+		// B opens the workspace's running app in the user's default
+		// browser at http://localhost:<row.Port>. Requires a live tmux
+		// session and a non-zero port — pressing B on a stopped or
+		// portless row would either 404 or open a port that some other
+		// process now owns, both worse than silently hiding the binding.
+		K:         key.NewBinding(key.WithKeys("B"), key.WithHelp("B", "open browser")),
+		Available: availableOpenBrowser,
+		Action:    actionOpenBrowser,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
@@ -200,7 +216,7 @@ func availableNewWorkspace(m *Model) bool {
 	return row.ProjectRoot != ""
 }
 
-// availableOpenPR is the Available predicate for `p`. Hidden when the
+// availableOpenPR is the Available predicate for `P`. Hidden when the
 // cursor row has no pr_status hint — `gh pr view --web` would error
 // out with "no pull requests found" otherwise. Skips main rows
 // (their branch is the project default; opening the "PR" for main
@@ -216,6 +232,19 @@ func availableOpenPR(m *Model) bool {
 		}
 	}
 	return false
+}
+
+// availableOpenBrowser is the Available predicate for `B`. Requires a
+// live session (Alive) and a non-zero Port. Both main and workspace
+// rows qualify — `scripts.run` exposes a server on CANOPY_PORT in
+// either context, and the user's intent ("show me my running app") is
+// the same regardless of row kind.
+func availableOpenBrowser(m *Model) bool {
+	row, ok := m.list.CursorRow()
+	if !ok {
+		return false
+	}
+	return row.Alive && row.Port > 0
 }
 
 // availableFocusProject is the Available predicate for `o`. Only
