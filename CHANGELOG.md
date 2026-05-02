@@ -5,6 +5,33 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1.0] - 2026-05-01 — Feat: B opens the running app in a browser, P opens the PR
+
+The TUI's PR-open shortcut moved from lowercase `p` to capital `P`, and a
+new capital `B` opens the workspace's running app at
+`http://localhost:<port>` via `xdg-open`. Lowercase `p` lives one row
+below `k` (cursor up) and the user kept firing `gh pr view --web` by
+accident on every misaimed nav stroke. Both new bindings now require
+shift, matching the friction posture of `K` (kill tmux): destructive or
+side-effecting verbs need a deliberate keypress.
+
+### Added
+
+- **`B` opens the running app in the browser.** Available on any row with
+  a live tmux session and an allocated port — main rows and workspace
+  rows both qualify, because `scripts.run` exposes a server on
+  `CANOPY_PORT` in either context. Hidden when the cursor sits on a
+  stopped row or one with no port, so the binding doesn't show up
+  promising a 404. Linux-only handoff via `xdg-open`; errors (no handler,
+  binary missing) surface on the status line instead of hanging the TUI.
+
+### Changed
+
+- **`P` (capital) is the new "open PR" key.** Lowercase `p` is unbound at
+  the top level, so an accidental keypress is now a silent no-op instead
+  of an external `gh` invocation. Help text and the long-form `?` panel
+  are updated.
+
 ## [0.14.0.3] - 2026-05-01 — Fix: e2e test cleanup symmetric with workspace removal
 
 `Client.Kill` (production workspace removal) walks `/proc` for processes

@@ -654,6 +654,27 @@ func actionOpenPR(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// actionOpenBrowser opens http://localhost:<row.Port> in the user's
+// default browser via `xdg-open`. Linux-only: canopy is positioned as
+// "Conductor for Linux" and xdg-open is the standard freedesktop
+// handoff. Spawn-and-forget shape mirrors actionOpenPR — errors
+// (xdg-open missing, no handler registered) surface in m.err so the
+// user gets a status-line hint without the TUI hanging.
+func actionOpenBrowser(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	row, ok := m.list.CursorRow()
+	if !ok || row.Port <= 0 {
+		return m, nil
+	}
+	url := fmt.Sprintf("http://localhost:%d", row.Port)
+	cmd := exec.Command("xdg-open", url)
+	if err := cmd.Start(); err != nil {
+		m.err = fmt.Errorf("open browser: %w", err)
+		return m, nil
+	}
+	go func() { _ = cmd.Wait() }()
+	return m, nil
+}
+
 // actionDelete opens the confirm-delete modal for the cursor row. Cross-
 // project rows construct a transient Manager via managerForRow; same
 // path as the same-project case so the confirm modal copy is uniform.

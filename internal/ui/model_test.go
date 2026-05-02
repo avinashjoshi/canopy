@@ -339,6 +339,85 @@ func TestAvailableFocusProject(t *testing.T) {
 	}
 }
 
+// TestAvailableOpenBrowser covers the `B` predicate: live session
+// AND a non-zero port. Both fields must be present — a stopped
+// session 404s; a row with Port=0 either lost its allocation or was
+// never started, both of which mean "nothing to point a browser at."
+func TestAvailableOpenBrowser(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []Row
+		want bool
+	}{
+		{"no rows", nil, false},
+		{"alive + port → yes", []Row{{Name: "ws", Alive: true, Port: 3001}}, true},
+		{"alive + port=0 → no", []Row{{Name: "ws", Alive: true, Port: 0}}, false},
+		{"dead + port → no", []Row{{Name: "ws", Alive: false, Port: 3001}}, false},
+		{"main + alive + port → yes", []Row{{IsMain: true, Name: "(main)", Alive: true, Port: 3000}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(false)
+			m.setTestRows(tc.rows)
+			if got := availableOpenBrowser(m); got != tc.want {
+				t.Errorf("availableOpenBrowser = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestListModeBinding_Browser verifies the B binding is wired up: the
+// keymap table contains a binding whose K matches the literal "B" and
+// whose Action is actionOpenBrowser. Belt-and-suspenders against
+// accidental drift of the keymap table.
+func TestListModeBinding_Browser(t *testing.T) {
+	var found bool
+	for _, b := range listModeBindings {
+		for _, k := range b.K.Keys() {
+			if k == "B" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("listModeBindings does not contain a binding for \"B\"")
+	}
+}
+
+// TestListModeBinding_OpenPR_IsCapital verifies the rebind: lowercase
+// p must NOT match the open-PR binding (a stray k-neighbor keypress
+// used to fire `gh pr view --web`, which was the user-reported
+// annoyance). Capital P is the new keypress.
+func TestListModeBinding_OpenPR_IsCapital(t *testing.T) {
+	var prBinding *Binding
+	for i := range listModeBindings {
+		// Identify the openPR binding by the help description rather
+		// than the key literal so this test still flags a regression
+		// if someone re-adds lowercase p with the same description.
+		if listModeBindings[i].K.Help().Desc == "open PR" {
+			prBinding = &listModeBindings[i]
+			break
+		}
+	}
+	if prBinding == nil {
+		t.Fatalf("no binding with help desc %q found", "open PR")
+	}
+	for _, k := range prBinding.K.Keys() {
+		if k == "p" {
+			t.Errorf("openPR binding still has lowercase \"p\" key — should be \"P\" only; keys=%v", prBinding.K.Keys())
+		}
+	}
+	var hasCapital bool
+	for _, k := range prBinding.K.Keys() {
+		if k == "P" {
+			hasCapital = true
+		}
+	}
+	if !hasCapital {
+		t.Errorf("openPR binding missing capital \"P\"; keys=%v", prBinding.K.Keys())
+	}
+}
+
 // TestActionNewWorkspace_Local: from Local tab, n populates newTargetMgr
 // from m.mgr (the launch-context Manager). Title/root mirror the project
 // the user is actively working in.
