@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 )
@@ -20,22 +19,18 @@ func TestResolveTargetWorkspace_ExplicitArg(t *testing.T) {
 	}
 }
 
-// TestResolveTargetWorkspace_NoArgsOutsideTmux: no positional + no tmux
-// produces an actionable error message that names the fix.
-//
-// Skipped when the test process is itself inside tmux — the dogfood
-// loop runs the full suite inside a workspace pane, where TMUX is set
-// and CurrentSession would succeed against a real session.
+// TestResolveTargetWorkspace_NoArgsOutsideTmux: no positional arg + nil
+// manager produces an actionable error message that names the fix
+// (`pass the workspace name explicitly`). The nil-manager path is also
+// the first guard in resolveTargetWorkspace so this test doubles as a
+// nil-safety regression check — it caught a panic in CI when the
+// function refactor moved mgr.List above the tmux check.
 func TestResolveTargetWorkspace_NoArgsOutsideTmux(t *testing.T) {
-	if os.Getenv("TMUX") != "" {
-		t.Skip("running inside tmux; can't simulate the outside-tmux path here")
-	}
-
 	_, err := resolveTargetWorkspace(context.Background(), nil, nil)
 	if err == nil {
-		t.Fatalf("want error for no-args-outside-tmux; got nil")
+		t.Fatalf("want error for no-args-nil-manager; got nil")
 	}
-	if !strings.Contains(err.Error(), "not inside a tmux session") {
+	if !strings.Contains(err.Error(), "pass the workspace name explicitly") {
 		t.Errorf("error lost the friendly direction: %v", err)
 	}
 }

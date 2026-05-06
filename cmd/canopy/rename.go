@@ -111,6 +111,15 @@ func resolveTargetWorkspace(ctx context.Context, mgr *workspace.Manager, args []
 		return args[0], nil
 	}
 
+	// nil mgr happens in tests that exercise the "no args, no tmux, no
+	// cwd match" failure path without spinning up a full Manager. With
+	// no manager there's no workspace list to consult — fall through to
+	// the actionable error below so the user gets the same "pass the
+	// workspace name explicitly" message they would in production.
+	if mgr == nil {
+		return "", fmt.Errorf("rename: not inside a canopy workspace (no manager available) — pass the workspace name explicitly: canopy rename <workspace>")
+	}
+
 	wss, err := mgr.List(ctx)
 	if err != nil {
 		return "", fmt.Errorf("rename: list workspaces: %w", err)
