@@ -5,6 +5,73 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0.0] - 2026-05-06 — Workspace identity follows the branch you renamed
+
+Every visible canopy surface now reflects the meaningful branch name instead
+of the auto-generated workspace slug. Rename your branch with `git branch -m`
+and within the next statusline tick (15 seconds) the tmux session name, the
+status-right widget, the canopy TUI rows, and your terminal tab title all
+update to match. No more glancing at `canopy-clever-jay` and wondering which
+workspace you're in.
+
+### Added
+
+- `canopy rename [<workspace>]` — forces an immediate label refresh from the
+  worktree's current branch. Useful right after `git branch -m` when you
+  want the surfaces synced now instead of waiting for the next tick. With
+  no argument, targets the workspace your shell is in (matches by tmux
+  session if you're inside one, or by cwd-prefix if you're in a different
+  terminal).
+- `canopy use` listing now shows a BRANCH column alongside TARGET, so you
+  can see at a glance which workspace is for which feature. The lookup also
+  accepts the branch name directly: `canopy use clear-workspace-identity`
+  resolves to the workspace whose branch matches.
+- Statusline width-aware collapse: long branch names render in full when
+  there's room, right-truncate with `…` in middle widths, collapse to
+  initials (`clear-workspace-identity` → `cwi`) below 40 columns, and drop
+  entirely below 30. Unicode-safe (East-Asian wide chars sized correctly).
+- Terminal tab title forwarding via `set-titles on` in the canopy tmux
+  block. Ghostty/iTerm tabs now show the same `canopy/branch` identity as
+  the statusline. Run `canopy install tmux --force` to pick up the new
+  config.
+
+### Changed
+
+- Tmux session name format: `canopy-<branch>` → `canopy/<branch>`. The
+  slash visually parses as namespacing, matches the `<project>/<feature>`
+  mental model. Existing sessions auto-migrate on the next statusline tick
+  or `canopy rename` invocation; no manual cleanup needed.
+- Tmux session window-name no longer duplicates the session prefix. Window
+  list reads `1:<branch>` instead of `1:canopy-<branch>`. canopy also pins
+  `automatic-rename off` on its windows so tmux's default process-name
+  tracking doesn't fight the branch label.
+- Workspace status-line and TUI rows now use the live git branch (live-
+  synced from `git rev-parse` on every statusline tick) instead of the
+  create-time cached value. The pre-existing Reconcile branch refresh keeps
+  working; the new SyncBranch path makes the same logic available per-
+  workspace without taking the full Reconcile flock.
+
+### Removed
+
+- `Workspace.Project` JSON field on state.json rows. Derived on-the-fly
+  from `ProjectRoot` via `ProjectBasename()`. Old state files load fine;
+  the field gets silently dropped on next save.
+- `Workspace.TmuxSession` JSON field on state.json rows. Computed on-the-
+  fly via `TmuxSessionName()` as `<project>/<branch>`. Same self-cleaning
+  save behavior as above. External tools that grepped state.json for the
+  field need to derive it from `project_root + branch`.
+
+### Fixed
+
+- `tmux install` now writes `set -g status-left-length 50` so long session
+  names like `canopy/clear-workspace-identity` aren't truncated to garbage
+  by tmux's stingy 10-char default.
+- `internal/lifecycle/rename.go::gitCurrentBranch` was a duplicate of
+  `internal/git/repo.go::CurrentBranch`. Dropped the local copy; all
+  callers now use the canonical helper. Stale comments at `pr_status.go:67`
+  and `lifecycle/rename.go:36` updated to reflect the new live-sync
+  reality.
+
 ## [0.14.1.0] - 2026-05-01 — Feat: B opens the running app in a browser, P opens the PR
 
 The TUI's PR-open shortcut moved from lowercase `p` to capital `P`, and a
