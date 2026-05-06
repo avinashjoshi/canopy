@@ -94,18 +94,14 @@ func (s *State) MigrateLegacyProject(basename, canonicalRoot string) {
 		migrated = true
 	}
 
-	// Step 3: backfill ProjectRoot on legacy Workspace rows. We match by
-	// the legacy Project basename; any row whose ProjectRoot is already
-	// set is left alone (it's either already migrated or belongs to a
-	// different project that happens to share the basename — though
-	// FindBasenameCollision should prevent that case from existing).
-	for i := range s.Workspaces {
-		w := &s.Workspaces[i]
-		if w.Project == basename && w.ProjectRoot == "" {
-			w.ProjectRoot = canonicalRoot
-			migrated = true
-		}
-	}
+	// Step 3 (workspace row backfill) removed in v0.15+ when Workspace.Project
+	// was dropped. State files that reach this code in v2 already have
+	// ProjectRoot on every row (Manager.New runs the migration on every
+	// startup, so any row that ever loaded successfully into a v2-shaped
+	// struct has been backfilled). True-v1 state files (from canopy <v0.5)
+	// can't be auto-upgraded anymore — the basename information is gone
+	// once Go unmarshal drops the unknown `project` JSON field. Anyone
+	// affected can hand-edit state.json or rm and re-create the workspace.
 
 	// Step 4: version bump.
 	if migrated && s.SchemaVersion < SchemaVersion {

@@ -109,22 +109,19 @@ const (
 // legacy-read field so v0.5 can parse v1 state.json files; v0.5+ writes
 // both for backward compat. v0.6 will drop the legacy Project field.
 type Workspace struct {
-	// Project is the legacy basename-keyed project name. v1 state files
-	// only have this. v2+ also writes it for backward compat with tools
-	// that grep state.json. Lookups should prefer ProjectRoot.
-	Project string `json:"project,omitempty"`
-
 	// ProjectRoot is the canonical absolute path to the project's repo
 	// root (the directory containing canopy.json), as resolved by
-	// filepath.EvalSymlinks. Authoritative key in v2+; empty in v1 rows
-	// until MigrateLegacyProject runs.
+	// filepath.EvalSymlinks. The authoritative key in v2+. State files
+	// from canopy <v0.5 (v1 schema) had a separate `project` basename
+	// field; that was dropped in v0.15+ since every state file in the
+	// wild has been v2 for many releases. Use ProjectBasename() when
+	// the basename is what you need for display.
 	ProjectRoot string `json:"project_root,omitempty"`
 
-	Name        string    `json:"name"`
-	Branch      string    `json:"branch"`
-	Path        string    `json:"path"`
-	TmuxSession string    `json:"tmux_session"`
-	Port        int       `json:"port"`
+	Name   string `json:"name"`
+	Branch string `json:"branch"`
+	Path   string `json:"path"`
+	Port   int    `json:"port"`
 	Status      Status    `json:"status"`
 	CreatedAt   time.Time `json:"created_at"`
 	LastError   string    `json:"last_error,omitempty"`
@@ -182,6 +179,105 @@ type Workspace struct {
 	// body changes, the agent learns about it through the conversation,
 	// not through a re-fetched briefing.
 	SourceContext string `json:"source_context,omitempty"`
+}
+
+// ProjectBasename returns the project's basename (e.g., "canopy" for
+// /home/avi/Work/canopy). Derived from ProjectRoot — replaces the
+// removed legacy `project` JSON field. Returns "" if ProjectRoot is
+// empty (a defensive case; every v2 row has it set).
+//
+// Used wherever code wants the short, human-readable project label:
+// statusline rendering, ls output, error messages, search filtering.
+func (w *Workspace) ProjectBasename() string {
+	if w == nil || w.ProjectRoot == "" {
+		return ""
+	}
+	return filepath.Base(w.ProjectRoot)
+}
+
+// SessionSeparator is the character canopy uses between project and
+// feature in tmux session names ("canopy/clear-workspace-identity").
+// Forward-slash visually parses as namespacing — "this is the canopy
+// project's clear-workspace-identity workspace" — and tmux's target
+// syntax (`session:window.pane`) doesn't reserve `/`, so it's safe.
+//
+// Pre-v0.16 used "-" instead. The runtime migration in
+// workspace.SyncWorkspaceBranch detects legacy hyphen-separated session
+// names on tmux and renames them to the new format on first sight.
+const SessionSeparator = "/"
+
+// TmuxSessionName returns the tmux session name canopy uses for this
+// workspace. Computed on the fly as `<project>/<branch>`.
+//
+// Replaces the stored `tmux_session` JSON field that lived on every row
+// pre-v0.15. The stored field was always derivable from project + branch
+// via SafeName, so it was 30 bytes of redundant data per workspace; the
+// only argument for storing it was the constant-time lookup, which the
+// callers have all been updated to handle by computing on-demand.
+//
+// The SafeName logic is intentionally duplicated from internal/tmux
+// (see safeNameForTmux below) to avoid a state→tmux package dependency
+// — same pattern as safeMainSessionName in listing.go.
+func (w *Workspace) TmuxSessionName() string {
+	if w == nil || w.ProjectRoot == "" {
+		return ""
+	}
+	suffix := w.Branch
+	if suffix == "" {
+		suffix = w.Name
+	}
+	return safeNameForTmux(filepath.Base(w.ProjectRoot)) + SessionSeparator + safeNameForTmux(suffix)
+}
+
+// LegacyTmuxSessionName returns the pre-v0.16 hyphen-separated session
+// name. Used by SyncBranch to detect existing tmux sessions that haven't
+// been migrated to the new `<project>/<branch>` format yet, so the first
+// sync after upgrade renames them in-place instead of stranding them.
+func (w *Workspace) LegacyTmuxSessionName() string {
+	if w == nil || w.ProjectRoot == "" {
+		return ""
+	}
+	suffix := w.Branch
+	if suffix == "" {
+		suffix = w.Name
+	}
+	return safeNameForTmux(filepath.Base(w.ProjectRoot)) + "-" + safeNameForTmux(suffix)
+}
+
+// safeNameForTmux mirrors internal/tmux.SafeName. Letters, digits,
+// underscore, and hyphen pass through; everything else collapses to a
+// single hyphen. Leading/trailing hyphens get trimmed. Duplicated to
+// avoid making internal/state import internal/tmux for a 20-line helper.
+//
+// Tests in tmux/session_test.go pin the equivalence between this
+// function and tmux.SafeName for typical inputs; if you add behavior
+// to one, mirror it here too.
+func safeNameForTmux(s string) string {
+	var b []byte
+	prevDash := false
+	for _, r := range s {
+		safe := (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_' || r == '-'
+		if safe {
+			b = append(b, byte(r))
+			prevDash = (r == '-')
+			continue
+		}
+		if !prevDash {
+			b = append(b, '-')
+			prevDash = true
+		}
+	}
+	start, end := 0, len(b)
+	for start < end && b[start] == '-' {
+		start++
+	}
+	for end > start && b[end-1] == '-' {
+		end--
+	}
+	return string(b[start:end])
 }
 
 // ProjectMeta tracks per-project metadata that lives outside any single

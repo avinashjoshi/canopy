@@ -5,19 +5,17 @@ import (
 	"testing"
 )
 
-// TestMigrateLegacyProject_BasicV1ToV2 verifies the central migration: a
-// v1 file with a basename-keyed Projects entry and legacy Workspace rows
-// becomes v2-shaped after one MigrateLegacyProject call.
+// TestMigrateLegacyProject_BasicV1ToV2 verifies the projects-map half of
+// the v1 -> v2 migration: a basename-keyed entry in s.Projects becomes a
+// canonical-root-keyed entry. The workspace-row backfill half was removed
+// in v0.15+ (Workspace.Project field dropped); v1 state files where the
+// only project association is the legacy basename can no longer be
+// auto-recovered, see migrate.go's step 3 comment.
 func TestMigrateLegacyProject_BasicV1ToV2(t *testing.T) {
 	s := &State{
 		SchemaVersion: 1,
 		Projects: map[string]ProjectMeta{
 			"cravd": {PortBase: 3000}, // v1: basename key, no Root
-		},
-		Workspaces: []Workspace{
-			{Project: "cravd", Name: "bold-falcon", Branch: "feature/x"},
-			{Project: "cravd", Name: "soft-fox", Branch: "feature/y"},
-			{Project: "other", Name: "unrelated", Branch: "main"}, // different project, untouched
 		},
 	}
 
@@ -36,21 +34,6 @@ func TestMigrateLegacyProject_BasicV1ToV2(t *testing.T) {
 	if meta.Root != "/home/avi/Work/cravd" {
 		t.Fatalf("meta.Root = %q, want %q", meta.Root, "/home/avi/Work/cravd")
 	}
-
-	// Workspaces of the migrated project get ProjectRoot.
-	for _, w := range s.Workspaces[:2] {
-		if w.ProjectRoot != "/home/avi/Work/cravd" {
-			t.Errorf("Workspace %q: ProjectRoot = %q, want %q", w.Name, w.ProjectRoot, "/home/avi/Work/cravd")
-		}
-		if w.Project != "cravd" {
-			t.Errorf("Workspace %q: legacy Project = %q, want preserved as 'cravd'", w.Name, w.Project)
-		}
-	}
-	// The unrelated project's row is untouched.
-	if s.Workspaces[2].ProjectRoot != "" {
-		t.Errorf("unrelated workspace got ProjectRoot = %q, should still be empty", s.Workspaces[2].ProjectRoot)
-	}
-
 	if s.SchemaVersion != 2 {
 		t.Errorf("SchemaVersion = %d, want 2", s.SchemaVersion)
 	}
@@ -64,18 +47,11 @@ func TestMigrateLegacyProject_Idempotent(t *testing.T) {
 		Projects: map[string]ProjectMeta{
 			"cravd": {PortBase: 3000},
 		},
-		Workspaces: []Workspace{
-			{Project: "cravd", Name: "bold-falcon"},
-		},
 	}
 
 	s.MigrateLegacyProject("cravd", "/home/avi/Work/cravd")
-
-	// Snapshot post-first-migration state.
 	beforeSecond, _ := json.Marshal(s)
-
 	s.MigrateLegacyProject("cravd", "/home/avi/Work/cravd")
-
 	afterSecond, _ := json.Marshal(s)
 
 	if string(beforeSecond) != string(afterSecond) {
@@ -83,18 +59,15 @@ func TestMigrateLegacyProject_Idempotent(t *testing.T) {
 	}
 }
 
-// TestMigrateLegacyProject_PartialOnly: when state has two projects but
-// migration is called for only one, the other one is left untouched.
+// TestMigrateLegacyProject_PartialOnly: when state has two basename-keyed
+// projects but migration is called for only one, the other is left
+// untouched.
 func TestMigrateLegacyProject_PartialOnly(t *testing.T) {
 	s := &State{
 		SchemaVersion: 1,
 		Projects: map[string]ProjectMeta{
 			"cravd":  {PortBase: 3000},
 			"canopy": {PortBase: 4000}, // not migrating this one yet
-		},
-		Workspaces: []Workspace{
-			{Project: "cravd", Name: "bold-falcon"},
-			{Project: "canopy", Name: "soft-fox"},
 		},
 	}
 
@@ -106,14 +79,11 @@ func TestMigrateLegacyProject_PartialOnly(t *testing.T) {
 	if _, ok := s.Projects["canopy"]; !ok {
 		t.Errorf("canopy basename key should still exist (its migration hasn't run yet)")
 	}
-	if s.Workspaces[1].ProjectRoot != "" {
-		t.Errorf("canopy workspace got ProjectRoot prematurely")
-	}
 }
 
 // TestMigrateLegacyProject_AlreadyAtRootKey: if a v2-shaped entry already
-// sits at the canonical root key, migration should not clobber it (e.g.
-// the user manually fixed state.json before canopy got around to it).
+// sits at the canonical root key, migration should not clobber its
+// PortBase (the user might have manually fixed state.json).
 func TestMigrateLegacyProject_AlreadyAtRootKey(t *testing.T) {
 	s := &State{
 		SchemaVersion: 2,
@@ -121,7 +91,7 @@ func TestMigrateLegacyProject_AlreadyAtRootKey(t *testing.T) {
 			"/home/avi/Work/cravd": {Root: "/home/avi/Work/cravd", PortBase: 3000},
 		},
 		Workspaces: []Workspace{
-			{Project: "cravd", ProjectRoot: "/home/avi/Work/cravd", Name: "bold-falcon"},
+			{ProjectRoot: "/home/avi/Work/cravd", Name: "bold-falcon"},
 		},
 	}
 
@@ -212,14 +182,18 @@ func TestMigrateLegacyProject_NoOpOnFreshState(t *testing.T) {
 	}
 }
 
-// TestLoadV1FileRoundTrip: simulate loading a real v1-shaped JSON document
-// (no Root, no ProjectRoot fields) and verify it parses cleanly into the
-// v2 struct shape — legacy fields populate, new fields stay zero. Then
-// run migration and assert v2 shape.
+// TestLoadV1FileTolerated: a v1-shaped state.json on disk must still load
+// without error after the v0.15+ field removal. The legacy "project"
+// field is silently dropped by Go's JSON unmarshal (no struct field to
+// hold it), but the row's other fields parse cleanly and the projects-map
+// migration moves the basename key over to the canonical root.
 //
-// This is the IRON-RULE regression test: prove a v1 state.json on disk
-// doesn't crash v0.5.
-func TestLoadV1FileRoundTrip(t *testing.T) {
+// This is the IRON-RULE regression test for the field removal: prove a
+// v1 user upgrading directly to v0.15+ doesn't see canopy crash on
+// startup. They lose the project association on workspace rows that had
+// no ProjectRoot yet (those rows can no longer be auto-rescued), but
+// canopy keeps running.
+func TestLoadV1FileTolerated(t *testing.T) {
 	v1JSON := []byte(`{
 		"schema_version": 1,
 		"projects": {
@@ -244,28 +218,20 @@ func TestLoadV1FileRoundTrip(t *testing.T) {
 		t.Fatalf("parse v1 file: %v", err)
 	}
 
-	// Pre-migration: legacy fields populate, new fields stay zero.
-	if s.Workspaces[0].Project != "cravd" {
-		t.Errorf("legacy Project not parsed: %q", s.Workspaces[0].Project)
-	}
+	// Pre-migration: workspace row has Name + Branch but no
+	// ProjectRoot. The legacy "project" JSON field was dropped by
+	// unmarshal — that's expected post-removal.
 	if s.Workspaces[0].ProjectRoot != "" {
 		t.Errorf("ProjectRoot pre-migration should be empty, got %q", s.Workspaces[0].ProjectRoot)
 	}
-	meta, ok := s.Projects["cravd"]
-	if !ok {
-		t.Fatalf("v1 Projects entry by basename missing")
-	}
-	if meta.Root != "" {
-		t.Errorf("meta.Root pre-migration should be empty, got %q", meta.Root)
+	if s.Workspaces[0].Name != "bold-falcon" {
+		t.Errorf("Name not parsed: %q", s.Workspaces[0].Name)
 	}
 
-	// Run migration.
+	// Run migration. Projects-map entry moves to canonical root key;
+	// workspace row stays orphaned (no longer auto-rescuable).
 	s.MigrateLegacyProject("cravd", "/home/avi/Work/cravd")
 
-	// Post-migration: v2 shape.
-	if s.Workspaces[0].ProjectRoot != "/home/avi/Work/cravd" {
-		t.Errorf("ProjectRoot not backfilled: %q", s.Workspaces[0].ProjectRoot)
-	}
 	migrated, ok := s.Projects["/home/avi/Work/cravd"]
 	if !ok {
 		t.Errorf("Projects entry not moved to root key")
