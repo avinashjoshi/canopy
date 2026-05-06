@@ -93,7 +93,7 @@ func newCmd() *cobra.Command {
 
 			fmt.Fprintf(cmd.OutOrStdout(),
 				"\nWorkspace ready: %s\n  branch:  %s\n  path:    %s\n  port:    %d\n  session: %s\n",
-				ws.Name, ws.Branch, ws.Path, ws.Port, ws.TmuxSession)
+				ws.Name, ws.Branch, ws.Path, ws.Port, ws.TmuxSessionName())
 
 			if newWorkspaceFlags.noAttach {
 				fmt.Fprintf(cmd.OutOrStdout(),
@@ -101,10 +101,10 @@ func newCmd() *cobra.Command {
 				return nil
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "\nAttaching tmux session %s...\n", ws.TmuxSession)
+			fmt.Fprintf(cmd.OutOrStdout(), "\nAttaching tmux session %s...\n", ws.TmuxSessionName())
 			// Attach replaces the canopy process via syscall.Exec on success.
 			// If we return from Attach, it failed.
-			return mgr.Tmux.Attach(ctx, ws.TmuxSession)
+			return mgr.Tmux.Attach(ctx, ws.TmuxSessionName())
 		},
 	}
 	cmd.Flags().StringVar(&newWorkspaceFlags.name, "name", "",

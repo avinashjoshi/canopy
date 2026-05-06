@@ -60,7 +60,7 @@ func retryCmd() *cobra.Command {
 
 			fmt.Fprintf(cmd.OutOrStdout(),
 				"\nWorkspace ready: %s\n  branch:  %s\n  path:    %s\n  port:    %d\n  session: %s\n",
-				ws.Name, ws.Branch, ws.Path, ws.Port, ws.TmuxSession)
+				ws.Name, ws.Branch, ws.Path, ws.Port, ws.TmuxSessionName())
 			fmt.Fprintf(cmd.OutOrStdout(),
 				"\nRun `canopy switch %s` to attach.\n", ws.Name)
 			return nil

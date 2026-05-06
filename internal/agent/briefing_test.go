@@ -20,7 +20,6 @@ func fixtureWorkspace() state.Workspace {
 		ProjectRoot: "/home/avi/Work/canopy",
 		Path:        "/home/avi/.canopy/workspaces/canopy/ancient-hornet",
 		Port:        40010,
-		TmuxSession: "canopy-ancient-hornet",
 		Status:      state.StatusReady,
 		SourceKind:  "fresh",
 	}
