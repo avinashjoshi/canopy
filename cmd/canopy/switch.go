@@ -51,8 +51,8 @@ func switchCmd() *cobra.Command {
 
 			switch ws.Status {
 			case state.StatusReady:
-				fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", ws.TmuxSession)
-				return mgr.Tmux.Attach(ctx, ws.TmuxSession)
+				fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", ws.TmuxSessionName())
+				return mgr.Tmux.Attach(ctx, ws.TmuxSessionName())
 
 			case state.StatusStopped:
 				fmt.Fprintf(cmd.OutOrStdout(), "Resurrecting workspace %s...\n", name)
@@ -60,8 +60,8 @@ func switchCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", revived.TmuxSession)
-				return mgr.Tmux.Attach(ctx, revived.TmuxSession)
+				fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", revived.TmuxSessionName())
+				return mgr.Tmux.Attach(ctx, revived.TmuxSessionName())
 
 			case state.StatusBroken:
 				fmt.Fprintf(cmd.ErrOrStderr(),

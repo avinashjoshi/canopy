@@ -1609,3 +1609,68 @@ diff principle: ship the correctness fix with clean validation, defend
 against the crash path separately.
 
 **Depends on / blocked by:** nothing. Self-contained.
+
+---
+
+## P3 — Deferred from v0.15 (clear-workspace-identity ship)
+
+### canopy rename --pin / --unpin
+
+**What:** opt-out for SyncBranch's auto-tracking. Power users who rebase
+frequently or check out multiple feature branches in one workspace might
+want to pin a display label so the statusline doesn't flicker.
+
+**Why deferred:** the 80% case (one branch per workspace, rename branch on
+turn 1, never touch it again) doesn't need pinning. Surfacing the design
+question in eng-review D4. Lift if multiple users complain post-ship.
+
+**Where:** `state.Workspace.PinDisplayName bool` field, gated check in
+`workspace.SyncBranch` to skip when set, `cmd/canopy/rename.go` flag.
+
+**Depends on / blocked by:** nothing. Self-contained.
+
+### Lipgloss AdaptiveColor migration
+
+**What:** canopy's internal/ui palette uses fixed ANSI 256 colors (e.g.
+`lipgloss.Color("241")` for dim text). Light-terminal users see ~2.8:1
+contrast on dim labels — fails WCAG AA.
+
+**Why deferred:** canopy is dark-terminal-first; light-term support is a
+broader migration touching every styler. Out of scope for the workspace-
+identity feature.
+
+**Where:** sweep all `lipgloss.NewStyle().Foreground(lipgloss.Color(...))`
+calls and replace with `lipgloss.AdaptiveColor{Light: ..., Dark: ...}`.
+
+**Depends on / blocked by:** nothing. Self-contained.
+
+### DESIGN.md for canopy's terminal-UI conventions
+
+**What:** color palette, glyph set, spacing rules, density philosophy. Today
+these conventions live in scattered comments (`internal/ui/projectlist/
+projectlist.go:849` for color 241 = "dim", `cmd/canopy/statusline.go:192`
+for glyph set, etc.).
+
+**Why deferred:** flagged in design review's Step 0B. Not blocking but useful
+for future TUI changes — saves future-Claude (and future-Avi) from
+rediscovering the precedents.
+
+**Where:** new `DESIGN.md` in repo root. /design-consultation skill is the
+right way to produce it.
+
+**Depends on / blocked by:** nothing. Self-contained.
+
+### Pre-existing TmuxSession field consumers
+
+**What:** v0.15 dropped `tmux_session` from state.json. Any external script
+that greps state.json for that field silently breaks. We have no known
+consumers (only canopy's own code reads it), but worth documenting and
+keeping an eye on.
+
+**Why deferred:** speculative concern. If someone reports their gstack hook /
+shellrc broke, point them at `TmuxSessionName()` (compute from project_root
++ branch via `safeNameForTmux`).
+
+**Where:** documentation only.
+
+**Depends on / blocked by:** community feedback.

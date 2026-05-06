@@ -100,11 +100,14 @@ func TestNew_RunsMigrationOnV1State(t *testing.T) {
 	if len(st.Workspaces) != 1 {
 		t.Fatalf("workspaces count = %d, want 1", len(st.Workspaces))
 	}
-	if st.Workspaces[0].ProjectRoot != cfg.ProjectRoot {
-		t.Errorf("legacy workspace ProjectRoot not backfilled: got %q", st.Workspaces[0].ProjectRoot)
-	}
-	if st.Workspaces[0].Project != projectBasename {
-		t.Errorf("legacy Project field should be preserved: got %q", st.Workspaces[0].Project)
+	// Pre-v0.15 this asserted that ProjectRoot got backfilled from the
+	// legacy `project` JSON field. v0.15+ dropped Workspace.Project, so
+	// the legacy row's project association is unrecoverable on load —
+	// ProjectRoot stays empty, matching the policy in
+	// state/migrate.go's step-3 comment. Other fields (Name, TmuxSession,
+	// Port) survive intact, so the row is still queryable by name.
+	if st.Workspaces[0].Name != "legacy-foo" {
+		t.Errorf("legacy Name lost: got %q", st.Workspaces[0].Name)
 	}
 }
 

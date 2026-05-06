@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/state"
 )
 
@@ -48,8 +49,8 @@ func detectPushState(ctx context.Context, ws state.Workspace) *state.Hint {
 	if ws.Path == "" {
 		return nil
 	}
-	branch := gitCurrentBranch(ctx, ws.Path)
-	if branch == "" {
+	branch, err := git.CurrentBranch(ctx, ws.Path)
+	if err != nil || branch == "" {
 		// Detached HEAD or git error — stuck_state surfaces the detached
 		// signal; no separate push_state hint here.
 		return nil

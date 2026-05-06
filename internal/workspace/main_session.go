@@ -22,7 +22,7 @@ import (
 // cmd/canopy/main.go and state/listing.go:safeMainSessionName so the
 // three places agree on what session to look for.
 func (m *Manager) MainSessionName() string {
-	return tmux.SafeName(m.Cfg.Project) + "-main"
+	return tmux.SafeName(m.Cfg.Project) + state.SessionSeparator + "main"
 }
 
 // EnsureMainSession idempotently brings up the project's main tmux
@@ -44,6 +44,24 @@ func (m *Manager) EnsureMainSession(ctx context.Context) (string, error) {
 	}
 	if alive {
 		return session, nil
+	}
+
+	// One-shot migration: pre-v0.16 used `<project>-main` (hyphen). If
+	// the new-format session isn't alive but the legacy one is, rename
+	// it in-place rather than spawning a duplicate. Same shim that
+	// SyncBranch runs for workspace sessions.
+	legacy := tmux.SafeName(m.Cfg.Project) + "-main"
+	if legacy != session {
+		if hasLegacy, _ := m.Tmux.HasSession(ctx, legacy); hasLegacy {
+			if err := m.Tmux.Rename(ctx, legacy, session, "main"); err != nil {
+				log.Warn("workspace.main.legacy-migration-failed",
+					"legacy", legacy, "new", session, "err", err)
+			} else {
+				log.Info("workspace.main.migrated-legacy-session",
+					"from", legacy, "to", session)
+				return session, nil
+			}
+		}
 	}
 
 	port, err := m.mainPort()

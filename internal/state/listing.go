@@ -169,17 +169,14 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 			attached = got
 		}
 	}
-	// Deterministic project iteration order: collect roots, sort.
+	// Deterministic project iteration order: collect roots, sort. Every
+	// row in v2+ has ProjectRoot populated; rows missing it are silently
+	// skipped (they'd show up as "(no project)" rows in the global tab,
+	// worse than just dropping them).
 	rootSet := map[string]struct{}{}
 	for _, w := range s.Workspaces {
-		// Prefer ProjectRoot (v2). Fall back to legacy basename so v1
-		// rows that haven't yet been migrated still render — they'll
-		// appear under their basename until the next project-scoped
-		// command runs migration.
 		if w.ProjectRoot != "" {
 			rootSet[w.ProjectRoot] = struct{}{}
-		} else if w.Project != "" {
-			rootSet[w.Project] = struct{}{}
 		}
 	}
 	for root := range s.Projects {
@@ -192,14 +189,15 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 	}
 	sort.Strings(roots)
 
-	// Pre-bucket workspaces by their effective project key.
+	// Pre-bucket workspaces by their canonical project root. Rows with
+	// empty ProjectRoot drop out (they can't be associated with a project
+	// and would render as orphans).
 	byProject := map[string][]Workspace{}
 	for _, w := range s.Workspaces {
-		key := w.ProjectRoot
-		if key == "" {
-			key = w.Project
+		if w.ProjectRoot == "" {
+			continue
 		}
-		byProject[key] = append(byProject[key], w)
+		byProject[w.ProjectRoot] = append(byProject[w.ProjectRoot], w)
 	}
 	for k := range byProject {
 		ws := byProject[k]
@@ -246,7 +244,8 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 
 		// Workspace rows.
 		for _, w := range byProject[root] {
-			alive, _ := probe.HasSession(ctx, w.TmuxSession)
+			session := w.TmuxSessionName()
+			alive, _ := probe.HasSession(ctx, session)
 			rows = append(rows, GlobalRow{
 				ProjectRoot:   root,
 				Project:       basename,
@@ -255,9 +254,9 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 				Status:        w.Status,
 				Port:          w.Port,
 				Path:          w.Path,
-				TmuxSession:   w.TmuxSession,
+				TmuxSession:   session,
 				Alive:         alive,
-				Attached:      attached[w.TmuxSession],
+				Attached:      attached[session],
 				LastErrorHint: w.LastErrorHint,
 			})
 		}
@@ -270,31 +269,16 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 // session, given its basename. Mirrors what `canopy main` writes so the
 // listing's liveness probe checks the right session.
 //
-// We deliberately don't import internal/tmux here (which would create a
-// state→tmux package dependency for something this trivial). The rule is
-// the same as tmux.SafeName for typical basenames (alphanumerics + hyphen
-// + underscore pass through; everything else collapses to '-').
+// Format follows TmuxSessionName's `<project>/<feature>` pattern with
+// "main" as the feature, so all canopy-managed sessions read with
+// consistent visual hierarchy in tmux's status bar.
 func safeMainSessionName(basename string) string {
-	var b []byte
-	prevDash := false
-	for _, r := range basename {
-		safe := (r >= 'a' && r <= 'z') ||
-			(r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') ||
-			r == '_' || r == '-'
-		if safe {
-			b = append(b, byte(r))
-			prevDash = (r == '-')
-			continue
-		}
-		if !prevDash {
-			b = append(b, '-')
-			prevDash = true
-		}
-	}
-	// Trim trailing dash before suffixing.
-	for len(b) > 0 && b[len(b)-1] == '-' {
-		b = b[:len(b)-1]
-	}
-	return string(b) + "-main"
+	return safeNameForTmux(basename) + SessionSeparator + "main"
+}
+
+// LegacyMainSessionName returns the pre-v0.16 hyphen-separated main
+// session name. Used by main-session resurrection to detect existing
+// `<project>-main` sessions and rename them in-place to the new format.
+func LegacyMainSessionName(basename string) string {
+	return safeNameForTmux(basename) + "-main"
 }

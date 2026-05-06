@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/state"
 )
 
@@ -63,23 +64,13 @@ func detectPRStatus(ctx context.Context, ws state.Workspace) *state.Hint {
 		return nil
 	}
 
-	// Cache key: project + current branch. We prefer git's view because
-	// a user-side `git branch -m` would leave state.Branch stale until
-	// reconcile catches up. Two failure modes need a fallback:
-	//
-	//  - currentBranch == ""   : git rev-parse failed (path missing,
-	//                             not a worktree, etc.).
-	//  - currentBranch == "HEAD": detached HEAD. `git rev-parse
-	//                             --abbrev-ref HEAD` returns the
-	//                             literal "HEAD" in this case, and
-	//                             querying a PR named "HEAD" is
-	//                             nonsense.
-	//
-	// In both cases, fall back to ws.Branch (the value canopy stored
-	// at workspace creation). The cost of a stale name is at most one
-	// 10-minute cache cycle.
-	currentBranch := gitCurrentBranch(ctx, ws.Path)
-	if currentBranch == "" || currentBranch == "HEAD" {
+	// Cache key: project + current branch. We prefer git's live view but
+	// fall back to ws.Branch (which Manager.SyncBranch keeps live now,
+	// so the fallback is also fresh — historical comments about staleness
+	// no longer apply). git.CurrentBranch returns "" on detached HEAD or
+	// any error; either way, ws.Branch is the right backstop.
+	currentBranch, _ := git.CurrentBranch(ctx, ws.Path)
+	if currentBranch == "" {
 		currentBranch = ws.Branch
 	}
 	if currentBranch == "" {

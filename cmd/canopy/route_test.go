@@ -209,7 +209,6 @@ func TestResolveProjectContext_workspaceCwd(t *testing.T) {
 				Name:        "feat-x",
 				Path:        canonicalWs,
 				ProjectRoot: canonicalSrc,
-				Project:     "myproj",
 			},
 		},
 	}

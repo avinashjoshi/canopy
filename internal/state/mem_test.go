@@ -137,12 +137,12 @@ func TestBuildGlobalRowsWithMem_PopulatesAliveRows(t *testing.T) {
 			"/p/foo": {Root: "/p/foo", PortBase: 3000},
 		},
 		Workspaces: []Workspace{
-			{ProjectRoot: "/p/foo", Name: "alive", Status: StatusReady, TmuxSession: "foo-alive"},
-			{ProjectRoot: "/p/foo", Name: "dead", Status: StatusStopped, TmuxSession: "foo-dead"},
+			{ProjectRoot: "/p/foo", Name: "alive", Status: StatusReady},
+			{ProjectRoot: "/p/foo", Name: "dead", Status: StatusStopped},
 		},
 	}
-	live := &fakeProbe{alive: map[string]bool{"foo-alive": true}}
-	mem := &fakeMemProbe{values: map[string]int64{"foo-alive": 42 * 1024 * 1024}}
+	live := &fakeProbe{alive: map[string]bool{"foo/alive": true}}
+	mem := &fakeMemProbe{values: map[string]int64{"foo/alive": 42 * 1024 * 1024}}
 	mc := NewMemCache(time.Hour)
 
 	rows := s.BuildGlobalRowsWithMem(context.Background(), live, mem, mc)
@@ -214,13 +214,13 @@ func TestBuildGlobalRowsWithLoad_PopulatesBoth(t *testing.T) {
 	s := &State{
 		Projects: map[string]ProjectMeta{"/p/foo": {Root: "/p/foo"}},
 		Workspaces: []Workspace{
-			{ProjectRoot: "/p/foo", Name: "alive", Status: StatusReady, TmuxSession: "foo-alive"},
-			{ProjectRoot: "/p/foo", Name: "dead", Status: StatusStopped, TmuxSession: "foo-dead"},
+			{ProjectRoot: "/p/foo", Name: "alive", Status: StatusReady},
+			{ProjectRoot: "/p/foo", Name: "dead", Status: StatusStopped},
 		},
 	}
-	live := &fakeProbe{alive: map[string]bool{"foo-alive": true}}
+	live := &fakeProbe{alive: map[string]bool{"foo/alive": true}}
 	probe := &fakeLoadProbe{values: map[string]LoadValue{
-		"foo-alive": {RSS: 42 * 1024 * 1024, CPU: 7.5},
+		"foo/alive": {RSS: 42 * 1024 * 1024, CPU: 7.5},
 	}}
 	mc := NewMemCache(time.Hour)
 
@@ -278,16 +278,16 @@ func TestBuildGlobalRows_PopulatesAttached(t *testing.T) {
 			"/p/foo": {Root: "/p/foo", PortBase: 3000},
 		},
 		Workspaces: []Workspace{
-			{ProjectRoot: "/p/foo", Name: "current", Status: StatusReady, TmuxSession: "foo-current"},
-			{ProjectRoot: "/p/foo", Name: "background", Status: StatusReady, TmuxSession: "foo-background"},
+			{ProjectRoot: "/p/foo", Name: "current", Status: StatusReady},
+			{ProjectRoot: "/p/foo", Name: "background", Status: StatusReady},
 		},
 	}
 	probe := &fakeProbeWithAttached{
 		fakeProbe: fakeProbe{alive: map[string]bool{
-			"foo-current":    true,
-			"foo-background": true,
+			"foo/current":    true,
+			"foo/background": true,
 		}},
-		attached: map[string]bool{"foo-current": true},
+		attached: map[string]bool{"foo/current": true},
 	}
 
 	rows := s.BuildGlobalRows(context.Background(), probe)
@@ -318,10 +318,10 @@ func TestBuildGlobalRows_LivenessOnlyProbe_NoAttached(t *testing.T) {
 			"/p/foo": {Root: "/p/foo"},
 		},
 		Workspaces: []Workspace{
-			{ProjectRoot: "/p/foo", Name: "ws", Status: StatusReady, TmuxSession: "foo-ws"},
+			{ProjectRoot: "/p/foo", Name: "ws", Status: StatusReady},
 		},
 	}
-	rows := s.BuildGlobalRows(context.Background(), &fakeProbe{alive: map[string]bool{"foo-ws": true}})
+	rows := s.BuildGlobalRows(context.Background(), &fakeProbe{alive: map[string]bool{"foo/ws": true}})
 	for _, r := range rows {
 		if r.Attached {
 			t.Errorf("row %q: Attached = true; want false (liveness-only probe)", r.Name)

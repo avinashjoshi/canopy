@@ -241,3 +241,65 @@ func TestKill_NotFound(t *testing.T) {
 		t.Fatalf("Kill(missing): got %v; want errors.Is(... ErrSessionNotFound)", err)
 	}
 }
+
+func TestRename_HappyPath(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	cwd := t.TempDir()
+
+	if err := c.Create(ctx, "rename-old", cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := c.Rename(ctx, "rename-old", "rename-new", "new"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	// Old name should be gone, new name alive.
+	if has, _ := c.HasSession(ctx, "rename-old"); has {
+		t.Errorf("old session still exists after rename")
+	}
+	if has, _ := c.HasSession(ctx, "rename-new"); !has {
+		t.Errorf("new session missing after rename")
+	}
+}
+
+func TestRename_NotFound(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	err := c.Rename(context.Background(), "does-not-exist", "whatever", "")
+	if !errors.Is(err, tmux.ErrSessionNotFound) {
+		t.Fatalf("Rename(missing): got %v; want ErrSessionNotFound", err)
+	}
+}
+
+func TestRename_Collision(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	cwd := t.TempDir()
+
+	if err := c.Create(ctx, "rename-a", cwd, ""); err != nil {
+		t.Fatalf("Create a: %v", err)
+	}
+	if err := c.Create(ctx, "rename-b", cwd, ""); err != nil {
+		t.Fatalf("Create b: %v", err)
+	}
+	err := c.Rename(ctx, "rename-a", "rename-b", "")
+	if !errors.Is(err, tmux.ErrSessionNameInUse) {
+		t.Fatalf("Rename(collision): got %v; want ErrSessionNameInUse", err)
+	}
+}
+
+func TestRename_Identity(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	cwd := t.TempDir()
+
+	if err := c.Create(ctx, "rename-id", cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := c.Rename(ctx, "rename-id", "rename-id", ""); err != nil {
+		t.Fatalf("Rename(self->self): got %v; want nil (no-op success)", err)
+	}
+}

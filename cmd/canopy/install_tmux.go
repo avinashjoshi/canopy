@@ -265,6 +265,19 @@ bind g display-popup -E -w 80% -h 80% -d "#{pane_current_path}" "CANOPY_IN_POPUP
 # user-installed #(my-statusline-tool) segment) survive untouched.
 run-shell 'tmux set -gq status-right "$(tmux show -gv status-right | sed -E "s| *#\([^)]*canopy[^)]*statusline[^)]*\)||g")"'
 set -ag status-right " #(` + bin + ` statusline --format=current) "
+# Terminal title: tmux emits OSC 0 to the host terminal. set-titles on
+# turns the feature on; set-titles-string '#S' makes the title reflect
+# the tmux session name. Since canopy renames sessions to follow the
+# git branch (Manager.SyncBranch), the Ghostty/iTerm/etc. tab/window
+# title stays in sync with the workspace identity automatically.
+set -g set-titles on
+set -g set-titles-string '#S'
+# status-left-length: tmux's default cap (10) truncates long canopy
+# session names ("canopy-clear-workspace-identity" etc.) to garbage.
+# Bump to 50 so even hyphenated branch names render in full. Doesn't
+# push other segments off the line — tmux flexes status-left and
+# status-right independently of these caps.
+set -g status-left-length 50
 ` + tmuxConfMarkerEnd
 }
 

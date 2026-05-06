@@ -66,7 +66,6 @@ func makeWorkspace(name, branch, path, root string) state.Workspace {
 		Branch:      branch,
 		Path:        path,
 		ProjectRoot: root,
-		TmuxSession: name,
 	}
 }
 

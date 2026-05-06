@@ -73,7 +73,7 @@ func buildFullBriefing(ws state.Workspace, cfg *config.Config, hints []state.Hin
 	if ws.Port > 0 {
 		fmt.Fprintf(&b, "- **Port:** %d\n", ws.Port)
 	}
-	fmt.Fprintf(&b, "- **Tmux session:** %s\n", ws.TmuxSession)
+	fmt.Fprintf(&b, "- **Tmux session:** %s\n", ws.TmuxSessionName())
 	b.WriteString("\n")
 
 	// Section 2: lifecycle conventions. Most steps are universal but the

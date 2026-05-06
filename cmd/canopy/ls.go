@@ -168,14 +168,10 @@ func lsProject(ctx context.Context, out io.Writer, projectRoot, projectBasename 
 
 	rows := []state.Workspace{}
 	for _, w := range st.Workspaces {
-		// v2 row: match by canonical root path.
+		// Match by canonical root path. v1-shaped rows (no ProjectRoot)
+		// are dropped — Workspace.Project was removed in v0.15+ so the
+		// fallback that used to fire is gone.
 		if w.ProjectRoot == projectRoot {
-			rows = append(rows, w)
-			continue
-		}
-		// v1 row (no ProjectRoot yet): fall back to basename match. Once
-		// migration runs (in workspace.New), this branch becomes dead.
-		if w.ProjectRoot == "" && w.Project == projectBasename {
 			rows = append(rows, w)
 		}
 	}
@@ -199,8 +195,8 @@ func lsProject(ctx context.Context, out io.Writer, projectRoot, projectBasename 
 	}
 	for _, w := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
-			liveBadge(ctx, tc, w.TmuxSession),
-			w.Name, w.Branch, w.Status, w.Port, w.TmuxSession)
+			liveBadge(ctx, tc, w.TmuxSessionName()),
+			w.Name, w.Branch, w.Status, w.Port, w.TmuxSessionName())
 	}
 	return tw.Flush()
 }

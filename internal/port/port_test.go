@@ -169,10 +169,10 @@ func TestAllocate_ConcurrentDistinctPorts(t *testing.T) {
 				}
 
 				return s.Add(state.Workspace{
-					Project: "concurrent-test",
-					Name:    fmt.Sprintf("ws-%d", i),
-					Port:    p,
-					Status:  state.StatusReady,
+					ProjectRoot: "/tmp/concurrent-test",
+					Name:        fmt.Sprintf("ws-%d", i),
+					Port:        p,
+					Status:      state.StatusReady,
 				})
 			})
 			if err != nil {

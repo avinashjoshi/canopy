@@ -177,6 +177,114 @@ func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string, env ...
 	return nil
 }
 
+// RenameWindow sets the active window's name on the named session AND
+// pins it (`set-window-option automatic-rename off`) so tmux's default
+// process-name-tracking doesn't fight us. Without the pin, every tick
+// would race against tmux's automatic-rename overwriting the canopy
+// label back to "zsh"/"nvim"/whatever's running — visible flicker on
+// every status-interval, hooks firing twice per cycle.
+//
+// Idempotent: tmux's rename-window accepts a no-op rename to the
+// current name; set-window-option to its current value is also a no-op.
+// Cheap enough to call from rename pipelines without checking first.
+//
+// Failure is non-fatal: caller logs at debug and continues. The window
+// name is polish — the session itself is the load-bearing identity.
+func (c *Client) RenameWindow(ctx context.Context, session, newWindowName string) error {
+	if newWindowName == "" {
+		return nil
+	}
+	// Pin the window name first, so the rename below sticks.
+	pinArgs := c.args("set-window-option", "-t", session, "automatic-rename", "off")
+	if err := exec.CommandContext(ctx, "tmux", pinArgs...).Run(); err != nil {
+		log.Debug("tmux.set-window-option-failed", "session", session, "err", err)
+	}
+	args := c.args("rename-window", "-t", session, newWindowName)
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux.RenameWindow(%s -> %s): %w (stderr: %s)",
+			session, newWindowName, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// ErrSessionNameInUse is returned by Rename when the destination name is
+// already a live session on the server. tmux's `rename-session` rejects
+// duplicate names; the canopy rename verb needs to distinguish this from
+// other failures so it can append a disambiguating suffix.
+var ErrSessionNameInUse = errors.New("tmux: target session name already in use")
+
+// Rename changes a live session's name from oldName to newName. Also
+// renames the session's first window to newWindowName (separately, to
+// avoid the byte-for-byte session/window duplication in tmux's status
+// line).
+//
+// Pass an empty newWindowName to skip the window rename — caller may
+// prefer to let tmux's automatic-rename own the window name (which
+// updates it based on the running process: `zsh`, `nvim`, etc.).
+//
+// Returns ErrSessionNotFound if oldName isn't on the server (canopy
+// callers treat that as a no-op — the session was killed externally and
+// state.json will catch up on the next Reconcile).
+//
+// Returns ErrSessionNameInUse if newName collides with another live
+// session. Caller is responsible for retrying with a disambiguating
+// suffix; we don't auto-suffix here because the rename verb wants to
+// surface the collision to the user.
+//
+// No-op success when oldName == newName: tmux would error
+// ("duplicate session: <name>") but the user-visible result is
+// "rename to current name", which is fine.
+func (c *Client) Rename(ctx context.Context, oldName, newName, newWindowName string) error {
+	if oldName == newName {
+		return nil
+	}
+
+	exists, err := c.HasSession(ctx, oldName)
+	if err != nil {
+		return fmt.Errorf("tmux.Rename(%s -> %s): %w", oldName, newName, err)
+	}
+	if !exists {
+		return fmt.Errorf("tmux.Rename(%s -> %s): %w", oldName, newName, ErrSessionNotFound)
+	}
+
+	// Detect collision before issuing rename — tmux's stderr is "duplicate
+	// session: NAME" but parsing it is brittle across tmux versions, so we
+	// pre-check. There's a TOCTOU window (another canopy could create
+	// `newName` between our HasSession check and our rename-session call)
+	// but the worst case is a tmux error we still wrap, not corruption.
+	if collide, err := c.HasSession(ctx, newName); err != nil {
+		return fmt.Errorf("tmux.Rename(%s -> %s): %w", oldName, newName, err)
+	} else if collide {
+		return fmt.Errorf("tmux.Rename(%s -> %s): %w", oldName, newName, ErrSessionNameInUse)
+	}
+
+	args := c.args("rename-session", "-t", oldName, newName)
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux.Rename(%s -> %s): %w (stderr: %s)",
+			oldName, newName, err, strings.TrimSpace(stderr.String()))
+	}
+
+	// Best-effort window rename, only when caller asked for one.
+	// Failures here are non-fatal: the session itself is renamed, which
+	// is the user-visible win.
+	if newWindowName != "" {
+		wargs := c.args("rename-window", "-t", newName, newWindowName)
+		wcmd := exec.CommandContext(ctx, "tmux", wargs...)
+		if err := wcmd.Run(); err != nil {
+			log.Warn("tmux.rename-window-failed", "session", newName, "window", newWindowName, "err", err)
+		}
+	}
+
+	log.Info("tmux.rename", "from", oldName, "to", newName, "window", newWindowName)
+	return nil
+}
+
 // SplitDirection picks how SplitPane carves up the target pane. tmux uses
 // "-h" for a side-by-side (horizontal split = vertical divider line) and
 // "-v" for stacked (vertical split = horizontal divider line). The naming

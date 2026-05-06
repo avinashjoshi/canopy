@@ -155,7 +155,7 @@ func TestCreate_HappyPath(t *testing.T) {
 
 	// tmux session must exist with the standard 3-pane layout
 	// (nvim top-left, claude top-right, shell full-width bottom).
-	out, err := exec.Command("tmux", "-L", testSocket,"list-panes", "-t", ws.TmuxSession).Output()
+	out, err := exec.Command("tmux", "-L", testSocket,"list-panes", "-t", ws.TmuxSessionName()).Output()
 	if err != nil {
 		t.Errorf("list-panes: %v", err)
 	} else if got := len(strings.Split(strings.TrimSpace(string(out)), "\n")); got != 3 {
@@ -211,7 +211,7 @@ func TestRemove_HappyPath(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	wsPath := ws.Path
-	tmuxName := ws.TmuxSession
+	tmuxName := ws.TmuxSessionName()
 
 	if err := mgr.Remove(context.Background(), "to-remove", &stdout, &stderr); err != nil {
 		t.Fatalf("Remove: %v", err)
@@ -659,7 +659,7 @@ func TestBareAttach_CreatesDebugSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BareAttach: %v", err)
 	}
-	wantSession := ws.TmuxSession + "-debug"
+	wantSession := ws.TmuxSessionName() + "-debug"
 	if debugSession != wantSession {
 		t.Errorf("debug session name = %q; want %q", debugSession, wantSession)
 	}
@@ -673,10 +673,10 @@ func TestBareAttach_CreatesDebugSession(t *testing.T) {
 
 	// Verify the workspace's normal session is also still alive (BareAttach
 	// must not interfere with it).
-	if alive, err := mgr.Tmux.HasSession(context.Background(), ws.TmuxSession); err != nil {
+	if alive, err := mgr.Tmux.HasSession(context.Background(), ws.TmuxSessionName()); err != nil {
 		t.Fatalf("HasSession workspace: %v", err)
 	} else if !alive {
-		t.Errorf("workspace session %q got killed by BareAttach (must be independent)", ws.TmuxSession)
+		t.Errorf("workspace session %q got killed by BareAttach (must be independent)", ws.TmuxSessionName())
 	}
 }
 
@@ -745,7 +745,7 @@ func TestBareAttachMain_CreatesDebugSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BareAttachMain: %v", err)
 	}
-	wantSuffix := "-main-debug"
+	wantSuffix := "/main-debug"
 	if !strings.HasSuffix(debugSession, wantSuffix) {
 		t.Errorf("debug session name = %q; want suffix %q", debugSession, wantSuffix)
 	}
@@ -791,7 +791,7 @@ func TestResurrect_HappyPath(t *testing.T) {
 	}
 
 	// Kill the tmux session out from under canopy (simulates reboot).
-	if err := mgr.Tmux.Kill(context.Background(), ws.TmuxSession); err != nil {
+	if err := mgr.Tmux.Kill(context.Background(), ws.TmuxSessionName()); err != nil {
 		t.Fatalf("Kill: %v", err)
 	}
 
@@ -803,7 +803,7 @@ func TestResurrect_HappyPath(t *testing.T) {
 		t.Errorf("status after resurrect = %q; want ready", revived.Status)
 	}
 
-	out, err := exec.Command("tmux", "-L", testSocket,"list-panes", "-t", ws.TmuxSession).Output()
+	out, err := exec.Command("tmux", "-L", testSocket,"list-panes", "-t", ws.TmuxSessionName()).Output()
 	if err != nil {
 		t.Errorf("list-panes: %v", err)
 	} else if got := len(strings.Split(strings.TrimSpace(string(out)), "\n")); got != 3 {

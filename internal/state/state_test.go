@@ -53,11 +53,10 @@ func TestSave_RoundTrip(t *testing.T) {
 		SchemaVersion: state.SchemaVersion,
 		Workspaces: []state.Workspace{
 			{
-				Project:     "cravd",
+				ProjectRoot: "/home/avi/Work/cravd",
 				Name:        "bold-falcon",
 				Branch:      "bold-falcon",
 				Path:        "/home/avi/Work/cravd/worktrees/bold-falcon",
-				TmuxSession: "cravd-bold-falcon",
 				Port:        3001,
 				Status:      state.StatusReady,
 				CreatedAt:   time.Now().UTC().Round(time.Second),
@@ -96,12 +95,10 @@ func TestSave_RoundTrip_v06Fields(t *testing.T) {
 		SchemaVersion: state.SchemaVersion,
 		Workspaces: []state.Workspace{
 			{
-				Project:          "cravd",
 				ProjectRoot:      "/home/avi/Work/cravd",
 				Name:             "review-pr-142",
 				Branch:           "feat/oauth",
 				Path:             "/home/avi/.canopy/workspaces/cravd/review-pr-142",
-				TmuxSession:      "cravd-review-pr-142",
 				Port:             3010,
 				Status:           state.StatusReady,
 				CreatedAt:        time.Now().UTC().Round(time.Second),
@@ -113,12 +110,10 @@ func TestSave_RoundTrip_v06Fields(t *testing.T) {
 				// from JSON via omitempty so we don't bloat existing
 				// state.json files for users who haven't created
 				// anything via the new flags.
-				Project:     "canopy",
 				ProjectRoot: "/home/avi/Work/canopy",
 				Name:        "fresh-falcon",
 				Branch:      "fresh-falcon",
 				Path:        "/home/avi/.canopy/workspaces/canopy/fresh-falcon",
-				TmuxSession: "canopy-fresh-falcon",
 				Port:        4000,
 				Status:      state.StatusSettingUp,
 				CreatedAt:   time.Now().UTC().Round(time.Second),
@@ -319,7 +314,6 @@ func TestState_AddFindRemove(t *testing.T) {
 
 	const root = "/home/avi/Work/cravd"
 	w := state.Workspace{
-		Project:     "cravd",
 		ProjectRoot: root,
 		Name:        "bold-falcon",
 		Status:      state.StatusReady,
@@ -375,7 +369,7 @@ func TestWithLock_HappyPath(t *testing.T) {
 	}
 
 	if err := store.WithLock(func(s *state.State) error {
-		return s.Add(state.Workspace{Project: "cravd", Name: "bold-falcon", Status: state.StatusReady})
+		return s.Add(state.Workspace{ProjectRoot: "/home/avi/Work/cravd", Name: "bold-falcon", Status: state.StatusReady})
 	}); err != nil {
 		t.Fatalf("WithLock: %v", err)
 	}
@@ -448,9 +442,9 @@ func TestWithLock_ParallelWriters(t *testing.T) {
 				// even when it succeeds — fine, sub-100ms in practice.
 				time.Sleep(1 * time.Millisecond)
 				return s.Add(state.Workspace{
-					Project: "cravd",
-					Name:    workspaceName(i),
-					Status:  state.StatusReady,
+					ProjectRoot: "/home/avi/Work/cravd",
+					Name:        workspaceName(i),
+					Status:      state.StatusReady,
 				})
 			})
 			if err != nil {

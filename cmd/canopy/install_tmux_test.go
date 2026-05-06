@@ -145,6 +145,26 @@ func TestCanopyBlockBody_popupBindShape(t *testing.T) {
 	}
 }
 
+// TestCanopyBlockBody_setsTitles asserts the block enables tmux's
+// terminal-title forwarding (set-titles on) with #S as the title source.
+// This is the load-bearing wire-up for "Ghostty tab strip shows the
+// current branch": tmux emits OSC 0 with the session name, and canopy
+// renames sessions to follow the branch via Manager.SyncBranch.
+//
+// Without these two lines, the rename pipeline updates everything EXCEPT
+// the terminal tab — degraded experience even though the underlying
+// session rename works.
+func TestCanopyBlockBody_setsTitles(t *testing.T) {
+	body := canopyBlockBody()
+
+	if !strings.Contains(body, "set -g set-titles on") {
+		t.Errorf("block missing 'set -g set-titles on' (terminal title forwarding):\n%s", body)
+	}
+	if !strings.Contains(body, "set -g set-titles-string '#S'") {
+		t.Errorf("block missing 'set -g set-titles-string \\'#S\\'' (title source = session name):\n%s", body)
+	}
+}
+
 // TestCanopyBlockBody_bareBinaryNoAbsolutePath asserts the block embeds
 // bare `canopy` (PATH-resolved at tmux runtime) and never an absolute
 // path. With `canopy use` swapping the ~/.local/bin/canopy symlink

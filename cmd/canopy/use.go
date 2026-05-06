@@ -172,7 +172,7 @@ func switchToWorkspace(ctx context.Context, name string, build bool, symlinkPath
 				"  Path:    %s\n"+
 				"  canopy use only works with worktrees of github.com/avinashjoshi/canopy itself.\n"+
 				"  Run 'canopy use' (no args) to see canopy worktrees you can switch to.",
-			name, name, ws.Project, ws.Path)
+			name, name, ws.ProjectBasename(), ws.Path)
 	}
 
 	devBin := filepath.Join(ws.Path, "canopy")
@@ -222,10 +222,10 @@ func printUseList(ctx context.Context, out io.Writer, symlinkPath, releaseTarget
 
 	fmt.Fprintln(out, "Available targets:")
 	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "  TARGET\tPATH\tVERSION\tBUILT")
+	fmt.Fprintln(tw, "  TARGET\tBRANCH\tVERSION\tBUILT")
 	fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
 		useReleaseAlias,
-		releaseTargetPath,
+		"—",
 		releaseVersionLabel(ctx, releaseTargetPath),
 		builtAgo(releaseTargetPath))
 
@@ -250,11 +250,12 @@ func printUseList(ctx context.Context, out io.Writer, symlinkPath, releaseTarget
 			ws := findWorkspaceByName(st, n)
 			devBin := filepath.Join(ws.Path, canopyBinName)
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
-				ws.Name, devBin, devVersionLabel(devBin), builtAgo(devBin))
+				ws.Name, branchLabelForUse(ws), devVersionLabel(devBin), builtAgo(devBin))
 			canopyOnly++
 		}
 	}
 	tw.Flush()
+	fmt.Fprintln(out, "\n  Tip: `canopy use <target>` accepts the workspace name OR its branch.")
 
 	// One-line footer when we filtered anything out, so the user knows
 	// the listing is canopy-only on purpose. Without this, someone with
@@ -422,10 +423,13 @@ func loadStateForUse() (*state.State, error) {
 	return st, nil
 }
 
-// findWorkspaceByName returns the first workspace whose Name matches.
+// findWorkspaceByName returns the first workspace whose Name OR Branch
+// matches. Name lookup wins on tie (Name is canonical); branch lookup
+// is the convenience path so users can type the meaningful identifier
+// they remember instead of the auto-generated workspace slug.
+//
 // O(n) linear scan over state.Workspaces is fine — registries are
-// dozens-not-thousands sized; a map index would just add deserialization
-// cost.
+// dozens-not-thousands sized.
 func findWorkspaceByName(st *state.State, name string) *state.Workspace {
 	if st == nil || name == "" {
 		return nil
@@ -435,7 +439,25 @@ func findWorkspaceByName(st *state.State, name string) *state.Workspace {
 			return &st.Workspaces[i]
 		}
 	}
+	// No exact name match. Try branch as a convenience: `canopy use
+	// clear-workspace-identity` resolves to the workspace whose branch
+	// is "clear-workspace-identity" even if its dir/name is "clever-jay".
+	for i := range st.Workspaces {
+		if st.Workspaces[i].Branch != "" && st.Workspaces[i].Branch == name {
+			return &st.Workspaces[i]
+		}
+	}
 	return nil
+}
+
+// branchLabelForUse returns the BRANCH column value for one row. We
+// elide redundancy when ws.Branch matches ws.Name (or is empty) so the
+// column doesn't render the same string twice per row.
+func branchLabelForUse(ws *state.Workspace) string {
+	if ws == nil || ws.Branch == "" || ws.Branch == ws.Name {
+		return "—"
+	}
+	return ws.Branch
 }
 
 // isCanopyWorktree reports whether a workspace dir is a canopy source
@@ -458,10 +480,9 @@ func isCanopyWorktree(workspacePath string) bool {
 }
 
 // errUnknownWorkspace formats the "unknown workspace" error with the
-// list of names the user could have meant. The fast diagnostic — they
-// usually mistyped a hyphen or capitalized a letter, and seeing the
-// real names side-by-side is faster than re-running `canopy use` for
-// the listing.
+// list of names + branches the user could have meant. The fast
+// diagnostic: they usually mistyped a hyphen or remembered the branch
+// name instead of the workspace slug.
 //
 // Suggestions are filtered to canopy worktrees only — listing a
 // cravd workspace as a "did you mean" suggestion when canopy use
@@ -470,7 +491,12 @@ func errUnknownWorkspace(name string, st *state.State) error {
 	available := []string{useReleaseAlias}
 	if st != nil {
 		for _, ws := range st.Workspaces {
-			if isCanopyWorktree(ws.Path) {
+			if !isCanopyWorktree(ws.Path) {
+				continue
+			}
+			if ws.Branch != "" && ws.Branch != ws.Name {
+				available = append(available, fmt.Sprintf("%s (or %s)", ws.Name, ws.Branch))
+			} else {
 				available = append(available, ws.Name)
 			}
 		}

@@ -1276,7 +1276,7 @@ func resurrectAndAttachCmd(mgr *workspace.Manager, name string) tea.Cmd {
 		// We can't return a tea.Cmd from a tea.Msg — instead we kick
 		// off the attach as a follow-on by returning an attachAfterMsg
 		// that Update routes through.
-		return attachAfterMsg{session: ws.TmuxSession}
+		return attachAfterMsg{session: ws.TmuxSessionName()}
 	}
 }
 
@@ -2068,7 +2068,7 @@ func createCmd(mgr *workspace.Manager, name string, spec workspace.SourceSpec) t
 			// if the tick timing missed them.
 			msg := createDoneMsg{output: buf.Drain(), err: err}
 			if err == nil && ws != nil {
-				msg.tmuxSession = ws.TmuxSession
+				msg.tmuxSession = ws.TmuxSessionName()
 			}
 			done <- msg
 		}()

@@ -38,13 +38,17 @@ func TestBuildGlobalRows_WorkspacesOnly(t *testing.T) {
 			"/a/cravd": {Root: "/a/cravd", PortBase: 3000},
 		},
 		Workspaces: []Workspace{
-			{ProjectRoot: "/a/cravd", Project: "cravd", Name: "soft-fox", TmuxSession: "cravd-soft-fox", Status: StatusReady, Port: 3000, Branch: "feat/y"},
-			{ProjectRoot: "/a/cravd", Project: "cravd", Name: "bold-falcon", TmuxSession: "cravd-bold-falcon", Status: StatusReady, Port: 3001, Branch: "feat/x"},
+			// Branch matches Name so the computed session name is
+			// stable for the probe map below. (Pre-v0.15 the field
+			// was stored explicitly; now it derives from project +
+			// branch via TmuxSessionName().)
+			{ProjectRoot: "/a/cravd", Name: "soft-fox", Branch: "soft-fox", Status: StatusReady, Port: 3000},
+			{ProjectRoot: "/a/cravd", Name: "bold-falcon", Branch: "bold-falcon", Status: StatusReady, Port: 3001},
 		},
 	}
 	probe := &fakeProbe{alive: map[string]bool{
-		"cravd-soft-fox":    true,
-		"cravd-bold-falcon": false, // dead
+		"cravd/soft-fox":    true,
+		"cravd/bold-falcon": false, // dead
 	}}
 
 	rows := s.BuildGlobalRows(context.Background(), probe)
@@ -81,7 +85,7 @@ func TestBuildGlobalRows_MainOnly(t *testing.T) {
 			"/a/cravd": {Root: "/a/cravd", PortBase: 3000},
 		},
 	}
-	probe := &fakeProbe{alive: map[string]bool{"cravd-main": true}}
+	probe := &fakeProbe{alive: map[string]bool{"cravd/main": true}}
 
 	rows := s.BuildGlobalRows(context.Background(), probe)
 	if len(rows) != 1 {
@@ -109,14 +113,14 @@ func TestBuildGlobalRows_Mixed(t *testing.T) {
 			"/b/canopy": {Root: "/b/canopy", PortBase: 4000},
 		},
 		Workspaces: []Workspace{
-			{ProjectRoot: "/b/canopy", Project: "canopy", Name: "ancient-hornet", TmuxSession: "canopy-ancient-hornet", Status: StatusReady},
-			{ProjectRoot: "/a/cravd", Project: "cravd", Name: "bold-falcon", TmuxSession: "cravd-bold-falcon", Status: StatusReady},
+			{ProjectRoot: "/b/canopy", Name: "ancient-hornet", Status: StatusReady},
+			{ProjectRoot: "/a/cravd", Name: "bold-falcon", Status: StatusReady},
 		},
 	}
 	probe := &fakeProbe{alive: map[string]bool{
-		"cravd-main":            true,
-		"cravd-bold-falcon":     true,
-		"canopy-ancient-hornet": false,
+		"cravd/main":            true,
+		"cravd/bold-falcon":     true,
+		"canopy/ancient-hornet": false,
 	}}
 
 	rows := s.BuildGlobalRows(context.Background(), probe)
@@ -152,7 +156,7 @@ func TestBuildGlobalRows_ProbeError(t *testing.T) {
 	s := &State{
 		Projects: map[string]ProjectMeta{"/a/cravd": {Root: "/a/cravd"}},
 		Workspaces: []Workspace{
-			{ProjectRoot: "/a/cravd", Project: "cravd", Name: "soft-fox", TmuxSession: "cravd-soft-fox"},
+			{ProjectRoot: "/a/cravd",Name: "soft-fox"},
 		},
 	}
 	probe := &fakeProbe{err: errors.New("tmux daemon down")}
@@ -169,24 +173,20 @@ func TestBuildGlobalRows_ProbeError(t *testing.T) {
 	}
 }
 
-// TestBuildGlobalRows_LegacyV1Workspace: a Workspace with only Project set
-// (no ProjectRoot) should still render. The basename functions as the
-// fallback key. Migration would have run already in production, but the
-// listing must not crash if it sees a stale row.
-func TestBuildGlobalRows_LegacyV1Workspace(t *testing.T) {
+// TestBuildGlobalRows_OrphanV1RowDropped: a Workspace with no ProjectRoot
+// (a legacy v1-shaped row that escaped migration) gets silently dropped
+// from the listing. The pre-v0.15 fallback that re-derived a project key
+// from the now-removed Workspace.Project field is gone.
+func TestBuildGlobalRows_OrphanV1RowDropped(t *testing.T) {
 	s := &State{
 		Workspaces: []Workspace{
-			{Project: "cravd", Name: "bold-falcon", TmuxSession: "cravd-bold-falcon", Status: StatusReady},
+			{Name: "bold-falcon", Status: StatusReady},
 		},
 	}
 	probe := &fakeProbe{}
 	rows := s.BuildGlobalRows(context.Background(), probe)
-	// Main + workspace = 2.
-	if len(rows) != 2 {
-		t.Fatalf("legacy row got %d rows, want 2 (main + workspace)", len(rows))
-	}
-	if rows[0].Project != "cravd" || rows[1].Project != "cravd" {
-		t.Errorf("legacy rows Project: got %q, %q", rows[0].Project, rows[1].Project)
+	if len(rows) != 0 {
+		t.Fatalf("orphan v1 row should be dropped; got %d rows: %+v", len(rows), rows)
 	}
 }
 
@@ -202,14 +202,14 @@ func TestBuildGlobalRows_LastErrorHintPropagates(t *testing.T) {
 		},
 		Workspaces: []Workspace{
 			{
-				ProjectRoot: "/a/cravd", Project: "cravd",
-				Name: "broken-ws", TmuxSession: "cravd-broken-ws",
+				ProjectRoot: "/a/cravd",
+				Name: "broken-ws",
 				Status: StatusBroken, Port: 3000,
 				LastErrorHint: "missing bin/dev script",
 			},
 			{
-				ProjectRoot: "/a/cravd", Project: "cravd",
-				Name: "ready-ws", TmuxSession: "cravd-ready-ws",
+				ProjectRoot: "/a/cravd",
+				Name: "ready-ws",
 				Status: StatusReady, Port: 3001,
 				LastErrorHint: "", // empty, must stay empty on row
 			},
@@ -252,11 +252,11 @@ func TestSafeMainSessionName(t *testing.T) {
 	cases := []struct {
 		basename, want string
 	}{
-		{"cravd", "cravd-main"},
-		{"hey-cli", "hey-cli-main"},
-		{"my.project", "my-project-main"},
-		{"weird name!", "weird-name-main"},
-		{"trailing-dash-", "trailing-dash-main"},
+		{"cravd", "cravd/main"},
+		{"hey-cli", "hey-cli/main"},
+		{"my.project", "my-project/main"},
+		{"weird name!", "weird-name/main"},
+		{"trailing-dash-", "trailing-dash/main"},
 	}
 	for _, c := range cases {
 		if got := safeMainSessionName(c.basename); got != c.want {
