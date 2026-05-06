@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/state"
 )
 
@@ -32,12 +33,18 @@ func detectRenameSuggested(ctx context.Context, ws state.Workspace) *state.Hint 
 		return nil
 	}
 
-	// Step 1: get the current branch name in this worktree. Use
-	// rev-parse rather than ws.Branch from state.json — state.Branch
-	// is set at create time and may be stale if the user manually
-	// renamed via git.
-	currentBranch := gitCurrentBranch(ctx, ws.Path)
-	if currentBranch == "" {
+	// Step 1: get the current branch name in this worktree.
+	//
+	// Historical note: this used to read state.Branch directly, which is
+	// set at workspace-create time. With Manager.SyncBranch (v0.15+) the
+	// statusline tick keeps state.Branch synced live, so reading it would
+	// be cheaper. We still git rev-parse here to keep the detector
+	// independent of the sync timing — if the user just ran `git
+	// branch -m` and the next sync hasn't fired, the detector still sees
+	// the new name and the rename-suggested hint correctly disappears.
+	currentBranch, err := git.CurrentBranch(ctx, ws.Path)
+	if err != nil || currentBranch == "" {
+		// Detached HEAD, mid-rebase, or git error — no hint either way.
 		return nil
 	}
 
@@ -62,24 +69,6 @@ func detectRenameSuggested(ctx context.Context, ws state.Workspace) *state.Hint 
 		Action:     "git branch -m <intent-name>",
 		DetectedAt: time.Now(),
 	}
-}
-
-// gitCurrentBranch returns the current branch name in the worktree at
-// path. Returns "" on detached HEAD or any git error — the detector
-// caller treats "" as "no hint."
-func gitCurrentBranch(ctx context.Context, path string) string {
-	cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		log.Debug("lifecycle.rename.current-branch", "path", path, "err", err)
-		return ""
-	}
-	branch := strings.TrimSpace(string(out))
-	if branch == "HEAD" {
-		// Detached HEAD — the workspace isn't on a branch we can rename.
-		return ""
-	}
-	return branch
 }
 
 // gitCommitsPastDefault returns the number of commits on HEAD that
