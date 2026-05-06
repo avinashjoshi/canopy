@@ -191,6 +191,65 @@ func TestFindWorkspaceByName(t *testing.T) {
 	}
 }
 
+// TestFindWorkspaceByName_BranchFallback covers the "user types the
+// branch instead of the workspace slug" convenience path. Name lookup
+// wins on direct match; branch lookup runs only if no name matches.
+func TestFindWorkspaceByName_BranchFallback(t *testing.T) {
+	st := &state.State{
+		Workspaces: []state.Workspace{
+			{Name: "clever-jay", Path: "/cj", Branch: "clear-workspace-identity"},
+			{Name: "another-slug", Path: "/another", Branch: "feat-foo"},
+			{Name: "branch-equals-name", Path: "/ben", Branch: "branch-equals-name"},
+		},
+	}
+	cases := []struct {
+		name        string
+		input       string
+		wantFoundAt string // workspace.Name we expect to match (or "" for nil)
+	}{
+		{"name match wins", "clever-jay", "clever-jay"},
+		{"branch fallback", "clear-workspace-identity", "clever-jay"},
+		{"second branch", "feat-foo", "another-slug"},
+		{"name == branch picks via name path", "branch-equals-name", "branch-equals-name"},
+		{"unknown still nil", "nope", ""},
+		{"empty branch never matches", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := findWorkspaceByName(st, tc.input)
+			if tc.wantFoundAt == "" {
+				if ws != nil {
+					t.Errorf("got %+v; want nil", ws)
+				}
+				return
+			}
+			if ws == nil || ws.Name != tc.wantFoundAt {
+				t.Errorf("got %+v; want workspace named %q", ws, tc.wantFoundAt)
+			}
+		})
+	}
+}
+
+func TestBranchLabelForUse(t *testing.T) {
+	cases := []struct {
+		name string
+		ws   *state.Workspace
+		want string
+	}{
+		{"nil workspace", nil, "—"},
+		{"no branch set", &state.Workspace{Name: "x"}, "—"},
+		{"branch == name (dedupe)", &state.Workspace{Name: "x", Branch: "x"}, "—"},
+		{"meaningful branch", &state.Workspace{Name: "clever-jay", Branch: "clear-workspace-identity"}, "clear-workspace-identity"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := branchLabelForUse(tc.ws); got != tc.want {
+				t.Errorf("got %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // makeCanopyWorktree creates a fake canopy source worktree at dir.
 // Adds cmd/canopy/main.go so isCanopyWorktree returns true. Test
 // helper used by every test that needs a "this is a canopy worktree"
@@ -301,7 +360,7 @@ func TestSwitchToWorkspace_notACanopyWorktree(t *testing.T) {
 	store, _ := state.NewStore(canopyHome)
 	if err := store.Save(&state.State{
 		Workspaces: []state.Workspace{
-			{Name: "crisp-badger", Path: rails, Project: "cravd"},
+			{Name: "crisp-badger", Path: rails, ProjectRoot: "/tmp/cravd"},
 		},
 	}); err != nil {
 		t.Fatalf("save: %v", err)
@@ -363,9 +422,9 @@ func TestPrintUseList_filtersNonCanopyWorktrees(t *testing.T) {
 	store, _ := state.NewStore(canopyHome)
 	if err := store.Save(&state.State{
 		Workspaces: []state.Workspace{
-			{Name: "smooth-fawn", Path: canopyWS, Project: "canopy"},
-			{Name: "crisp-badger", Path: railsWS, Project: "cravd"},
-			{Name: "fierce-salmon", Path: railsWS, Project: "cravd"},
+			{Name: "smooth-fawn", Path: canopyWS, ProjectRoot: "/tmp/canopy"},
+			{Name: "crisp-badger", Path: railsWS, ProjectRoot: "/tmp/cravd"},
+			{Name: "fierce-salmon", Path: railsWS, ProjectRoot: "/tmp/cravd"},
 		},
 	}); err != nil {
 		t.Fatalf("save: %v", err)
@@ -608,6 +667,15 @@ func TestPrintUseList(t *testing.T) {
 	idxB := strings.Index(got, "feature-B")
 	if idxA == -1 || idxB == -1 || idxA > idxB {
 		t.Errorf("workspaces not sorted alphabetically; A@%d B@%d:\n%s", idxA, idxB, got)
+	}
+
+	// New columns shape: BRANCH replaces PATH.
+	if !strings.Contains(got, "BRANCH") {
+		t.Errorf("BRANCH column missing from header:\n%s", got)
+	}
+	// Tip line so users discover branch-name lookup.
+	if !strings.Contains(got, "OR its branch") {
+		t.Errorf("missing tip explaining branch-name lookup:\n%s", got)
 	}
 }
 
