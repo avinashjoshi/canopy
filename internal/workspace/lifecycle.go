@@ -319,10 +319,13 @@ func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, s
 		}
 		safeName := git.Sanitize(name)
 		wsPath := filepath.Join(m.workspacesDir(), safeName)
-		// Tmux session keys off the workspace NAME (canonical canopy
-		// identifier), not the branch — same workspace dir maps to one
-		// tmux session even if the branch is renamed later.
-		session := tmux.SafeName(m.Cfg.Project) + "-" + tmux.SafeName(safeName)
+		// Tmux session name is computed on demand from project + branch
+		// via state.Workspace.TmuxSessionName(). At create time, branch
+		// and name usually match (auto-generated names), so the initial
+		// session name reads as `<project>-<branch>` straight away.
+		// Subsequent `git branch -m` calls + SyncBranch transparently
+		// rename the live tmux session (the computed value moves; old
+		// stored field gone in v0.15+).
 
 		// Default SourceKind to "fresh" so v0.6+ rows always carry an
 		// explicit kind (older "fresh" was implicit). SourceContext
@@ -334,12 +337,10 @@ func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, s
 		}
 
 		ws = state.Workspace{
-			Project:           m.Cfg.Project,     // legacy basename, still written for backward compat
-			ProjectRoot:       m.Cfg.ProjectRoot, // v2 authoritative key
+			ProjectRoot:       m.Cfg.ProjectRoot, // v2 authoritative key (basename derived via ProjectBasename())
 			Name:              name,
 			Branch:            branch,
 			Path:              wsPath,
-			TmuxSession:       session,
 			Port:              p,
 			Status:            state.StatusSettingUp,
 			CreatedAt:         time.Now().UTC(),
@@ -354,7 +355,7 @@ func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, s
 	}
 
 	log.Info("workspace.create.registered",
-		"project", ws.Project, "name", ws.Name, "path", ws.Path, "port", ws.Port)
+		"project", ws.ProjectBasename(), "name", ws.Name, "path", ws.Path, "port", ws.Port)
 
 	// Phase 2: slow operations outside the lock. If any of these fail,
 	// the workspace transitions to status=broken via the helper below.
@@ -499,7 +500,7 @@ func (m *Manager) runSetupHooksOnly(ctx context.Context, ws *state.Workspace, st
 	// workspace usually has no tmux session yet (setup failed before
 	// the buildSession step), but we check defensively in case a future
 	// failure mode leaves a half-built session lying around.
-	alive, err := m.Tmux.HasSession(ctx, ws.TmuxSession)
+	alive, err := m.Tmux.HasSession(ctx, ws.TmuxSessionName())
 	if err != nil {
 		return fmt.Errorf("workspace.runSetupHooksOnly: tmux check: %w", err)
 	}
@@ -581,7 +582,7 @@ func (m *Manager) RetrySetup(ctx context.Context, name string, force bool, stdou
 	}
 
 	log.Info("workspace.retry.start",
-		"project", ws.Project, "name", ws.Name, "path", ws.Path, "port", ws.Port)
+		"project", ws.ProjectBasename(), "name", ws.Name, "path", ws.Path, "port", ws.Port)
 	start := time.Now()
 
 	// Phase 2: re-run hooks + tmux build (slow, no lock held). Same
@@ -650,11 +651,11 @@ func (m *Manager) RetrySetup(ctx context.Context, name string, force bool, stdou
 // ending drops the pane to a shell instead of closing it.
 func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	env := hooks.WorkspaceEnv(ws.Path, m.Cfg.ProjectRoot, ws.Port)
-	if err := m.Tmux.Create(ctx, ws.TmuxSession, ws.Path, keepAlive("nvim ."), env...); err != nil {
+	if err := m.Tmux.Create(ctx, ws.TmuxSessionName(), ws.Path, keepAlive("nvim ."), env...); err != nil {
 		return err
 	}
 	// Shell, ~15% of window height, full-width bottom strip.
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, "", tmux.SplitVertical, 15); err != nil {
+	if err := m.Tmux.SplitPane(ctx, ws.TmuxSessionName(), ws.Path, "", tmux.SplitVertical, 15); err != nil {
 		return err
 	}
 	// Agent pane, ~30% of the top pane's width on the right. Uses
@@ -667,7 +668,7 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	if err != nil {
 		return fmt.Errorf("workspace.buildSession: agent pane: %w", err)
 	}
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSession, ws.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
+	if err := m.Tmux.SplitPane(ctx, ws.TmuxSessionName(), ws.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
 		return err
 	}
 	// Land the active pane on the agent (claude) pane — that's the
@@ -675,8 +676,8 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	// above all use -d (active stays on nvim), so we explicitly move
 	// right to the just-created agent pane. Best-effort: a select-
 	// pane failure shouldn't tear down workspace creation.
-	if err := m.Tmux.SelectPaneDirection(ctx, ws.TmuxSession, "R"); err != nil {
-		log.Warn("workspace.build.select-agent-pane-failed", "session", ws.TmuxSession, "err", err.Error())
+	if err := m.Tmux.SelectPaneDirection(ctx, ws.TmuxSessionName(), "R"); err != nil {
+		log.Warn("workspace.build.select-agent-pane-failed", "session", ws.TmuxSessionName(), "err", err.Error())
 	}
 	return nil
 }
@@ -908,7 +909,7 @@ func (m *Manager) Remove(ctx context.Context, name string, stdout, stderr io.Wri
 	}
 
 	// 3. tmux kill — log failure but proceed.
-	if err := m.Tmux.Kill(ctx, wsCopy.TmuxSession); err != nil && !errors.Is(err, tmux.ErrSessionNotFound) {
+	if err := m.Tmux.Kill(ctx, wsCopy.TmuxSessionName()); err != nil && !errors.Is(err, tmux.ErrSessionNotFound) {
 		log.Warn("workspace.remove.tmux-failed", "name", name, "err", err)
 	}
 
@@ -970,22 +971,22 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	// conversation history is preserved by the agent itself
 	// (claude --continue resumes; aider --restore-chat-history; etc).
 	env := hooks.WorkspaceEnv(wsCopy.Path, m.Cfg.ProjectRoot, wsCopy.Port)
-	if err := m.Tmux.Create(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive("nvim ."), env...); err != nil {
+	if err := m.Tmux.Create(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, keepAlive("nvim ."), env...); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {
+	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {
 		return nil, err
 	}
 	agentCmd, err := m.agentPaneCmd(&wsCopy, true /* resume */)
 	if err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: agent pane: %w", err)
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSession, wsCopy.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
+	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
 		return nil, err
 	}
 	// Land active pane on the agent — same rationale as buildSession.
-	if err := m.Tmux.SelectPaneDirection(ctx, wsCopy.TmuxSession, "R"); err != nil {
-		log.Warn("workspace.resurrect.select-agent-pane-failed", "session", wsCopy.TmuxSession, "err", err.Error())
+	if err := m.Tmux.SelectPaneDirection(ctx, wsCopy.TmuxSessionName(), "R"); err != nil {
+		log.Warn("workspace.resurrect.select-agent-pane-failed", "session", wsCopy.TmuxSessionName(), "err", err.Error())
 	}
 
 	// Flip status to ready + bump AgentLaunchCount. The agent pane was
@@ -1041,7 +1042,7 @@ func (m *Manager) BareAttach(ctx context.Context, name string) (string, error) {
 			name, ws.Path, name)
 	}
 
-	debugSession := ws.TmuxSession + "-debug"
+	debugSession := ws.TmuxSessionName() + "-debug"
 	exists, err := m.Tmux.HasSession(ctx, debugSession)
 	if err != nil {
 		return "", fmt.Errorf("workspace.BareAttach: probe: %w", err)
@@ -1229,20 +1230,11 @@ func (m *Manager) Reconcile(ctx context.Context) ([]ReconcileChange, error) {
 				w.Status = newStatus
 			}
 
-			// Refresh branch from the worktree. CLAUDE.md tells agents
-			// to `git branch -m <intent>` on first turn, and users do
-			// the same manually — without this re-read, the TUI's
-			// Branch column stays frozen at workspace-create time.
-			// Skip if the dir is gone (orphaned) or HEAD is detached
-			// (current returns ""): leave the recorded branch alone
-			// rather than blanking it.
+			// Refresh branch from the worktree. Shared with SyncBranch
+			// (the per-workspace path hit by the statusline tick) so
+			// detached-HEAD/empty/orphaned semantics live in one place.
 			if newStatus != state.StatusOrphaned {
-				if branch, err := git.CurrentBranch(ctx, w.Path); err != nil {
-					log.Warn("reconcile.branch-read-failed", "name", w.Name, "err", err)
-				} else if branch != "" && branch != w.Branch {
-					log.Info("reconcile.branch-renamed", "name", w.Name, "from", w.Branch, "to", branch)
-					w.Branch = branch
-				}
+				refreshBranchFromWorktree(ctx, w)
 			}
 		}
 		return nil
@@ -1251,6 +1243,42 @@ func (m *Manager) Reconcile(ctx context.Context) ([]ReconcileChange, error) {
 		return nil, err
 	}
 	return changes, nil
+}
+
+// refreshBranchFromWorktree updates w.Branch from `git rev-parse` if the
+// recorded value is stale. Returns true iff w.Branch was mutated.
+//
+// Shared by Reconcile (full-project sweep) and SyncBranch (per-workspace
+// statusline path). Centralizing the detached-HEAD/empty-string/error
+// semantics here means there's exactly one place to reason about
+// "when do we trust git over our cached value?"
+//
+// Rules:
+//   - git error → preserve w.Branch, log WARN, return false
+//   - branch == "" (detached HEAD, mid-rebase) → preserve w.Branch,
+//     log DEBUG, return false. Critical: never blank out the displayed
+//     label just because the user is mid-rebase.
+//   - branch == w.Branch → no-op, return false
+//   - branch differs → mutate w.Branch, log INFO, return true
+//
+// Caller is responsible for: persisting w to state.json, holding the
+// flock, and propagating side effects (tmux session rename, etc.).
+func refreshBranchFromWorktree(ctx context.Context, w *state.Workspace) bool {
+	branch, err := git.CurrentBranch(ctx, w.Path)
+	if err != nil {
+		log.Warn("workspace.branch-read-failed", "name", w.Name, "err", err)
+		return false
+	}
+	if branch == "" {
+		log.Debug("workspace.branch-empty", "name", w.Name, "path", w.Path)
+		return false
+	}
+	if branch == w.Branch {
+		return false
+	}
+	log.Info("workspace.branch-refreshed", "name", w.Name, "from", w.Branch, "to", branch)
+	w.Branch = branch
+	return true
 }
 
 // ReconcileChange records one workspace's status transition during a
@@ -1285,9 +1313,9 @@ func (m *Manager) observeStatus(ctx context.Context, w *state.Workspace) (state.
 		return "", fmt.Errorf("stat %s: %w", w.Path, err)
 	}
 
-	alive, err := m.Tmux.HasSession(ctx, w.TmuxSession)
+	alive, err := m.Tmux.HasSession(ctx, w.TmuxSessionName())
 	if err != nil {
-		return "", fmt.Errorf("tmux.HasSession(%s): %w", w.TmuxSession, err)
+		return "", fmt.Errorf("tmux.HasSession(%s): %w", w.TmuxSessionName(), err)
 	}
 	if alive {
 		return state.StatusReady, nil
