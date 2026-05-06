@@ -23,14 +23,18 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/spf13/cobra"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 const (
@@ -100,6 +104,12 @@ func runStatusline(cmd *cobra.Command, _ []string) error {
 // renderCurrentLine produces the line for `--format=current`. ALWAYS
 // returns a tmux-safe string: either a fully-escaped status line, or "".
 // Never propagates errors — internal failures log + return "".
+//
+// As a side effect, fires a best-effort SyncBranch call before rendering
+// so that `git branch -m` performed inside the workspace shows up on the
+// next tick. The sync is bounded by a 500ms timeout so a hung tmux or
+// flock contention can't hang the user's status bar (tmux would render
+// stale output for one tick, no worse).
 func renderCurrentLine(ctx context.Context) string {
 	t := tmux.New()
 	sessionName, err := t.CurrentSession(ctx)
@@ -108,7 +118,12 @@ func renderCurrentLine(ctx context.Context) string {
 		return ""
 	}
 
-	st, err := loadStateForStatusline()
+	store, err := newStoreForStatusline()
+	if err != nil {
+		statuslineLog.Warn("statusline.load_state", "err", err.Error())
+		return ""
+	}
+	st, err := store.Load()
 	if err != nil {
 		statuslineLog.Warn("statusline.load_state", "err", err.Error())
 		return ""
@@ -121,6 +136,23 @@ func renderCurrentLine(ctx context.Context) string {
 		return ""
 	}
 
+	// Best-effort branch sync. Bounded ctx so worst-case behavior is one
+	// tick of stale label, never a hung status bar. We re-load from state
+	// after the sync so the render reflects any change we just applied.
+	syncCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if res, err := workspace.SyncWorkspaceBranch(syncCtx, store, t, ws.ProjectRoot, ws.Name); err != nil {
+		statuslineLog.Debug("statusline.sync_branch", "name", ws.Name, "err", err.Error())
+	} else if res.Changed {
+		// State just changed under us. Re-read so we render the new label,
+		// not the pre-sync stale one. Cheap (one file read).
+		if st2, err := store.Load(); err == nil {
+			if ws2 := findWorkspaceBySession(st2, res.NewSession); ws2 != nil {
+				ws = ws2
+			}
+		}
+	}
+
 	// Resolve "is the running canopy a dev build?" once per invocation.
 	// Statusline is invoked every status-interval seconds, so we keep
 	// this cheap: VersionDetails does at most one git fork (dev only,
@@ -128,61 +160,153 @@ func renderCurrentLine(ctx context.Context) string {
 	// at-a-glance reminder that they swapped binaries via `canopy use`
 	// or `make dev` and forgot to swap back.
 	d := versionDetails()
-	return formatCurrent(ws.Name, ws.Status, ws.Port, d.IsDev, d.DevWorkspace)
+	cols := paneColsForStatusline()
+	return formatCurrent(ws.ProjectBasename(), ws.Branch, ws.Name, ws.Status, ws.Port, d.IsDev, d.DevWorkspace, cols)
 }
 
-// loadStateForStatusline opens state.json read-only. No flock — statusline
-// tolerates a stale snapshot up to status-interval seconds (15s default),
-// which is well within tmux's refresh window. Locking would block tmux
-// across canopy mutations and is a perf footgun.
-func loadStateForStatusline() (*state.State, error) {
+// newStoreForStatusline returns a state.Store handle for the statusline
+// path. Returning the Store (rather than the loaded State) lets the
+// caller both read state AND hand the same Store to SyncWorkspaceBranch
+// when it needs to mutate under flock.
+//
+// Cost: one os.UserHomeDir() + one stat to verify the canopy home dir.
+// Sub-millisecond on warm caches; same as the old loadStateForStatusline.
+func newStoreForStatusline() (*state.Store, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("statusline: home dir: %w", err)
 	}
-	store, err := state.NewStore(filepath.Join(home, ".canopy"))
-	if err != nil {
-		return nil, err
-	}
-	return store.Load()
+	return state.NewStore(filepath.Join(home, ".canopy"))
 }
 
+// findWorkspaceBySession matches both the current `<project>/<branch>` format
+// AND the legacy `<project>-<branch>` format. Legacy match is what lets the
+// statusline find a workspace whose live tmux session hasn't migrated yet
+// — without it, `findWorkspaceBySession` would return nil for every legacy
+// session, the statusline would render empty, and SyncBranch's migration
+// shim would never run from the statusline path.
 func findWorkspaceBySession(st *state.State, sessionName string) *state.Workspace {
 	if sessionName == "" {
 		return nil
 	}
 	for i := range st.Workspaces {
-		if st.Workspaces[i].TmuxSession == sessionName {
+		if st.Workspaces[i].TmuxSessionName() == sessionName {
+			return &st.Workspaces[i]
+		}
+	}
+	for i := range st.Workspaces {
+		if st.Workspaces[i].LegacyTmuxSessionName() == sessionName {
 			return &st.Workspaces[i]
 		}
 	}
 	return nil
 }
 
-// formatCurrent renders one line: "canopy: <name> <glyph> :<port>",
-// optionally appending a "[DEV:<branch>]" suffix when the running
-// canopy is a dev build. Always passes through escapeForTmux so `#`
-// in a workspace name (or branch name) can't inject style sequences.
+// formatCurrent renders one tmux status-right line:
+//
+//	<project> / <branch> <glyph> :<port> [DEV:<x>]
+//
+// Width-aware: when cols is positive, the branch segment collapses
+// (full -> right-ellipsis -> initials -> dropped) per the design D2
+// algorithm so narrow tmux panes don't smear the line.
+//
+// branch falls back to wsName when empty (legacy state.json rows that
+// pre-date the live-sync pipeline). project falls back to "canopy" when
+// empty (defensive: a corrupted state row shouldn't blank the line).
 //
 // The DEV suffix is independent of which workspace the user is in: it
 // reflects the running canopy binary, not the active session. So a
 // user inside workspace B's tmux who has `canopy use feature-A` flipped
-// will see `canopy: B ● :40010 [DEV:feature-A]` — which is exactly the
+// will see `canopy / B ● :40010 [DEV:feature-A]` — exactly the
 // confusion-buster the design calls for.
 //
 // devWorkspace may be empty even when isDev is true (binary lives
 // outside any known worktree); we fall back to bare "[DEV]" then so
 // the user still sees the dev marker.
-func formatCurrent(name string, status state.Status, port int, isDev bool, devWorkspace string) string {
-	base := fmt.Sprintf("canopy: %s %s :%d", name, statuslineGlyph(status), port)
+//
+// Drops the [DEV:<x>] suffix down to bare [DEV] when devWorkspace ==
+// the workspace's branch — saves ~24 cols on the screenshot's exact
+// pain point (where the workspace name and the active dev binary
+// reference the same thing, so the suffix is just noise).
+//
+// Always passes through escapeForTmux so `#` in a name can't inject
+// style sequences.
+func formatCurrent(project, branch, wsName string, status state.Status, port int, isDev bool, devWorkspace string, cols int) string {
+	if project == "" {
+		project = "canopy"
+	}
+	displayBranch := branch
+	if displayBranch == "" {
+		displayBranch = wsName
+	}
+
+	devSuffix := ""
 	if isDev {
-		if devWorkspace != "" {
-			base += fmt.Sprintf(" [DEV:%s]", devWorkspace)
+		// DEV-suffix-when-redundant drop (collapse step 1): if the
+		// running dev binary belongs to this same branch, the [DEV:x]
+		// part is just noise — collapse to bare [DEV].
+		if devWorkspace != "" && devWorkspace != displayBranch {
+			devSuffix = fmt.Sprintf(" [DEV:%s]", devWorkspace)
 		} else {
-			base += " [DEV]"
+			devSuffix = " [DEV]"
 		}
 	}
-	return escapeForTmux(base)
+
+	glyph := statuslineGlyph(status)
+	tail := fmt.Sprintf(" %s :%d%s", glyph, port, devSuffix)
+
+	// Width budget for the branch segment = total cols minus the fixed
+	// pieces (project name + tail). When cols <= 0 (no width info from
+	// tmux), render at full and let tmux do whatever it does.
+	var branchSeg string
+	if cols <= 0 {
+		if displayBranch != "" {
+			branchSeg = " / " + displayBranch
+		}
+	} else {
+		fixedCols := runewidth.StringWidth(project) + runewidth.StringWidth(tail)
+		branchSeg = renderBranchSegment(displayBranch, cols-fixedCols)
+	}
+
+	return escapeForTmux(project + branchSeg + tail)
+}
+
+// paneColsForStatusline reads tmux's current client width so the collapse
+// algorithm has a real budget to work with. Returns 0 ("no width info,
+// render full") on any error — formatCurrent falls back to the
+// unbounded layout when cols<=0, which matches today's behavior.
+//
+// Uses `tmux display-message -p '#{client_width}'` because status-right
+// is rendered per-client, not per-pane. Each statusline tick is a fresh
+// process so there's no cross-tick caching to worry about.
+//
+// Heuristic clamp: client_width is the entire terminal width, but tmux's
+// status-right shares cols with status-left and other status-right
+// segments. We reserve roughly half the width for canopy's segment, which
+// matches typical tmux configs where canopy is one of several segments.
+// Users with custom-heavy status bars get less budget; users with bare
+// status bars get more. A future refinement could parse the actual
+// status-right format.
+func paneColsForStatusline() int {
+	out, err := exec.Command("tmux", "display-message", "-p", "#{client_width}").Output()
+	if err != nil {
+		return 0
+	}
+	cols := 0
+	if _, scanErr := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &cols); scanErr != nil {
+		return 0
+	}
+	if cols <= 0 {
+		return 0
+	}
+	// Reserve ~half for the rest of the status bar. Floor at 30 cols so
+	// we don't auto-drop the branch on perfectly normal terminal widths
+	// just because some user runs their status bar packed.
+	budget := cols / 2
+	if budget < 30 {
+		budget = cols // tiny terminal, give canopy whatever's there
+	}
+	return budget
 }
 
 // statuslineGlyph mirrors the protanopia-friendly glyph set used in the
