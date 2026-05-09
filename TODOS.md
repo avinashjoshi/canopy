@@ -1662,6 +1662,134 @@ shellrc broke, point them at `TmuxSessionName()` (compute from project_root
 
 ---
 
+## v0.16+ — Current-workspace context popup (the bigger arc)
+
+Captured 2026-05-09 from user: *"there should be a way to open the
+current workspace and do actions on the current workspace... this is
+a bigger thing but we have a good start i think."*
+
+The "good start" is the prefix-less `Ctrl+Alt+C` chord shipped in this
+PR (`bind -n C-M-c display-popup -E "CANOPY_IN_POPUP=1 canopy"`). That
+gives users a one-chord summon-canopy-from-anywhere experience. The
+*next* layer is making the popup smart about *where you are*: when
+fired from inside a canopy-managed workspace pane, the popup should
+default to **acting on this workspace**, not the workspace switcher.
+
+### Shape
+
+The Ctrl+Alt+C popup has two contexts depending on `pane_current_path`:
+
+1. **Inside a canopy workspace** → "Current workspace" mode.
+   Header shows the workspace name, branch, status, agent state. Body
+   is a fuzzy-searchable list of actions (rerun setup, restart server,
+   open in editor, project-defined actions from canopy.json). Built-ins
+   plus user-defined entries from the `actions` block — see the
+   v0.15+ Workspace actions menu entry below for the action schema.
+
+2. **Outside any workspace** → "Switch / create" mode (today's behavior).
+   Workspace list across Local + Global tabs, `n` to create.
+
+Both are the same popup; the mode flips based on whether
+`workspace.ResolveCurrentProject` finds a managed workspace at the
+firing pane's cwd.
+
+### Why this is one design, not two
+
+The user already has muscle memory for `<prefix>g` and `Ctrl+Alt+C`.
+Splitting context-popup into a separate chord (e.g., `Ctrl+Alt+.`)
+fragments that surface and forces another mnemonic. Letting the same
+popup be context-sensitive is what tmux-menus, k9s, and lazygit all
+do — the trigger is constant, the menu adapts.
+
+### Inspirations driving this design (2026-05-08 ecosystem scan)
+
+- **tmux-menus** (jaclu/tmux-menus) — single trigger key opens a
+  navigable menu hierarchy. Standout: dim active-state items rather
+  than hiding them. Direct inspiration for the popup hierarchy.
+- **tmux-command-palette** (lost-melody/tmux-command-palette) —
+  fzf-driven command palette over tmux actions. Shape the actions
+  list as a fuzzy-searchable palette, not a fixed picker.
+- **numentext** (numentech-co/numentext) — F1 searchable help in a
+  Go TUI; same idea applied to keybindings + actions.
+- **tmux-sessionx** (omerxx/tmux-sessionx) — session switcher with
+  *live preview pane*. Worth borrowing for the switch-mode body —
+  show actual tmux pane content next to the workspace list.
+- **tmux-tab** (leohenon/tmux-tab) — Alt-tab between sessions with
+  MRU ordering + previews. Suggests an MRU back-toggle hotkey
+  canopy is missing.
+- **tmux-agent-indicator + lazyclaude + opensessions** — three
+  independent peers converging on per-pane AI-agent state
+  (idle/thinking/awaiting-input) as the differentiator. Project
+  memory `project_agent_state_unlocks_background.md` captures this
+  as load-bearing for the v0.16+ background-workspaces TODO; the
+  current-workspace context popup is the natural place to surface
+  that state at the row level.
+- **mynav** (GianlucaP106/mynav) — closest direct peer. Read their
+  state model + workspace/session distinction before this design
+  is locked in.
+
+### Sequencing
+
+1. ✅ Ship `Ctrl+Alt+C` no-prefix chord (this PR — foundation).
+2. Land the Workspace actions menu (existing v0.15+ entry below) —
+   builds the action dispatcher + canopy.json `actions` schema.
+3. Wire context detection into the popup's entry point — same
+   trigger, different default mode.
+4. Add live preview pane to switch-mode (tmux-sessionx pattern).
+5. Surface agent state on each row (the unlock for v0.16+
+   background workspaces).
+
+Steps 2–3 ship as v0.16; 4–5 may slip to v0.17 depending on appetite.
+
+### Open questions
+
+- Where does the "switch to a different workspace" entry live in
+  current-workspace mode? Probably as an action: "Switch workspace…"
+  pivots back to switch-mode.
+- Should fuzzy-search be flat (one list, current actions + other
+  workspaces interleaved) or modal (tabbed: Actions / Switch /
+  Create)? Lean modal — flat lists with mixed entry types tend to
+  feel chaotic past ~12 items.
+- Does this subsume the Future "Sidebar pane mode" TODO, or do they
+  coexist? Probably coexist — the popup is summon-on-demand, the
+  sidebar is always-there. Same data model, two presentations.
+
+### Depends on / blocked by
+
+- v0.15+ Workspace actions menu (this entry references its action
+  schema; can't ship context-popup without it).
+- Agent-state indicator (nice-to-have for v1, not strictly required).
+
+---
+
+## References — tmux ecosystem inspirations (surveyed 2026-05-08)
+
+Scanned awesome-tmux + numentech-co/numentext + jaclu/tmux-menus from
+user prompt. Recorded here as the canonical pointer when reasoning about
+canopy's switcher / palette / status surface evolution. Full taxonomy
++ "what to crib" notes live in memory `tools_tried.md` under "Tmux
+ecosystem inspirations." Cross-referenced from the v0.16+ context-popup
+entry above and the v0.15+ workspace actions menu entry below.
+
+Highlights:
+
+- **Agent-state visibility** (tmux-agent-indicator, lazyclaude,
+  opensessions) — *the* highest-leverage cluster. Three independent
+  peers converging on per-pane AI-state surfacing. Canopy is uniquely
+  positioned because every workspace already has a known agent pane.
+  Load-bearing for v0.16+ background workspaces (memory:
+  `project_agent_state_unlocks_background.md`).
+- **Live preview switcher** (tmux-sessionx, tmux-tab) — modern
+  baseline canopy doesn't meet yet.
+- **Command palette** (tmux-menus, tmux-command-palette, numentext
+  F1) — `?`-triggered fuzzy-searchable action overlay.
+- **Pinning UX benchmark** (tmux-grip) — read before iterating on
+  the v0.15.1.0 `--pin/--unpin` work.
+- **Direct peer** (mynav) — closest tmux-TUI worktree-flavored
+  peer; study their state model.
+
+---
+
 ## Wild idea — Cloud-hosted canopy workspaces (streamed terminals)
 
 Captured 2026-05-08 from user. Pure idea-pool entry; no milestone, no
