@@ -1614,21 +1614,6 @@ against the crash path separately.
 
 ## P3 — Deferred from v0.15 (clear-workspace-identity ship)
 
-### canopy rename --pin / --unpin
-
-**What:** opt-out for SyncBranch's auto-tracking. Power users who rebase
-frequently or check out multiple feature branches in one workspace might
-want to pin a display label so the statusline doesn't flicker.
-
-**Why deferred:** the 80% case (one branch per workspace, rename branch on
-turn 1, never touch it again) doesn't need pinning. Surfacing the design
-question in eng-review D4. Lift if multiple users complain post-ship.
-
-**Where:** `state.Workspace.PinDisplayName bool` field, gated check in
-`workspace.SyncBranch` to skip when set, `cmd/canopy/rename.go` flag.
-
-**Depends on / blocked by:** nothing. Self-contained.
-
 ### Lipgloss AdaptiveColor migration
 
 **What:** canopy's internal/ui palette uses fixed ANSI 256 colors (e.g.
