@@ -7,8 +7,11 @@
 // currently attached. With an explicit name, it targets that workspace.
 // Either way the new label comes from `git rev-parse --abbrev-ref HEAD`
 // inside the worktree — there's no `--to <name>` flag because auto-sync
-// would clobber it next tick. Pinning is deferred (see TODOS for the
-// `--pin/--unpin` follow-up).
+// would clobber it next tick.
+//
+// `--pin` freezes the current label so subsequent branch checkouts don't
+// flicker through the statusline; `--unpin` releases the freeze and
+// re-syncs to whatever branch the worktree is currently on.
 package main
 
 import (
@@ -26,6 +29,7 @@ import (
 )
 
 func newRenameCmd() *cobra.Command {
+	var pin, unpin bool
 	cmd := &cobra.Command{
 		Use:   "rename [<workspace>]",
 		Short: "Refresh workspace labels from the current branch.",
@@ -38,20 +42,32 @@ currently attached. To target another workspace, pass its name.
 
 There is no --to flag: the new label always comes from the worktree's
 current branch. Statusline auto-sync would clobber any explicit value
-on the next tick. Pinning is on the roadmap.
+on the next tick.
+
+Use --pin to freeze the current label so subsequent branch checkouts
+don't propagate through the statusline. Useful when one worktree hosts
+multiple feature branches (e.g. heavy rebasing). --unpin releases the
+freeze and re-syncs the labels.
 
   canopy rename                    # rename current workspace from git branch
-  canopy rename feat-oauth         # rename a specific workspace`,
+  canopy rename feat-oauth         # rename a specific workspace
+  canopy rename --pin              # freeze current label; ignore future checkouts
+  canopy rename --unpin            # release freeze; re-sync from current branch`,
 		Args: cobra.MaximumNArgs(1),
 		// Allow inside tmux: the common case is "I just renamed my branch in
 		// this very pane and want the labels to refresh."
 		Annotations: map[string]string{allowInTmuxAnnotation: "true"},
-		RunE:        runRename,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRename(cmd, args, pin, unpin)
+		},
 	}
+	cmd.Flags().BoolVar(&pin, "pin", false, "freeze current label; skip auto-sync on future branch changes")
+	cmd.Flags().BoolVar(&unpin, "unpin", false, "release pin; re-sync labels from the current branch")
+	cmd.MarkFlagsMutuallyExclusive("pin", "unpin")
 	return cmd
 }
 
-func runRename(cmd *cobra.Command, args []string) error {
+func runRename(cmd *cobra.Command, args []string, pin, unpin bool) error {
 	mgr, err := loadManager()
 	if err != nil {
 		return err
@@ -61,6 +77,24 @@ func runRename(cmd *cobra.Command, args []string) error {
 	wsName, err := resolveTargetWorkspace(ctx, mgr, args)
 	if err != nil {
 		return err
+	}
+
+	switch {
+	case pin:
+		return runRenamePin(cmd, ctx, mgr, wsName)
+	case unpin:
+		return runRenameUnpin(cmd, ctx, mgr, wsName)
+	}
+
+	// Plain rename: refresh labels from worktree branch. Pinned workspaces
+	// short-circuit inside SyncBranch and produce a no-op result; surface
+	// that to the user with a hint instead of the generic "already in sync"
+	// line so they know their flag is in effect.
+	if w, err := mgr.Find(ctx, wsName); err == nil && w.PinDisplayName {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"%s: pinned (%s) — no labels updated. Use `canopy rename --unpin` to release.\n",
+			wsName, w.Branch)
+		return nil
 	}
 
 	res, err := mgr.SyncBranch(ctx, wsName)
@@ -90,6 +124,83 @@ func runRename(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(),
 		"%s: %s -> %s   (tmux session %s -> %s)\n",
 		wsName, res.OldBranch, res.NewBranch, res.OldSession, res.NewSession)
+	return nil
+}
+
+// runRenamePin handles `canopy rename --pin`. We clear any existing pin
+// first so SyncBranch can refresh labels to the current worktree branch,
+// then set the pin. This makes `--pin` idempotent and "pin to the latest"
+// at the same time — a re-pin captures whatever branch is checked out
+// right now, not whatever stale value happened to be in state.json.
+func runRenamePin(cmd *cobra.Command, ctx context.Context, mgr *workspace.Manager, wsName string) error {
+	if err := mgr.SetPin(ctx, wsName, false); err != nil {
+		return fmt.Errorf("rename --pin: %w", err)
+	}
+	res, err := mgr.SyncBranch(ctx, wsName)
+	if err != nil && !errors.Is(err, tmux.ErrSessionNameInUse) {
+		return fmt.Errorf("rename --pin: %w", err)
+	}
+	if err := mgr.SetPin(ctx, wsName, true); err != nil {
+		return fmt.Errorf("rename --pin: %w", err)
+	}
+
+	branch := ""
+	if w, err := mgr.Find(ctx, wsName); err == nil {
+		branch = w.Branch
+	}
+	if res.Changed {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"%s: pinned at %s (was %s; tmux session %s -> %s).\n",
+			wsName, res.NewBranch, res.OldBranch, res.OldSession, res.NewSession)
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"%s: pinned at %s — auto-sync disabled until `canopy rename --unpin`.\n",
+			wsName, branch)
+	}
+	return nil
+}
+
+// runRenameUnpin clears the pin and runs a sync so labels catch up to
+// whatever branch the worktree drifted to while pinned.
+func runRenameUnpin(cmd *cobra.Command, ctx context.Context, mgr *workspace.Manager, wsName string) error {
+	w, findErr := mgr.Find(ctx, wsName)
+	wasPinned := findErr == nil && w.PinDisplayName
+
+	if err := mgr.SetPin(ctx, wsName, false); err != nil {
+		return fmt.Errorf("rename --unpin: %w", err)
+	}
+	res, err := mgr.SyncBranch(ctx, wsName)
+	if err != nil {
+		if errors.Is(err, tmux.ErrSessionNameInUse) {
+			return fmt.Errorf("rename --unpin: pin released, but another workspace holds the tmux session name for branch '%s' — rename the colliding workspace and re-run sync", res.NewBranch)
+		}
+		return fmt.Errorf("rename --unpin: %w", err)
+	}
+
+	if !wasPinned {
+		current := ""
+		if w, err := mgr.Find(ctx, wsName); err == nil {
+			current = w.Branch
+		}
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"%s: not pinned (%s) — no change.\n",
+			wsName, current)
+		return nil
+	}
+
+	if res.Changed {
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"%s: unpinned. %s -> %s   (tmux session %s -> %s)\n",
+			wsName, res.OldBranch, res.NewBranch, res.OldSession, res.NewSession)
+	} else {
+		current := ""
+		if w, err := mgr.Find(ctx, wsName); err == nil {
+			current = w.Branch
+		}
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"%s: unpinned (%s) — labels already in sync.\n",
+			wsName, current)
+	}
 	return nil
 }
 
