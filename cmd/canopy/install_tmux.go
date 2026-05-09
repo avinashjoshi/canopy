@@ -182,8 +182,9 @@ func runInstallTmux(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out, "Apply now without restarting tmux:")
 	fmt.Fprintln(out, "  tmux source-file ~/.tmux.conf")
 	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Then press <prefix>g to open the canopy popup. The statusline shows")
-	fmt.Fprintln(out, "the current workspace when you're attached to a canopy-managed session.")
+	fmt.Fprintln(out, "Then press <prefix>g (or Ctrl+Alt+c, no prefix) to open the canopy")
+	fmt.Fprintln(out, "popup. The statusline shows the current workspace when you're attached")
+	fmt.Fprintln(out, "to a canopy-managed session.")
 	return nil
 }
 
@@ -258,6 +259,13 @@ func canopyBlockBody() string {
 # explored. Bind manually if you want it; e.g.:
 #   bind X display-popup -E -d "#{pane_current_path}" "canopy run"
 bind g display-popup -E -w 80% -h 80% -d "#{pane_current_path}" "CANOPY_IN_POPUP=1 ` + quoted + `"
+# Prefix-less alias: Ctrl+Alt+c summons canopy from any pane without
+# needing the tmux prefix. -n = no prefix. The chord is unclaimed by
+# common shells/editors and most terminals (Ghostty, Alacritty, kitty,
+# iTerm2) forward it through to tmux unmodified. If your terminal
+# swallows it, edit this binding to taste — the marker block is
+# preserved across re-runs except for full --force replacement.
+bind -n C-M-c display-popup -E -w 80% -h 80% -d "#{pane_current_path}" "CANOPY_IN_POPUP=1 ` + quoted + `"
 # Statusline: strip any pre-existing canopy segment, then append fresh.
 # The strip+append pattern keeps reloads idempotent (set -ag alone would
 # accumulate duplicates on every source-file invocation). Pattern is

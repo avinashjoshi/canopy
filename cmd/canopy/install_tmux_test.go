@@ -145,6 +145,39 @@ func TestCanopyBlockBody_popupBindShape(t *testing.T) {
 	}
 }
 
+// TestCanopyBlockBody_noPrefixChord asserts the generated block ships a
+// prefix-less Ctrl+Alt+c (bind -n C-M-c) that summons canopy from any
+// pane without needing the tmux prefix. Same display-popup payload as
+// the prefix bind — diverging the two payloads would invite drift.
+//
+// REGRESSION GUARD: dropping `-n C-M-c` silently downgrades the install
+// from "canopy is one chord away" to "canopy is two chords away," which
+// is the entire reason the no-prefix alias exists.
+func TestCanopyBlockBody_noPrefixChord(t *testing.T) {
+	body := canopyBlockBody()
+
+	if !strings.Contains(body, "bind -n C-M-c display-popup") {
+		t.Errorf("block missing 'bind -n C-M-c display-popup' (no-prefix Ctrl+Alt+c alias):\n%s", body)
+	}
+	// Same env + cwd plumbing as the prefix bind. If these diverge, the
+	// no-prefix popup will misbehave (wrong project resolved, popup-mode
+	// rendering not triggered).
+	noPrefixLineIdx := strings.Index(body, "bind -n C-M-c")
+	if noPrefixLineIdx < 0 {
+		return // already failed above
+	}
+	noPrefixLine := body[noPrefixLineIdx:]
+	if nl := strings.IndexByte(noPrefixLine, '\n'); nl > 0 {
+		noPrefixLine = noPrefixLine[:nl]
+	}
+	if !strings.Contains(noPrefixLine, `-d "#{pane_current_path}"`) {
+		t.Errorf("no-prefix bind missing -d \"#{pane_current_path}\":\n%s", noPrefixLine)
+	}
+	if !strings.Contains(noPrefixLine, "CANOPY_IN_POPUP=1") {
+		t.Errorf("no-prefix bind missing CANOPY_IN_POPUP=1:\n%s", noPrefixLine)
+	}
+}
+
 // TestCanopyBlockBody_setsTitles asserts the block enables tmux's
 // terminal-title forwarding (set-titles on) with #S as the title source.
 // This is the load-bearing wire-up for "Ghostty tab strip shows the
