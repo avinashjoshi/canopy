@@ -5,6 +5,35 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2.0] - 2026-05-09 — Prefix-less `Ctrl+Alt+c` summon chord
+
+Pressing the tmux prefix to reach canopy is one chord too many when canopy
+is the verb you reach for ten times a day. `canopy install tmux` now writes
+a no-prefix `Ctrl+Alt+c` binding alongside the existing `<prefix>g`, so the
+TUI is one chord away from any pane — same display-popup payload, same
+project resolution, no behavior change for the prefix bind.
+
+### Added
+
+- `bind -n C-M-c display-popup -E "CANOPY_IN_POPUP=1 canopy"` is appended
+  to the managed canopy block on every fresh install. Existing installs
+  pick it up via `canopy install tmux --force` (the present-block guard
+  refuses overwrites without `--force`, which stays the right call for
+  hand-edited blocks).
+- Success message updates to mention both chords so users discover the
+  new alias right after running install.
+
+### Notes
+
+- Both the prefix bind and the no-prefix chord share one display-popup
+  payload (`-d "#{pane_current_path}"`, `CANOPY_IN_POPUP=1`). Diverging
+  the two would invite drift; a regression test enforces the shared
+  shape.
+- The chord is unclaimed by common shells/editors and forwards through
+  Ghostty, Alacritty, kitty, and iTerm2. Terminals that swallow it can
+  hand-edit the binding inside the marker block — re-runs without
+  `--force` preserve hand edits.
+
 ## [0.15.1.0] - 2026-05-08 — `canopy rename --pin` / `--unpin` for power users
 
 Opt out of branch auto-tracking on workspaces where you rebase frequently or
