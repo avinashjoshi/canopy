@@ -3,9 +3,64 @@
 Items deferred during /office-hours and /plan-eng-review on 2026-04-27.
 Each entry is self-contained for someone (you, future-Claude, or another AI agent) picking it up months later.
 
+**Status legend:**
+- ✅ **SHIPPED** — landed in main; banner names the version + PR
+- 🔄 **PARTIAL** — some shipped, more in the body
+- 📋 **OPEN** — still real work, body has the design
+- ❌ **REJECTED** — explicitly declined; kept for the argument trail
+- 💡 **PARKED** — wild-idea pool, not roadmap
+
 ---
 
-## ✅ DONE 2026-04-30 — Fullscreen+current delete strand (v0.11.3)
+## Audit refresh — 2026-05-09 (post-v0.15.2)
+
+The doc was last status-flagged through v0.11.x. We're nine minor releases ahead.
+Each section below has a banner; this summary is the 30-second scan.
+
+**Shipped since the last refresh (search ✅ inline):**
+- v0.5 `canopy rename` verb → v0.15.0 + `--pin`/`--unpin` in v0.15.1
+- v0.5 multi-AI / agent.type → v0.6 lifecycle wrapper (`internal/agent/launchers.go`)
+- v0.5 `canopy run` subcommand → `cmd/canopy/run.go`
+- v0.5 branch-rename tolerance in `canopy rm` → v0.15.0 (workspace identity follows the branch)
+- v0.5 multi-project, v0.6 global-mode lifecycle (create/remove anywhere) → v0.11.0
+- v0.6 drop legacy `Workspace.Project` field → already gone (state.go has `Branch` only)
+- v0.7 stuck-workspace detector → v0.13.4.0
+- v0.7 conflict detector → v0.13.3.0
+- v0.8 `canopy install tmux` (extended in v0.15.2.0 with prefix-less `Ctrl+Alt+c`)
+- v0.8 PR status in statusline → v0.13.5.0 push-state + v0.14.0.0 precedence overhaul
+- v0.8+ `o` keybind reuse → v0.14.1.0 (`B` opens browser, `P` opens PR)
+- v0.10 P2 setup-logs `isSafeWorkspaceName` guard → present in `internal/clog/`
+
+**Still open, worth picking up (search 📋 inline):**
+- **v0.10 P2 perf** — load-cache singleflight, git_stats cache, BuildGlobalRows N+1 probe, Kill PID-reuse re-verify, BareAttach BaseCommit. **None of the perf items shipped.**
+- **v0.15+ workspace actions menu** — replaces ambiguous `R retry`; user-defined `actions` in canopy.json.
+- **v0.15+ onboarding wizard + global config** — `~/.canopy/config.json` doesn't exist yet.
+- **v0.15+ offboard project** — `canopy offboard` verb absent.
+- **v0.16+ current-workspace context popup** — Ctrl+Alt+c chord is the foundation.
+- **v0.16+ kick-off-with-prompt + background workspaces** — `--prompt` flag absent on `canopy new`.
+- **v0.6 `canopy reconcile --remove-project`** — basename-collision escape hatch.
+- **v0.6 global-mode E2E tests** — none exist for the global routing flows.
+- **v0.5 hook timeout** — no `Timeout` plumbing in `internal/hooks/`.
+- **v0.5 `canopy doctor`** — diagnostics verb absent.
+- **v0.5 `canopy adopt`** — no migration path for existing manual worktrees.
+- **v0.7 `scripts.shipped`** — schema field never added.
+- **v0.9 deep session-naming refactor** — only the cosmetic half (`canopy-` → `canopy/`) shipped in v0.15.0.
+- **P3 hygiene** — defensive TestMain reap, AdaptiveColor migration, DESIGN.md, drawer ANSI strip.
+
+**Parked / rejected (no action expected):**
+- ❌ `canopy event` bus — rejected during v0.6 review.
+- 💡 Cloud-hosted workspaces — wild-idea pool, post-v0.16+.
+- 💡 Switch-agent on live workspace — wild-idea pool, blocked on lifecycle prereqs.
+- v0.2 darwin/macOS releases — waiting on Linux dogfood signal.
+- v0.1.0 demo recording (vhs `.tape`) — never shipped; punt unless launch-driven.
+- v0.5 PTY handoff for interactive hooks — kept "make hooks non-interactive" world.
+- Sidebar pane mode (`canopy --sidebar`) — deferred during persistent-sidebar review.
+- Always-on keybind bar (TurboC++ style) — discoverability layer, not yet justified.
+- v1 pluggable session backend, multi-AI parallel panes, edit-and-retry from TUI, recent-workspaces 3rd tab, auto-cleanup after PR merges — all still v1+ ideas.
+
+---
+
+## ✅ SHIPPED 2026-04-30 — Fullscreen+current delete strand (v0.11.3)
 
 The fullscreen+current case now reuses the v0.11.2 popup detach pattern
 (spawn detached `canopy rm`, `tmux detach-client`, `tea.Quit`) instead
@@ -23,10 +78,15 @@ from). Niche — accept and document if it bites someone in practice.
 
 ## P2 — Deferred review findings from v0.10 ship (2026-04-30)
 
+🔄 **PARTIAL — re-audited 2026-05-09 against v0.15.2.** Of nine items below:
+one shipped (setup-logs `isSafeWorkspaceName` — see `internal/clog/`), one
+landed partially (`tailFile` now seeks-from-end on large files but isn't a
+streaming tail), seven still open and unverified-since.
+
 The `tmux-health-and-resurrect` ship-review surfaced several smaller findings
 that were not blocking but worth following up. Each is self-contained:
 
-### load cache: thundering herd on first refresh
+### 📋 OPEN — load cache: thundering herd on first refresh
 
 **Where:** `internal/state/mem.go:GetLoad` (and `Get`).
 
@@ -41,7 +101,11 @@ measurable cost on cold-cache refreshes.
 session, OR hold the mutex across the probe call (simpler, blocks unrelated
 sessions for the duration of one probe).
 
-### git_stats: no cache + N×4 goroutines per refresh
+### 📋 OPEN — git_stats: no cache + N×4 goroutines per refresh
+
+**Re-confirmed 2026-05-09:** `internal/lifecycle/git_stats.go` still has no
+cache; `RunFast` still spawns four detector goroutines per workspace per
+refresh.
 
 **Where:** `internal/lifecycle/git_stats.go:detectGitStats`.
 
@@ -55,7 +119,12 @@ helps `pr_status` but `git_stats` has no cache and runs every refresh.
 `(workspace, HEAD-sha)`, OR debounce RunFast calls per workspace, OR limit
 goroutine concurrency with a semaphore.
 
-### Kill: PID-reuse race in cwd-walk reap
+### 📋 OPEN — Kill: PID-reuse race in cwd-walk reap
+
+**Re-confirmed 2026-05-09:** `internal/tmux/session.go` still SIGKILLs from
+a pre-kill snapshot with no `/proc/<pid>/cwd` re-verify. The symmetric-reap
+refactor (commit 65df573) extracted `cwdScanForReap` but didn't add the
+re-verify step.
 
 **Where:** `internal/tmux/session.go:Kill` reap loop.
 
@@ -70,7 +139,12 @@ and only kill if the process still matches the recorded cwd / comm. The
 image-name gate added in v0.10 mitigates the wrong-target case, but doesn't
 fully close the race.
 
-### tailFile: scans full file (up to 10MB) per drawer open
+### 🔄 PARTIAL — tailFile: scans full file (up to 10MB) per drawer open
+
+**Re-audited 2026-05-09:** `internal/ui/drawer.go:tailFile` now seeks from
+end when the file is larger than `max` (line ~296), so the worst case is
+mitigated. A full streaming-tail iterator (no allocation of the whole tail
+window) is still open if anyone needs it.
 
 **Where:** `internal/ui/drawer.go:tailFile`.
 
@@ -83,7 +157,12 @@ inside it.
 scan from there — same pattern as `readBoundedFile` already uses for setup
 logs. Trim partial first line after seek.
 
-### Setup logs: no isSafeWorkspaceName guard
+### ✅ SHIPPED — Setup logs: isSafeWorkspaceName guard
+
+**Verified 2026-05-09:** `isSafeWorkspaceName` lives in `internal/clog/`
+and is exercised by `fanout_test.go`. Closed.
+
+**Original entry follows for context.**
 
 **Where:** `internal/workspace/setup_log.go:openSetupLog`,
 `removeSetupLog`.
@@ -101,7 +180,9 @@ next to `Sanitize`, or call it from both layers. Align the dot rule across
 both layers (probably: reject dots in both, since they'd mess with file
 extensions anyway).
 
-### Drawer setup log: ANSI escapes break TUI layout
+### 📋 OPEN — Drawer setup log: ANSI escapes break TUI layout
+
+**Re-confirmed 2026-05-09:** no ANSI strip in `internal/ui/drawer.go`. Still open.
 
 **Where:** `internal/ui/drawer.go:drawerLoadCmd` setup-log section.
 
@@ -113,7 +194,10 @@ layout (cursor jumps, color bleed into the rest of the TUI).
 **Fix:** strip ANSI from `setupLog` before rendering, similar to projectlist's
 `stripAnsi`. Move `stripAnsi` to a shared internal helper.
 
-### BuildGlobalRows: N+1 tmux probe pattern
+### 📋 OPEN — BuildGlobalRows: N+1 tmux probe pattern
+
+**Re-confirmed 2026-05-09:** `internal/state/listing.go` still calls
+`HasSession` per row.
 
 **Where:** `internal/state/listing.go:BuildGlobalRows`.
 
@@ -125,7 +209,7 @@ exposed at scale by v0.10's auto-population of the load column.
 a set, look up locally. AttachedProbe already does this — extend the same
 pattern to liveness probing.
 
-### detectShipped: blank-line guard regression
+### 📋 OPEN — detectShipped: blank-line guard regression
 
 **Where:** `internal/lifecycle/shipped.go:detectShipped`.
 
@@ -139,7 +223,9 @@ short-circuit to nil.
 **Fix:** restore the `if line == "" { continue }` skip in the cherry-output
 loop.
 
-### BareAttach: store BaseCommit on workspace creation
+### 📋 OPEN — BareAttach: store BaseCommit on workspace creation
+
+**Re-confirmed 2026-05-09:** no `BaseCommit` field on `state.Workspace`.
 
 **Where:** `internal/state/state.go:Workspace`.
 
@@ -158,7 +244,7 @@ cases.
 
 ---
 
-## ✅ DONE 2026-04-29 — `canopy debug` (subsumed into the inspect drawer)
+## ✅ SHIPPED 2026-04-29 — `canopy debug` (subsumed into the inspect drawer)
 
 Shipped on the `tmux-health-and-resurrect` branch. The verb itself was
 not added — instead, `Manager.BareAttach(ctx, name)` lives on the
@@ -178,7 +264,11 @@ required typing the workspace name from the shell.
 
 ---
 
-## v0.6 follow-up — Background liveness probe (deferred 2026-04-29)
+## 📋 OPEN — v0.6 follow-up — Background liveness probe (deferred 2026-04-29)
+
+**Re-audited 2026-05-09:** still no general-purpose `tea.Tick` liveness loop.
+The only `tea.Tick` calls in `internal/ui/` are in upgrade and update progress
+animations. Cosmetic-only impact (Enter handler resurrects stale-ready rows).
 
 **What:** Run a `tea.Tick` every N seconds (e.g., 10s) that re-probes
 liveness for visible TUI rows and updates `Alive` in place. Today, the
@@ -207,7 +297,11 @@ few weeks of dogfood with the explicit-refresh-only model.
 
 ---
 
-## v0.1.0 — Demo recording for the launch
+## 💡 PARKED — v0.1.0 — Demo recording for the launch
+
+**Status 2026-05-09:** `tape/canopy-demo.tape` and `docs/demo.gif` don't
+exist. Public-launch README polish landed in v0.14.0.1 without one. Punt
+unless launch demand makes it load-bearing.
 
 **What:** A 30–45 second terminal recording showing the canopy happy path end-to-end: `canopy init` → `canopy new` (auto-attach into the 3-pane tmux session) → tiny edit → detach → `canopy ls` → `canopy switch <name>` (claude conversation resumes) → `canopy rm`. Output as `docs/demo.gif` referenced from the README hero and used as the launch-tweet asset.
 
@@ -231,7 +325,14 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.5 — Repo org move (`avinashjoshi/canopy` → org)
+## ❌ REVERTED — v0.5 — Repo org move (`avinashjoshi/canopy` → org)
+
+**Status 2026-04-30:** moved to `oncactus/canopy`, then reverted in v0.12.4
+("for now"). Repo lives at `github.com/avinashjoshi/canopy`. Memory
+`canopy_org_move.md` carries the rationale. Don't re-attempt without an
+explicit "go" signal.
+
+**Original entry follows for context.**
 
 **What:** Move canopy out of Avi's personal GitHub into either **cravd** or **oncactus** org. Bulk-update `go install` URLs in README + docs, the module path in `go.mod`, every internal `import` line, and any `gh` URLs in CLAUDE.md.
 
@@ -253,7 +354,13 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.5 — multi-project support — PARTIAL (2026-04-28)
+## ✅ SHIPPED — v0.5 — multi-project support (closed v0.11.0)
+
+**Status 2026-05-09:** the deferred `n`/`d` from global mode shipped in
+v0.11.0 ("Cross-project new workspace + picker chrome polish"). The full
+v0.5 multi-project entry below is closed.
+
+**Original entry follows for context.**
 
 **Shipped on `ancient-hornet`:**
 - Read-only global TUI: `canopy` from outside any project lists every workspace + every alive `<project>-main` session canopy knows about. Enter on `ready`/`main` rows attaches via tmux.
@@ -267,7 +374,9 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.6 — global mode lifecycle (create / remove from anywhere)
+## ✅ SHIPPED v0.11.0 — v0.6 — global mode lifecycle (create / remove from anywhere)
+
+**Original entry follows for context.**
 
 **What:** Make `canopy` in global mode able to create + remove workspaces without cd'ing into the project. New project picker modal: 'n' in global mode → list of registered projects → name input → create. 'd' on a global-mode row → confirm → remove (without needing the project's canopy.json on hand).
 
@@ -283,7 +392,11 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.6 — `canopy reconcile --remove-project <root>`
+## 📋 OPEN — v0.6 — `canopy reconcile --remove-project <root>`
+
+**Re-confirmed 2026-05-09:** `cmd/canopy/reconcile.go` has no
+`--remove-project` flag. Still the documented manual escape hatch is
+"hand-edit state.json."
 
 **What:** A CLI surface for removing a project entry from `state.Projects` (and any of its workspaces) without hand-editing state.json. Triggers the basename-collision-refusal escape hatch when the colliding project is gone from disk.
 
@@ -299,7 +412,12 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.6 — drop legacy `Workspace.Project` field
+## ✅ SHIPPED — v0.6 — drop legacy `Workspace.Project` field
+
+**Verified 2026-05-09:** `internal/state/state.go` has only `Branch string`;
+no `Project string` legacy field remains.
+
+**Original entry follows for context.**
 
 **What:** v0.5 keeps Workspace.Project (basename) as a legacy-read-only field for back-compat with v1 state files. Once everyone has migrated (one release of v0.5+ in the wild), drop the field entirely.
 
@@ -315,7 +433,11 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.6 — global mode E2E tests
+## 📋 OPEN — v0.6 — global mode E2E tests
+
+**Re-audited 2026-05-09:** no end-to-end tests for global TUI flows under
+`-tags=e2e`. The existing project-flow E2E in `internal/workspace/lifecycle_test.go`
+covers project mode, but global routing has only unit-level coverage.
 
 **What:** Three Go tests under `-tags=e2e`: canopy-from-home (global TUI launches with rows from prior project-scoped activity), canopy-from-fresh-repo (init splash launches and `i` produces a canopy.json), canopy-from-project (today's project TUI, regression).
 
@@ -331,7 +453,11 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.5 — `canopy doctor` subcommand
+## 📋 OPEN — v0.5 — `canopy doctor` subcommand
+
+**Re-confirmed 2026-05-09:** no `cmd/canopy/doctor.go`. The diagnostic
+drawer (`i` keybind) covers the per-workspace inspection use case but
+not the orphan-tmux / orphan-disk discovery the doctor verb would surface.
 
 **What:** Validates project config, checks git/tmux versions, lists tmux sessions matching project prefix that lack a state.json row (orphan-tmux discovery), lists workspace dirs on disk that lack a row (orphan-disk discovery), offers to clean up.
 
@@ -347,7 +473,10 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.5 — Hook timeout
+## 📋 OPEN — v0.5 — Hook timeout
+
+**Re-confirmed 2026-05-09:** `internal/hooks/runner.go` has no `Timeout`
+field; hooks still run with `context.Background()` (no deadline).
 
 **What:** Per-script timeout (configurable in `canopy.json` or hardcoded 5min default) so a hung `scripts.setup` doesn't freeze the TUI.
 
@@ -363,7 +492,10 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.5 — PTY handoff for interactive hooks
+## 💡 PARKED — v0.5 — PTY handoff for interactive hooks
+
+**Status 2026-05-09:** punted. Original entry recommends staying in the
+"make hooks non-interactive" world; nobody has asked for the PTY path.
 
 **What:** Real PTY allocation when a script needs interactive stdin (e.g., `gem install` prompts, `git pull` with credentials, sudo).
 
@@ -379,7 +511,11 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.2 — darwin / macOS releases
+## 💡 PARKED — v0.2 — darwin / macOS releases
+
+**Status 2026-05-09:** no goreleaser / darwin builds. Linux dogfood is
+ongoing; cross-compile is free, sign+notarize is not. Re-evaluate when a
+non-Avi Linux user reports it works.
 
 **What:** Add `darwin/amd64` + `darwin/arm64` to `goreleaser` config. Code-signing if needed for Gatekeeper compliance.
 
@@ -395,7 +531,15 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.6 — Agent lifecycle wrapper + detectors — PARTIAL (2026-04-28)
+## ✅ SHIPPED — v0.6 — Agent lifecycle wrapper + detectors
+
+**Status 2026-05-09:** the wrapper, launcher map, briefing assembly, and
+detector framework all shipped. Followups (push-state, stuck, conflict
+detectors) landed across v0.13.3.0–v0.13.5.0. The only piece deliberately
+*not* on by default is `auto_close_shipped` — current behavior surfaces a
+hint instead of auto-running `canopy rm`.
+
+**Original entry follows for context.**
 
 **Shipped on `agent-lifecycle` branch:**
 - Agent launcher map (`internal/agent/launchers.go`) for claude/codex/opencode/aider, picked via `agent.type` in canopy.json. Backwards compat: empty agent block defaults to claude.
@@ -421,7 +565,7 @@ Avi (2026-04-28): "I'll work on the demo later, just keep a todo on that." Defer
 
 ---
 
-## v0.6 — Agent lifecycle wrapper + detectors (original entry, kept for context)
+## ✅ SHIPPED — v0.6 — Agent lifecycle wrapper + detectors (original spec entry, kept for context)
 
 **What:** Wrap every agent session with canopy-assembled workspace context + active lifecycle detector hints so any coding agent (Claude, Codex, OpenCode, aider) boots knowing where it is in the feature lifecycle. Seven accepted scope items:
 
@@ -447,7 +591,15 @@ State schema: `Workspace.AgentLaunchCount int` + `Workspace.SourceKind string` (
 
 ---
 
-## v0.5 — `canopy rename <new-branch>` verb
+## ✅ SHIPPED v0.15.0 + v0.15.1 — v0.5 — `canopy rename <new-branch>` verb
+
+**Status 2026-05-09:** `canopy rename` shipped in v0.15.0 (workspace
+identity follows the branch, with `git branch -m` propagation through the
+statusline and TUI rows) and v0.15.1 added `--pin`/`--unpin` for
+power-users. The original "small subcommand" idea grew into a full
+identity-tracking feature.
+
+**Original entry follows for context.**
 
 **What:** A small subcommand to rename a workspace's git branch atomically. `canopy rename feat/oauth` renames the worktree's current branch (e.g. from the auto-generated `bold-falcon` to `feat/oauth`) and updates the state row's `Branch` field in the same lock window.
 
@@ -465,7 +617,13 @@ Pairs with the v0.6 agent lifecycle wrapper (above): the AGENT.md briefing tells
 
 ---
 
-## v0.5 — Multi-AI-tool support (via layout-as-config)
+## ✅ SHIPPED — v0.5 — Multi-AI-tool support (subsumed by v0.6 lifecycle wrapper)
+
+**Status 2026-05-09:** subsumed by the agent lifecycle wrapper. Launcher
+map for claude/codex/opencode/aider lives in `internal/agent/launchers.go`;
+agent type configurable via `agent.type` in canopy.json.
+
+**Original entry follows for context.**
 
 **What:** Make the AI pane configurable in `canopy.json` so users can choose claude / codex / opencode / aider / etc. per project. Both the launch command AND the resume command go in config.
 
@@ -488,7 +646,12 @@ Pairs with the v0.6 agent lifecycle wrapper (above): the AGENT.md briefing tells
 
 ---
 
-## v0.5 — `canopy run` subcommand for on-demand scripts.run
+## ✅ SHIPPED — v0.5 — `canopy run` subcommand for on-demand scripts.run
+
+**Status 2026-05-09:** `cmd/canopy/run.go` ships. Uses `syscall.Exec` to
+replace the canopy process with the run script and inherit CANOPY_* env.
+
+**Original entry follows for context.**
 
 **What:** `canopy run` invokes the project's `scripts.run` with the
 right `CANOPY_*` env vars in the user's current workspace. Replaces
@@ -521,7 +684,11 @@ help" below) so `canopy main`'s sessions can offer a hotkey overlay.
 
 ---
 
-## v0.5 — Tmux navigation help / overlay
+## 📋 OPEN — v0.5 — Tmux navigation help / overlay
+
+**Status 2026-05-09:** still no `?` overlay or `canopy help-tmux` cheat
+sheet. The Ctrl+Alt+c chord (v0.15.2) reduced the discovery cliff but
+didn't replace the cheatsheet.
 
 **What:** A small in-session help cheatsheet that explains canopy's
 pane layout + the most useful tmux navigation keys to a user who
@@ -557,7 +724,10 @@ for popup-window). A static cheatsheet is easier but less discoverable.
 
 ---
 
-## v1 — Pluggable session backend (tmux → zellij/kitty/etc.)
+## 💡 PARKED — v1 — Pluggable session backend (tmux → zellij/kitty/etc.)
+
+**Status 2026-05-09:** still tmux-only. No second backend has been
+requested. Don't abstract until a real second implementation exists.
 
 **What:** Abstract the tmux dependency behind a `SessionBackend` interface so canopy can swap to other multiplexers (zellij, kitty's session protocol, Ghostty's eventual native persistence, etc.) without changing core logic.
 
@@ -573,7 +743,11 @@ for popup-window). A static cheatsheet is easier but less discoverable.
 
 ---
 
-## v1 — Multi-AI within one workspace (parallel-pane provider switching)
+## 💡 PARKED — v1 — Multi-AI within one workspace (parallel-pane provider switching)
+
+**Status 2026-05-09:** still v1+. The "switch agent on a live workspace"
+wild-idea (bottom of file) is a subset of this; both are gated on real
+demand once a second-agent launcher has been validated in dogfood.
 
 **What:** Hotkey to add a new pane running a different AI tool, side-by-side with the existing one. Compare outputs, hand off context, A/B different models on the same problem.
 
@@ -589,7 +763,14 @@ for popup-window). A static cheatsheet is easier but less discoverable.
 
 ---
 
-## v0.5 — Branch-rename tolerance in `canopy rm`
+## ✅ SHIPPED — v0.5 — Branch-rename tolerance in `canopy rm`
+
+**Status 2026-05-09:** subsumed by v0.15.0 ("workspace identity follows
+the branch"). The displayed branch name now tracks `git branch -m`
+through statusline + TUI rows; `canopy rm` queries the current branch
+via `git worktree list` rather than a stale `state.Workspace.Branch`.
+
+**Original entry follows for context.**
 
 **What:** When the user has renamed a branch after canopy created it
 (`git branch -m bold-falcon feat/oauth`), `canopy rm bold-falcon`
@@ -622,7 +803,10 @@ not the stale original.
 
 ---
 
-## v0.5 — Worktree adopt
+## 📋 OPEN — v0.5 — Worktree adopt
+
+**Re-confirmed 2026-05-09:** no `cmd/canopy/adopt.go`. Migration path for
+manually-created worktrees still requires hand-editing state.json.
 
 **What:** `canopy adopt <branch>` — register an existing git worktree (created via `git worktree add` outside canopy) into state.json without re-running `scripts.setup`.
 
@@ -638,7 +822,7 @@ not the stale original.
 
 ---
 
-## ✅ PARTIAL 2026-04-29 — Per-workspace logs (workspace + setup)
+## 🔄 PARTIAL 2026-04-29 — Per-workspace logs (workspace + setup)
 
 Shipped on the `tmux-health-and-resurrect` branch. Two of the three
 file types from the original entry now exist:
@@ -666,7 +850,7 @@ way the per-workspace layer keys on `name`.
 
 ---
 
-## v0.5 — Auto-detect fixable setup failures
+## 📋 OPEN — v0.5 — Auto-detect fixable setup failures
 
 **What:** When `scripts.setup` fails, scan its stderr for known signatures (`master.key not found`, `bundle: command not found`, network errors) and surface a one-line "what to fix" hint in the TUI before the user has to dig through `~/.canopy/log/canopy.log`.
 
@@ -682,7 +866,7 @@ way the per-workspace layer keys on `name`.
 
 ---
 
-## v1 — Edit-and-retry directly from the TUI
+## 📋 OPEN — v1 — Edit-and-retry directly from the TUI
 
 **What:** When a workspace is in `broken` status, offer an "edit + retry" affordance from the TUI: open `$EDITOR` on the failing script (or its log), let the user fix, then re-run with one keystroke.
 
@@ -698,7 +882,13 @@ way the per-workspace layer keys on `name`.
 
 ---
 
-## v0.5 — Canopy onboarding
+## 📋 OPEN — v0.5 — Canopy onboarding (superseded by v0.15+ wizard entry)
+
+**Status 2026-05-09:** the v0.15+ "Onboarding wizard + global config"
+entry below is the active design surface for this. Keep this entry as
+historical context for the project-type-detection scaffolding ideas
+(Rails/Node templates) — those would slot into the wizard's per-project
+flow if implemented.
 
 **What:** A guided first-run experience for users who've just installed canopy. Replaces the bare `canopy init` with an interactive walkthrough that explains the canopy.json schema, scaffolds `scripts.setup`/`scripts.run`/`scripts.archive` with project-aware defaults (Rails? Node? Go?), checks tmux/git versions, runs a smoke-test workspace creation, and points the user at `canopy ls` + the TUI.
 
@@ -714,7 +904,12 @@ way the per-workspace layer keys on `name`.
 
 ---
 
-## v1 — Auto-cleanup workspaces after PR merges
+## 📋 OPEN — v1 — Auto-cleanup workspaces after PR merges
+
+**Status 2026-05-09:** v0.6 lifecycle wrapper surfaces a hint instead of
+auto-running rm; the `auto_close_shipped` config flag was reverted as
+"destructive auto-rm was the wrong shape." The detector half exists; the
+auto-execution half is still v1+ behind a flag.
 
 **What:** Detect when a workspace's branch has been merged + deleted upstream, and offer (or auto-execute) `canopy rm <workspace>` so the user doesn't have to remember the cleanup step. Pairs with the v0.6 agent lifecycle wrapper (which makes the rm step explicit) by closing the loop without an agent in the room.
 
@@ -732,7 +927,9 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 
 ---
 
-## v0.7 — `scripts.shipped` lifecycle hook
+## 📋 OPEN — v0.7 — `scripts.shipped` lifecycle hook
+
+**Re-confirmed 2026-05-09:** no `Shipped` field in canopy.json schema.
 
 **What:** A new optional script in `canopy.json`'s `scripts` block that fires when the v0.6 `shipped` detector triggers for a workspace. User can wire post-merge automation (Slack message, Linear status update, deploy ping, etc.).
 
@@ -748,7 +945,9 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 
 ---
 
-## v0.7 — Stuck workspace detector
+## ✅ SHIPPED v0.13.4.0 — v0.7 — Stuck workspace detector
+
+**Original entry follows for context.**
 
 **What:** Detector that flags workspaces with no commits and no agent activity in N days (default 7). Surfaces as an amber `stuck (Nd)` hint in the TUI; AGENT.md briefing on next attach starts with: "this workspace has been quiet for N days. Pick up where you left off, or close it?"
 
@@ -764,7 +963,9 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 
 ---
 
-## v0.7 — Conflict detector
+## ✅ SHIPPED v0.13.3.0 — v0.7 — Conflict detector
+
+**Original entry follows for context.**
 
 **What:** Detector that flags workspaces whose branch can't merge cleanly into the default branch. Surfaces as a red `conflict` hint; AGENT.md briefing on attach: "rebase onto origin/main first."
 
@@ -780,7 +981,7 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 
 ---
 
-## v1 — `canopy event` bus (REJECTED in v0.6, conditional revisit)
+## ❌ REJECTED — v1 — `canopy event` bus (rejected in v0.6, conditional revisit)
 
 **What:** A `canopy event <kind> [args]` CLI verb the agent emits to communicate semantic lifecycle events to canopy (e.g., `canopy event scoped open-canopy-anywhere`, `canopy event committed "auth refactor done"`). Events persist in `~/.canopy/log/<project>/<workspace>/lifecycle.jsonl`. Detectors and downstream features (scripts.shipped hook, dashboards) can subscribe.
 
@@ -798,7 +999,13 @@ Could also pair with the in-session overlay (below) — the overlay's status seg
 
 ---
 
-## v1 — In-session canopy overlay (TurboC++ style)
+## 🔄 PARTIAL — v1 — In-session canopy overlay (TurboC++ style)
+
+**Status 2026-05-09:** popup launcher and statusline shipped via
+`canopy install tmux` (now extended in v0.15.2.0 with the prefix-less
+`Ctrl+Alt+c` chord). Cheatsheet pane (`<prefix>-?` static help) and the
+context-sensitive keybind bar are still open — see the v0.16+ context-
+popup entry and the "Always-on keybind bar" entry below.
 
 **What:** A persistent canopy presence inside an attached workspace tmux session — a status bar at the bottom (or a popup-on-hotkey) that shows the workspace name, port, status, and a row of F-key / single-letter shortcuts. One shortcut pops the full canopy splash/list as a `tmux display-popup` overlay so the user can switch workspaces without detaching the current session. Same overlay also shows quick-reference cheatsheet for canopy + tmux keybinds.
 
@@ -826,7 +1033,13 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## v0.8 — `canopy session` (pinned-reach dedicated tmux session)
+## 📋 OPEN — v0.8 — `canopy session` (pinned-reach dedicated tmux session)
+
+**Status 2026-05-09:** the prefix-less `Ctrl+Alt+c` chord (v0.15.2.0)
+covers the "one chord from any session" use case via display-popup, so
+the pressure for a dedicated long-running canopy session is reduced.
+Re-evaluate only if popup-cold-start latency becomes annoying in
+practice.
 
 **What:** A subcommand that creates or attaches to a dedicated tmux session named with a reserved prefix (likely `canopy-hub-<project>`) running the existing global TUI in pane 0. Bound to `<prefix> G` in the user's tmux config, the chord flips the current tmux client to the canopy session. From canopy, picking a workspace fires `tmux switch-client -t <workspace-session>`. Picking nothing and re-pressing the chord flips back to the previous client (`tmux switch-client -l`).
 
@@ -842,7 +1055,14 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## v0.8 — `canopy install tmux` (idempotent ~/.tmux.conf writer)
+## ✅ SHIPPED — v0.8 — `canopy install tmux` (idempotent ~/.tmux.conf writer)
+
+**Status 2026-05-09:** `cmd/canopy/install_tmux.go` ships. Marker block,
+idempotent re-runs, force flag for hand-edited blocks, and (as of
+v0.15.2.0) writes both the `<prefix>g` popup bind and the prefix-less
+`Ctrl+Alt+c` chord into the managed block.
+
+**Original entry follows for context.**
 
 **What:** A subcommand that writes canopy's tmux integration (popup keybind, statusline interpolation, future session keybind) into `~/.tmux.conf` between `# canopy:start` / `# canopy:end` marker comments. Idempotent re-runs replace the block in place. Backup at `~/.tmux.conf.canopy-backup-<timestamp>`. Supports `--uninstall` to remove the block. Refuses if tmux < 3.2 with a clear message. Detects pre-existing user binds for the same keys and asks before overriding.
 
@@ -858,7 +1078,7 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## Future — Sidebar pane mode (`canopy --sidebar`)
+## 💡 PARKED — Future — Sidebar pane mode (`canopy --sidebar`)
 
 **What:** A canopy mode that runs in a narrow vertical tmux pane (~25 cols), designed to live alongside the user's working pane(s) in the same tmux session. User splits the pane themselves (or via canopy install). Toggle key collapses the pane to 0 cols and back. Visible-alongside-your-work view — closest to the literal "Conductor sidebar" mental model.
 
@@ -874,7 +1094,13 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## v0.8 — PR status in `canopy statusline`
+## ✅ SHIPPED v0.13.5.0 + v0.14.0.0 — v0.8 — PR status in `canopy statusline`
+
+**Status 2026-05-09:** push-state hint shipped in v0.13.5.0 (⇡N / ⇅);
+render-precedence overhaul in v0.14.0.0 makes stuck-state preempt
+git-stats. PR detector lives in `internal/lifecycle/` with a 10min cache.
+
+**Original entry follows for context.**
 
 **What:** Extend `canopy statusline --format=current` to surface PR state alongside workspace name/status/port. Concrete shape: `canopy: silent-falcon ●ready :40010 PR #42 ⚠conflict` (or `✓clean`, `…draft`, `⏳ci-running`, `✗ci-failed`, `✓merged`).
 
@@ -890,7 +1116,13 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## v0.8 — Canopy actions from tmux key binds (Claude-driven)
+## 📋 OPEN — v0.8 — Canopy actions from tmux key binds (Claude-driven)
+
+**Status 2026-05-09:** no `<prefix>M` / `<prefix>F` / `<prefix>X` send-keys
+bindings in `install_tmux`. Likely subsumed by the v0.15+ workspace
+actions menu — same shape (canned commands run against the workspace's
+panes), different surface (TUI picker vs. tmux keybind). Keep both
+entries until one ships and validates the abstraction.
 
 **What:** Tmux keybinds (managed by `canopy install tmux`) that pipe canned prompts into the active workspace's claude pane via `tmux send-keys`. Concrete examples: `<prefix>M` = "merge this PR" (sends to claude), `<prefix>F` = "fix the failing CI", `<prefix>X` = "explain what broke." Each binding identifies the workspace (parse `tmux display-message -p '#S'`), looks up the claude pane (the `claude` pane in canopy's standard layout), sends the prompt + Enter.
 
@@ -906,7 +1138,15 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## v0.9 — Session-naming refactor: session = project, window = workspace
+## 🔄 PARTIAL — v0.9 — Session-naming refactor: session = project, window = workspace
+
+**Status 2026-05-09:** only the cosmetic half landed — v0.15.0.0 changed
+tmux session names from `canopy-<branch>` to `canopy/<branch>`. The deep
+"session = project, window = workspace" topology refactor (with all six
+trade-offs in the original entry) is untouched. Open question: now that
+v0.15.x makes branch-tracked identity work cleanly across renames, does
+the topology refactor still feel necessary, or did the cosmetic change
+buy us most of the readability win?
 
 **What:** Restructure tmux session/window topology. Today: every workspace is its own tmux session named `<project>-<workspace>` (e.g., `cravd-misty-aspen`, `canopy-silent-falcon`). Proposed: one tmux session per project named `<project>`, each workspace is a window named `<workspace>` (or `<workspace>:<branch>` if they differ). `canopy main` becomes the project session's first window.
 
@@ -928,7 +1168,7 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## Future — Always-on keybind bar (TurboC++ style)
+## 💡 PARKED — Future — Always-on keybind bar (TurboC++ style)
 
 **What:** Extension of the existing v1 in-session-overlay TODO above. Specifically: a row in tmux's status-left or status-bottom showing the active canopy keybinds in real time, like TurboC++'s `F1 Help · F2 Save · F3 Open ...` bar. Updates contextually: in a workspace with PR conflict, the bar shows `M merge · F fix-ci · X explain`. Outside any canopy session, the bar is empty.
 
@@ -944,7 +1184,7 @@ Keybind discipline: NEVER bind anything below tmux's prefix. All canopy keys go 
 
 ---
 
-## v0.8 — TUI unification: one model, three contexts (✅ SHIPPED v0.8.0, 2026-04-29)
+## ✅ SHIPPED v0.8.0, 2026-04-29 — v0.8 — TUI unification: one model, three contexts
 
 **What:** Collapse canopy's three TUI flows into one. Today there are three separate Bubbletea models and three invocation paths:
 
@@ -1005,7 +1245,17 @@ The v0.5 boundary ("global is read-only, project owns destructive") made sense b
 
 ---
 
-## v0.8+ — Repurpose freed-up `o` keybind for "open worktree in editor" (deferred from TUI unification CEO review)
+## ✅ REUSED-DIFFERENTLY v0.14.1.0 — v0.8+ — Repurpose freed-up `o` keybind
+
+**Status 2026-05-09:** the freed-up keybind got reused in v0.14.1.0 but
+for *different* verbs — `B` opens the running app in a browser, `P`
+opens the PR. The "open worktree in editor" idea below didn't ship in
+that round. If the editor-handoff is still wanted, it would need a
+different keybind (the keymap is denser now); leave the open-design
+questions in the original entry as the design surface for whenever it
+comes up again.
+
+**Original entry follows for context.**
 
 **What:** After v0.8 TUI unification, the `o` keybind is freed (its old purpose — open project TUI from popup — disappears). A natural reuse: launch the user's editor on the highlighted workspace dir.
 
@@ -1030,7 +1280,7 @@ The v0.5 boundary ("global is read-only, project owns destructive") made sense b
 
 ---
 
-## v0.9+ — "Recent workspaces" 3rd tab in unified TUI
+## 📋 OPEN (P3) — v0.9+ — "Recent workspaces" 3rd tab in unified TUI
 
 **What:** After the unified TUI ships (v0.8), consider a 3rd tab beyond Local/Global: "Recent" — last N workspaces the user attached to, ordered by last-use timestamp.
 
@@ -1051,7 +1301,7 @@ The v0.5 boundary ("global is read-only, project owns destructive") made sense b
 
 ---
 
-## ✅ DONE 2026-04-30 — Surface version in `canopy use` and `canopy --help` (v0.12.3)
+## ✅ SHIPPED 2026-04-30 — Surface version in `canopy use` and `canopy --help` (v0.12.3)
 
 Both sub-items shipped on the `surface-version-in-use-and-help` branch.
 
@@ -1068,7 +1318,7 @@ threshold needs design. Punt to a future round if anyone wants it.
 
 ---
 
-## ✅ DONE 2026-04-30 — Upgrade UX overhaul (v0.13.0.0)
+## ✅ SHIPPED 2026-04-30 — Upgrade UX overhaul (v0.13.0.0)
 
 Shipped per design doc at `docs/design/v0.13-upgrade-ux.md`. All three
 sub-items below landed in the same PR: auto-check pill + cache file,
@@ -1162,7 +1412,13 @@ Doable as a follow-up once both above are in.
 
 ---
 
-## v0.15+ — Workspace actions menu (replace ambiguous `R retry`)
+## 📋 OPEN — v0.15+ — Workspace actions menu (replace ambiguous `R retry`)
+
+**Status 2026-05-09:** v0.13.4.1 renamed the ambiguous "retry scripts.setup"
+copy to "re-run setup" — a partial step. The actual actions-menu
+infrastructure (config schema, picker, `window: true` semantics, user-
+defined actions) is untouched. Probably the highest-leverage v0.15+
+feature still on the list.
 
 Captured 2026-04-30 from user feedback. Today the only re-run path is
 `R` (retry scripts.setup), and the verb is opaque — "retry what?"
@@ -1254,7 +1510,12 @@ work. Spawning in a new tmux window means:
 
 ---
 
-## v0.15+ — Onboarding wizard + global config
+## 📋 OPEN — v0.15+ — Onboarding wizard + global config
+
+**Status 2026-05-09:** no `~/.canopy/config.json` loader yet (search
+`internal/config/` for `globalConfig` returns empty). The hardcoded
+constants the entry calls out (`nvim`, `3000-3999`, `6h`, the 4-pane
+builder) all still live in code.
 
 Captured 2026-04-30 from user feedback. Canopy has no global config
 file today — every customizable surface is either hardcoded (pane
@@ -1359,7 +1620,11 @@ hardcoded-constant complaint a user has had so far.
 
 ---
 
-## v0.15+ — Offboard / delete a project completely
+## 📋 OPEN — v0.15+ — Offboard / delete a project completely
+
+**Re-confirmed 2026-05-09:** no `cmd/canopy/offboard.go`. Closely related
+to the v0.6 `canopy reconcile --remove-project` open entry above — the
+two should probably converge into one verb during design.
 
 Captured 2026-04-30 from user feedback. Today `canopy rm <workspace>`
 removes ONE workspace. There's no verb for "I'm done with this
@@ -1454,7 +1719,11 @@ Continue? [y/N]
 
 ---
 
-## v0.16+ — Kick-off-with-prompt + background workspaces (idea pool)
+## 📋 OPEN — v0.16+ — Kick-off-with-prompt + background workspaces (idea pool)
+
+**Re-confirmed 2026-05-09:** `cmd/canopy/new.go` has no `--prompt` /
+`--prompt-file` flags. Per-workspace agent-state visibility is the
+prerequisite (memory `project_agent_state_unlocks_background.md`).
 
 Captured 2026-04-30 from user feedback. Today `canopy new <branch>`
 creates a workspace, runs scripts.setup, launches the agent with the
@@ -1565,7 +1834,7 @@ background flow is too far out.
 
 ---
 
-## P3 — Defensive TestMain reap for crashed-runner stragglers (2026-05-01)
+## 📋 OPEN (P3) — Defensive TestMain reap for crashed-runner stragglers (2026-05-01)
 
 **Where:** `internal/tmux/session_test.go:TestMain` and
 `internal/workspace/lifecycle_test.go:TestMain`.
@@ -1612,7 +1881,7 @@ against the crash path separately.
 
 ---
 
-## P3 — Deferred from v0.15 (clear-workspace-identity ship)
+## 📋 OPEN (P3) — Deferred from v0.15 (clear-workspace-identity ship)
 
 ### Lipgloss AdaptiveColor migration
 
@@ -1662,7 +1931,12 @@ shellrc broke, point them at `TmuxSessionName()` (compute from project_root
 
 ---
 
-## v0.16+ — Current-workspace context popup (the bigger arc)
+## 📋 OPEN — v0.16+ — Current-workspace context popup (the bigger arc)
+
+**Status 2026-05-09:** the foundation (Ctrl+Alt+c chord) is in place as
+of v0.15.2.0. Step 2 (workspace actions menu) is the next prerequisite
+— see the v0.15+ entry above. Rest of the sequencing list below is
+unchanged.
 
 Captured 2026-05-09 from user: *"there should be a way to open the
 current workspace and do actions on the current workspace... this is
@@ -1790,7 +2064,7 @@ Highlights:
 
 ---
 
-## Wild idea — Cloud-hosted canopy workspaces (streamed terminals)
+## 💡 PARKED — Wild idea — Cloud-hosted canopy workspaces (streamed terminals)
 
 Captured 2026-05-08 from user. Pure idea-pool entry; no milestone, no
 estimate. Worth a thought experiment + MVP probe, not a roadmap commit.
@@ -1904,7 +2178,7 @@ if it's a real product direction.
 
 ---
 
-## Wild idea — Switch agent / model on a live workspace
+## 💡 PARKED — Wild idea — Switch agent / model on a live workspace
 
 Captured 2026-05-08 from user. Pure idea-pool entry; partially overlaps
 with two earlier TODOs but pushes further:
