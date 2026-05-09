@@ -5,6 +5,37 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1.0] - 2026-05-08 — `canopy rename --pin` / `--unpin` for power users
+
+Opt out of branch auto-tracking on workspaces where you rebase frequently or
+host multiple feature branches in a single worktree. The default 80% case
+(one branch per workspace, rename branch on turn 1, never touch it again)
+keeps working as before — pinning is purely additive.
+
+### Added
+
+- `canopy rename --pin` freezes the workspace's display label at the current
+  branch. Subsequent `git checkout` / `git branch -m` calls inside the
+  worktree no longer propagate to the tmux session name, statusline, or
+  TUI rows. Idempotent: re-running `--pin` re-snapshots whatever branch is
+  currently checked out.
+- `canopy rename --unpin` releases the pin and re-syncs labels to the
+  worktree's current branch in one shot.
+- Plain `canopy rename` on a pinned workspace prints a friendly hint that
+  names the unpin command instead of silently no-opping.
+
+### Changed
+
+- `internal/state.Workspace` gains a `pin_display_name` field. `omitempty`
+  on the JSON tag means existing state.json files round-trip unchanged.
+
+### Notes
+
+Closes the v0.15 deferred-list entry `canopy rename --pin / --unpin`. The
+pin check sits AFTER the legacy hyphen→slash session migration in
+`SyncBranch` so a one-time format upgrade still happens for pinned
+workspaces left over from pre-v0.16.
+
 ## [0.15.0.0] - 2026-05-06 — Workspace identity follows the branch you renamed
 
 Every visible canopy surface now reflects the meaningful branch name instead

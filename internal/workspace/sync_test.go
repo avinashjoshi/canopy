@@ -140,6 +140,83 @@ func TestSyncBranch_NotFound(t *testing.T) {
 	}
 }
 
+// TestSyncBranch_Pinned: a pinned workspace ignores branch changes.
+// Even with a real git rename, SyncBranch returns Changed=false and
+// state.json keeps its prior Branch value. SetPin(false) restores the
+// auto-tracking pipeline and the deferred rename then propagates.
+func TestSyncBranch_Pinned(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(context.Background(), "pinned-ws", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	originalBranch := ws.Branch
+	originalSession := ws.TmuxSessionName()
+
+	if err := mgr.SetPin(context.Background(), ws.Name, true); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+
+	// Branch changes underneath the pin.
+	out, err := exec.Command("git", "-C", ws.Path, "branch", "-m", "ignored-while-pinned").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch -m: %v\n%s", err, out)
+	}
+
+	res, err := mgr.SyncBranch(context.Background(), ws.Name)
+	if err != nil {
+		t.Fatalf("SyncBranch (pinned): %v", err)
+	}
+	if res.Changed {
+		t.Errorf("Changed = true on pinned workspace; want false. Result: %+v", res)
+	}
+
+	got, err := mgr.Find(context.Background(), ws.Name)
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if got.Branch != originalBranch {
+		t.Errorf("Branch drifted while pinned: got %q, want %q", got.Branch, originalBranch)
+	}
+	if got.TmuxSessionName() != originalSession {
+		t.Errorf("TmuxSession drifted while pinned: got %q, want %q", got.TmuxSessionName(), originalSession)
+	}
+	if !got.PinDisplayName {
+		t.Errorf("PinDisplayName lost across sync; want true")
+	}
+
+	// Unpin and re-sync — labels catch up.
+	if err := mgr.SetPin(context.Background(), ws.Name, false); err != nil {
+		t.Fatalf("SetPin(false): %v", err)
+	}
+	res, err = mgr.SyncBranch(context.Background(), ws.Name)
+	if err != nil {
+		t.Fatalf("SyncBranch (post-unpin): %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("Changed = false after unpin; want true. Result: %+v", res)
+	}
+	if res.NewBranch != "ignored-while-pinned" {
+		t.Errorf("post-unpin NewBranch = %q; want ignored-while-pinned", res.NewBranch)
+	}
+}
+
+// TestSetPin_NotFound: SetPin on a missing workspace surfaces the
+// canonical ErrWorkspaceNotFound so the rename CLI can distinguish bad
+// names from genuine state-write failures.
+func TestSetPin_NotFound(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	err := mgr.SetPin(context.Background(), "no-such-ws", true)
+	if !errors.Is(err, workspace.ErrWorkspaceNotFound) {
+		t.Errorf("err = %v; want errors.Is(... ErrWorkspaceNotFound)", err)
+	}
+}
+
 // TestSyncBranch_Collision: two workspaces with the same branch name
 // after rename — the second SyncBranch should return ErrSessionNameInUse
 // without writing state.json (preserving the stale value is preferable
