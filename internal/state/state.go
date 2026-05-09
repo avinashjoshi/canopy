@@ -179,6 +179,16 @@ type Workspace struct {
 	// body changes, the agent learns about it through the conversation,
 	// not through a re-fetched briefing.
 	SourceContext string `json:"source_context,omitempty"`
+
+	// PinDisplayName, when true, opts this workspace out of the
+	// SyncBranch auto-tracking pipeline. Power users who rebase
+	// frequently or check out multiple feature branches in one workspace
+	// can `canopy rename --pin` to freeze the current display label so
+	// the statusline and tmux session name don't flicker on every
+	// `git checkout`. `canopy rename --unpin` clears it; the next sync
+	// tick (or `canopy rename`) re-syncs the labels to whatever branch
+	// the worktree is currently on.
+	PinDisplayName bool `json:"pin_display_name,omitempty"`
 }
 
 // ProjectBasename returns the project's basename (e.g., "canopy" for
