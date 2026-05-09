@@ -122,6 +122,20 @@ func SyncWorkspaceBranch(ctx context.Context, store *state.Store, tmuxClient *tm
 		}
 	}
 
+	// Pinned workspaces opt out of branch auto-tracking. The user has
+	// declared the current display label is the one they want — typically
+	// because they rebase or check out multiple feature branches in this
+	// worktree and don't want the statusline to flicker. `canopy rename
+	// --unpin` clears the field and lets sync run again.
+	//
+	// Placed AFTER legacy session migration so a one-time hyphen→slash
+	// session rename still happens for pinned workspaces left over from
+	// pre-v0.16 — that's a session-name format upgrade, not a branch
+	// switch the user is trying to suppress.
+	if wPeek.PinDisplayName {
+		return result, nil
+	}
+
 	// Snapshot the current values so we can decide if work is needed.
 	wCopy := *wPeek
 	if !refreshBranchFromWorktree(ctx, &wCopy) {
@@ -198,6 +212,25 @@ func SyncWorkspaceBranch(ctx context.Context, store *state.Store, tmuxClient *tm
 	result.OldSession = oldSession
 	result.NewSession = newSession
 	return result, nil
+}
+
+// SetPin toggles a workspace's PinDisplayName field under flock. When
+// pinned, SyncBranch is a no-op for this workspace until it's unpinned.
+//
+// SetPin only mutates state.json — it does not run SyncBranch. Callers
+// that want "pin to the current branch" semantics should run SyncBranch
+// (or set pinned=false → sync → SetPin true) themselves; keeping this
+// method surgical lets `canopy rename --pin` and `--unpin` compose the
+// pipeline they need without baking policy into the state mutation.
+func (m *Manager) SetPin(ctx context.Context, name string, pinned bool) error {
+	return m.Store.WithLock(func(s *state.State) error {
+		w, err := s.Find(m.Cfg.ProjectRoot, name)
+		if err != nil {
+			return fmt.Errorf("workspace.SetPin(%s): %w", name, ErrWorkspaceNotFound)
+		}
+		w.PinDisplayName = pinned
+		return nil
+	})
 }
 
 // tmuxSessionNameFor produces the canonical "<project>/<branch>" tmux
