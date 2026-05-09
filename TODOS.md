@@ -1659,3 +1659,253 @@ shellrc broke, point them at `TmuxSessionName()` (compute from project_root
 **Where:** documentation only.
 
 **Depends on / blocked by:** community feedback.
+
+---
+
+## Wild idea — Cloud-hosted canopy workspaces (streamed terminals)
+
+Captured 2026-05-08 from user. Pure idea-pool entry; no milestone, no
+estimate. Worth a thought experiment + MVP probe, not a roadmap commit.
+
+### The vision
+
+A canopy workspace runs on a remote box (cloud VM, container, or
+Fly Machine), not on your laptop. Every terminal in that workspace —
+the agent terminal, the dev-server terminal, your `nvim` editing
+session, the shell pane — streams from the cloud to your local tmux/
+terminal. Your laptop is a thin client; the workspace state (worktree,
+processes, agent context, file edits) lives in the cloud and survives
+laptop sleep, network blips, and machine swaps.
+
+The user pitch writes itself: "click `canopy new` from your phone,
+walk to your desk, attach the same workspace from your laptop, keep
+working." Or: "kick off four agent workspaces in parallel, each on its
+own cloud box, none of them eating your laptop battery." It's
+Conductor → tmuxinator → canopy → **canopy cloud**.
+
+### What's actually new vs. what already exists
+
+The "stream a remote terminal" half is solved technology — `mosh`,
+`tmate`, `gotty`, `wetty`, plain `ssh + tmux attach` all do this. The
+canopy-shaped half is the orchestration:
+
+- Provisioning a workspace = "spin up a VM/container, clone the repo
+  at the right commit, run scripts.setup, launch the agent, expose the
+  tmux session over SSH/mosh/wss."
+- Workspace state lives in the cloud's `~/.canopy/state.json`, mirrored
+  back to the local TUI so the Global tab shows local + cloud rows
+  side-by-side.
+- The local TUI's "switch to workspace" action either runs the existing
+  tmux attach (for local rows) or `ssh -t cloud-box tmux attach -t <ws>`
+  (for cloud rows). Same keybind, two transports.
+- nvim, claude, dev server — all run on the cloud. The local terminal
+  is just a renderer. Latency budget: comfortable typing needs ≤80ms
+  RTT, which means **region matters** (US-East user → US-East cloud).
+- Editor experience: tmux + nvim over mosh is genuinely fine for most
+  edits. Heavy LSP / treesitter is the test case. If it's bad, fallback
+  is "edit locally via VS Code Remote SSH or `code-tunnel`, run agent
+  remotely" — but that splits the model and probably feels worse than
+  going all-in.
+
+### The MVP
+
+Smallest thing that proves the loop:
+
+1. `canopy cloud-new <branch>` — same UX as `canopy new`, but instead
+   of provisioning under `~/.canopy/workspaces/`, it `ssh`s to a
+   pre-configured cloud box, runs a remote canopy binary that creates
+   the workspace + tmux session over there, prints back a connection
+   string.
+2. `canopy cloud-switch <name>` (or extend Global tab with cloud rows)
+   — runs `mosh cloud-box -- tmux attach -t canopy-<name>`. That's it.
+   The user gets dropped into the same Bubbletea-launched tmux layout
+   they'd get locally, just streamed from a remote machine.
+3. State sync: cloud canopy posts its `state.json` to a known endpoint
+   (or just `rsync ~/.canopy/state.json` periodically); local TUI
+   merges remote rows into Global tab. Stale-tolerant.
+
+The MVP can hardcode "the cloud box" to a single user-owned VM the
+user pre-provisions (`canopy cloud-init` to bootstrap it: install
+canopy, install tmux, clone the repo, set up scripts.setup deps).
+**Multi-tenant cloud-as-a-service is not the MVP** — that's the
+business; the MVP is "BYO box, canopy makes it usable."
+
+### Open questions to chew on later
+
+- **Ergonomics floor.** Is mosh + tmux + nvim actually pleasant for an
+  8-hour session, or does it feel like working through a straw? Test by
+  using it for one real day before over-engineering.
+- **Repo state.** Cloud workspace clones from `origin`, but local
+  uncommitted work is on the laptop. Either canopy `rsync`s the repo
+  up before creating, or the workflow assumes "commit + push first."
+  The latter is cleaner; matches how Conductor's cloud rumors work.
+- **Cost shape.** Per-workspace VM is expensive idle. Container-per-
+  workspace on a shared host is cheaper. Fly Machines auto-stop
+  semantics are basically built for this. Worth a back-of-envelope
+  before committing — but the MVP punts entirely (BYO box).
+- **State sync direction.** Today `state.json` is local-canonical. With
+  cloud rows, who's canonical? Probably each canopy is canonical for
+  its own workspaces and the local TUI is a read-side aggregator.
+  Avoids the distributed-systems tar pit.
+- **Auth.** SSH keys for MVP. Anything fancier (OIDC, short-lived
+  tokens) is product, not MVP.
+- **Killer feature, not toy.** The fire-and-forget angle pairs hard
+  with v0.16+ kick-off-with-prompt + background workspaces above. "Open
+  three cloud workspaces with these three prompts, ping me when any
+  agent is stuck." That's the unique thing — local-only canopy can't do
+  it without burning your laptop.
+
+### Why this is interesting (and why it's risky)
+
+Interesting: it's the natural extension of canopy's "workspace as the
+unit" — the unit doesn't have to live on your laptop. Risky: every
+remote-terminal-as-IDE attempt has bumped against latency, editor
+parity, and "I just want my files locally." The differentiator vs.
+"just SSH" is the orchestration UX (one verb to provision + connect)
+and the multi-workspace background-agent loop. Without that loop, this
+is a glorified `tmate`.
+
+### Posture
+
+Park it. Re-visit after v0.1.0 ships and after the v0.16+ background-
+agents idea matures (cloud is much more compelling once the local
+background-agent UX exists, because the cloud version is "the same
+thing, but it doesn't drain your laptop"). MVP probe = one weekend
+hack on a personal VM to feel out the latency/UX floor before deciding
+if it's a real product direction.
+
+---
+
+## Wild idea — Switch agent / model on a live workspace
+
+Captured 2026-05-08 from user. Pure idea-pool entry; partially overlaps
+with two earlier TODOs but pushes further:
+- v0.5 "Configurable AI tool" (line ~466) — config-time picker.
+- v1 "Multi-AI within one workspace" (line ~575) — parallel panes.
+
+This entry is about the **third axis**: runtime switching of the agent
+or model on an *existing* workspace. Cursor's composer shows a `GPT-5.5`
++ `Fast` chip the user can toggle per-turn (see screenshot 2026-05-08);
+canopy today hardcodes claude for the lifetime of the workspace.
+
+### What "switching" actually means (three nested levels)
+
+The user's question — "what happens if we switch?" — needs disambiguation
+because there are three different switches with three different blast
+radii:
+
+1. **Model within the same agent CLI.** `claude /model opus`,
+   `codex --model gpt-5`. This is agent-internal; canopy has no role
+   here. Just document it in the briefing or a help overlay — "press
+   Ctrl-` to ask the agent to switch models." MVP: zero canopy code.
+2. **Agent CLI for new turns on this workspace.** Workspace was launched
+   with claude; user wants codex to take over from here. Canopy kills
+   the claude pane, launches codex in the same pane, but the briefing
+   + worktree + state.json all stay intact. Agent conversation context
+   does NOT carry over (claude's `~/.claude/projects/<path>` is opaque
+   to codex). New agent starts with a fresh briefing that includes a
+   "you're picking up from claude — here's the diff so far, here's the
+   active hint set."
+3. **A/B parallel.** Two agents on the same workspace at the same time.
+   Already covered by the v1 multi-AI parallel-pane entry. Cross-link.
+
+This entry focuses on **(2)** — single-pane agent swap — because it's
+the most interesting design question and the one that doesn't already
+have a shape in TODOs.
+
+### The thorny questions
+
+- **What happens to the conversation?** Each agent CLI stores its own
+  history under its own dotdir keyed by cwd. Switching agents = starting
+  fresh on the new agent. Canopy can soften this by injecting a
+  "previous agent was claude; here's a summary of the last N turns"
+  block into the briefing — but extracting that summary from claude's
+  JSONL is brittle. MVP: don't try; just brief the new agent with the
+  workspace state (branch, hints, scope) and let the user re-state
+  context if needed. Honest UX: "switching agents resets the
+  conversation."
+- **What happens to in-flight work?** If claude is mid-tool-call when
+  the user hits switch, canopy needs to confirm ("claude is running a
+  command — switch anyway?") and SIGTERM the agent process. Same shape
+  as the existing kill-pane logic.
+- **Does canopy track which agent ran which turn?** Probably not in v1
+  — it's metadata users don't ask for until they do. But the workspace
+  state could grow an `agent_history: [{agent, started_at, ended_at}]`
+  list later. Cheap to add.
+- **Briefing evolution.** Today the briefing has a Claude-shaped
+  preamble ("You are the agent for this workspace…"). For agent swaps
+  to work cleanly, the briefing needs to be agent-agnostic at the top
+  and agent-specific only in the tool-call examples. The agent-
+  lifecycle wrapper design (`docs/design/v0.6-agent-lifecycle.md`)
+  already moves toward this — the launcher map abstracts the CLI; the
+  briefing assembler abstracts the prompt. Agent-swap is the natural
+  test case for whether that abstraction holds.
+- **Re-resume semantics.** Today `canopy switch <name>` runs `claude
+  --continue`. After an agent swap, the resume command for this
+  workspace is now `codex` (no continue flag, codex doesn't have one,
+  or whatever the right call is). Canopy needs to remember per-
+  workspace which agent is active and use the right launcher map entry
+  on resume. Field on `state.Workspace`: `Agent string`. Defaults to
+  "claude" for back-compat.
+
+### How the user triggers it
+
+Picker UX options (think before committing):
+
+- **Per-workspace command.** `canopy agent codex` from anywhere → finds
+  the workspace by cwd, kills the agent pane, relaunches with codex.
+  Easy, scriptable, no TUI work.
+- **TUI keybind.** Inside the workspace TUI / popup, an `a` keybind
+  opens an agent picker (list of agents from `canopy.json` `agents`
+  block + a global default registry). Pick one → confirm → swap.
+- **Cursor-style chip in the agent pane.** Not canopy's surface — that
+  belongs to the agent CLI. Skip.
+
+MVP probably picks the command form first (`canopy agent <name>`) because
+it's testable without any TUI changes. TUI keybind comes after.
+
+### MVP shape
+
+1. Land the v0.5 "agent.type config + launcher map" first — that's the
+   prerequisite. Without a launcher map there's nothing to swap to.
+2. Add `Agent string` to `state.Workspace`, default "claude", populated
+   on workspace creation from `canopy.json` config.
+3. New verb: `canopy agent <agent-name>` (or `canopy switch-agent`).
+   Resolves workspace by cwd, confirms (TTY) or forces (`--yes`),
+   sends SIGTERM to the agent pane's process, updates
+   `state.Workspace.Agent`, relaunches via the new launcher map entry
+   with a fresh briefing that includes a "you're succeeding <prev-agent>
+   on this workspace; full briefing follows" preamble.
+4. `canopy switch <name>` reads `state.Workspace.Agent` and dispatches
+   to the correct launcher's resume command.
+5. Briefing assembler grows an optional `PrevAgent` field that, when
+   set, prepends the handoff preamble.
+
+~150-250 LOC + tests. Bigger than the rename verb; smaller than the
+lifecycle wrapper itself.
+
+### Why this is interesting (and why it's risky)
+
+Interesting: the AI-CLI ecosystem is genuinely volatile (claude /
+codex / aider / opencode / gemini-cli / amp). Canopy is in a privileged
+position to be the *workspace shell* that doesn't care which agent you
+use today vs. tomorrow. Agent-swap on a live workspace is the demo that
+sells that pitch.
+
+Risky: the conversation-loss UX is a real cliff. Users will instinctively
+expect "switch from claude to codex" to mean "codex picks up where
+claude left off," which is technically not possible without writing a
+canopy-level conversation transcript layer (huge scope, brittle, not
+worth it). Honest framing matters — "switching agents starts a fresh
+conversation; the workspace state and worktree stay" — and the briefing-
+preamble handoff softens but doesn't eliminate the cliff.
+
+### Posture
+
+Park behind two prereqs: (1) agent-lifecycle wrapper ships and the
+launcher map exists, (2) at least one second agent (codex or aider) has
+a real launcher entry tested in dogfood. Without both, this is paper.
+After both, it's a one-PR feature with high marketing leverage.
+
+**Depends on / blocked by:** v0.5 agent-lifecycle wrapper +
+launcher map. See `docs/design/v0.6-agent-lifecycle.md`.
