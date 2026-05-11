@@ -5,6 +5,81 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2.1] - 2026-05-11 — Pane-role contract hardening (defense-in-depth)
+
+Quiet cleanup release. No user-facing behavior change in the happy path — these
+are the safety nets behind the pane-role contract that v0.16.0 shipped. If you
+have weird tmux configs, exotic layouts, or have ever seen "the agent badge is
+on the wrong pane," this is the release that closes those gaps.
+
+### Changed
+
+- Pane-ID capture now structurally validates `%<digits>` format in `tmux.Create`
+  and `tmux.SplitPane`. A user tmux hook that prints to stdout
+  (`set-hook session-created 'display-message ...'`) can no longer poison the
+  captured pane ID and silently propagate garbage into `SetRole` / `SelectPane`.
+- `LookupPane` / `LookupAllPanes` now reject role globs with a leading or
+  internal `*` (new `tmux.ErrInvalidGlob`). Previously `LookupPane("*:claude")`
+  silently matched nothing — it read as "no such pane" when the real cause was
+  a malformed pattern. Trailing `*` (the documented prefix-match form) still
+  works.
+- `BackfillRoles` returns no value. The function never produced an error in
+  practice and every caller wrote `_ = BackfillRoles(...)`, which read as
+  intentional error-swallow but wasn't.
+- `TestRoles_PanesInOrder` now asserts the layout-tree traversal order
+  (`[ide, agent, terminal:shell]`) and call-stability — the contract
+  `BackfillRoles`' canonical-role mapping has always depended on. Previously
+  the test only checked set-membership despite its name promising order.
+
+### Added — backfill safeguards
+
+`workspace.BackfillRoles` (which tags pre-v0.16 sessions on first attach) is
+now harder to fool when the live layout doesn't match canopy's canonical shape:
+
+- **Window-count gate.** Sessions with more than one window are skipped.
+  Without this, three panes spread across multiple tmux windows passed the
+  3-pane check (list-panes is session-scoped, not window-scoped) and
+  positional inference would tag arbitrary panes from arbitrary windows.
+- **Command-sniffing safeguard.** Reads `pane_current_command` and refuses to
+  backfill if an editor or agent command is sitting in the wrong canonical
+  slot (e.g., vim in the agent position). Shell-class commands stay
+  permissive — "I quit claude to poke around" is still a valid intermediate
+  state.
+- **Concurrent-attach guard.** Skips backfill when a tmux client is already
+  attached to the target session. Narrows the read-modify-write race window
+  for the rare two-process case where two `canopy switch <ws>` invocations
+  fire against the same v0.15-style session simultaneously.
+
+Each new safeguard ships with both unit tests for the helper logic and an
+integration test exercising the full path.
+
+### Known limitations (documented, not yet fixed — captured in TODOS.md)
+
+These are the residual gaps the safeguards above don't close. Acknowledged
+explicitly in `BackfillRoles`' docstring so future work knows where to dig:
+
+- **Already-but-wrong-tagged sessions** stay corrupted forever — backfill's
+  early-exit only checks that role names exist, not that they're on the
+  canonical panes.
+- **launcherType vs observed-command divergence**: a pane actually running
+  `codex` in a global flow (empty launcherType) gets tagged `agent:claude`
+  because the canonical role uses the launcherType argument, not the sniffed
+  command.
+- **TOCTOU between `ListAllRoles` / `PanesInOrder` / `PaneCommands`**: a
+  pathological multi-process race could still partially mistag despite the
+  incongruence + command-sniff guards.
+- **`HasClient` swallows all tmux errors** as "no client" — if the server
+  fails non-trivially, the concurrent-attach guard silently disables itself.
+
+### Behind the scenes
+
+- New `tmux.PaneCommands` helper — single batched call for
+  `pane_id → pane_current_command` mapping.
+- New `tmux.HasClient` helper — `list-clients -t <session>` swallow-all wrapper
+  intended only for the backfill polling use-case (documented in its
+  docstring).
+- New `tmux.WindowCount` helper — straightforward `list-windows` wrapper.
+
 ## [0.16.2.0] - 2026-05-11 — Spawn-with-task from the TUI
 
 The prompt-driven workspace creation that landed as a CLI flag in v0.16.1 now has

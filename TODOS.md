@@ -12,7 +12,33 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
-## 📋 OPEN — v0.16.x — Pane-role contract follow-ups (deferred per /ship adversarial review 2026-05-10)
+## 📋 OPEN — v0.16.x — Extend `--prompt` / background workspaces to codex + opencode (added 2026-05-11)
+
+v0.16.1 shipped `canopy new --prompt`/`--prompt-file` + the agent-state badge column, but the prompt-delivery flow is claude-only. The agent registry in `internal/agent/launchers.go` already understands codex / opencode / aider as launcher types — the gap is in the kickoff path:
+
+- **Trust-dialog state machine** (`internal/agent/state.go::IsTrustDialog`) matches claude's first-launch prompt. codex has its own onboarding (different copy + Y/N shape); opencode reads `AGENTS.md` from cwd at startup and has a different settle pattern; aider may have its own --yes-always interactive prompt depending on git remote presence.
+- **`IsClaudeRendering` settle check** is the Phase-3 verification gate before typing the prompt. Needs a per-launcher equivalent ("is the agent actually at an input prompt, not a shell"). Different launchers have different marker chars (claude `❯`, codex's own, aider `>`, opencode's).
+- **System-prompt surfaces** differ per agent (already enumerated in `launchers.go:38-46`): claude `--append-system-prompt`, codex `--instructions`, aider `--message-file <path>`, opencode reads `AGENTS.md` from cwd. The `--prompt` initial-message path is separate from the system-prompt surface, but the right answer is probably "use the agent's native first-message flag when one exists; otherwise paste-buffer into the pane."
+- **Detector** (`internal/agent/state.go`) currently classifies pane state from claude markers (spinner line, auto-mode footer, `❯` input line). Per-agent classifiers needed so the badge column (⚡💤✋·) works for non-claude workspaces. Without this, codex/opencode workspaces render as `·` even though they have an agent pane.
+
+Shape (sketch):
+- Introduce a per-launcher interface in `internal/agent` covering: `IsTrustDialog(content) bool`, `IsRendering(content) bool`, `ClassifyState(content) State`, `SendInitialPrompt(paneID, text) error`.
+- Move the existing claude logic behind that interface. Add a codex implementation first (closest peer, most users), then opencode.
+- `state.go` polling and the trust-dialog Phase-1 wait both dispatch by launcher type from `Workspace.AgentType`.
+
+Sequencing:
+- Ships in waves: codex first (highest demand, shape parity with claude), opencode second (AGENTS.md briefing path adds one more variable), aider last (probably not worth the prompt-injection of an interactive --yes-always flow until someone asks).
+- Each wave is its own PR with a per-launcher unit test pair (trust-dialog detect + idle/thinking classification).
+
+Risks:
+- codex and opencode UI surfaces are moving targets; pin matched literals to a "last verified 2026-05-xx" comment per launcher (already the convention in `launchers.go:109-111`).
+- Detector false-positives bleed into the badge column. Per-launcher classifier defaults should err toward `·` (no agent) over `💤` (idle), so a misclassified pane doesn't lie about being ready.
+
+---
+
+## ✅ SHIPPED 2026-05-11 — v0.16.x — Pane-role contract follow-ups (was deferred per /ship adversarial review 2026-05-10)
+
+All six items below landed in one PR (branch `v0-16-ship-followups`). Tests + e2e green. Original review notes preserved for context.
 
 The pane-role-contract refactor (v0.16.0) shipped with conservative scope. Adversarial review on the implementation surfaced three follow-ups worth tracking:
 
