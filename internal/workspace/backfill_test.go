@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/workspace"
@@ -52,9 +53,7 @@ func TestBackfillRoles_CanonicalLayout(t *testing.T) {
 	}
 
 	// Backfill.
-	if err := workspace.BackfillRoles(ctx, c, name, "claude"); err != nil {
-		t.Fatalf("BackfillRoles: %v", err)
-	}
+	workspace.BackfillRoles(ctx, c, name, "claude")
 
 	// Post-condition: each role lookup returns the CORRECT pane ID.
 	// This catches the bug where backfill tagged in creation order
@@ -103,9 +102,7 @@ func TestBackfillRoles_NonCanonicalSkipped(t *testing.T) {
 		}
 	}
 
-	if err := workspace.BackfillRoles(ctx, c, name, "claude"); err != nil {
-		t.Fatalf("BackfillRoles: %v", err)
-	}
+	workspace.BackfillRoles(ctx, c, name, "claude")
 
 	// No roles should be set — backfill skipped.
 	all, _ := c.ListAllRoles(ctx, name)
@@ -156,9 +153,7 @@ func TestBackfillRoles_AlreadyTagged(t *testing.T) {
 	}
 
 	// Backfill — should be a no-op.
-	if err := workspace.BackfillRoles(ctx, c, name, "claude"); err != nil {
-		t.Fatalf("BackfillRoles (already tagged): %v", err)
-	}
+	workspace.BackfillRoles(ctx, c, name, "claude")
 
 	postAll, _ := c.ListAllRoles(ctx, name)
 	if len(postAll) != 3 {
@@ -197,9 +192,7 @@ func TestBackfillRoles_PartialTagged(t *testing.T) {
 	}
 
 	// Backfill should fill in the missing ide + terminal:shell.
-	if err := workspace.BackfillRoles(ctx, c, name, "claude"); err != nil {
-		t.Fatalf("BackfillRoles: %v", err)
-	}
+	workspace.BackfillRoles(ctx, c, name, "claude")
 
 	// All 3 canonical roles should now be present.
 	all, _ := c.ListAllRoles(ctx, name)
@@ -259,9 +252,7 @@ func TestBackfillRoles_IncongruentTagsSkipped(t *testing.T) {
 	}
 
 	// Backfill should refuse — incongruent tag detected.
-	if err := workspace.BackfillRoles(ctx, c, name, "claude"); err != nil {
-		t.Fatalf("BackfillRoles: %v", err)
-	}
+	workspace.BackfillRoles(ctx, c, name, "claude")
 
 	// Post-condition: ONLY the original incongruent tag remains. The
 	// other two panes are still untagged. No overwrite happened.
@@ -272,6 +263,106 @@ func TestBackfillRoles_IncongruentTagsSkipped(t *testing.T) {
 	if all[0].ID != panes[1] || all[0].Role != "ide" {
 		t.Errorf("incongruent tag was modified: got pane=%s role=%s; want pane=%s role=ide",
 			all[0].ID, all[0].Role, panes[1])
+	}
+}
+
+// TestBackfillRoles_CommandConflictSkipped: a 3-pane session with the
+// canonical layout, but with `vim` running in the canonical SHELL slot
+// (i.e., the user manually rearranged something and the editor is now
+// in the wrong position) gets skipped. The conflict signal —
+// `pane_current_command` reports an editor where the canonical role is
+// `terminal:shell` — overrides positional inference.
+//
+// Without the command-sniffing safeguard, backfill would have happily
+// tagged the editor pane as `terminal:shell`, then later lookups by
+// role would land on the wrong pane.
+func TestBackfillRoles_CommandConflictSkipped(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH; skipping integration test")
+	}
+	if _, err := exec.LookPath("vim"); err != nil {
+		t.Skip("vim not on PATH; skipping command-conflict integration test")
+	}
+	c := tmux.WithSocket(testSocket)
+	t.Cleanup(func() { _ = c.KillServerAndReap(context.Background()) })
+	ctx := context.Background()
+	cwd := t.TempDir()
+	name := "backfill-command-conflict"
+
+	// Build canopy's canonical 3-pane layout shape, but put `vim` in
+	// the slot that list-panes traversal lands at position 2 (the
+	// canonical shell slot). The ide and agent slots are plain shells.
+	//
+	// Canopy's canonical create sequence is Create → SplitVertical(15)
+	// → SplitHorizontal(30). List-panes traversal returns
+	// [pos0=ide, pos1=agent, pos2=shell]. We start vim in the second
+	// SplitPane call's pane (pos1 = agent slot) — that's a clear
+	// "ide-class command in agent slot" conflict.
+	if _, err := c.Create(ctx, name, cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical, 15); err != nil {
+		t.Fatalf("SplitPane shell: %v", err)
+	}
+	// `-c 'q!'` would exit immediately; we need vim to STAY running
+	// so pane_current_command reads it. Use `+startinsert` and an
+	// empty buffer — vim sits in insert mode, process stays alive.
+	if _, err := c.SplitPane(ctx, name, cwd, "vim", tmux.SplitHorizontal, 30); err != nil {
+		t.Fatalf("SplitPane vim: %v", err)
+	}
+
+	// Give vim a moment to start up so pane_current_command reflects
+	// it rather than the brief shell that exec'd into it. Accept any
+	// vim-family comm name: GitHub's Ubuntu runners ship `vim.tiny` as
+	// /usr/bin/vim, which reports its real comm not the symlink. The
+	// match must mirror what classifyCommand can resolve to ide-class.
+	vimFamily := map[string]bool{
+		"vim": true, "vim.tiny": true, "vim.basic": true,
+		"vim.nox": true, "vi": true, "nvim": true,
+	}
+	sawVim := false
+	const pollSteps = 60 // 60 × 50ms = 3s. Slow CI runners need the headroom.
+	for i := 0; i < pollSteps; i++ {
+		cmds, err := c.PaneCommands(ctx, name)
+		if err != nil {
+			t.Fatalf("PaneCommands: %v", err)
+		}
+		for _, cmd := range cmds {
+			if vimFamily[cmd] {
+				sawVim = true
+				break
+			}
+		}
+		if sawVim {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("ctx done while waiting for vim")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if !sawVim {
+		// vim didn't show up in pane_current_command. Two causes seen in
+		// practice: (1) vim.tiny on Ubuntu CI fails to start without a
+		// real TTY/terminfo, leaving sh visible; (2) the runner is so
+		// slow vim hasn't finished spawning in 3s. Either way, we can't
+		// observe the wrong-slot conflict, so we can't assert the
+		// safeguard fired. Skip instead of failing — the unit tests in
+		// command_sniff_test.go cover the conflict logic exhaustively;
+		// this integration test is just bonus on environments where
+		// vim actually runs.
+		cmds, _ := c.PaneCommands(ctx, name)
+		t.Skipf("no vim-family command in PaneCommands within 3s (likely vim.tiny on CI without TTY); observed: %v", cmds)
+	}
+
+	// Backfill should refuse — vim is in the canonical agent slot.
+	workspace.BackfillRoles(ctx, c, name, "claude")
+
+	// No roles should be tagged.
+	all, _ := c.ListAllRoles(ctx, name)
+	if len(all) != 0 {
+		t.Fatalf("expected 0 tagged panes after command-conflict refusal, got %d: %v", len(all), all)
 	}
 }
 
@@ -298,9 +389,7 @@ func TestBackfillRoles_EmptyLauncherDefaultsToClaude(t *testing.T) {
 		t.Fatalf("SplitPane: %v", err)
 	}
 
-	if err := workspace.BackfillRoles(ctx, c, name, ""); err != nil {
-		t.Fatalf("BackfillRoles: %v", err)
-	}
+	workspace.BackfillRoles(ctx, c, name, "")
 
 	if _, err := c.LookupPane(ctx, name, "agent:claude"); err != nil {
 		t.Errorf("LookupPane(agent:claude) after empty-launcher backfill: %v", err)

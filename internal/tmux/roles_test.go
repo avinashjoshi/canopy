@@ -288,6 +288,15 @@ func TestRoles_PaneCount(t *testing.T) {
 
 // TestRoles_PanesInOrder: returns pane IDs in tmux list-panes natural
 // order — used by the backfill heuristic.
+//
+// The backfill canonical-role mapping (in workspace.BackfillRoles) is
+// load-bearing on this order being:
+//   - stable across calls for the same layout
+//   - matching the layout-tree depth-first traversal, not pane creation
+//     order — for canopy's canonical splits, that's [ide, agent, shell]
+//     even though we Create→SplitVertical(shell)→SplitHorizontal(agent).
+//
+// If either assertion regresses, BackfillRoles will mistag panes.
 func TestRoles_PanesInOrder(t *testing.T) {
 	requireTmux(t)
 	c := newClient(t)
@@ -295,15 +304,16 @@ func TestRoles_PanesInOrder(t *testing.T) {
 	name := "roles-order"
 	cwd := t.TempDir()
 
-	p1, err := c.Create(ctx, name, cwd, "")
+	// Build canopy's canonical 3-pane layout.
+	idePane, err := c.Create(ctx, name, cwd, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	p2, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical, 15)
+	shellPane, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical, 15)
 	if err != nil {
 		t.Fatalf("SplitPane shell: %v", err)
 	}
-	p3, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal, 30)
+	agentPane, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal, 30)
 	if err != nil {
 		t.Fatalf("SplitPane agent: %v", err)
 	}
@@ -312,23 +322,34 @@ func TestRoles_PanesInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PanesInOrder: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("PanesInOrder: got %d panes; want 3", len(got))
+
+	// Assertion 1: layout-tree order. The canonical canopy layout traverses
+	// to [ide, agent, shell] — pane CREATION order was [ide, shell, agent].
+	// BackfillRoles' canonicalRoles slice depends on this exact ordering.
+	want := []string{idePane, agentPane, shellPane}
+	if len(got) != len(want) {
+		t.Fatalf("PanesInOrder: got %d panes; want %d (%v)", len(got), len(want), want)
 	}
-	// All three pane IDs should appear in the result. We don't assert
-	// exact order here because tmux's list-panes output order can depend
-	// on the layout tree; what matters for the backfill heuristic is
-	// that the order is STABLE across calls (tested implicitly by
-	// canopy3pane's resurrect-then-attach lifecycle test elsewhere).
-	want := map[string]bool{p1: false, p2: false, p3: false}
-	for _, id := range got {
-		if _, ok := want[id]; ok {
-			want[id] = true
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("PanesInOrder[%d] = %s; want %s\nfull order: got %v, want %v",
+				i, got[i], want[i], got, want)
 		}
 	}
-	for id, found := range want {
-		if !found {
-			t.Errorf("PanesInOrder: missing pane %s", id)
+
+	// Assertion 2: stability. Calling PanesInOrder twice for the same
+	// session must return identical slices; otherwise BackfillRoles'
+	// canonical mapping can land on different panes between read and write.
+	got2, err := c.PanesInOrder(ctx, name)
+	if err != nil {
+		t.Fatalf("PanesInOrder (second call): %v", err)
+	}
+	if len(got2) != len(got) {
+		t.Fatalf("PanesInOrder unstable: first=%d panes, second=%d panes", len(got), len(got2))
+	}
+	for i := range got {
+		if got[i] != got2[i] {
+			t.Errorf("PanesInOrder unstable at index %d: first=%s, second=%s", i, got[i], got2[i])
 		}
 	}
 }
@@ -365,6 +386,90 @@ func TestRoles_ListAllRoles(t *testing.T) {
 	}
 	if all[0].Role != "ide" {
 		t.Fatalf("ListAllRoles[0].Role = %q; want ide", all[0].Role)
+	}
+}
+
+// TestWindowCount: returns 1 for a fresh canopy-shaped session. Used
+// by the backfill window-count gate to reject multi-window layouts.
+func TestWindowCount(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	cwd := t.TempDir()
+	name := "win-count"
+
+	if _, err := c.Create(ctx, name, cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got, err := c.WindowCount(ctx, name); err != nil || got != 1 {
+		t.Fatalf("WindowCount after Create: got (%d, %v); want (1, nil)", got, err)
+	}
+}
+
+// TestHasClient: returns true only when a client is actually attached
+// to the named session, false on missing-session or detached-session.
+// Used by the backfill concurrent-attach guard.
+func TestHasClient(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	cwd := t.TempDir()
+
+	// Missing session — `tmux list-clients -t <missing>` errors out;
+	// HasClient should swallow it and return false.
+	if got, err := c.HasClient(ctx, "no-such-session"); err != nil || got {
+		t.Fatalf("HasClient(missing): got (%v, %v); want (false, nil)", got, err)
+	}
+
+	// Existing session, no clients attached (Create makes a detached
+	// session via `-d`).
+	if _, err := c.Create(ctx, "no-client-session", cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got, err := c.HasClient(ctx, "no-client-session"); err != nil || got {
+		t.Fatalf("HasClient(detached): got (%v, %v); want (false, nil)", got, err)
+	}
+}
+
+// TestRoles_InvalidGlob: globs with `*` in any position other than a
+// single trailing char are rejected up front with ErrInvalidGlob.
+// Previously these silently matched nothing — looked like "no such pane"
+// when the real cause was a malformed pattern.
+func TestRoles_InvalidGlob(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	name := "roles-invalid-glob"
+	cwd := t.TempDir()
+
+	if _, err := c.Create(ctx, name, cwd, ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cases := []string{
+		"*:claude",        // leading *
+		"agent:*claude",   // middle *
+		"agent:**",        // double trailing *
+		"*agent*",         // both ends
+	}
+	for _, pattern := range cases {
+		_, err := c.LookupAllPanes(ctx, name, pattern)
+		if !errors.Is(err, tmux.ErrInvalidGlob) {
+			t.Errorf("LookupAllPanes(%q): got err %v; want ErrInvalidGlob", pattern, err)
+		}
+		_, err = c.LookupPane(ctx, name, pattern)
+		if !errors.Is(err, tmux.ErrInvalidGlob) {
+			t.Errorf("LookupPane(%q): got err %v; want ErrInvalidGlob", pattern, err)
+		}
+	}
+
+	// Sanity: well-formed patterns still go through (return
+	// ErrPaneNotFound rather than ErrInvalidGlob on an empty session).
+	for _, pattern := range []string{"ide", "agent:claude", "agent:*", "*"} {
+		_, err := c.LookupAllPanes(ctx, name, pattern)
+		if errors.Is(err, tmux.ErrInvalidGlob) {
+			t.Errorf("LookupAllPanes(%q): rejected as invalid; want acceptance", pattern)
+		}
 	}
 }
 

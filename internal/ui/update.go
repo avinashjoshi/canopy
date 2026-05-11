@@ -1219,7 +1219,7 @@ func (m *Model) attachOrSwitch(session string) tea.Cmd {
 	if m.mgr != nil {
 		launcherType = m.mgr.Cfg.Agent.Type
 	}
-	_ = workspace.BackfillRoles(context.Background(), m.tc, session, launcherType)
+	workspace.BackfillRoles(context.Background(), m.tc, session, launcherType)
 
 	if m.inPopup {
 		return func() tea.Msg {

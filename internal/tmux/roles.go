@@ -24,6 +24,13 @@ type RoleInfo struct {
 // has a @canopy-role matching the requested role (or role glob).
 var ErrPaneNotFound = errors.New("tmux: pane with role not found")
 
+// ErrInvalidGlob is returned by LookupPane / LookupAllPanes when the
+// role pattern contains a `*` in a position the matcher doesn't
+// support. Only a single trailing `*` is honored (prefix match);
+// anything else (leading `*foo`, middle `agent:*claude`, multiple `*`)
+// would silently match nothing — fail fast instead.
+var ErrInvalidGlob = errors.New("tmux: only a single trailing '*' is supported in role globs")
+
 // roleOption is the tmux user-option key canopy uses to tag pane roles.
 // The leading "@" is required by tmux for user-defined options.
 const roleOption = "@canopy-role"
@@ -102,7 +109,17 @@ func (c *Client) LookupPane(ctx context.Context, session, role string) (string, 
 //
 // See LookupPane for the matching rules (prefix glob via trailing "*",
 // session-scoped via -s, output ordering via list-panes natural order).
+//
+// Returns ErrInvalidGlob if `role` contains `*` anywhere except as a
+// single trailing character. Previously such patterns silently matched
+// nothing (LookupPane("*:claude") treated `*` as a literal and never
+// returned a result), which read as "no pane exists" rather than "your
+// pattern is wrong."
 func (c *Client) LookupAllPanes(ctx context.Context, session, role string) ([]RoleInfo, error) {
+	if err := validateRoleGlob(role); err != nil {
+		return nil, err
+	}
+
 	// Format spec: `#{@canopy-role}` keeps the leading @. tmux's user-
 	// option references retain the @ in `#{...}` (verified empirically;
 	// `#{canopy-role}` returns empty). Don't strip.
@@ -150,6 +167,26 @@ func (c *Client) LookupAllPanes(ctx context.Context, session, role string) ([]Ro
 	return matches, nil
 }
 
+// validateRoleGlob rejects patterns that LookupAllPanes can't match the
+// way a reader would expect. The matcher supports either an exact role
+// string or a single trailing `*` for prefix matching. Anything else —
+// a leading `*`, an internal `*`, multiple `*`s — would silently match
+// nothing, indistinguishable from "no pane has this role." Fail fast.
+//
+// Bare "*" is allowed (and means "match anything"); ListAllRoles uses
+// it to enumerate every tagged pane in a session.
+func validateRoleGlob(role string) error {
+	idx := strings.Index(role, "*")
+	if idx == -1 {
+		return nil // exact match, no glob
+	}
+	// `*` exists; it must be the only one AND the last char.
+	if idx != len(role)-1 || strings.Count(role, "*") > 1 {
+		return fmt.Errorf("%w: got %q", ErrInvalidGlob, role)
+	}
+	return nil
+}
+
 // ListAllRoles returns every (pane ID, role) pair in the session for
 // panes that have @canopy-role set. Used by the backfill path to check
 // whether all required roles are present without doing N LookupPane
@@ -159,6 +196,41 @@ func (c *Client) LookupAllPanes(ctx context.Context, session, role string) ([]Ro
 // at the call site.
 func (c *Client) ListAllRoles(ctx context.Context, session string) ([]RoleInfo, error) {
 	return c.LookupAllPanes(ctx, session, "*")
+}
+
+// PaneCommands returns paneID → `#{pane_current_command}` for every pane
+// in the session. Single tmux call, regardless of pane count.
+//
+// Used by backfill to cross-check command vs canonical positional role
+// before tagging — a stronger safeguard than positional inference alone.
+//
+// Returns an empty map (not nil) when the session has no panes. Panes
+// whose current command is empty (between commands, or just exited)
+// appear with value "".
+func (c *Client) PaneCommands(ctx context.Context, session string) (map[string]string, error) {
+	args := c.args("list-panes", "-s", "-t", session, "-F",
+		"#{pane_id}\t#{pane_current_command}")
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("tmux.PaneCommands(%s): %w (stderr: %s)",
+			session, err, strings.TrimSpace(stderr.String()))
+	}
+	out := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			log.Warn("tmux.pane-commands.malformed-line", "line", line)
+			continue
+		}
+		out[parts[0]] = parts[1]
+	}
+	return out, nil
 }
 
 // SelectPane focuses the given pane (by tmux pane ID like "%15").
@@ -217,15 +289,42 @@ func (c *Client) PaneCount(ctx context.Context, session string) (int, error) {
 	return count, nil
 }
 
+// WindowCount returns the number of tmux windows in the session.
+// Canopy's canonical session shape is exactly one window per session,
+// so the backfill path uses this to reject multi-window layouts that
+// could happen to have 3 panes total but spread across several windows
+// (which would cause positional inference to land on arbitrary panes).
+func (c *Client) WindowCount(ctx context.Context, session string) (int, error) {
+	args := c.args("list-windows", "-t", session, "-F", "#{window_id}")
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return 0, fmt.Errorf("tmux.WindowCount(%s): %w (stderr: %s)",
+			session, err, strings.TrimSpace(stderr.String()))
+	}
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if line != "" {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // PanesInOrder returns the pane IDs of the session's panes in tmux's
 // natural list-panes output ORDER (NOT pane index — tmux's pane-base-
 // index is user-configurable and codex-corrected: positional logic
 // must use list-panes output order, not raw `#{pane_index}`, to be
 // safe across `pane-base-index 1` configs).
 //
-// Used by the backfill path to map the canonical 3-pane layout
-// (position 0 = ide, position 1 = terminal:shell, position 2 = agent)
-// without tripping on base-index config.
+// Used by the backfill path to map the canonical 3-pane layout. The
+// list-panes traversal order for canopy's standard splits is
+// (position 0 = ide, position 1 = agent, position 2 = terminal:shell)
+// — verified by TestRoles_PanesInOrder and load-bearing for
+// workspace.BackfillRoles' canonicalRoles slice. Layout-tree depth-
+// first, NOT pane creation order.
 func (c *Client) PanesInOrder(ctx context.Context, session string) ([]string, error) {
 	args := c.args("list-panes", "-s", "-t", session, "-F", "#{pane_id}")
 	cmd := exec.CommandContext(ctx, "tmux", args...)

@@ -49,7 +49,7 @@ func (m *Manager) EnsureMainSession(ctx context.Context) (string, error) {
 		// block attach. Empty launcherType defaults to "agent:claude"
 		// via agent.RoleForType, which matches the hardcoded
 		// `claude --continue || claude` literal in buildMainSession.
-		_ = BackfillRoles(ctx, m.Tmux, session, "")
+		BackfillRoles(ctx, m.Tmux, session, "")
 		return session, nil
 	}
 
