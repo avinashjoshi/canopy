@@ -58,8 +58,8 @@ func main() {
 			"                         |_|    |___/\n" +
 			"\n" +
 			"Canopy creates per-branch git worktrees, runs configurable setup\n" +
-			"and teardown scripts, and pairs each workspace with a 4-pane tmux\n" +
-			"session (nvim / claude / shell / server). One TUI lets you switch\n" +
+			"and teardown scripts, and pairs each workspace with a 3-pane tmux\n" +
+			"session (nvim / claude / shell). One TUI lets you switch\n" +
 			"between workspaces and resurrect them after reboots.\n",
 		// Bare `canopy` (no subcommand) launches the unified TUI, which
 		// is safe to run from inside an existing tmux session — it

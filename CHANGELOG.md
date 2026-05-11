@@ -5,6 +5,67 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0.0] - 2026-05-10 — Pane-role contract (internal refactor)
+
+Canopy now addresses tmux panes by ROLE instead of by index. Every pane
+canopy creates gets tagged with a `@canopy-role` tmux user-option (`ide`,
+`agent:claude`, `terminal:shell`), and downstream code looks panes up by
+role rather than remembering position. No user-visible behavior change in
+this release — the refactor unblocks v0.16+ background workspaces, custom
+layouts, and the kick-off-with-prompt feature without any of those needing
+a second architectural change.
+
+### Added
+
+- `internal/tmux/roles.go`: `SetRole`, `LookupPane`, `LookupAllPanes`,
+  `SelectPane`, `PaneCount`, `PanesInOrder`, `ListAllRoles` — the new
+  role-addressing API. Uses tmux user-options (process-proof, persistent
+  for the pane lifetime, queryable in one syscall via `list-panes -F`).
+- `internal/workspace/backfill.go`: retroactively tags v0.15-style sessions
+  on first attach. Conservative: only tags when the session has the
+  canonical 3-pane layout AND no existing tags conflict with the canonical
+  positional mapping. Skips with a warn line otherwise.
+- `internal/agent/launchers.go::RoleForType`: produces `agent:<launcher>`
+  role strings with empty-input defaulting to `agent:claude`.
+
+### Changed
+
+- `tmux.Create` and `tmux.SplitPane` now return `(paneID string, err error)`.
+  Captured via `-P -F '#{pane_id}'` at creation time. Callers that don't
+  need the ID (debug sessions) use `_, err := ...`.
+- `internal/workspace/lifecycle.go::buildSession` and the resurrect path
+  tag each pane after creation.
+- `internal/workspace/main_session.go::buildMainSession` likewise; alive-
+  branch attaches now run backfill so v0.15 main sessions get tagged on
+  their first v0.16 attach.
+- `cmd/canopy/switch.go` and `internal/ui/update.go::attachOrSwitch` hook
+  backfill before every attach to a ready-status workspace.
+- `cmd/canopy/main.go` and `cmd/canopy/new.go` help text: stale "4-pane"
+  references corrected to "3-pane" (drive-by fix).
+
+### Notes
+
+- Layout-tree traversal vs creation order: a smoke test caught that
+  `tmux list-panes` returns panes in layout-tree depth-first order, NOT
+  creation order. Backfill maps positions accordingly. If `buildSession`'s
+  split sequence ever changes, the canonical mapping in `backfill.go`
+  must update to match the new traversal order.
+- Adversarial review caught and fixed (pre-ship) a bug where backfill
+  would overwrite an existing tag if it landed at a different canonical
+  position. v0.16 only tags untagged panes; sessions with incongruent
+  existing tags are skipped entirely.
+- 6 follow-ups deferred to v0.16.x — see TODOS.md "Pane-role contract
+  follow-ups" entry for the list.
+
+### Tests
+
+- 12 new tests in `internal/tmux/roles_test.go` (round-trip, glob, multi-
+  match, cross-session contamination, etc.)
+- 6 new tests in `internal/workspace/backfill_test.go` (canonical, partial,
+  incongruent-skip, non-canonical-skip, empty-launcher, already-tagged)
+- 1 new table-driven test for `agent.RoleForType`
+- Existing `tmux.Create`/`SplitPane` tests updated for new signature
+
 ## [0.15.2.0] - 2026-05-09 — Prefix-less `Ctrl+Alt+c` summon chord
 
 Pressing the tmux prefix to reach canopy is one chord too many when canopy

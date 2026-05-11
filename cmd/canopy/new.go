@@ -37,8 +37,8 @@ func newCmd() *cobra.Command {
 		Use:   "new",
 		Short: "Create a new workspace and attach to its tmux session",
 		Long: "Generates a random adjective-noun workspace name (or uses --name),\n" +
-			"creates a git worktree, runs scripts.setup, builds the standard 4-pane\n" +
-			"tmux session (nvim / claude / shell / scripts.run), and attaches.\n\n" +
+			"creates a git worktree, runs scripts.setup, builds the standard 3-pane\n" +
+			"tmux session (nvim / claude / shell), and attaches.\n\n" +
 			"Source variants (mutually exclusive):\n" +
 			"  --pr <num>     check out PR <num>'s branch (briefing includes PR body)\n" +
 			"  --issue <num>  fresh branch off main; briefing seeded with issue body\n" +
