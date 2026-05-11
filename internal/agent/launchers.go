@@ -128,6 +128,24 @@ var defaults = map[string]Launcher{
 	},
 }
 
+// RoleForType returns the @canopy-role tag value for the agent pane,
+// given the canopy.json's agent.type. Always shaped as "agent:<type>".
+//
+// Empty input defaults to "agent:claude" — defensive handling so that
+// the role tag stays correct after the parked global-config PR removes
+// config.validate()'s auto-default of Agent.Type. Today (with the
+// auto-default in place) the empty case is unreachable in practice;
+// the helper is cheap insurance for the next PR.
+//
+// Lives here (not internal/tmux, not internal/workspace) so the agent
+// default lives next to agent.Resolve and can't drift from it.
+func RoleForType(launcherType string) string {
+	if launcherType == "" {
+		launcherType = "claude"
+	}
+	return "agent:" + launcherType
+}
+
 // KnownAgents returns the sorted list of built-in agent type names.
 // Used by config.validate's error messages and `canopy init --with-scripts
 // --agent <foo>` to list valid choices.

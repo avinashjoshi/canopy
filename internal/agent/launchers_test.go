@@ -49,6 +49,25 @@ func TestResolve_UnknownReturnsError(t *testing.T) {
 	}
 }
 
+func TestRoleForType(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"empty defaults to claude", "", "agent:claude"},
+		{"claude", "claude", "agent:claude"},
+		{"codex", "codex", "agent:codex"},
+		{"opencode", "opencode", "agent:opencode"},
+		{"unknown launcher echoes back", "future-agent", "agent:future-agent"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RoleForType(tc.in); got != tc.want {
+				t.Errorf("RoleForType(%q) = %q; want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestKnownAgents_SortedAndComplete: returns all four in a stable order.
 // The deterministic order matters for error messages and CLI help text.
 func TestKnownAgents(t *testing.T) {
