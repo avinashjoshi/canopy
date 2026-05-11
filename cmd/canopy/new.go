@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -13,12 +14,14 @@ import (
 // --allow-local for the source-variant flows; the original --name
 // and --no-attach still work as before.
 var newWorkspaceFlags struct {
-	name     string
-	noAttach bool
-	pr       int    // --pr <num>: check out this PR's branch into a workspace
-	issue    int    // --issue <num>: create workspace, briefing references this issue
-	branch   string // --branch <name>: check out an existing branch
-	allowLoc bool   // --allow-local: with --branch, allow non-existent on origin
+	name       string
+	noAttach   bool
+	pr         int    // --pr <num>: check out this PR's branch into a workspace
+	issue      int    // --issue <num>: create workspace, briefing references this issue
+	branch     string // --branch <name>: check out an existing branch
+	allowLoc   bool   // --allow-local: with --branch, allow non-existent on origin
+	prompt     string // --prompt: initial agent message; sent after creation
+	promptFile string // --prompt-file: read --prompt content from file (multi-line)
 }
 
 // newCmd returns the `canopy new` cobra subcommand.
@@ -50,6 +53,14 @@ func newCmd() *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
+
+			// Pre-validate the prompt BEFORE workspace creation. Bad
+			// flag combos / unreadable / oversized files exit 1 with
+			// no workspace created (per v3 failure-modes table).
+			promptText, err := loadPrompt(newWorkspaceFlags.prompt, newWorkspaceFlags.promptFile)
+			if err != nil {
+				return err
+			}
 
 			spec := workspace.SourceSpec{
 				PR:         newWorkspaceFlags.pr,
@@ -95,15 +106,48 @@ func newCmd() *cobra.Command {
 				"\nWorkspace ready: %s\n  branch:  %s\n  path:    %s\n  port:    %d\n  session: %s\n",
 				ws.Name, ws.Branch, ws.Path, ws.Port, ws.TmuxSessionName())
 
+			// Send the initial prompt if requested. The trust-dialog
+			// state machine + claude-rendering verify all live in
+			// sendInitialPrompt; we just decide what to do with the
+			// outcome here.
+			var promptErr error
+			if promptText != "" {
+				promptErr = sendInitialPrompt(
+					ctx,
+					mgr.Tmux,
+					ws.TmuxSessionName(),
+					ws.Name,
+					promptText,
+					cmd.ErrOrStderr(),
+				)
+				if promptErr == nil {
+					fmt.Fprintf(cmd.OutOrStdout(),
+						"Sent initial prompt to agent (%d chars).\n", len(promptText))
+				} else {
+					var pf *errPromptFailed
+					if errors.As(promptErr, &pf) {
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"WARN: workspace created, %s\n", pf.Error())
+					} else {
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"ERROR while sending prompt: %v\n", promptErr)
+					}
+				}
+			}
+
 			if newWorkspaceFlags.noAttach {
 				fmt.Fprintf(cmd.OutOrStdout(),
 					"\nSkipping attach (--no-attach). Run `canopy switch %s` to attach later.\n", ws.Name)
-				return nil
+				// Return promptErr (if any) so main.go can pick the right
+				// exit code (2 for *errPromptFailed, 1 for other errors).
+				return promptErr
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "\nAttaching tmux session %s...\n", ws.TmuxSessionName())
 			// Attach replaces the canopy process via syscall.Exec on success.
-			// If we return from Attach, it failed.
+			// If we return from Attach, it failed. Note: a non-nil promptErr
+			// is dropped here — once we exec into tmux the user sees the
+			// state directly and the exit code becomes whatever tmux returns.
 			return mgr.Tmux.Attach(ctx, ws.TmuxSessionName())
 		},
 	}
@@ -119,5 +163,9 @@ func newCmd() *cobra.Command {
 		"check out an existing branch (must exist on origin unless --allow-local)")
 	cmd.Flags().BoolVar(&newWorkspaceFlags.allowLoc, "allow-local", false,
 		"with --branch, allow a branch that exists only locally (no origin/<name>)")
+	cmd.Flags().StringVar(&newWorkspaceFlags.prompt, "prompt", "",
+		"initial agent message; sent to the agent pane after creation (single-line)")
+	cmd.Flags().StringVar(&newWorkspaceFlags.promptFile, "prompt-file", "",
+		"read --prompt content from file (multi-line; max 32KB)")
 	return cmd
 }

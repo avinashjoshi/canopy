@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -125,6 +126,14 @@ func main() {
 	root.AddCommand(newUpgradeCmd())
 
 	if err := root.Execute(); err != nil {
+		// Distinguish "workspace OK, prompt failed" (exit 2) from
+		// every other failure (exit 1). Scripts can branch on the
+		// distinction: exit 2 means the workspace is alive on disk
+		// and only the initial prompt didn't get delivered.
+		var promptErr *errPromptFailed
+		if errors.As(err, &promptErr) {
+			os.Exit(2)
+		}
 		// cobra has already printed the error; just exit non-zero.
 		os.Exit(1)
 	}
