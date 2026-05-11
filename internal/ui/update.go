@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -291,6 +292,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busyOutput += msg.output
 		}
 		if msg.err == nil && msg.tmuxSession != "" {
+			// "From a prompt" path: send the initial prompt to the
+			// agent pane BEFORE attaching. The send blocks while the
+			// trust-dialog state machine runs (≤5s + ≤5s + verify),
+			// so we stay in busyMode with a "Sending prompt..." title
+			// instead of attaching immediately — the user otherwise
+			// lands in the agent pane mid-trust-dismiss and watches
+			// keys appear out of nowhere, which looks like a bug.
+			if m.pendingPrompt != "" {
+				m.busyTitle = "Sending prompt to agent..."
+				m.busyOutput += "\nWorkspace ready. Sending initial prompt to the agent...\n"
+				m.busyDone = false
+				prompt := m.pendingPrompt
+				session := msg.tmuxSession
+				m.pendingPrompt = "" // consumed; don't double-send on a retry path
+				return m, sendPromptCmd(m.newTargetMgr, session, prompt)
+			}
 			m.mode = listMode
 			m.busyOp = busyOpNone
 			m.busyTitle = ""
@@ -299,6 +316,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.attachOrSwitch(msg.tmuxSession)
 		}
 		return m, nil
+
+	case promptSentMsg:
+		// SendInitialPrompt finished. On success: attach. On failure
+		// (workspace.ErrPromptFailed): still attach — the workspace
+		// is alive and the user should land in it; surface the error
+		// inline so they know to re-issue the prompt by hand. Same
+		// posture as the CLI's exit-code 2 behavior (workspace OK,
+		// prompt skipped).
+		if msg.err != nil {
+			// Stash the error so the next listMode render surfaces it
+			// in the error banner (m.err is the standard surface).
+			m.err = fmt.Errorf("workspace created but prompt was not delivered: %w", msg.err)
+		}
+		m.mode = listMode
+		m.busyOp = busyOpNone
+		m.busyTitle = ""
+		m.busyOutput = ""
+		m.busyDone = false
+		return m, m.attachOrSwitch(msg.session)
 
 	case removeDoneMsg:
 		// Workspace removal finished. busyOutput already contains
@@ -399,6 +435,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.nameInput, cmd = m.nameInput.Update(msg)
 		return m, cmd
+	case newPromptMode:
+		var cmd tea.Cmd
+		m.promptInput, cmd = m.promptInput.Update(msg)
+		return m, cmd
 	case newPRMode, newIssueMode, newBranchMode:
 		var cmd tea.Cmd
 		m.listInput, cmd = m.listInput.Update(msg)
@@ -426,6 +466,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNewPickerKey(msg)
 	case newFreshMode:
 		return m.handleNewFreshKey(msg)
+	case newPromptMode:
+		return m.handleNewPromptKey(msg)
 	case newPRMode:
 		return m.handleNewPRKey(msg)
 	case newIssueMode:
@@ -608,6 +650,7 @@ func (m *Model) clearNewTarget() {
 	m.newTargetMgr = nil
 	m.newTargetRoot = ""
 	m.newTargetName = ""
+	m.pendingPrompt = ""
 }
 
 // actionFocusProject "loads into" the cursor row's project: sets it as
@@ -1372,6 +1415,10 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openNewIssue()
 	case "b":
 		return m, m.openNewBranch()
+	case "t":
+		// 't' for "task" — see newPickerOptions for the letter-choice
+		// rationale (no good mnemonic for "prompt", and `p` is taken).
+		return m.openNewPrompt()
 
 	// Arrow nav for keyboard-discovery users.
 	case "up", "k":
@@ -1386,14 +1433,18 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		// Same dispatch as the letter shortcuts, just keyed off cursor.
+		// Indices follow newPickerOptions order: fresh, prompt, PR,
+		// issue, branch.
 		switch m.newPickerCursor {
 		case 0:
 			return m.openNewFresh(), textinputBlink()
 		case 1:
-			return m, m.openNewPR()
+			return m.openNewPrompt()
 		case 2:
-			return m, m.openNewIssue()
+			return m, m.openNewPR()
 		case 3:
+			return m, m.openNewIssue()
+		case 4:
 			return m, m.openNewBranch()
 		}
 		return m, nil
@@ -1404,7 +1455,7 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // newPickerOptionCount is the number of options in the variant
 // picker. Used to bound cursor nav. Update if newPickerOption is
 // extended.
-const newPickerOptionCount = 4
+const newPickerOptionCount = 5
 
 // openNewFresh prepares the fresh-workspace sub-modal (step 2a).
 // Reused by the picker's 'n'/'f'/enter-on-Fresh dispatch and any
@@ -1440,6 +1491,60 @@ func (m *Model) handleNewFreshKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.nameInput, cmd = m.nameInput.Update(msg)
+	return m, cmd
+}
+
+// openNewPrompt prepares the "fresh + prompt" sub-modal (the 5th
+// picker option). Mirrors openNewFresh but focuses the prompt
+// textarea. Workspace name = namegen (no name input in this mode —
+// the prompt is the user-facing primary; if they want an explicit
+// name they can use the CLI's `canopy new --name foo --prompt ...`).
+// Returns the cursor-blink cmd from textarea.Focus so the caret
+// blinks immediately on open.
+func (m *Model) openNewPrompt() (*Model, tea.Cmd) {
+	m.mode = newPromptMode
+	m.promptInput.Reset()
+	blink := m.promptInput.Focus()
+	return m, blink
+}
+
+// handleNewPromptKey is the keymap for the "fresh + prompt" sub-modal.
+//
+// Esc steps back to the picker. Ctrl+S submits when the prompt is
+// non-empty (an empty Ctrl+S is a no-op — the placeholder already
+// telegraphs the requirement, so an inline error would be noise).
+// Enter inserts a newline because the prompt is a textarea, not a
+// textinput — multi-line briefings are the whole point of the
+// upgrade from single-line input.
+//
+// Anything else falls through to the textarea so the user can type
+// normally.
+func (m *Model) handleNewPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.openNewPicker()
+		return m, nil
+	case "ctrl+s":
+		prompt := strings.TrimSpace(m.promptInput.Value())
+		if prompt == "" {
+			return m, nil
+		}
+		// Stash the prompt on the model so createDoneMsg can pick it
+		// up after Create succeeds. The actual send happens between
+		// Create-success and attach.
+		m.pendingPrompt = prompt
+		spec := workspace.SourceSpec{} // fresh = zero spec
+		m.busyOp = busyOpCreate
+		m.busyTitle = "Creating workspace + prompting agent..."
+		m.busyDone = false
+		m.busyOutput = ""
+		m.busyErr = nil
+		m.mode = busyMode
+		m.promptInput.Blur()
+		return m, createCmd(m.newTargetMgr, "", spec)
+	}
+	var cmd tea.Cmd
+	m.promptInput, cmd = m.promptInput.Update(msg)
 	return m, cmd
 }
 
@@ -1969,6 +2074,32 @@ type createDoneMsg struct {
 	output      string
 	tmuxSession string
 	err         error
+}
+
+// promptSentMsg fires after workspace.SendInitialPrompt finishes
+// (either successfully delivered the prompt, or failed with an
+// ErrPromptFailed). Carries the session name so the createDoneMsg
+// follow-up can dispatch the attach without re-deriving it. err
+// is non-nil only when the prompt didn't get delivered — the
+// workspace itself is alive either way.
+type promptSentMsg struct {
+	session string
+	err     error
+}
+
+// sendPromptCmd dispatches workspace.SendInitialPrompt in a
+// goroutine, then emits promptSentMsg with the result. mgr.Tmux
+// is the tmux client that knows about the freshly-created session.
+// io.Discard for the progress writer because the TUI doesn't render
+// that carriage-return progress line — the busyMode "Sending prompt..."
+// title is the equivalent feedback.
+func sendPromptCmd(mgr *workspace.Manager, session, prompt string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		err := workspace.SendInitialPrompt(ctx, mgr.Tmux, session, session, prompt, io.Discard)
+		return promptSentMsg{session: session, err: err}
+	}
 }
 
 // removeDoneMsg is the Remove counterpart to createDoneMsg. Same shape;

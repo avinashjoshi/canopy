@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -34,6 +35,7 @@ func newTestModel(_ bool) *Model {
 		projectName:    "test-project",
 		nameInput:      textinput.New(),
 		listInput:      textinput.New(),
+		promptInput:    textarea.New(),
 		mode:           listMode,
 		currentProject: "/tmp/test-project",
 		tab:            tabLocal,
@@ -1078,6 +1080,7 @@ func TestNewPicker_LetterShortcuts(t *testing.T) {
 		{"p", newPRMode},
 		{"i", newIssueMode},
 		{"b", newBranchMode},
+		{"t", newPromptMode},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {
@@ -1095,24 +1098,39 @@ func TestNewPicker_LetterShortcuts(t *testing.T) {
 
 // TestNewPicker_ArrowsThenEnter: keyboard-discovery flow — arrow
 // down to the desired option, hit enter. Equivalent to pressing the
-// letter directly.
+// letter directly. The cursor index follows newPickerOptions order:
+// fresh, prompt, PR, issue, branch.
 func TestNewPicker_ArrowsThenEnter(t *testing.T) {
-	m := newTestModel(false)
-	m.openNewPicker()
-
-	// Down twice → cursor on issue (index 2).
-	for i := 0; i < 2; i++ {
-		model, _ := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyDown})
-		m = model.(*Model)
+	cases := []struct {
+		downs    int
+		wantMode viewMode
+	}{
+		{0, newFreshMode},
+		{1, newPromptMode},
+		{2, newPRMode},
+		{3, newIssueMode},
+		{4, newBranchMode},
 	}
-	if m.newPickerCursor != 2 {
-		t.Fatalf("cursor = %d; want 2", m.newPickerCursor)
-	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("downs=%d", tc.downs), func(t *testing.T) {
+			m := newTestModel(false)
+			m.openNewPicker()
 
-	model, _ := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyEnter})
-	m = model.(*Model)
-	if m.mode != newIssueMode {
-		t.Errorf("enter on cursor=2 should open newIssueMode; got %v", m.mode)
+			for i := 0; i < tc.downs; i++ {
+				model, _ := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+				m = model.(*Model)
+			}
+			if m.newPickerCursor != tc.downs {
+				t.Fatalf("cursor = %d; want %d", m.newPickerCursor, tc.downs)
+			}
+
+			model, _ := m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyEnter})
+			m = model.(*Model)
+			if m.mode != tc.wantMode {
+				t.Errorf("enter on cursor=%d: mode = %v; want %v",
+					tc.downs, m.mode, tc.wantMode)
+			}
+		})
 	}
 }
 
@@ -1175,6 +1193,242 @@ func TestNewFresh_EscReturnsToPicker(t *testing.T) {
 	m = model.(*Model)
 	if m.mode != newPickerMode {
 		t.Errorf("esc on fresh sub-modal should return to picker; got %v", m.mode)
+	}
+}
+
+// TestNewPrompt_CtrlSSubmits_StashesPrompt: with a non-empty prompt,
+// Ctrl+S in newPromptMode flips to busyMode, kicks off a create cmd,
+// and stashes the trimmed prompt on m.pendingPrompt so the
+// createDoneMsg handler can deliver it after Create returns.
+//
+// The busy title reflects the prompt path ("Creating workspace +
+// prompting agent...") so the user knows the second phase is coming.
+func TestNewPrompt_CtrlSSubmits_StashesPrompt(t *testing.T) {
+	m := newTestModel(false)
+	m.openNewPrompt()
+	// Multi-line value with leading/trailing whitespace; TrimSpace
+	// hits both ends, internal newlines survive intact.
+	m.promptInput.SetValue("  add OAuth login\nthen Google  ")
+
+	model, cmd := m.handleNewPromptKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("expected busyMode; got %v", m.mode)
+	}
+	if cmd == nil {
+		t.Errorf("expected create cmd")
+	}
+	want := "add OAuth login\nthen Google"
+	if m.pendingPrompt != want {
+		t.Errorf("pendingPrompt = %q; want %q", m.pendingPrompt, want)
+	}
+	if !strings.Contains(m.busyTitle, "prompting") {
+		t.Errorf("busy title should mention prompt path; got %q", m.busyTitle)
+	}
+}
+
+// TestNewPrompt_CtrlSEmpty_NoOp: an empty (or whitespace-only) prompt
+// is a no-op — mode stays in newPromptMode and no cmd is dispatched.
+// The placeholder copy already signals the requirement; surfacing an
+// inline error would be noise.
+func TestNewPrompt_CtrlSEmpty_NoOp(t *testing.T) {
+	cases := []string{"", "   ", "\t\n"}
+	for _, val := range cases {
+		t.Run(fmt.Sprintf("value=%q", val), func(t *testing.T) {
+			m := newTestModel(false)
+			m.openNewPrompt()
+			m.promptInput.SetValue(val)
+
+			model, cmd := m.handleNewPromptKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+			m = model.(*Model)
+			if m.mode != newPromptMode {
+				t.Errorf("empty ctrl+s should stay in newPromptMode; got %v", m.mode)
+			}
+			if cmd != nil {
+				t.Errorf("empty ctrl+s should not dispatch a cmd; got %T", cmd)
+			}
+			if m.pendingPrompt != "" {
+				t.Errorf("empty ctrl+s set pendingPrompt = %q; want empty", m.pendingPrompt)
+			}
+		})
+	}
+}
+
+// TestNewPrompt_EnterIsNewline_DoesNotSubmit: Enter is reserved for
+// the textarea's newline behavior, NOT submit. This is the load-
+// bearing distinction that makes multi-line input usable — without
+// it, the first Enter mid-prompt would prematurely submit.
+//
+// The textarea consumes the Enter and inserts "\n" into the buffer;
+// our handler must not flip to busyMode or set pendingPrompt.
+func TestNewPrompt_EnterIsNewline_DoesNotSubmit(t *testing.T) {
+	m := newTestModel(false)
+	m.openNewPrompt()
+	m.promptInput.SetValue("line one")
+
+	model, _ := m.handleNewPromptKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+	if m.mode != newPromptMode {
+		t.Errorf("Enter should not submit; mode = %v, want newPromptMode", m.mode)
+	}
+	if m.pendingPrompt != "" {
+		t.Errorf("Enter should not stash prompt; pendingPrompt = %q", m.pendingPrompt)
+	}
+	if !strings.Contains(m.promptInput.Value(), "\n") {
+		t.Errorf("Enter should insert a newline into the textarea; value = %q",
+			m.promptInput.Value())
+	}
+}
+
+// TestNewPrompt_EscReturnsToPicker: esc steps back one level (to the
+// picker), mirroring all the other sub-modals. Doesn't drop to
+// listMode — the user can re-pick a different variant without
+// re-entering the new-workspace flow from scratch.
+func TestNewPrompt_EscReturnsToPicker(t *testing.T) {
+	m := newTestModel(false)
+	m.openNewPrompt()
+
+	model, _ := m.handleNewPromptKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = model.(*Model)
+	if m.mode != newPickerMode {
+		t.Errorf("esc on prompt sub-modal should return to picker; got %v", m.mode)
+	}
+}
+
+// TestRenderNewPrompt_FooterTelegraphsSubmitVsNewline: the footer
+// makes the submit-vs-newline split explicit because terminal users
+// default-assume Enter = submit. Without the hint, the first Enter
+// mid-prompt feels like a broken submit gate.
+func TestRenderNewPrompt_FooterTelegraphsSubmitVsNewline(t *testing.T) {
+	m := newTestModel(false)
+	m.openNewPrompt()
+	out := stripAnsi(m.renderNewPrompt())
+	if !strings.Contains(out, "ctrl+s") {
+		t.Errorf("renderNewPrompt should mention ctrl+s submit; got:\n%s", out)
+	}
+	if !strings.Contains(out, "enter newline") {
+		t.Errorf("renderNewPrompt should mention enter inserts a newline; got:\n%s", out)
+	}
+	if !strings.Contains(out, "What should the agent work on?") {
+		t.Errorf("renderNewPrompt missing the headline prompt-question; got:\n%s", out)
+	}
+}
+
+// TestCreateDoneMsg_PendingPrompt_StaysBusyAndConsumes: when a Create
+// succeeds AND m.pendingPrompt is non-empty, the handler stays in
+// busyMode (instead of attaching immediately) so the trust-dialog
+// state machine has time to run, and consumes pendingPrompt so a
+// stale value can't trigger a second send.
+func TestCreateDoneMsg_PendingPrompt_StaysBusyAndConsumes(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOp = busyOpCreate
+	m.busyDone = false
+	m.newTargetMgr = m.mgr
+	m.pendingPrompt = "do the thing"
+
+	model, cmd := m.Update(createDoneMsg{tmuxSession: "canopy-test-foo", err: nil})
+	m = model.(*Model)
+	if m.mode != busyMode {
+		t.Errorf("expected busyMode while prompt sends; got %v", m.mode)
+	}
+	if m.pendingPrompt != "" {
+		t.Errorf("pendingPrompt should be consumed; got %q", m.pendingPrompt)
+	}
+	if cmd == nil {
+		t.Errorf("expected sendPromptCmd to be dispatched")
+	}
+	if !strings.Contains(m.busyTitle, "Sending prompt") {
+		t.Errorf("busy title should switch to 'Sending prompt'; got %q", m.busyTitle)
+	}
+}
+
+// TestCreateDoneMsg_NoPrompt_AttachesImmediately: the existing fresh /
+// pr / issue / branch paths must keep their immediate-attach behavior.
+// This is a regression test for the pendingPrompt branch: without
+// pendingPrompt set, createDoneMsg flips to listMode and dispatches
+// the attach cmd directly.
+func TestCreateDoneMsg_NoPrompt_AttachesImmediately(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOp = busyOpCreate
+	m.busyDone = false
+	m.newTargetMgr = m.mgr
+	// pendingPrompt deliberately empty.
+
+	model, cmd := m.Update(createDoneMsg{tmuxSession: "canopy-test-foo", err: nil})
+	m = model.(*Model)
+	if m.mode != listMode {
+		t.Errorf("no-prompt Create success should flip to listMode; got %v", m.mode)
+	}
+	if cmd == nil {
+		t.Errorf("expected attach cmd; got nil")
+	}
+}
+
+// TestPromptSentMsg_Success_AttachesAndClearsBusy: a successful
+// prompt-send flips out of busyMode, clears the busy chrome, and
+// dispatches the attach cmd. No error is recorded.
+func TestPromptSentMsg_Success_AttachesAndClearsBusy(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOp = busyOpCreate
+	m.busyTitle = "Sending prompt to agent..."
+	m.busyOutput = "stuff"
+
+	model, cmd := m.Update(promptSentMsg{session: "canopy-test-foo", err: nil})
+	m = model.(*Model)
+	if m.mode != listMode {
+		t.Errorf("success should flip to listMode; got %v", m.mode)
+	}
+	if cmd == nil {
+		t.Errorf("expected attach cmd")
+	}
+	if m.err != nil {
+		t.Errorf("no error should be recorded on success; got %v", m.err)
+	}
+	if m.busyTitle != "" || m.busyOutput != "" {
+		t.Errorf("busy chrome should be cleared; title=%q output=%q",
+			m.busyTitle, m.busyOutput)
+	}
+}
+
+// TestPromptSentMsg_Failure_AttachesButSurfacesError: a failed
+// prompt-send still attaches (the workspace is alive) but records
+// the error on m.err so the next listMode render surfaces it. Same
+// posture as the CLI's exit code 2 (workspace OK, prompt skipped).
+func TestPromptSentMsg_Failure_AttachesButSurfacesError(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOp = busyOpCreate
+
+	sendErr := &workspace.ErrPromptFailed{Reason: "trust dialog timeout"}
+	model, cmd := m.Update(promptSentMsg{session: "canopy-test-foo", err: sendErr})
+	m = model.(*Model)
+	if m.mode != listMode {
+		t.Errorf("failure should still attach (flip to listMode); got %v", m.mode)
+	}
+	if cmd == nil {
+		t.Errorf("expected attach cmd even on prompt failure")
+	}
+	if m.err == nil {
+		t.Fatal("m.err should be set after prompt failure")
+	}
+	if _, ok := workspace.IsPromptFailed(m.err); !ok {
+		t.Errorf("m.err should unwrap to *ErrPromptFailed; got %v", m.err)
+	}
+}
+
+// TestClearNewTarget_ClearsPendingPrompt: when the new-flow exits
+// (esc to listMode or busy dismiss), clearNewTarget zeroes out the
+// pendingPrompt too — so a future `n` press doesn't inherit a stale
+// prompt that the user already abandoned.
+func TestClearNewTarget_ClearsPendingPrompt(t *testing.T) {
+	m := newTestModel(false)
+	m.pendingPrompt = "stale prompt"
+	m.clearNewTarget()
+	if m.pendingPrompt != "" {
+		t.Errorf("pendingPrompt = %q after clearNewTarget; want empty", m.pendingPrompt)
 	}
 }
 
