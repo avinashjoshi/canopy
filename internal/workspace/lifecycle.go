@@ -651,12 +651,20 @@ func (m *Manager) RetrySetup(ctx context.Context, name string, force bool, stdou
 // ending drops the pane to a shell instead of closing it.
 func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	env := hooks.WorkspaceEnv(ws.Path, m.Cfg.ProjectRoot, ws.Port)
-	if err := m.Tmux.Create(ctx, ws.TmuxSessionName(), ws.Path, keepAlive("nvim ."), env...); err != nil {
+	idePane, err := m.Tmux.Create(ctx, ws.TmuxSessionName(), ws.Path, keepAlive("nvim ."), env...)
+	if err != nil {
 		return err
 	}
+	if err := m.Tmux.SetRole(ctx, idePane, "ide"); err != nil {
+		return fmt.Errorf("workspace.buildSession: tag ide pane: %w", err)
+	}
 	// Shell, ~15% of window height, full-width bottom strip.
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSessionName(), ws.Path, "", tmux.SplitVertical, 15); err != nil {
+	shellPane, err := m.Tmux.SplitPane(ctx, ws.TmuxSessionName(), ws.Path, "", tmux.SplitVertical, 15)
+	if err != nil {
 		return err
+	}
+	if err := m.Tmux.SetRole(ctx, shellPane, "terminal:shell"); err != nil {
+		return fmt.Errorf("workspace.buildSession: tag shell pane: %w", err)
 	}
 	// Agent pane, ~30% of the top pane's width on the right. Uses
 	// canopy.json's agent.type to pick the launcher (claude by default;
@@ -668,15 +676,19 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	if err != nil {
 		return fmt.Errorf("workspace.buildSession: agent pane: %w", err)
 	}
-	if err := m.Tmux.SplitPane(ctx, ws.TmuxSessionName(), ws.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
+	agentPane, err := m.Tmux.SplitPane(ctx, ws.TmuxSessionName(), ws.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30)
+	if err != nil {
 		return err
 	}
-	// Land the active pane on the agent (claude) pane — that's the
-	// thing the user wants to interact with first after `n`. Splits
-	// above all use -d (active stays on nvim), so we explicitly move
-	// right to the just-created agent pane. Best-effort: a select-
-	// pane failure shouldn't tear down workspace creation.
-	if err := m.Tmux.SelectPaneDirection(ctx, ws.TmuxSessionName(), "R"); err != nil {
+	if err := m.Tmux.SetRole(ctx, agentPane, agent.RoleForType(m.Cfg.Agent.Type)); err != nil {
+		return fmt.Errorf("workspace.buildSession: tag agent pane: %w", err)
+	}
+	// Land the active pane on the agent pane — that's the thing the
+	// user wants to interact with first after `n`. Splits above all
+	// use -d (active stays on nvim), so we explicitly select the
+	// just-created agent pane by ID. Best-effort: a select-pane
+	// failure shouldn't tear down workspace creation.
+	if err := m.Tmux.SelectPane(ctx, agentPane); err != nil {
 		log.Warn("workspace.build.select-agent-pane-failed", "session", ws.TmuxSessionName(), "err", err.Error())
 	}
 	return nil
@@ -971,21 +983,33 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	// conversation history is preserved by the agent itself
 	// (claude --continue resumes; aider --restore-chat-history; etc).
 	env := hooks.WorkspaceEnv(wsCopy.Path, m.Cfg.ProjectRoot, wsCopy.Port)
-	if err := m.Tmux.Create(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, keepAlive("nvim ."), env...); err != nil {
+	idePane, err := m.Tmux.Create(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, keepAlive("nvim ."), env...)
+	if err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tmux create: %w", err)
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, "", tmux.SplitVertical, 15); err != nil {
+	if err := m.Tmux.SetRole(ctx, idePane, "ide"); err != nil {
+		return nil, fmt.Errorf("workspace.Resurrect: tag ide pane: %w", err)
+	}
+	shellPane, err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, "", tmux.SplitVertical, 15)
+	if err != nil {
 		return nil, err
+	}
+	if err := m.Tmux.SetRole(ctx, shellPane, "terminal:shell"); err != nil {
+		return nil, fmt.Errorf("workspace.Resurrect: tag shell pane: %w", err)
 	}
 	agentCmd, err := m.agentPaneCmd(&wsCopy, true /* resume */)
 	if err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: agent pane: %w", err)
 	}
-	if err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30); err != nil {
+	agentPane, err := m.Tmux.SplitPane(ctx, wsCopy.TmuxSessionName(), wsCopy.Path, keepAlive(agentCmd), tmux.SplitHorizontal, 30)
+	if err != nil {
 		return nil, err
 	}
+	if err := m.Tmux.SetRole(ctx, agentPane, agent.RoleForType(m.Cfg.Agent.Type)); err != nil {
+		return nil, fmt.Errorf("workspace.Resurrect: tag agent pane: %w", err)
+	}
 	// Land active pane on the agent — same rationale as buildSession.
-	if err := m.Tmux.SelectPaneDirection(ctx, wsCopy.TmuxSessionName(), "R"); err != nil {
+	if err := m.Tmux.SelectPane(ctx, agentPane); err != nil {
 		log.Warn("workspace.resurrect.select-agent-pane-failed", "session", wsCopy.TmuxSessionName(), "err", err.Error())
 	}
 
@@ -1056,7 +1080,7 @@ func (m *Manager) BareAttach(ctx context.Context, name string) (string, error) {
 	// Single-pane shell, no shellCmd — drops the user at their default
 	// shell with CANOPY_* env vars set so manual hook reruns inherit
 	// the right environment. No setup, no scripts.run, no agent pane.
-	if err := m.Tmux.Create(ctx, debugSession, ws.Path, "", env...); err != nil {
+	if _, err := m.Tmux.Create(ctx, debugSession, ws.Path, "", env...); err != nil {
 		return "", fmt.Errorf("workspace.BareAttach: tmux create: %w", err)
 	}
 	log.Info("bare-attach.created", "name", name, "session", debugSession, "path", ws.Path)
@@ -1096,7 +1120,7 @@ func (m *Manager) BareAttachMain(ctx context.Context) (string, error) {
 	// Single pane, no shellCmd — drops the user at their default
 	// shell with CANOPY_* env vars set. No nvim, no claude, no
 	// auto-runs.
-	if err := m.Tmux.Create(ctx, debugSession, m.Cfg.ProjectRoot, "", env...); err != nil {
+	if _, err := m.Tmux.Create(ctx, debugSession, m.Cfg.ProjectRoot, "", env...); err != nil {
 		return "", fmt.Errorf("workspace.BareAttachMain: tmux create: %w", err)
 	}
 	log.Info("bare-attach-main.created", "session", debugSession, "path", m.Cfg.ProjectRoot)

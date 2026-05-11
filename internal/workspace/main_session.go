@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/hooks"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
@@ -43,6 +44,12 @@ func (m *Manager) EnsureMainSession(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("workspace.EnsureMainSession: probe %s: %w", session, err)
 	}
 	if alive {
+		// Backfill @canopy-role tags for v0.15-style main sessions that
+		// were started before v0.16. Best-effort: errors logged, never
+		// block attach. Empty launcherType defaults to "agent:claude"
+		// via agent.RoleForType, which matches the hardcoded
+		// `claude --continue || claude` literal in buildMainSession.
+		_ = BackfillRoles(ctx, m.Tmux, session, "")
 		return session, nil
 	}
 
@@ -106,14 +113,30 @@ func (m *Manager) mainPort() (int, error) {
 // and the `canopy main` CLI share one implementation. The CLI body
 // keeps the user-facing prints; this function is silent.
 func buildMainSession(ctx context.Context, tc *tmux.Client, session, projectRoot string, env []string) error {
-	if err := tc.Create(ctx, session, projectRoot, `nvim .; exec "$SHELL"`, env...); err != nil {
+	idePane, err := tc.Create(ctx, session, projectRoot, `nvim .; exec "$SHELL"`, env...)
+	if err != nil {
 		return err
 	}
-	if err := tc.SplitPane(ctx, session, projectRoot, "", tmux.SplitVertical, 15); err != nil {
+	if err := tc.SetRole(ctx, idePane, "ide"); err != nil {
+		return fmt.Errorf("workspace.buildMainSession: tag ide pane: %w", err)
+	}
+	shellPane, err := tc.SplitPane(ctx, session, projectRoot, "", tmux.SplitVertical, 15)
+	if err != nil {
 		return err
 	}
-	if err := tc.SplitPane(ctx, session, projectRoot, `claude --continue || claude; exec "$SHELL"`, tmux.SplitHorizontal, 30); err != nil {
+	if err := tc.SetRole(ctx, shellPane, "terminal:shell"); err != nil {
+		return fmt.Errorf("workspace.buildMainSession: tag shell pane: %w", err)
+	}
+	// Main session's agent is hardcoded to claude today (matches the
+	// `claude --continue || claude` literal). When the parked global-
+	// config PR ships, this becomes agent.RoleForType(settings.DefaultAgent).
+	// For now, the role tag uses the canopy-default helper for symmetry.
+	agentPane, err := tc.SplitPane(ctx, session, projectRoot, `claude --continue || claude; exec "$SHELL"`, tmux.SplitHorizontal, 30)
+	if err != nil {
 		return err
+	}
+	if err := tc.SetRole(ctx, agentPane, agent.RoleForType("")); err != nil {
+		return fmt.Errorf("workspace.buildMainSession: tag agent pane: %w", err)
 	}
 	return nil
 }
