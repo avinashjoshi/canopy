@@ -25,15 +25,22 @@ internal/git/                  worktree add/remove/sanitize, fetch, default-bran
 internal/tmux/                 Client struct (with optional named socket for tests).
                                HasSession / Create / SplitPane / SelectLayout /
                                SelectPaneDirection / Attach (syscall.Exec) /
-                               KillServer. SafeName helper. Create and SplitPane
-                               return the new pane ID (captured via -P -F
-                               '#{pane_id}') so callers can tag panes by role.
+                               KillServer / HasClient / WindowCount. SafeName
+                               helper. Create and SplitPane return the new
+                               pane ID (captured via -P -F '#{pane_id}') and
+                               validate it matches tmux's `%<digits>` format
+                               so a user tmux hook polluting stdout fails at
+                               the boundary instead of poisoning SetRole.
                                roles.go: SetRole / LookupPane / LookupAllPanes /
                                SelectPane / PaneCount / PanesInOrder /
-                               ListAllRoles — pane addressing by @canopy-role
-                               tmux user-option (process-proof, persistent for
-                               the pane's lifetime). Replaces positional pane
-                               indexing across the workspace lifecycle.
+                               ListAllRoles / PaneCommands — pane addressing
+                               by @canopy-role tmux user-option (process-
+                               proof, persistent for the pane's lifetime).
+                               Replaces positional pane indexing across the
+                               workspace lifecycle. Role globs accept exact
+                               match or a single trailing `*`; anything else
+                               returns ErrInvalidGlob (fail fast instead of
+                               silent no-match).
 internal/agent/                Agent launcher metadata (claude / codex / aider).
                                RoleForType produces canonical role strings
                                (`agent:claude`, etc.) consumed by the tmux
