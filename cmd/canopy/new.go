@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -112,7 +111,7 @@ func newCmd() *cobra.Command {
 			// outcome here.
 			var promptErr error
 			if promptText != "" {
-				promptErr = sendInitialPrompt(
+				promptErr = workspace.SendInitialPrompt(
 					ctx,
 					mgr.Tmux,
 					ws.TmuxSessionName(),
@@ -124,8 +123,7 @@ func newCmd() *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(),
 						"Sent initial prompt to agent (%d chars).\n", len(promptText))
 				} else {
-					var pf *errPromptFailed
-					if errors.As(promptErr, &pf) {
+					if pf, ok := workspace.IsPromptFailed(promptErr); ok {
 						fmt.Fprintf(cmd.ErrOrStderr(),
 							"WARN: workspace created, %s\n", pf.Error())
 					} else {

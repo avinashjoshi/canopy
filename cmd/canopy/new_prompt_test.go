@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,31 +106,5 @@ func TestLoadPrompt_ExactlyAtLimit_Accepted(t *testing.T) {
 	}
 }
 
-func TestErrPromptFailed_ErrorsAs(t *testing.T) {
-	// Verifies the sentinel works with errors.As — main.go's exit-code-2
-	// branch depends on this.
-	var inner error = &errPromptFailed{Reason: "test reason"}
-	wrapped := errors.New("not a prompt failure")
-
-	var pf *errPromptFailed
-	if !errors.As(inner, &pf) {
-		t.Error("errors.As on direct *errPromptFailed = false, want true")
-	}
-	if pf.Reason != "test reason" {
-		t.Errorf("Reason after As = %q, want %q", pf.Reason, "test reason")
-	}
-
-	// Negative: a different error should NOT match.
-	pf = nil
-	if errors.As(wrapped, &pf) {
-		t.Error("errors.As on plain error = true, want false")
-	}
-}
-
-func TestErrPromptFailed_ErrorMessageFormat(t *testing.T) {
-	e := &errPromptFailed{Reason: "test reason here"}
-	want := "prompt not sent: test reason here"
-	if got := e.Error(); got != want {
-		t.Errorf("Error() = %q, want %q", got, want)
-	}
-}
+// ErrPromptFailed sentinel tests live in
+// internal/workspace/initprompt_test.go alongside the type definition.

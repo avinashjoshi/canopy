@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/state"
@@ -26,6 +27,8 @@ func (m *Model) View() string {
 		return m.renderNewPicker()
 	case newFreshMode:
 		return m.renderNewFresh()
+	case newPromptMode:
+		return m.renderNewPrompt()
 	case newPRMode:
 		return m.renderNewPR()
 	case newIssueMode:
@@ -418,9 +421,65 @@ type newPickerOption struct {
 // dispatch, and a renderer below.
 var newPickerOptions = []newPickerOption{
 	{"n", "Fresh workspace", "random name, branch off main"},
+	// "From a prompt" sits second — directly under the fresh path —
+	// because it IS a fresh workspace; the only difference is that
+	// you hand the agent a task at launch. Keeping it adjacent to
+	// "Fresh workspace" matches that mental model and surfaces it
+	// before the gh-driven variants for the common case. The key
+	// is `t` (think "task") — `p` already belongs to pull-request,
+	// and there's no perfect mnemonic letter for "prompt." The
+	// description carries the agent-task framing so the letter
+	// doesn't have to.
+	{"t", "From a prompt", "fresh workspace; send the agent an initial task"},
 	{"p", "From a pull request", "check out a PR's branch (uses gh)"},
 	{"i", "From an issue", "implement work from an issue (uses gh)"},
 	{"b", "From a branch", "check out an existing branch"},
+}
+
+// promptBorderStyle wraps the prompt textarea in a single rounded
+// violet box. Drawing the border out here (instead of via the
+// textarea's per-line Base style) avoids a subtle bug where the
+// top-edge corner glyphs render unevenly under some widths — the
+// textarea's internal renderer paints each row independently, and
+// the border continuation between rows can break visually. One
+// outer lipgloss.Border() draws the box as a single unit.
+var promptBorderStyle = lipgloss.NewStyle().
+	Border(lipgloss.RoundedBorder()).
+	BorderForeground(lipgloss.Color("99")). // matches canopy brand violet
+	Padding(0, 1)
+
+// renderNewPrompt is step 2e — prompt input for the "fresh + send
+// the agent a task" path. Workspace name is namegen-only (no name
+// input in this mode) so the user can focus on the prompt content.
+//
+// The input is a multi-line textarea: Enter inserts a newline (so
+// users can paste/type a real task brief), Ctrl+S submits. The
+// footer telegraphs the submit-vs-newline split because terminal
+// users tend to expect Enter = submit by default; without the
+// hint, the first Enter feels broken.
+func (m *Model) renderNewPrompt() string {
+	var b strings.Builder
+	b.WriteString(m.renderTargetBanner())
+	b.WriteString(titleStyle.Render("new workspace"))
+	b.WriteString(" ")
+	b.WriteString(subtleStyle.Render("· prompt"))
+	b.WriteString("\n\n")
+	b.WriteString("  What should the agent work on?\n\n")
+	// Indent the bordered textarea by two spaces to line up with the
+	// "What should the agent work on?" headline above. lipgloss.JoinVertical
+	// would also work; manual indent keeps the chrome consistent with
+	// the other new-flow renderers (all of which two-space-indent
+	// their primary input).
+	boxed := promptBorderStyle.Render(m.promptInput.View())
+	for _, line := range strings.Split(boxed, "\n") {
+		b.WriteString("  ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render(
+		"  ctrl+s submit  ·  enter newline  ·  esc back"))
+	return b.String()
 }
 
 // renderNewFresh is step 2a — name input for the fresh-workspace

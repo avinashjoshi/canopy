@@ -5,6 +5,33 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2.0] - 2026-05-11 — Spawn-with-task from the TUI
+
+The prompt-driven workspace creation that landed as a CLI flag in v0.16.1 now has
+a home in the TUI. Press `n`, pick "From a prompt", type (or paste) the task,
+hit Ctrl+S — canopy spins up the workspace and hands claude its marching orders
+in one move. Same trust-dialog state machine as the CLI, same defense against
+typing the prompt into a crashed-to-shell pane.
+
+### Added
+
+- New TUI picker option: "From a prompt" (key `t`), sitting directly under
+  "Fresh workspace" since it IS a fresh workspace with an opening message. The
+  10-row textarea scrolls internally for long pastes; Ctrl+S submits, Enter
+  inserts a newline, Esc steps back to the picker. After Create succeeds the
+  prompt is delivered to the agent pane before auto-attach — the user lands in
+  a workspace where claude is already thinking.
+- Picker reorder so the most-used variants come first: fresh → prompt →
+  pull request → issue → branch. Cursor + letter shortcuts updated to match.
+
+### Changed
+
+- `workspace.SendInitialPrompt` and `workspace.ErrPromptFailed` are now exported
+  from `internal/workspace/initprompt.go`. Both the CLI (`canopy new --prompt`)
+  and the TUI's new picker option share one implementation of the trust-dialog
+  state machine — no copy-paste, no drift. `workspace.IsPromptFailed(err)` is
+  the typed convenience for the `errors.As` check.
+
 ## [0.16.1.0] - 2026-05-10 — Background workspaces
 
 Fire-and-forget claude. Spawn a workspace with `canopy new --prompt "..." --no-attach`,

@@ -21,8 +21,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
+	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/avinashjoshi/canopy/internal/agent"
@@ -60,6 +62,11 @@ type Row = state.GlobalRow
 //   - newPRMode / newIssueMode / newBranchMode: per-variant sub-modals
 //     that load live data (gh / git) and let the user pick from a
 //     filtered list.
+//   - newPromptMode: prompt input for the "fresh workspace + send the
+//     agent an initial task on launch" path. Mirrors the CLI's
+//     `canopy new --prompt` flow. The prompt is delivered to the
+//     agent pane via workspace.SendInitialPrompt after Create returns
+//     and before the auto-attach.
 //
 // Esc steps back one level; from a sub-modal back to the picker, from
 // the picker back to listMode. Never exits canopy outright.
@@ -75,6 +82,7 @@ const (
 	newPRMode
 	newIssueMode
 	newBranchMode
+	newPromptMode
 	confirmDeleteMode
 	// confirmRetryMode is the y/N gate for `R` on a non-broken workspace
 	// (D3/CP1). Mirrors the CLI's `canopy retry --force` friction so a
@@ -115,7 +123,8 @@ func (m viewMode) inNewFlow() bool {
 		m == newFreshMode ||
 		m == newPRMode ||
 		m == newIssueMode ||
-		m == newBranchMode
+		m == newBranchMode ||
+		m == newPromptMode
 }
 
 // busyOpKind identifies which long-running operation is currently in
@@ -185,6 +194,23 @@ type Model struct {
 	// hold the live data once the async loader returns.
 	newPickerCursor int
 	nameInput       textinput.Model
+
+	// promptInput captures the textarea for newPromptMode — the "fresh
+	// workspace + send the agent an initial task" path. Multi-line
+	// (Enter = newline, Ctrl+S = submit) so users can type a real
+	// task brief without hopping out to the CLI. The CLI's
+	// --prompt-file path is still the right escape hatch for prompts
+	// pulled from disk. Empty Value() blocks submit (the whole point
+	// of the mode is the prompt content).
+	promptInput textarea.Model
+
+	// pendingPrompt is the prompt text captured from newPromptMode that
+	// must be sent to the agent pane AFTER mgr.Create succeeds and
+	// BEFORE auto-attach. Carries the value across the picker → submit
+	// → busy → done → attach handoff; cleared by clearNewTarget.
+	// Empty means "no prompt to send" — the createDoneMsg handler
+	// branches on it to decide whether to dispatch sendPromptCmd.
+	pendingPrompt string
 
 	listInput   textinput.Model
 	listCursor  int
@@ -579,6 +605,42 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	li.CharLimit = 80
 	li.Width = 60
 
+	// Multi-line textarea: Enter inserts newline, Ctrl+S submits
+	// (intercepted by handleNewPromptKey before this widget sees the
+	// key — see internal/ui/update.go). CharLimit 8KB caps the
+	// total prompt size (CLI's --prompt-file path stays at 32KB —
+	// users with bigger prompts should drop to that surface).
+	//
+	// Sizing: SetHeight(10) gives a generous initial viewport; the
+	// textarea scrolls internally when content exceeds it, so a
+	// paste of 100 lines fits — the user can arrow up/down to
+	// review. MaxHeight stays at the bubbles default (99) so the
+	// textarea's own scroll machinery is the only limit. The
+	// renderNewPrompt() wrapper draws a single outer border around
+	// the entire View() output (cleaner than the per-line Base-style
+	// border, which left a visual gap at the top corner).
+	pi := textarea.New()
+	pi.Placeholder = "task to send the agent (e.g. add OAuth login)"
+	pi.CharLimit = 8 * 1024
+	pi.SetWidth(60)
+	pi.SetHeight(10)
+	pi.ShowLineNumbers = false
+	// Visual cleanup vs the bubbles defaults:
+	//   - Prompt "" drops the per-line "│ " glyph (it stacks down
+	//     every row including empty ones — looks like a column of
+	//     stutter on a half-filled textarea).
+	//   - CursorLine cleared so the placeholder line isn't painted
+	//     with a contrasting background block (the default looks
+	//     like a selection highlight on an empty input — confusing).
+	// The outer rounded border is applied by renderNewPrompt rather
+	// than via Base style; rendering it through the textarea's
+	// per-line draw produces a broken top-edge under certain widths.
+	pi.Prompt = ""
+	pi.FocusedStyle.Prompt = lipgloss.NewStyle()
+	pi.BlurredStyle.Prompt = lipgloss.NewStyle()
+	pi.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	pi.BlurredStyle.CursorLine = lipgloss.NewStyle()
+
 	// Tab pre-selection: Local when the user has a current project
 	// context, Global otherwise. The user can tab away on either side.
 	defaultTab := tabLocal
@@ -598,6 +660,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 		projectName:          projectName,
 		nameInput:            ti,
 		listInput:            li,
+		promptInput:          pi,
 		mode:                 listMode,
 		inPopup:              os.Getenv("CANOPY_IN_POPUP") == "1",
 		currentProject:       currentProject,
