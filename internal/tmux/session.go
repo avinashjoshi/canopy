@@ -907,69 +907,78 @@ type PaneRoleInfo struct {
 	Role    string
 }
 
-// soh is the field separator for batched `tmux list-panes -F` output.
-// Unlike `|` or other printables, the SOH control byte cannot appear in
-// a tmux user-option value set via the documented APIs, so a malformed
-// or malicious @canopy-role string can't break the parse (codex review
-// v3-B4).
-const soh = "\x01"
-
 // ListAgentPanes returns one row per pane on the tmux server whose
-// @canopy-role tag begins with "agent:". One tmux invocation regardless
-// of session count — much cheaper than N per-session list-panes calls
-// when the TUI polls 50 workspaces (codex review M9 / v3 batched
-// polling premise).
+// @canopy-role tag begins with "agent:".
 //
-// Filters are applied AFTER parsing: the raw `list-panes -a` returns
-// every pane on the server (including tmux sessions canopy didn't
-// create); we keep only those whose role starts with "agent:". Callers
-// that want canopy-only panes should additionally filter by session
-// name prefix (codex review v3-M8).
+// Implementation: list sessions, then per-session list-panes scoped via
+// `-s -t <session>`. Mirrors the LookupAllPanes call shape that's known
+// to expand pane-scope user-options correctly across tmux 3.4-3.6+.
 //
-// Field separator is SOH (0x01) so role values containing `|`, newline,
-// or other printables can't break the parse.
+// An earlier `list-panes -a -F '#{@canopy-role}'` implementation worked
+// on tmux 3.6 locally but failed in CI (Ubuntu tmux 3.4) — the format
+// engine in older versions doesn't expand pane-scope user-options when
+// enumerating server-wide. Per-session enumeration costs an extra
+// `list-sessions` call but is portable.
+//
+// Field separator is TAB. tmux user-options set via canopy never contain
+// tabs in practice; the only "arbitrary string" defence we owe is at the
+// role value level, which the prefix check below already handles.
 func (c *Client) ListAgentPanes(ctx context.Context) ([]PaneRoleInfo, error) {
-	format := "#{session_name}" + soh + "#{pane_id}" + soh + "#{@canopy-role}"
-	cmd := exec.CommandContext(ctx, "tmux", c.args("list-panes", "-a", "-F", format)...)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		// list-panes returns non-zero when the server isn't running. That's
-		// a normal "no canopy sessions yet" signal, not a fatal error.
+	sessCmd := exec.CommandContext(ctx, "tmux", c.args("list-sessions", "-F", "#{session_name}")...)
+	var sessStdout, sessStderr strings.Builder
+	sessCmd.Stdout = &sessStdout
+	sessCmd.Stderr = &sessStderr
+	if err := sessCmd.Run(); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("tmux.ListAgentPanes: timed out: %w", ctx.Err())
+			return nil, fmt.Errorf("tmux.ListAgentPanes list-sessions: timed out: %w", ctx.Err())
 		}
-		stderrStr := strings.TrimSpace(stderr.String())
-		// Both shapes mean "no live tmux server, no panes to enumerate":
-		//   - "no server running on /path/to/socket"  (cold start)
-		//   - "server exited unexpectedly"            (recently killed mid-test)
+		stderrStr := strings.TrimSpace(sessStderr.String())
+		// "no server running" / "server exited" both mean: no live sessions.
 		if strings.Contains(stderrStr, "no server running") ||
 			strings.Contains(stderrStr, "server exited") {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("tmux.ListAgentPanes: %w (stderr: %s)", err, stderrStr)
+		return nil, fmt.Errorf("tmux.ListAgentPanes list-sessions: %w (stderr: %s)", err, stderrStr)
 	}
-
-	out := strings.TrimSpace(stdout.String())
-	if out == "" {
+	sessOut := strings.TrimSpace(sessStdout.String())
+	if sessOut == "" {
 		return nil, nil
 	}
+
 	var rows []PaneRoleInfo
-	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, soh, 3)
-		if len(parts) != 3 {
-			continue // malformed row (shouldn't happen with SOH separator, defensive)
-		}
-		role := parts[2]
-		if !strings.HasPrefix(role, "agent:") {
+	for _, session := range strings.Split(sessOut, "\n") {
+		if session == "" {
 			continue
 		}
-		rows = append(rows, PaneRoleInfo{
-			Session: parts[0],
-			ID:      parts[1],
-			Role:    role,
-		})
+		paneCmd := exec.CommandContext(ctx, "tmux", c.args(
+			"list-panes", "-s", "-t", session, "-F",
+			fmt.Sprintf("#{pane_id}\t#{%s}", roleOption),
+		)...)
+		var paneStdout strings.Builder
+		paneCmd.Stdout = &paneStdout
+		// Per-session enumeration failures (session died mid-iter) are
+		// non-fatal; skip and continue with the rest.
+		if err := paneCmd.Run(); err != nil {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(paneStdout.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			role := parts[1]
+			if !strings.HasPrefix(role, "agent:") {
+				continue
+			}
+			rows = append(rows, PaneRoleInfo{
+				Session: session,
+				ID:      parts[0],
+				Role:    role,
+			})
+		}
 	}
 	return rows, nil
 }
