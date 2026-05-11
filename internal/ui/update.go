@@ -47,6 +47,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case agentPollTickMsg:
+		// Generation gate: if Init re-fired (m.agentPollGen++ in
+		// startAgentPolling), this scheduled tick is stale. Drop it
+		// without rescheduling. The new generation's tick is already
+		// in flight via the new startAgentPolling call.
+		if msg.gen != m.agentPollGen {
+			return m, nil
+		}
+		// Run the actual poll. Result lands as agentPollResultMsg.
+		// Reschedule does NOT happen here — only after the result
+		// applies, so we're guaranteed at-most-one tick in flight.
+		return m, runAgentPoll(m.detector, m.tc, msg.gen)
+
+	case agentPollResultMsg:
+		// Same generation gate (defensive — runAgentPoll won't
+		// outlive the gen, but be explicit).
+		if msg.gen != m.agentPollGen {
+			return m, nil
+		}
+		m.agentStates = msg.states
+		// polled=true so the projectlist can distinguish "no agent
+		// pane in this workspace" (No-AI badge) from "first tick
+		// hasn't landed yet" (blank). Always true once a result lands.
+		m.list.SetAgentStates(msg.states, true)
+		// Skip Prune when active is nil — that's the "ListAgentPanes
+		// failed transiently" signal. Pruning with nil would wipe
+		// every pane's history and force a cold-start StateUnknown
+		// across all rows on the next tick.
+		if m.detector != nil && msg.active != nil {
+			m.detector.Prune(msg.active)
+		}
+		return m, scheduleAgentPollTick(m.agentPollGen)
+
 	case upgradeCheckedMsg:
 		// Async upgrade refresh landed. Update pill state — empty
 		// latest means "no upgrade available after refresh" (cleared)
