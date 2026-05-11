@@ -13,6 +13,9 @@ func TestClassifyCommand(t *testing.T) {
 		{"", ""},
 		{"nvim", "ide"},
 		{"vim", "ide"},
+		{"vim.tiny", "ide"}, // Debian/Ubuntu CI ships this as /usr/bin/vim
+		{"vim.basic", "ide"},
+		{"vim.nox", "ide"},
 		{"hx", "ide"},
 		{"emacs", "ide"},
 		{"bash", "shell"},

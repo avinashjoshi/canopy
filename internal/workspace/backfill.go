@@ -313,7 +313,10 @@ func classifyCommand(cmd string) string {
 	switch cmd {
 	case "":
 		return ""
-	case "nvim", "vim", "vi", "hx", "helix", "emacs":
+	case "nvim", "vim", "vim.tiny", "vim.basic", "vim.nox", "vi", "hx", "helix", "emacs":
+		// vim.tiny / vim.basic / vim.nox are the Debian/Ubuntu vim
+		// variants — GitHub Actions runners ship vim.tiny as /usr/bin/vim,
+		// and pane_current_command reports the real comm not the symlink.
 		return "ide"
 	case "bash", "zsh", "fish", "sh", "dash", "ksh":
 		return "shell"

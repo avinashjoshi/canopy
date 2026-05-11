@@ -312,15 +312,23 @@ func TestBackfillRoles_CommandConflictSkipped(t *testing.T) {
 	}
 
 	// Give vim a moment to start up so pane_current_command reflects
-	// it rather than the brief shell that exec'd into it.
+	// it rather than the brief shell that exec'd into it. Accept any
+	// vim-family comm name: GitHub's Ubuntu runners ship `vim.tiny` as
+	// /usr/bin/vim, which reports its real comm not the symlink. The
+	// match must mirror what classifyCommand can resolve to ide-class.
+	vimFamily := map[string]bool{
+		"vim": true, "vim.tiny": true, "vim.basic": true,
+		"vim.nox": true, "vi": true, "nvim": true,
+	}
 	sawVim := false
-	for i := 0; i < 20; i++ {
+	const pollSteps = 60 // 60 × 50ms = 3s. Slow CI runners need the headroom.
+	for i := 0; i < pollSteps; i++ {
 		cmds, err := c.PaneCommands(ctx, name)
 		if err != nil {
 			t.Fatalf("PaneCommands: %v", err)
 		}
 		for _, cmd := range cmds {
-			if cmd == "vim" {
+			if vimFamily[cmd] {
 				sawVim = true
 				break
 			}
@@ -328,7 +336,6 @@ func TestBackfillRoles_CommandConflictSkipped(t *testing.T) {
 		if sawVim {
 			break
 		}
-		// 50ms poll — vim usually takes <500ms to show up in proc.
 		select {
 		case <-ctx.Done():
 			t.Fatal("ctx done while waiting for vim")
@@ -341,7 +348,8 @@ func TestBackfillRoles_CommandConflictSkipped(t *testing.T) {
 		// pane_current_command read as sh/bash — shell is permissive,
 		// backfill proceeded, all three got tagged." Fail loud rather
 		// than letting that flake pass silently on slow CI.
-		t.Fatal("vim did not appear in PaneCommands within 1s; cannot test conflict path")
+		cmds, _ := c.PaneCommands(ctx, name)
+		t.Fatalf("no vim-family command in PaneCommands within 3s; cannot test conflict path. observed commands: %v", cmds)
 	}
 
 	// Backfill should refuse — vim is in the canonical agent slot.
