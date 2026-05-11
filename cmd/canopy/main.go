@@ -7,7 +7,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 // debugFlag is the --debug switch on the root command. When true, the log
@@ -130,8 +130,7 @@ func main() {
 		// every other failure (exit 1). Scripts can branch on the
 		// distinction: exit 2 means the workspace is alive on disk
 		// and only the initial prompt didn't get delivered.
-		var promptErr *errPromptFailed
-		if errors.As(err, &promptErr) {
+		if _, ok := workspace.IsPromptFailed(err); ok {
 			os.Exit(2)
 		}
 		// cobra has already printed the error; just exit non-zero.
