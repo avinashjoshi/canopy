@@ -26,6 +26,62 @@ import (
 
 var log = clog.Pkg("tmux")
 
+// HasClient reports whether any tmux client is currently attached to
+// the named session. Used by the backfill path to skip tagging when
+// someone else is already in the session — narrows the read-modify-
+// write race window for concurrent `canopy switch` calls.
+//
+// SWALLOWS ALL tmux errors as `(false, nil)`. Intentional for the
+// backfill caller (the safe default is "proceed and let the
+// incongruence check catch anything truly wrong"), but means this is
+// a polling helper, NOT a strict probe. Callers that need to
+// distinguish "no client" from "tmux unreachable" must not use this
+// function. If tmux fails non-trivially (server crashed mid-call,
+// permission error), this function silently reports "no client" and
+// the concurrent-attach guard disables itself — defense-in-depth, not
+// a full mitigation. The signature returns an error for forward
+// compatibility only; today it's always nil.
+func (c *Client) HasClient(ctx context.Context, session string) (bool, error) {
+	args := c.args("list-clients", "-t", session, "-F", "#{client_name}")
+	cmd := exec.CommandContext(ctx, "tmux", args...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		// tmux returns non-zero whenever it can't enumerate clients:
+		// session missing, server not running, server exited, no current
+		// client. From the backfill caller's perspective ALL of these
+		// mean "no attached client to worry about." Swallowing is safer
+		// than trying to enumerate every stderr variant tmux versions
+		// emit — and there's no false-positive risk: if tmux can't tell
+		// us, the worst case is we proceed with backfill (which is
+		// already idempotent + incongruence-checked).
+		return false, nil
+	}
+	return strings.TrimSpace(stdout.String()) != "", nil
+}
+
+// validPaneID checks that s matches tmux's pane-ID format `%<digits>`.
+//
+// Defense-in-depth against tmux hooks that emit to stdout. A user with
+// `set-hook session-created 'display-message ...'` or similar wired up
+// can get extra bytes appended to the `#{pane_id}` capture from Create
+// / SplitPane / new-window. Without this check, the bad pane ID would
+// flow into SetRole/SelectPane and either error opaquely or no-op
+// silently. Validating up front turns it into a clean error at the
+// boundary that knows what tmux returned.
+func validPaneID(s string) bool {
+	if len(s) < 2 || s[0] != '%' {
+		return false
+	}
+	for _, r := range s[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // SafeName turns an arbitrary identifier into one safe for use as a tmux
 // session or window name. tmux's target syntax uses `:` and `.` as
 // separators (`session:window.pane`), so neither character can appear
@@ -185,8 +241,8 @@ func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string, env ...
 		return "", fmt.Errorf("tmux.Create(%s): %w (stderr: %s)", name, err, strings.TrimSpace(stderr.String()))
 	}
 	paneID = strings.TrimSpace(stdout.String())
-	if paneID == "" {
-		return "", fmt.Errorf("tmux.Create(%s): empty pane ID returned", name)
+	if !validPaneID(paneID) {
+		return "", fmt.Errorf("tmux.Create(%s): invalid pane ID %q (expected %%<digits>; user tmux hook polluting stdout?)", name, paneID)
 	}
 	return paneID, nil
 }
@@ -357,8 +413,8 @@ func (c *Client) SplitPane(ctx context.Context, session, cwd, shellCmd string, d
 			strings.TrimSpace(stderr.String()))
 	}
 	paneID = strings.TrimSpace(stdout.String())
-	if paneID == "" {
-		return "", fmt.Errorf("tmux.SplitPane(%s, %s): empty pane ID returned", session, dir)
+	if !validPaneID(paneID) {
+		return "", fmt.Errorf("tmux.SplitPane(%s, %s): invalid pane ID %q (expected %%<digits>; user tmux hook polluting stdout?)", session, dir, paneID)
 	}
 	return paneID, nil
 }
