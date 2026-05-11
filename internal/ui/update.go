@@ -1131,6 +1131,20 @@ func effectiveStatus(row Row) state.Status {
 // The post-attach refresh is dispatched via m.store + m.tc rather than
 // the project-only mgr.Reconcile path so it works in both contexts.
 func (m *Model) attachOrSwitch(session string) tea.Cmd {
+	// Backfill @canopy-role tags for v0.15-style sessions that never
+	// went through the v0.16+ buildSession (which tags at creation).
+	// Best-effort: errors logged, never block attach. Common path for
+	// both popup (switch-client) and fullscreen (tea.ExecProcess) modes.
+	// launcherType: pulls from this canopy invocation's project config
+	// when available; empty in Global tab cross-project flows where
+	// m.mgr is nil. Empty defaults to "agent:claude" via agent.RoleForType,
+	// which matches every v0.15 workspace's actual agent.
+	var launcherType string
+	if m.mgr != nil {
+		launcherType = m.mgr.Cfg.Agent.Type
+	}
+	_ = workspace.BackfillRoles(context.Background(), m.tc, session, launcherType)
+
 	if m.inPopup {
 		return func() tea.Msg {
 			if err := m.tc.SwitchClient(context.Background(), session); err != nil {

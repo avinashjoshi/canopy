@@ -136,9 +136,14 @@ func (c *Client) HasSession(ctx context.Context, name string) (bool, error) {
 // "rm -rf .overmind.sock && bin/dev"); otherwise the pane runs the user's
 // default shell.
 //
+// Returns the tmux pane ID of the initial pane (e.g. "%15") so callers
+// can directly target it for subsequent operations like SetRole. Pane
+// IDs are stable for the pane's lifetime and unique across the tmux
+// server, unlike pane indexes which depend on user config (pane-base-index).
+//
 // Returns ErrSessionExists if a session with that name is already alive.
 //
-// Callers that want canopy's standard 4-pane workspace layout call this
+// Callers that want canopy's standard 3-pane workspace layout call this
 // to seed the session, then SplitPane for each additional pane. That
 // orchestration lives in internal/workspace, not here.
 //
@@ -147,18 +152,22 @@ func (c *Client) HasSession(ctx context.Context, name string) (bool, error) {
 // including future panes the user creates with prefix-c. Use this for
 // CANOPY_PORT and friends so commands typed in the shell pane (like
 // `bin/dev`) can read them.
-func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string, env ...string) error {
+func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string, env ...string) (paneID string, err error) {
 	log.Info("tmux.create", "name", name, "cwd", cwd, "cmd", shellCmd, "env_count", len(env))
 
 	exists, err := c.HasSession(ctx, name)
 	if err != nil {
-		return fmt.Errorf("tmux.Create(%s): %w", name, err)
+		return "", fmt.Errorf("tmux.Create(%s): %w", name, err)
 	}
 	if exists {
-		return fmt.Errorf("tmux.Create(%s): %w", name, ErrSessionExists)
+		return "", fmt.Errorf("tmux.Create(%s): %w", name, ErrSessionExists)
 	}
 
-	args := c.args("new-session", "-d", "-s", name, "-c", cwd)
+	// `-P -F '#{pane_id}'` tells tmux to print the new pane's ID on stdout.
+	// Capturing this at creation time is the canonical way to address the
+	// pane later (the `session:.0` shorthand is unreliable; verified via
+	// the spike at design-doc time).
+	args := c.args("new-session", "-d", "-s", name, "-c", cwd, "-P", "-F", "#{pane_id}")
 	for _, kv := range env {
 		args = append(args, "-e", kv)
 	}
@@ -169,12 +178,17 @@ func (c *Client) Create(ctx context.Context, name, cwd, shellCmd string, env ...
 		args = append(args, "sh", "-c", shellCmd)
 	}
 	cmd := exec.CommandContext(ctx, "tmux", args...)
-	var stderr strings.Builder
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tmux.Create(%s): %w (stderr: %s)", name, err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("tmux.Create(%s): %w (stderr: %s)", name, err, strings.TrimSpace(stderr.String()))
 	}
-	return nil
+	paneID = strings.TrimSpace(stdout.String())
+	if paneID == "" {
+		return "", fmt.Errorf("tmux.Create(%s): empty pane ID returned", name)
+	}
+	return paneID, nil
 }
 
 // RenameWindow sets the active window's name on the named session AND
@@ -319,10 +333,13 @@ const (
 // SelectLayout can rearrange tiled grids, but for fixed proportional
 // layouts (like tdl), use sizePercent on each split to set the geometry
 // at creation time.
-func (c *Client) SplitPane(ctx context.Context, session, cwd, shellCmd string, dir SplitDirection, sizePercent ...int) error {
+func (c *Client) SplitPane(ctx context.Context, session, cwd, shellCmd string, dir SplitDirection, sizePercent ...int) (paneID string, err error) {
 	log.Info("tmux.split-pane", "session", session, "cwd", cwd, "cmd", shellCmd, "dir", dir)
 
-	args := c.args("split-window", "-d", string(dir), "-t", session, "-c", cwd)
+	// `-P -F '#{pane_id}'` prints the new pane's ID on stdout — same
+	// pattern as Create. See Create's comment for why we capture pane IDs
+	// rather than relying on positional addressing.
+	args := c.args("split-window", "-d", string(dir), "-t", session, "-c", cwd, "-P", "-F", "#{pane_id}")
 	if len(sizePercent) > 0 && sizePercent[0] > 0 && sizePercent[0] < 100 {
 		// `-l <N>%` is the modern tmux size syntax (the deprecated form is
 		// `-p <N>`). Sizes the NEW pane to N% of the parent pane.
@@ -332,13 +349,18 @@ func (c *Client) SplitPane(ctx context.Context, session, cwd, shellCmd string, d
 		args = append(args, "sh", "-c", shellCmd)
 	}
 	cmd := exec.CommandContext(ctx, "tmux", args...)
-	var stderr strings.Builder
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tmux.SplitPane(%s, %s): %w (stderr: %s)", session, dir, err,
+		return "", fmt.Errorf("tmux.SplitPane(%s, %s): %w (stderr: %s)", session, dir, err,
 			strings.TrimSpace(stderr.String()))
 	}
-	return nil
+	paneID = strings.TrimSpace(stdout.String())
+	if paneID == "" {
+		return "", fmt.Errorf("tmux.SplitPane(%s, %s): empty pane ID returned", session, dir)
+	}
+	return paneID, nil
 }
 
 // SelectLayout applies a named tmux layout preset to the session's

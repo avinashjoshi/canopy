@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 // switchCmd returns the `canopy switch <name>` cobra subcommand.
@@ -51,6 +52,10 @@ func switchCmd() *cobra.Command {
 
 			switch ws.Status {
 			case state.StatusReady:
+				// Backfill @canopy-role tags for v0.15-style sessions that
+				// never went through the v0.16+ buildSession (which tags at
+				// creation). Best-effort: errors logged, never block attach.
+				_ = workspace.BackfillRoles(ctx, mgr.Tmux, ws.TmuxSessionName(), mgr.Cfg.Agent.Type)
 				fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", ws.TmuxSessionName())
 				return mgr.Tmux.Attach(ctx, ws.TmuxSessionName())
 

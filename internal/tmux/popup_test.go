@@ -89,7 +89,7 @@ func TestSwitchClient_targetNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed the server with one session so it's alive.
-	if err := c.Create(ctx, "seed", t.TempDir(), ""); err != nil {
+	if _, err := c.Create(ctx, "seed", t.TempDir(), ""); err != nil {
 		t.Fatalf("seed Create: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestAttachVerb_switchesByTmuxEnv(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed a session so AttachCmd's HasSession check passes.
-	if err := c.Create(ctx, "verb-test", t.TempDir(), ""); err != nil {
+	if _, err := c.Create(ctx, "verb-test", t.TempDir(), ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -186,7 +186,7 @@ func TestAttachCmd_AutoDetachFlag(t *testing.T) {
 	requireTmux(t)
 	c := newClient(t)
 	ctx := context.Background()
-	if err := c.Create(ctx, "detach-test", t.TempDir(), ""); err != nil {
+	if _, err := c.Create(ctx, "detach-test", t.TempDir(), ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

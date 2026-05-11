@@ -32,7 +32,7 @@ func TestAttachedSessions_DetachedSession_NotInResult(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, "detached-test", cwd, ""); err != nil {
+	if _, err := c.Create(ctx, "detached-test", cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	got, err := c.AttachedSessions(ctx)
@@ -53,7 +53,7 @@ func TestSessionAttached_Detached(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, "single-detached", cwd, ""); err != nil {
+	if _, err := c.Create(ctx, "single-detached", cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	got, err := c.SessionAttached(ctx, "single-detached")

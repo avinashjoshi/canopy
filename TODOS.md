@@ -12,6 +12,26 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## 📋 OPEN — v0.16.x — Pane-role contract follow-ups (deferred per /ship adversarial review 2026-05-10)
+
+The pane-role-contract refactor (v0.16.0) shipped with conservative scope. Adversarial review on the implementation surfaced three follow-ups worth tracking:
+
+1. **Command-sniffing safeguard for backfill.** `internal/workspace/backfill.go` infers role from list-panes positional ORDER. The v0.16 fix only tags untagged panes and skips on incongruence (caught the overwrite bug pre-ship). A stronger safeguard: query `pane_current_command` before tagging. nvim → ide, claude/codex/aider → agent:*, shell → terminal:shell. Catches "wrong canonical layout" cases positional logic can't see. ~50 lines + tests. Low-priority since the v0.16 incongruence-skip already protects against the high-impact bug.
+
+2. **Concurrent-attach race on backfill.** Two simultaneous `canopy switch <ws>` invocations against the same v0.15-style session both enter backfill, both see "untagged," both call SetRole. tmux set-option is idempotent so the writes don't corrupt, but the read-modify-write window allows for transient mistagging if pane state changes mid-flow. Solo-dev workflow makes this very rare. Fix: snapshot pane IDs once + validate identical to the snapshot used by the role check, OR skip backfill entirely when any client is currently attached (`tmux list-clients -t session`).
+
+3. **`BackfillRoles` returning `error` is misleading.** Function is documented as "always returns nil today" but signature returns `error`. Every caller does `_ = BackfillRoles(...)` which reads as intentional error-swallow but isn't. Drop the return signature, or make it return real errors. Trivial fix; capture as cleanup.
+
+4. **`tmux.LookupPane` glob behavior with leading/middle asterisks.** Today `*` is treated as prefix-only (trailing). `LookupPane("*:claude")` silently treats `*` as a literal. Either reject non-trailing `*` with an explicit error, or document the limitation. Minor API ergonomics.
+
+5. **Pane ID format validation.** `tmux.Create` and `tmux.SplitPane` capture `#{pane_id}` from stdout but only check non-empty, not format. A user with a tmux hook that prints to stdout (`set-hook session-created 'display-message ...'`) could get garbage appended to the captured pane ID. Validate with regex `^%\d+$` before returning. Defense-in-depth.
+
+6. **`TestRoles_PanesInOrder` doesn't actually test ordering.** Test asserts set-membership not order. Function is named "PanesInOrder" — rename or strengthen the test.
+
+All caught by the v0.16 ship adversarial review. The HIGH-severity issue (overwrite-on-incongruence) was fixed pre-ship.
+
+---
+
 ## Audit refresh — 2026-05-09 (post-v0.15.2)
 
 The doc was last status-flagged through v0.11.x. We're nine minor releases ahead.
@@ -1510,11 +1530,106 @@ work. Spawning in a new tmux window means:
 
 ---
 
-## 📋 OPEN — v0.15+ — Onboarding wizard + global config
+## ✅ SHIPPED v0.16.0.0 — Pane-role contract (refactor that unblocks tdl, custom layouts, AND simplifies global config)
+
+**Captured 2026-05-10** from /office-hours → /plan-eng-review → /codex × 2 design pipeline on the global-config-defaults branch (now `pane-role-contract`). Originally scoped as "global config + JIT prompts," then "global config + canopy config verb," then this — discovered during the 4-review pipeline that the underlying issue blocking tdl integration ALSO blocks the v0.16+ background workspaces feature AND is the load-bearing cleanup before global config can ship cleanly.
+
+### The problem
+
+Canopy today addresses tmux panes by INDEX. `internal/workspace/lifecycle.go::buildSession` knows pane 0 = nvim, pane 1 = shell, pane 2 = agent. `agentPaneCmd` builds a complete shell command (launcher + briefing + temp file injection) and SplitPane runs it as pane 2. The resurrect path at `lifecycle.go:977,:984` duplicates this layout-building.
+
+This index-based addressing breaks three real things:
+1. **Tdl integration is impossible.** Tdl wants to OWN pane construction. If tdl creates the layout, canopy doesn't get to inject the agent command into "pane 2" — there's no pane 2 in tdl's mental model. The agent briefing handoff (canopy's core value) breaks.
+2. **Custom `scripts.layout` impossible.** A user with a 4-pane layout preference (or 2-pane minimal, or multi-window) has no way to express it. Canopy's layout is hardcoded.
+3. **Background workspaces (v0.16+ memory) blocked.** Per-workspace agent-state detection (idle/thinking/awaiting-input) needs to tail a specific pane. If layout is variable, "the agent pane" must be addressable by ROLE, not index.
+
+### The shape
+
+Address panes by ROLE via tmux user options (`@canopy-role`). The role is the ABI; the layout is data.
+
+**Role ABI (v1):**
+- `ide` — editor pane (today nvim; respects `Settings.Editor` once that ships)
+- `agent:<launcher>` — agent pane (`agent:claude`, `agent:codex`, `agent:opencode`, `agent:aider`)
+- `terminal:setup` — pane that ran scripts.setup (visible during creation, optional)
+- `terminal:run` — pane for scripts.run (server, optional)
+- `terminal:shell` — bare shell for the user
+- `files` — file browser (lazygit/yazi/broot — future role, not built today)
+
+Set via `tmux set-option -p -t <pane> @canopy-role <value>`. Query via `tmux list-panes -F "#{pane_id} #{@canopy-role}"`. User options are namespaced, persistent across pane lifetime, and process-proof (unlike pane title which a running process can override).
+
+**Canopy operations become role-queries:**
+- "Inject agent command + briefing" → `lookupPane("agent:*")` → `tmux send-keys`
+- "Watch agent state" → tail the pane with `@canopy-role` matching `agent:*`
+- "Send `--prompt` from kick-off-with-prompt feature" → same as above
+- "Open file in IDE from a future keybind" → `lookupPane("ide")` → send-keys
+
+**Layout builders become pluggable:**
+- `internal/workspace/layout/canopy3pane.go` — today's default (creates panes + sets `@canopy-role` on each)
+- `internal/workspace/layout/tdl.go` — invokes `tdl`, then post-labels by best-guess heuristic + warning if guess fails
+- `scripts.layout` in canopy.json — user-defined script that creates panes; canopy validates AFTER the script runs and warns about missing roles (soft fallback: workspace works as worktree+tmux+port shell, briefing/state-detection skipped for missing roles)
+
+### Why this swallows global config
+
+The previously-designed v0.16 config feature (`editor`, `default_agent`, `canopy config` verb — see parked design doc at `~/.gstack/projects/avinashjoshi-canopy/avi-global-config-defaults-design-20260510-093902.md`) wires `Settings.Editor` into THREE sites in `internal/workspace/` because of the index-based addressing. After this refactor, it wires into ONE site (the canopy3pane builder) because everything goes through `lookupPane("ide")`.
+
+Same for `Settings.DefaultAgent` — instead of threading through `agentPaneCmd` AND `buildMainSession` AND fixing the log message, the launcher resolution happens once in the layout builder and the agent role gets the right command.
+
+Config feature shrinks from ~250 lines to maybe ~150 once the role contract exists. Cleaner abstraction, smaller PR, ships v0.17 as a small follow-up.
+
+### Implementation sketch
+
+1. Add `@canopy-role` user-option setting to current 3-pane builder. Pure refactor, no behavior change. Tests confirm roles set correctly.
+2. Add `internal/workspace/layout/` package with `Builder` interface: `Build(ctx, ws, env) error` + `Resurrect(ctx, ws, env) error`. Default impl is `canopy3pane`.
+3. Move existing buildSession + resurrect-path layout code into `canopy3pane.Build` / `canopy3pane.Resurrect`. lifecycle.go becomes thinner — orchestrates state, calls builder, doesn't know layout.
+4. Add `pane.Lookup(session, role)` helper in `internal/tmux/`. Returns pane_id or ErrNotFound.
+5. Refactor agentPaneCmd to: build the command (launcher+briefing as today), then `Lookup("agent:*")` + `send-keys`. Same for the future "open file in IDE" affordance.
+6. Validate-after-build helper: scans pane roles, returns missing-required + missing-optional. Default builder always satisfies; pluggable builders may not.
+7. Define `scripts.layout` in canopy.json schema (string path, optional). If set, run script instead of builtin builder, then validate.
+8. (DEFERRED to its own PR after this lands) `tdl` builder. Spike first: can `tmux send-keys` inject `claude --append-system-prompt "..."` into a tdl-spawned pane and have the briefing actually land? If yes, build it. If no, document tdl as incompatible with agent briefing and ship anyway (covers the custom-layout case).
+
+### Sequencing
+
+1. **This PR (v0.16):** role contract + canopy3pane builder + lookup helper + agentPaneCmd refactor + tests. NO new user-facing features. Pure architectural change. Tests verify zero regression on existing canopy new + canopy switch flows.
+2. **Next PR (v0.16.1 or v0.17):** Global config (`editor`, `default_agent`, `canopy config` verb). Dramatically simpler on top of role contract. Design doc already at `~/.gstack/projects/avinashjoshi-canopy/avi-global-config-defaults-design-20260510-093902.md`; will need a small revision to use the role-lookup pattern.
+3. **Next PR (v0.17+):** `scripts.layout` user hook + validate-after-build + warning model.
+4. **Next PR (v0.17+):** tdl builder (after the spike confirms agent-pane handoff works).
+5. **Unblocked by all above (v0.18+):** background workspaces (per memory `project_agent_state_unlocks_background.md`) — agent-state detection now works regardless of layout.
+
+### Why this is the right shape
+
+Doing config first then this refactor would:
+- Wire `Settings.Editor` into 3 sites we're about to throw out (write-then-rewrite)
+- Defer the tdl decision indefinitely (no architectural foundation)
+- Keep the v0.16+ background workspaces feature blocked
+
+Doing this first then config:
+- Config feature becomes ~40% smaller and lands cleaner
+- Tdl unblocked (with caveat: pane handoff still needs spike)
+- Background workspaces unblocked architecturally
+- Custom `scripts.layout` becomes possible without re-litigating layout patterns
+
+The cost is one PR's worth of "refactor with no user-visible feature," which is sometimes a hard sell on a side project but objectively the right move when three downstream features all need it.
+
+### Risks / open questions
+
+- **Tmux user-option persistence across detach/reattach.** Need to verify `@canopy-role` survives the workspace going from `ready` → `stopped` → resurrected. Probably yes (set-option -p is per-pane and tmux remembers), but test it in the spike.
+- **Custom layout builders + state detector compatibility.** The detector reads pane content. If a custom layout puts the agent in a 5-line strip, detection still works but UX is degraded. Probably document as user-responsibility.
+- **`agent:*` is plural-OK or unique?** Today one agent per workspace. If a user wants two agents (claude + codex side-by-side, future feature), `agent:claude` and `agent:codex` are both valid. Plan for plural.
+- **Migration:** existing workspaces created before v0.16 don't have `@canopy-role` set. On resurrect, run a "label the existing panes by index → role" backfill. Test the migration path.
+
+### Depends on / blocked by
+
+Nothing. The role contract is a self-contained refactor. Settings (and the config verb) wait for this to land.
+
+---
+
+## 📋 OPEN — v0.15+ — Onboarding wizard + global config (PARTIALLY DESIGNED, parked behind pane-role-contract)
+
+**Status 2026-05-10:** Designed through 4 review passes (/office-hours → /plan-eng-review → /codex × 2). Final v4 design at `~/.gstack/projects/avinashjoshi-canopy/avi-global-config-defaults-design-20260510-093902.md`. Parked because the role-contract refactor (above) makes this dramatically simpler — config wires into ONE place instead of three after roles exist. Pick this back up as the v0.16.1 (or v0.17) follow-up PR. The design doc already captures all decisions; expect a small revision to use the new role-lookup pattern.
 
 **Status 2026-05-09:** no `~/.canopy/config.json` loader yet (search
 `internal/config/` for `globalConfig` returns empty). The hardcoded
-constants the entry calls out (`nvim`, `3000-3999`, `6h`, the 4-pane
+constants the entry calls out (`nvim`, `3000-3999`, `6h`, the 3-pane
 builder) all still live in code.
 
 Captured 2026-04-30 from user feedback. Canopy has no global config

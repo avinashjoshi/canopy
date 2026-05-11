@@ -43,6 +43,11 @@ cmd/canopy/main.go      Entry point; routes between TUI and subcommands.
 internal/config/        canopy.json walk-up discovery + load. Read-only at startup.
 internal/git/           Worktree add/remove/sanitize via os/exec wrapping git.
 internal/tmux/          Session create/attach/kill/has via os/exec wrapping tmux.
+                        Role-addressing layer (roles.go) tags panes with
+                        @canopy-role and looks them up by role name; replaces
+                        positional pane indexing across the workspace lifecycle.
+internal/agent/         Agent launcher metadata (claude / codex / aider) and
+                        canonical role strings (RoleForType → `agent:<launcher>`).
 internal/hooks/         Script execution via exec.CommandContext + CANOPY_* env.
 internal/state/         JSON registry of workspaces. Single mutable. flock-protected.
 internal/workspace/     Orchestration: Create / Remove / Resurrect / Reconcile.
