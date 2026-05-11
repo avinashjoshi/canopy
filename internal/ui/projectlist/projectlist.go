@@ -33,6 +33,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/state"
 )
 
@@ -95,6 +96,22 @@ type Model struct {
 	// "this is where I am" cue.
 	currentRoot string
 	currentName string
+
+	// agentStates is the per-row agent-state map keyed by tmux session
+	// name (project-prefixed: `canopy/add-oauth`). Populated by the
+	// parent's SetAgentStates whenever its agent.Detector poll tick
+	// fires. Empty map = no badges rendered (initial state before the
+	// first tick lands, or workspaces without an agent pane). Keyed
+	// by session (not workspace name) to avoid Global-tab collisions
+	// across projects.
+	agentStates map[string]agent.State
+
+	// agentPolled is true once at least one agent-state poll has
+	// landed. Before that, the badge column stays blank for ALL rows
+	// (we don't know the layout yet). After it flips true, rows whose
+	// session is missing from agentStates are interpreted as "no agent
+	// pane in this workspace" and rendered with the No-AI glyph.
+	agentPolled bool
 }
 
 // New constructs a Model with no rows. The parent typically follows up
@@ -206,6 +223,23 @@ func (m *Model) UpdateRowHints(project, name string, hints []state.Hint) {
 // SetCurrent records which (projectRoot, name) is the "you are here"
 // row — the workspace whose dir cwd was inside at canopy launch. Empty
 // values disable the marker.
+
+// SetAgentStates pushes a fresh agent-state map into the projectlist.
+// Map is keyed by tmux session name (e.g. "canopy/add-oauth"); rows
+// whose TmuxSession is in the map render the corresponding badge.
+//
+// Pass polled=true once the FIRST poll tick has actually landed.
+// After that point, rows whose session is alive but missing from the
+// map are interpreted as "this workspace has no agent pane" (vs the
+// pre-first-poll case where we don't know yet).
+//
+// nil/empty map with polled=true means "we polled, found no agent
+// panes anywhere" — every Alive row becomes No-AI badged.
+func (m *Model) SetAgentStates(states map[string]agent.State, polled bool) {
+	m.agentStates = states
+	m.agentPolled = polled
+}
+
 func (m *Model) SetCurrent(projectRoot, name string) {
 	m.currentRoot = projectRoot
 	m.currentName = name
@@ -369,13 +403,15 @@ func (m Model) renderTable() string {
 			presenceGlyph = "○ "
 		}
 
+		badge := agentBadge(r, m.agentStates, m.agentPolled)
 		if isSelected {
 			// Selected row: `❯ ` caret + plain content (no inner ANSI)
 			// wrapped with the selection bg padded to terminal width.
 			// Non-selected rows pad with two spaces in the caret slot
 			// so columns stay put as the cursor moves.
-			plainContent := fmt.Sprintf("❯ %s%-*s  %s%-*s  %s%-*s  %*s  %*s",
+			plainContent := fmt.Sprintf("❯ %s%s %-*s  %s%-*s  %s%-*s  %*s  %*s",
 				presenceGlyph,
+				stripAnsi(badge),
 				colName, r.Name,
 				branchIcon,
 				colBranch, r.Branch,
@@ -436,8 +472,9 @@ func (m Model) renderTable() string {
 			// Two-space caret slot (matches the `❯ ` width of the
 			// selected branch) so everything after stays put when the
 			// cursor moves between rows.
-			line = fmt.Sprintf("  %s%-*s  %s  %s  %*s  %s",
+			line = fmt.Sprintf("  %s%s %-*s  %s  %s  %*s  %s",
 				styledPresence,
+				badge,
 				colName, r.Name,
 				branchDisplay,
 				statusCell,
@@ -918,6 +955,53 @@ func displayGlyph(r state.GlobalRow) string {
 		return statusGlyphFor(state.StatusStopped)
 	}
 	return statusGlyphFor(r.Status)
+}
+
+// agentBadge returns a single-character glyph for the row's agent
+// state plus a per-state color. Returns "  " (two-space slot) when no
+// badge is appropriate.
+//
+// All badge glyphs are width-1 in standard terminals (verified with
+// lipgloss.Width); we still pad to a 2-cell slot so the column width
+// math stays simple.
+//
+// State decision tree:
+//   - row not alive, main row, or no tmux session → blank
+//   - state map has an entry → render that state's glyph
+//   - first poll hasn't landed yet (agentPolled=false) → blank
+//     (we don't know if this workspace has an agent pane yet)
+//   - first poll HAS landed but this session isn't in the map →
+//     No-AI badge (workspace exists but has no agent pane)
+//
+// Color choices:
+//   - 226 (yellow)  AwaitingInput — "you're blocking on this"
+//   - 51  (cyan)    Thinking      — "claude is working"
+//   - 244 (gray)    Idle          — "ready, waiting on you"
+//   - 240 (subtle)  No-AI         — "this workspace has no agent"
+func agentBadge(r state.GlobalRow, states map[string]agent.State, polled bool) string {
+	if !r.Alive || r.IsMain || r.TmuxSession == "" {
+		return "  "
+	}
+	s, ok := states[r.TmuxSession]
+	if !ok {
+		// Not in the map. Two cases:
+		//   1. First poll hasn't landed yet → blank, we don't know.
+		//   2. Poll has landed → workspace has no agent pane → No-AI.
+		if !polled {
+			return "  "
+		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("·")
+	}
+	switch s {
+	case agent.StateAwaitingInput:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("✋")
+	case agent.StateThinking:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Render("⚡")
+	case agent.StateIdle:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("💤")
+	}
+	// StateUnknown or unrecognized — blank, we don't have signal.
+	return "  "
 }
 
 // memCell returns the human-readable load text for a row: "320M 12%"

@@ -57,7 +57,7 @@ Each section below has a banner; this summary is the 30-second scan.
 - **v0.15+ onboarding wizard + global config** — `~/.canopy/config.json` doesn't exist yet.
 - **v0.15+ offboard project** — `canopy offboard` verb absent.
 - **v0.16+ current-workspace context popup** — Ctrl+Alt+c chord is the foundation.
-- **v0.16+ kick-off-with-prompt + background workspaces** — `--prompt` flag absent on `canopy new`.
+- ✅ **v0.16.1.0 kick-off-with-prompt + background workspaces — SHIPPED** — `canopy new --prompt`/`--prompt-file` + TUI badge column (⚡💤✋·).
 - **v0.6 `canopy reconcile --remove-project`** — basename-collision escape hatch.
 - **v0.6 global-mode E2E tests** — none exist for the global routing flows.
 - **v0.5 hook timeout** — no `Timeout` plumbing in `internal/hooks/`.

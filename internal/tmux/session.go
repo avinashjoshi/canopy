@@ -688,12 +688,12 @@ func shouldDetachOthers() bool {
 // is itself inside a tmux client (TMUX env set):
 //
 //   - Inside tmux  → "switch-client" (the calling tmux client switches
-//                   to the target session). `attach` would fail with
-//                   "sessions should be nested with care" or similar.
+//     to the target session). `attach` would fail with
+//     "sessions should be nested with care" or similar.
 //
 //   - Outside tmux → "attach" (a fresh tmux client attaches to the
-//                   target). switch-client requires an existing client
-//                   to switch.
+//     target). switch-client requires an existing client
+//     to switch.
 //
 // This handles popup mode (popup pty IS a tmux client) and any future
 // nested invocation. The CLI subcommands that today are gated by
@@ -794,4 +794,191 @@ func (c *Client) KillServerAndReap(ctx context.Context) error {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
 	return nil
+}
+
+// CapturePane returns the visible content of a single pane as a string.
+//
+// Wraps `tmux capture-pane -p -t <paneID>`. Intentionally NOT using
+// `-J` (join wrapped lines): the agent state detector matches regex
+// patterns against the raw content, and `-J` collapses line boundaries
+// that those patterns depend on (per codex review of the
+// background-workspaces design).
+//
+// Caller is responsible for the context timeout — the polling loop
+// wraps each call with `context.WithTimeout(500*time.Millisecond)` so
+// a hung tmux server can't wedge the Bubbletea command goroutine.
+func (c *Client) CapturePane(ctx context.Context, paneID string) (string, error) {
+	cmd := exec.CommandContext(ctx, "tmux", c.args("capture-pane", "-p", "-t", paneID)...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("tmux.CapturePane(%s): %w (stderr: %s)", paneID, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+// SendKeysLiteral types text into a pane as literal keystrokes (no key
+// name interpretation). Use this for ANY user-supplied text — `tmux
+// send-keys "<text>"` interprets words like `Enter`, `Tab`, `Up`,
+// `Space` as key presses, so a prompt containing those words gets
+// partially executed instead of typed (codex review v3-B2).
+//
+// Does NOT submit the input. Follow with SendKeyName(ctx, paneID,
+// "Enter") to submit. The split is intentional so callers can choose
+// whether to add a trailing newline (interactive prompts vs draft text).
+//
+// The `--` separates the flag list from the literal text, so prompts
+// beginning with `-` aren't parsed as flags.
+func (c *Client) SendKeysLiteral(ctx context.Context, paneID, text string) error {
+	cmd := exec.CommandContext(ctx, "tmux", c.args("send-keys", "-t", paneID, "-l", "--", text)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux.SendKeysLiteral(%s, %d bytes): %w (stderr: %s)", paneID, len(text), err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// SendKeyName sends a named key (Enter, Escape, Up, C-c, etc.) to a
+// pane. For arbitrary text use SendKeysLiteral.
+func (c *Client) SendKeyName(ctx context.Context, paneID, keyName string) error {
+	cmd := exec.CommandContext(ctx, "tmux", c.args("send-keys", "-t", paneID, keyName)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux.SendKeyName(%s, %s): %w (stderr: %s)", paneID, keyName, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// LoadAndPasteBuffer loads `content` into a named tmux paste buffer,
+// pastes it into the target pane, and deletes the buffer. Used for
+// multi-line --prompt-file payloads.
+//
+// Why a NAMED buffer (codex review M4): the unnamed default buffer is
+// shared across the tmux server. Two `canopy new --prompt-file` calls
+// firing concurrently would clobber each other's buffer. A unique
+// per-workspace buffer name keeps them isolated.
+//
+// Content is streamed via stdin to avoid argv size limits and shell
+// escaping (codex review M6) — `tmux load-buffer -b <name> -` reads
+// the buffer content from stdin until EOF.
+//
+// The buffer name should be sanitized via SafeName at the call site.
+// LoadAndPasteBuffer best-effort deletes the buffer after paste; a
+// failed delete is logged but not returned, so a paste that succeeded
+// isn't reported as a failure on cleanup.
+func (c *Client) LoadAndPasteBuffer(ctx context.Context, paneID, bufferName, content string) error {
+	loadCmd := exec.CommandContext(ctx, "tmux", c.args("load-buffer", "-b", bufferName, "-")...)
+	loadCmd.Stdin = strings.NewReader(content)
+	var loadStderr strings.Builder
+	loadCmd.Stderr = &loadStderr
+	if err := loadCmd.Run(); err != nil {
+		return fmt.Errorf("tmux.LoadAndPasteBuffer load-buffer(%s, %d bytes): %w (stderr: %s)",
+			bufferName, len(content), err, strings.TrimSpace(loadStderr.String()))
+	}
+
+	pasteCmd := exec.CommandContext(ctx, "tmux", c.args("paste-buffer", "-t", paneID, "-b", bufferName)...)
+	var pasteStderr strings.Builder
+	pasteCmd.Stderr = &pasteStderr
+	if err := pasteCmd.Run(); err != nil {
+		// Best-effort cleanup before returning the paste error.
+		_ = exec.CommandContext(ctx, "tmux", c.args("delete-buffer", "-b", bufferName)...).Run()
+		return fmt.Errorf("tmux.LoadAndPasteBuffer paste-buffer(%s -> %s): %w (stderr: %s)",
+			bufferName, paneID, err, strings.TrimSpace(pasteStderr.String()))
+	}
+
+	delCmd := exec.CommandContext(ctx, "tmux", c.args("delete-buffer", "-b", bufferName)...)
+	if err := delCmd.Run(); err != nil {
+		log.Warn("tmux.LoadAndPasteBuffer cleanup", "buffer", bufferName, "err", err)
+	}
+	return nil
+}
+
+// PaneRoleInfo is one row from ListAgentPanes — session name, pane ID,
+// and the @canopy-role tag value (typically "agent:claude").
+type PaneRoleInfo struct {
+	Session string
+	ID      string
+	Role    string
+}
+
+// ListAgentPanes returns one row per pane on the tmux server whose
+// @canopy-role tag begins with "agent:".
+//
+// Implementation: list sessions, then per-session list-panes scoped via
+// `-s -t <session>`. Mirrors the LookupAllPanes call shape that's known
+// to expand pane-scope user-options correctly across tmux 3.4-3.6+.
+//
+// An earlier `list-panes -a -F '#{@canopy-role}'` implementation worked
+// on tmux 3.6 locally but failed in CI (Ubuntu tmux 3.4) — the format
+// engine in older versions doesn't expand pane-scope user-options when
+// enumerating server-wide. Per-session enumeration costs an extra
+// `list-sessions` call but is portable.
+//
+// Field separator is TAB. tmux user-options set via canopy never contain
+// tabs in practice; the only "arbitrary string" defence we owe is at the
+// role value level, which the prefix check below already handles.
+func (c *Client) ListAgentPanes(ctx context.Context) ([]PaneRoleInfo, error) {
+	sessCmd := exec.CommandContext(ctx, "tmux", c.args("list-sessions", "-F", "#{session_name}")...)
+	var sessStdout, sessStderr strings.Builder
+	sessCmd.Stdout = &sessStdout
+	sessCmd.Stderr = &sessStderr
+	if err := sessCmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("tmux.ListAgentPanes list-sessions: timed out: %w", ctx.Err())
+		}
+		stderrStr := strings.TrimSpace(sessStderr.String())
+		// "no server running" / "server exited" both mean: no live sessions.
+		if strings.Contains(stderrStr, "no server running") ||
+			strings.Contains(stderrStr, "server exited") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("tmux.ListAgentPanes list-sessions: %w (stderr: %s)", err, stderrStr)
+	}
+	sessOut := strings.TrimSpace(sessStdout.String())
+	if sessOut == "" {
+		return nil, nil
+	}
+
+	var rows []PaneRoleInfo
+	for _, session := range strings.Split(sessOut, "\n") {
+		if session == "" {
+			continue
+		}
+		paneCmd := exec.CommandContext(ctx, "tmux", c.args(
+			"list-panes", "-s", "-t", session, "-F",
+			fmt.Sprintf("#{pane_id}\t#{%s}", roleOption),
+		)...)
+		var paneStdout strings.Builder
+		paneCmd.Stdout = &paneStdout
+		// Per-session enumeration failures (session died mid-iter) are
+		// non-fatal; skip and continue with the rest.
+		if err := paneCmd.Run(); err != nil {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(paneStdout.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			role := parts[1]
+			if !strings.HasPrefix(role, "agent:") {
+				continue
+			}
+			rows = append(rows, PaneRoleInfo{
+				Session: session,
+				ID:      parts[0],
+				Role:    role,
+			})
+		}
+	}
+	return rows, nil
 }

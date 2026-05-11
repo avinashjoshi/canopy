@@ -146,6 +146,29 @@ func RoleForType(launcherType string) string {
 	return "agent:" + launcherType
 }
 
+// LauncherFromRole extracts the launcher type from a @canopy-role tag
+// value: "agent:claude" → "claude", "agent:codex" → "codex".
+//
+// Edge cases (per codex review of background-workspaces design):
+//   - "agent:" or "agent" → "" (empty/missing suffix)
+//   - "agent::foo" → "" (first token after "agent:" is empty)
+//   - "agent:claude:extra" → "claude" (first non-empty token)
+//
+// Empty return means the role is malformed — caller decides the policy
+// (StateUnknown for badge polling, reject for --prompt sends).
+func LauncherFromRole(role string) string {
+	const prefix = "agent:"
+	if !strings.HasPrefix(role, prefix) {
+		return ""
+	}
+	rest := role[len(prefix):]
+	if rest == "" {
+		return ""
+	}
+	parts := strings.SplitN(rest, ":", 2)
+	return parts[0] // may be "" if rest starts with ':'
+}
+
 // KnownAgents returns the sorted list of built-in agent type names.
 // Used by config.validate's error messages and `canopy init --with-scripts
 // --agent <foo>` to list valid choices.

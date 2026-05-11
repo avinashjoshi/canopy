@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/clog"
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/ghx"
@@ -299,6 +300,26 @@ type Model struct {
 	// just-killed row flips to "—" immediately rather than lagging
 	// the actual state by up to TTL seconds.
 	memCache *state.MemCache
+
+	// detector classifies agent-pane state for the badge column.
+	// Owns per-pane history; ticked every agentPollInterval. Single
+	// instance shared across the TUI lifetime; pruned every tick to
+	// drop history for panes that no longer exist.
+	detector *agent.Detector
+
+	// agentStates is the latest poll's session-name → state map.
+	// Snapshot pushed to projectlist via SetAgentStates after each
+	// successful tick. Keyed by tmux session name so Global-tab rows
+	// from different projects don't collide.
+	agentStates map[string]agent.State
+
+	// agentPollGen is the generation token for the agent-state poll
+	// loop (codex review v3-B3). Incremented on Init; in-flight ticks
+	// captured a value at schedule time and drop themselves if they
+	// see a newer generation. Only the accepted tick reschedules, so
+	// at most one tick is ever in flight regardless of how many times
+	// Init is re-entered.
+	agentPollGen uint64
 
 	// Confirm-kill modal (mode == confirmKillMode). K kills the
 	// workspace's tmux session; the y/N gate prevents accidental
@@ -722,6 +743,12 @@ func (m *Model) Init() tea.Cmd {
 		if cmd := upgradeRefreshCmd(m.upgradeRefreshFn); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	}
+	// Kick off the agent-state badge poll loop. The first tick fires
+	// after agentPollInterval; until then badges stay empty (matches
+	// the v3 design's stale-then-fresh acceptance).
+	if cmd := m.startAgentPolling(); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 	return tea.Batch(cmds...)
 }

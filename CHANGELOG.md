@@ -5,6 +5,55 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1.0] - 2026-05-10 — Background workspaces
+
+Fire-and-forget claude. Spawn a workspace with `canopy new --prompt "..." --no-attach`,
+walk away, come back, open the TUI, and SEE which one needs you. The first version
+where you can run three claudes in parallel without staring at any of them.
+
+### Added
+
+- `canopy new --prompt "<text>"` and `--prompt-file <path>` — send an initial
+  message to the agent pane right after workspace creation. Combine with the
+  existing `--no-attach` for true fire-and-forget. Multi-line prompts via
+  `--prompt-file` arrive at claude as one message (verified against claude's
+  paste-buffer behavior). 32KB cap; oversized files are rejected, never
+  silently truncated.
+- TUI badge column showing per-workspace agent state, polled every 2 seconds:
+  - ⚡ (cyan) — claude is thinking
+  - 💤 (gray) — claude is idle, ready for your next message
+  - ✋ (yellow) — claude is awaiting input (y/N or tool-permission popup blocking)
+  - · (subtle) — workspace has no agent pane
+- Press `?` for the legend.
+- New exit code: `canopy new --prompt` exits 2 (not 1) when the workspace was
+  created OK but the prompt couldn't be delivered. Scripts can now distinguish
+  "workspace failed" from "workspace OK, agent didn't get its prompt".
+
+### How it stays safe
+
+- Trust-dialog state machine waits up to 10s for claude's first-launch
+  trust prompt, dismisses it, then verifies claude is actually rendering
+  before typing anything. If claude crashed and the pane fell back to a
+  shell, the prompt is refused — no shell metacharacter execution from
+  `--prompt "rm -rf /tmp"`.
+- Verification looks at the bottom of the pane (where the live cursor is),
+  not anywhere on screen, so stale claude scrollback after a crash can't
+  fool the check.
+- Every tmux call has a 500ms-2s timeout; a hung tmux server can't freeze
+  the CLI or the TUI.
+
+### Behind the scenes
+
+- New `internal/agent` Detector classifies pane state from periodic content
+  captures. Strips ANSI escapes, the spinner line, the auto-mode footer,
+  and the input-prompt line before hashing — so user typing into claude
+  doesn't read as "thinking".
+- Polling skips dead workspaces automatically (only alive tmux sessions
+  show up in `list-panes -a`). One batched tmux call per 2s tick across
+  all workspaces, regardless of count.
+- Generation token on the poll loop guarantees at most one tick in flight,
+  even if Init re-fires.
+
 ## [0.16.0.0] - 2026-05-10 — Pane-role contract (internal refactor)
 
 Canopy now addresses tmux panes by ROLE instead of by index. Every pane
