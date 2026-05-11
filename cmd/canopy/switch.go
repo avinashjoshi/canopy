@@ -55,7 +55,7 @@ func switchCmd() *cobra.Command {
 				// Backfill @canopy-role tags for v0.15-style sessions that
 				// never went through the v0.16+ buildSession (which tags at
 				// creation). Best-effort: errors logged, never block attach.
-				_ = workspace.BackfillRoles(ctx, mgr.Tmux, ws.TmuxSessionName(), mgr.Cfg.Agent.Type)
+				workspace.BackfillRoles(ctx, mgr.Tmux, ws.TmuxSessionName(), mgr.Cfg.Agent.Type)
 				fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", ws.TmuxSessionName())
 				return mgr.Tmux.Attach(ctx, ws.TmuxSessionName())
 
