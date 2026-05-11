@@ -34,7 +34,7 @@ func TestKill_ReapsDetachedNvimEmbed(t *testing.T) {
 	session := "reap-test"
 	// Start an interactive nvim pane. nvim immediately forks
 	// `nvim --embed .` as its editor backend.
-	if err := c.Create(ctx, session, cwd, "nvim ."); err != nil {
+	if _, err := c.Create(ctx, session, cwd, "nvim ."); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -90,7 +90,7 @@ func TestKillServerAndReap_ReapsDetachedNvimEmbed(t *testing.T) {
 
 	cwd := t.TempDir()
 	session := "reap-server-test"
-	if err := c.Create(ctx, session, cwd, "nvim ."); err != nil {
+	if _, err := c.Create(ctx, session, cwd, "nvim ."); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

@@ -76,7 +76,7 @@ func TestSession_HappyPath(t *testing.T) {
 		t.Fatalf("pre-create HasSession: got (%v, %v); want (false, nil)", has, err)
 	}
 
-	if err := c.Create(ctx, name, cwd, ""); err != nil {
+	if _, err := c.Create(ctx, name, cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -103,11 +103,11 @@ func TestCreate_AlreadyExists(t *testing.T) {
 	name := "already-exists"
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, name, cwd, ""); err != nil {
+	if _, err := c.Create(ctx, name, cwd, ""); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 
-	err := c.Create(ctx, name, cwd, "")
+	_, err := c.Create(ctx, name, cwd, "")
 	if !errors.Is(err, tmux.ErrSessionExists) {
 		t.Fatalf("second Create: got %v; want errors.Is(... ErrSessionExists)", err)
 	}
@@ -123,16 +123,16 @@ func TestSplitPane(t *testing.T) {
 	name := "split-test"
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, name, cwd, ""); err != nil {
+	if _, err := c.Create(ctx, name, cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
+	if _, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
 		t.Fatalf("SplitPane #1: %v", err)
 	}
-	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical); err != nil {
+	if _, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical); err != nil {
 		t.Fatalf("SplitPane #2: %v", err)
 	}
-	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical); err != nil {
+	if _, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitVertical); err != nil {
 		t.Fatalf("SplitPane #3: %v", err)
 	}
 
@@ -157,11 +157,11 @@ func TestSelectPaneDirection(t *testing.T) {
 	name := "select-pane-dir-test"
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, name, cwd, ""); err != nil {
+	if _, err := c.Create(ctx, name, cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	// -d keeps active on pane 0; the new pane is to the right.
-	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
+	if _, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
 		t.Fatalf("SplitPane: %v", err)
 	}
 	if err := c.SelectPaneDirection(ctx, name, "R"); err != nil {
@@ -186,10 +186,10 @@ func TestSelectLayout(t *testing.T) {
 	name := "layout-test"
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, name, cwd, ""); err != nil {
+	if _, err := c.Create(ctx, name, cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
+	if _, err := c.SplitPane(ctx, name, cwd, "", tmux.SplitHorizontal); err != nil {
 		t.Fatalf("SplitPane: %v", err)
 	}
 	if err := c.SelectLayout(ctx, name, "tiled"); err != nil {
@@ -248,7 +248,7 @@ func TestRename_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, "rename-old", cwd, ""); err != nil {
+	if _, err := c.Create(ctx, "rename-old", cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if err := c.Rename(ctx, "rename-old", "rename-new", "new"); err != nil {
@@ -278,10 +278,10 @@ func TestRename_Collision(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, "rename-a", cwd, ""); err != nil {
+	if _, err := c.Create(ctx, "rename-a", cwd, ""); err != nil {
 		t.Fatalf("Create a: %v", err)
 	}
-	if err := c.Create(ctx, "rename-b", cwd, ""); err != nil {
+	if _, err := c.Create(ctx, "rename-b", cwd, ""); err != nil {
 		t.Fatalf("Create b: %v", err)
 	}
 	err := c.Rename(ctx, "rename-a", "rename-b", "")
@@ -296,7 +296,7 @@ func TestRename_Identity(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
 
-	if err := c.Create(ctx, "rename-id", cwd, ""); err != nil {
+	if _, err := c.Create(ctx, "rename-id", cwd, ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if err := c.Rename(ctx, "rename-id", "rename-id", ""); err != nil {
