@@ -25,7 +25,19 @@ internal/git/                  worktree add/remove/sanitize, fetch, default-bran
 internal/tmux/                 Client struct (with optional named socket for tests).
                                HasSession / Create / SplitPane / SelectLayout /
                                SelectPaneDirection / Attach (syscall.Exec) /
-                               KillServer. SafeName helper.
+                               KillServer. SafeName helper. Create and SplitPane
+                               return the new pane ID (captured via -P -F
+                               '#{pane_id}') so callers can tag panes by role.
+                               roles.go: SetRole / LookupPane / LookupAllPanes /
+                               SelectPane / PaneCount / PanesInOrder /
+                               ListAllRoles — pane addressing by @canopy-role
+                               tmux user-option (process-proof, persistent for
+                               the pane's lifetime). Replaces positional pane
+                               indexing across the workspace lifecycle.
+internal/agent/                Agent launcher metadata (claude / codex / aider).
+                               RoleForType produces canonical role strings
+                               (`agent:claude`, etc.) consumed by the tmux
+                               role-addressing layer.
 internal/hooks/                exec.CommandContext-based script runner with
                                process-group kill + WaitDelay so SIGINT cleanly
                                unwinds bundle install style children.
@@ -93,7 +105,9 @@ Strictly leaf-up. Lower packages don't import higher ones.
 │   6. git.DetectDefaultBranch + git.Fetch (best-effort)
 │   7. git.Add(repoRoot, branch, path, "origin/<default>")
 │   8. hooks.Run(scripts.setup, env=CANOPY_*) -- if non-empty
-│   9. tmux.Create + 2 SplitPane + (no SelectLayout — proportions are baked in)
+│   9. tmux.Create + 2 SplitPane (each returns paneID) + tmux.SetRole on each
+│      pane (`ide`, `terminal:shell`, `agent:<launcher>`) — no SelectLayout,
+│      proportions are baked in
 └─
 
 ┌─ Phase 3 (state.WithLock):
@@ -163,6 +177,8 @@ project_base + 20  = canopy new ws#2
 | A new CLI subcommand | `cmd/canopy/<name>.go`, register in `main.go`'s `root.AddCommand` |
 | A new git operation | `internal/git/worktree.go` |
 | A new tmux operation | `internal/tmux/session.go` |
+| A new pane role or role-lookup helper | `internal/tmux/roles.go` |
+| A new agent launcher | `internal/agent/launchers.go` (add to the registry; `RoleForType` picks up the new type automatically) |
 | A new env var canopy passes to scripts | `internal/hooks/runner.go`'s `WorkspaceEnv` |
 | A new field on canopy.json | `internal/config/config.go`'s `Config`/`Scripts` struct |
 | A new workspace state field | `internal/state/state.go`'s `Workspace` struct (and bump `SchemaVersion` if breaking) |
