@@ -81,8 +81,8 @@ func resolveOnForNew(spec, localProject, explicitRemoteCwd string) (resolvedHost
 		if perr != nil {
 			if errors.Is(perr, host.ErrProjectNotFound) {
 				return resolvedHost{}, fmt.Errorf(
-					"project %q not registered on host %q. Run: canopy host project add %s %s <remote-path>",
-					localProject, spec, spec, localProject)
+					"project %q not registered on host %q. Run: canopy project add %s <remote-path> --on %s",
+					localProject, spec, localProject, spec)
 			}
 			return resolvedHost{}, perr
 		}
@@ -154,7 +154,7 @@ func resolveOnForSwitch(spec, preferredProject, explicitRemoteCwd string) (resol
 		// Still nothing? Host has no projects registered.
 		if cwd == "" {
 			return resolvedHost{}, fmt.Errorf(
-				"host %q has no projects registered. Run: canopy host project add %s <project-name> <remote-path> (or pass --remote-cwd)",
+				"host %q has no projects registered. Run: canopy project add <project-name> <remote-path> --on %s (or pass --remote-cwd)",
 				spec, spec)
 		}
 	}

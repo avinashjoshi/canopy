@@ -176,7 +176,7 @@ func (r *Registry) RemoveProject(hostName, projectName string) error {
 // GetProject returns the remote path for a (host, project) pair.
 // Distinguishes "host unknown" from "host known but project not
 // registered on it" so the dispatcher can print the right error
-// (the latter is recoverable with `canopy host project add`; the
+// (the latter is recoverable with `canopy project add ... --on <host>`; the
 // former requires `canopy host add` first).
 func (r *Registry) GetProject(hostName, projectName string) (string, error) {
 	rf, err := r.load()
@@ -221,6 +221,48 @@ func (r *Registry) ListProjects(hostName string) ([]ProjectEntry, error) {
 type ProjectEntry struct {
 	Name string
 	Path string
+}
+
+// AllProjectEntry is the cross-host listing shape returned by
+// ListAllProjects. Each entry pairs the host name with the project
+// name and remote path, enabling the `canopy project ls` view that
+// shows everything you've registered anywhere.
+type AllProjectEntry struct {
+	HostName string
+	Name     string
+	Path     string
+}
+
+// ListAllProjects returns every (host, project) pair in the registry,
+// sorted by host name then project name. Used by `canopy project ls`
+// without --on filter ("show me everywhere I have stuff registered").
+func (r *Registry) ListAllProjects() ([]AllProjectEntry, error) {
+	rf, err := r.loadAndMaybePersistMigration()
+	if err != nil {
+		return nil, err
+	}
+	hostNames := make([]string, 0, len(rf.Hosts))
+	for name := range rf.Hosts {
+		hostNames = append(hostNames, name)
+	}
+	sort.Strings(hostNames)
+	var out []AllProjectEntry
+	for _, hostName := range hostNames {
+		h := rf.Hosts[hostName]
+		projNames := make([]string, 0, len(h.Projects))
+		for name := range h.Projects {
+			projNames = append(projNames, name)
+		}
+		sort.Strings(projNames)
+		for _, projName := range projNames {
+			out = append(out, AllProjectEntry{
+				HostName: hostName,
+				Name:     projName,
+				Path:     h.Projects[projName],
+			})
+		}
+	}
+	return out, nil
 }
 
 // Resolve returns a copy of the named host. ErrHostNotFound if missing.
@@ -309,7 +351,7 @@ func (r *Registry) load() (*registryFile, error) {
 						"from", "v1 project_path",
 						"to", "v2 projects.default",
 						"path", h.LegacyProjectPath,
-						"hint", "rename with `canopy host project rm "+name+" default; canopy host project add "+name+" <name> <path>`")
+						"hint", "rename with `canopy project rm default --on "+name+"; canopy project add <name> <path> --on "+name+"`")
 				}
 				h.LegacyProjectPath = ""
 			}
