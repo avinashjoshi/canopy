@@ -12,6 +12,40 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## 📋 OPEN (P1) — `canopy host add` connectivity probe + ssh-copy-id offer (added 2026-05-12, surfaced during Phase 1b dogfood)
+
+Avi added `pi` as a host without SSH key auth set up. The TUI refresh fails fast (correct — BatchMode), but there's no help bridging the user from "I just registered this host" to "wait, I need keys." Add a connectivity probe to `canopy host add`:
+
+1. After successful registration, run `ssh -o BatchMode=yes -o ConnectTimeout=5 <target> true`.
+2. On success: print "✓ connection confirmed".
+3. On `Permission denied (publickey)`: prompt "Set up passwordless SSH now? (runs `ssh-copy-id <target>`) [Y/n]". If yes, exec ssh-copy-id directly (it reuses the user's terminal for the password prompt). If no, print "OK; run `ssh-copy-id <target>` when ready. Refreshes will fail until then."
+4. On network unreachable: warn but don't block registration (host might be asleep).
+
+Phase 1c's huh wizard for `canopy host add` is the natural home for this — the wizard can run the probe interactively + offer key setup as a follow-up step. Schedule with 1c.
+
+---
+
+## 📋 OPEN (P2) — Surface refresh errors in TUI Global tab section header (added 2026-05-12)
+
+Right now hosts whose refresh failed (auth, network, etc.) don't appear in the TUI Global tab at all — their cache entry has empty `workspaces` and `last_error` set, but the projectlist render path skips them entirely. Better UX: render a section header for failed hosts too, with the error condition shown:
+
+  tower (auth failed)         — last seen never · key not configured
+  fly-iad (offline)           — last seen 2h ago
+
+This gives the user visibility into "canopy IS trying tower, here's why it can't reach it" rather than a silently empty listing. Implementation: extend `internal/ui/projectlist`'s render to walk the remotes-cache snapshots, not just `state.GlobalRow`s, so failed-host sections render alongside successful ones.
+
+---
+
+## 📋 OPEN (P1) — Overlay shortcuts (Ctrl+Alt+c, prefix+g) broken when remote rows loaded (added 2026-05-12)
+
+Avi reports: when the TUI is running with remote rows visible, the canopy-summon overlay shortcuts don't fire. Specifically Ctrl+Alt+c (from v0.15.2's prefix-less chord) and prefix+g (from `canopy install tmux`).
+
+Suspected: the popup-mode `canopy` invocation (CANOPY_IN_POPUP=1) does the same remote refresh that the fullscreen TUI does, and either (a) the BatchMode SSH ConnectTimeout=5 makes the popup hang for ~5s before rendering, or (b) the popup terminal-mode + background goroutine combination deadlocks, or (c) refreshRemoteCmd's tea.Cmd dispatch interferes with the popup's much-shorter lifecycle.
+
+Need to repro + diagnose. Likely fix: popup mode should SKIP the remote refresh entirely (it's transient — fullscreen mode handles polling) and just render from the cache. Or: respect a shorter timeout in popup mode.
+
+---
+
 ## 📋 OPEN (P3) — Nested-canopy guard scope (added 2026-05-12)
 
 The CANOPY_ALLOW_NESTED guard in `cmd/canopy/guard.go` fires for every canopy subcommand when invoked inside a canopy tmux session, including pure-metadata verbs like `canopy host add/ls/rm` and `canopy version`. The guard exists because canopy's tmux launch/attach plumbing gets confused when canopy creates a session from inside another canopy session. But host-registry CLI doesn't touch tmux at all.
