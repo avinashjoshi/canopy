@@ -57,7 +57,11 @@ func switchCmd() *cobra.Command {
 			// canopy version and project layout). Tower's canopy figures
 			// it out. Laptop is the renderer; tower is the brain.
 			if switchFlags.onHost != "" {
-				return dispatchSwitchToRemote(ctx, switchFlags.onHost, name)
+				resolved, err := resolveOn(switchFlags.onHost)
+				if err != nil {
+					return err
+				}
+				return dispatchSwitchToRemote(ctx, resolved, name)
 			}
 
 			mgr, err := loadManager()
@@ -142,12 +146,13 @@ func switchCmd() *cobra.Command {
 // ctrl-c, and terminal modes all need to flow cleanly. Exec replacement
 // gives mosh a clean inheritance and avoids canopy sitting around as a
 // zombie parent.
-func dispatchSwitchToRemote(ctx context.Context, target, wsName string) error {
+func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName string) error {
+	target := resolved.SSHTarget
 	if err := host.CheckMoshAvailable(); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "Attaching to %s via mosh+tmux...\n", target)
+	fmt.Fprintf(os.Stderr, "Attaching to %s (%s) via mosh+tmux...\n", target, resolved.Source)
 
 	// Resolve mosh's absolute path for exec (syscall.Exec needs absolute path).
 	moshBin, err := exec.LookPath("mosh")
@@ -166,11 +171,16 @@ func dispatchSwitchToRemote(ctx context.Context, target, wsName string) error {
 	// from cwd to find canopy.json. mosh-server starts in $HOME by
 	// default, which has no project. Without an explicit cd, switch
 	// fails and the exec chain dies before tmux attach takes the PTY,
-	// leaving the user staring at "[mosh is exiting]". Phase 1
-	// absorbs this into hosts.json (per-host project registry).
+	// leaving the user staring at "[mosh is exiting]". Phase 1a
+	// absorbs this into hosts.json (per-host project registry); the
+	// explicit --remote-cwd still wins as a per-command override.
+	cwd := switchFlags.remoteCwd
+	if cwd == "" {
+		cwd = resolved.ProjectPath
+	}
 	remoteCmd := `export PATH="$HOME/.local/bin:$PATH"; `
-	if switchFlags.remoteCwd != "" {
-		remoteCmd += "cd " + shellQuote(switchFlags.remoteCwd) + "; "
+	if cwd != "" {
+		remoteCmd += "cd " + shellQuote(cwd) + "; "
 	}
 	remoteCmd += "exec canopy switch " + shellQuote(wsName)
 	argv := []string{"mosh", target, "--", "bash", "-lc", remoteCmd}

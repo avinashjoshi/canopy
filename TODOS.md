@@ -12,6 +12,33 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## 📋 OPEN (P3) — Nested-canopy guard scope (added 2026-05-12)
+
+The CANOPY_ALLOW_NESTED guard in `cmd/canopy/guard.go` fires for every canopy subcommand when invoked inside a canopy tmux session, including pure-metadata verbs like `canopy host add/ls/rm` and `canopy version`. The guard exists because canopy's tmux launch/attach plumbing gets confused when canopy creates a session from inside another canopy session. But host-registry CLI doesn't touch tmux at all.
+
+Fix: tag commands that don't interact with tmux (host, version, possibly statusline) so the guard exempts them. Either a per-command flag in the cobra setup or a small allowlist in main.go's pre-run hook.
+
+Defer until v0.17 ships and there are >1 of these subcommands; for now it's annoying-but-tolerable with the CANOPY_ALLOW_NESTED escape.
+
+---
+
+## 📋 OPEN (P3) — `BackfillRoles` re-tags already-tagged panes (added 2026-05-12)
+
+Observed during v0.17.0 Phase 0 dogfooding on the omarchy tower running canopy v0.16.2.1+cce6199.
+
+Sequence:
+1. `canopy new` (remote) creates a workspace; `buildSession` tags all 3 panes with `@canopy-role=...` at creation time.
+2. Verified via `tmux list-panes -t canopy/<name> -F '#{pane_id} @canopy-role=#{@canopy-role}'` — all panes correctly tagged.
+3. `canopy switch <name>` calls `workspace.BackfillRoles(...)`. The log shows `workspace.backfill.tagged panes_tagged: 3` — claiming it tagged 3 panes that were already tagged.
+
+Bug is in `internal/workspace/backfill.go`: either the "is this pane already tagged" check is failing (treats existing tag as "untagged"), or the log message fires unconditionally even when nothing was actually re-tagged.
+
+Cosmetic — no functional impact (tagging is idempotent). But it floods the canopy.log with spurious events and the metric is misleading. Worth fixing in a follow-up PR.
+
+Repro: any workspace created via v0.16+ buildSession, then attached via `canopy switch`. The "tagged" log fires every time.
+
+---
+
 ## 📋 OPEN — v0.17.x — Remote canopy workspaces (BYO box, multi-host) (added 2026-05-11)
 
 Greenlit via /office-hours + /plan-ceo-review on 2026-05-11. Design doc + CEO plan persisted:

@@ -68,7 +68,11 @@ func newCmd() *cobra.Command {
 			// laptop-side state-cache integration so the new workspace
 			// shows up in the local TUI without manual refresh.
 			if newWorkspaceFlags.onHost != "" {
-				return dispatchNewToRemote(ctx, newWorkspaceFlags.onHost, args, cmd.OutOrStdout(), cmd.ErrOrStderr())
+				resolved, err := resolveOn(newWorkspaceFlags.onHost)
+				if err != nil {
+					return err
+				}
+				return dispatchNewToRemote(ctx, resolved, args, cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
 
 			mgr, err := loadManager()
@@ -209,13 +213,14 @@ func newCmd() *cobra.Command {
 //
 // Phase 1 will pipe prompt text via SSH stdin into a remote temp file
 // so it never appears in `ps aux` on either side.
-func dispatchNewToRemote(ctx context.Context, target string, posArgs []string, stdout, stderr io.Writer) error {
+func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []string, stdout, stderr io.Writer) error {
+	target := resolved.SSHTarget
 	if newWorkspaceFlags.prompt != "" || newWorkspaceFlags.promptFile != "" {
 		return fmt.Errorf(
-			"--on does not support --prompt / --prompt-file in v0.17.0 Phase 0.\n"+
+			"--on does not support --prompt / --prompt-file in v0.17.0 Phase 0/1a.\n"+
 				"Create the remote workspace first, then attach with `canopy switch --on %s <name>` and type the prompt.\n"+
-				"Phase 1 will pipe prompt text via SSH stdin (see TODOS.md).",
-			target)
+				"Phase 1f will pipe prompt text via SSH stdin (see TODOS.md).",
+			newWorkspaceFlags.onHost)
 	}
 
 	var canopyArgs []string
@@ -244,13 +249,22 @@ func dispatchNewToRemote(ctx context.Context, target string, posArgs []string, s
 	// practice `canopy new` takes none today but future-proof the call).
 	canopyArgs = append(canopyArgs, posArgs...)
 
+	// Resolve the remote working directory. Per-command --remote-cwd
+	// wins; otherwise fall back to the registered host's project_path.
+	// Phase 0 required the explicit flag every time; Phase 1a's
+	// registry stores the path per-host so the daily verb is just
+	// `--on tower --name foo`.
+	cwd := newWorkspaceFlags.remoteCwd
+	if cwd == "" {
+		cwd = resolved.ProjectPath
+	}
 	// Build a small shell script and pipe it to `bash -l` on the remote
 	// via stdin. The login shell sources ~/.bash_profile / ~/.profile,
 	// which is where most install scripts add ~/.local/bin to PATH.
 	// `set -e` halts on cd failure so we don't accidentally run canopy
 	// in the wrong directory.
-	script := buildRemoteScript(newWorkspaceFlags.remoteCwd, canopyArgs)
-	fmt.Fprintf(stderr, "Dispatching to %s:\n%s", target, indent(script, "  "))
+	script := buildRemoteScript(cwd, canopyArgs)
+	fmt.Fprintf(stderr, "Dispatching to %s (%s):\n%s", target, resolved.Source, indent(script, "  "))
 
 	c := host.SSHCmd(ctx, target, "bash", "-l")
 	c.Stdout = stdout
@@ -260,7 +274,7 @@ func dispatchNewToRemote(ctx context.Context, target string, posArgs []string, s
 		return fmt.Errorf("remote canopy new failed: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "\nRemote workspace created. Attach with:\n  canopy switch --on %s <name>\n", target)
+	fmt.Fprintf(stdout, "\nRemote workspace created. Attach with:\n  canopy switch --on %s <name>\n", newWorkspaceFlags.onHost)
 	return nil
 }
 

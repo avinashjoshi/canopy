@@ -124,6 +124,7 @@ func main() {
 	root.AddCommand(newRunCmd())
 	root.AddCommand(newUseCmd())
 	root.AddCommand(newUpgradeCmd())
+	root.AddCommand(hostCmd()) // v0.17.0 Phase 1a: remote host registry
 
 	if err := root.Execute(); err != nil {
 		// Distinguish "workspace OK, prompt failed" (exit 2) from
