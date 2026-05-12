@@ -869,10 +869,11 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea
 func (m *Model) refresh() tea.Cmd {
 	cmds := []tea.Cmd{refreshCmdWithMem(m.mgr, m.tc, m.store, m.memCache)}
 	if !m.remoteRefreshing {
-		if cmd := refreshRemoteCmd(); cmd != nil {
-			m.remoteRefreshing = true
-			cmds = append(cmds, cmd)
-		}
+		// refreshRemoteCmd is always non-nil — it returns an empty
+		// remoteRowsLoadedMsg when no hosts are registered. We always
+		// dispatch it so the refreshing-latch lifecycle is consistent.
+		m.remoteRefreshing = true
+		cmds = append(cmds, refreshRemoteCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -886,31 +887,38 @@ func (m *Model) refresh() tea.Cmd {
 // also persisted to ~/.canopy/remotes-cache.json so the next session
 // has last-known rows even if some hosts are offline at startup.
 //
-// Returns nil if there are no registered hosts (saves a tea.Batch
-// no-op slot) or if the registry can't be loaded (logged + ignored).
+// CRITICAL: ALL I/O happens inside the returned closure. The outer
+// function does no work — Bubbletea requires this so tea.Cmd dispatch
+// stays off the UI thread. Loading hosts.json, flock-and-migration,
+// SSH fan-out, and remotes-cache.json save all run in the goroutine
+// Bubbletea spawns for the closure.
 func refreshRemoteCmd() tea.Cmd {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return nil
-	}
-	canopyHome := filepath.Join(home, ".canopy")
-	reg, err := host.NewRegistry(canopyHome)
-	if err != nil {
-		log.Warn("ui.refresh.remote.registry-failed", "err", err)
-		return nil
-	}
-	hosts, err := reg.List()
-	if err != nil {
-		log.Warn("ui.refresh.remote.list-failed", "err", err)
-		return nil
-	}
-	if len(hosts) == 0 {
-		return nil
-	}
-	cache, _ := state.NewRemotesCache(canopyHome)
-	refresher := &host.Refresher{} // default 3s timeout per host
-
 	return func() tea.Msg {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return remoteRowsLoadedMsg{}
+		}
+		canopyHome := filepath.Join(home, ".canopy")
+		reg, err := host.NewRegistry(canopyHome)
+		if err != nil {
+			log.Warn("ui.refresh.remote.registry-failed", "err", err)
+			return remoteRowsLoadedMsg{err: err}
+		}
+		hosts, err := reg.List()
+		if err != nil {
+			log.Warn("ui.refresh.remote.list-failed", "err", err)
+			return remoteRowsLoadedMsg{err: err}
+		}
+		if len(hosts) == 0 {
+			// No registered hosts; emit an empty msg so the UI
+			// clears remoteRefreshing and the next refresh tick is
+			// free to run. Without this, m.remoteRefreshing latches
+			// true forever and subsequent refreshes silently skip.
+			return remoteRowsLoadedMsg{}
+		}
+		cache, _ := state.NewRemotesCache(canopyHome)
+		refresher := &host.Refresher{} // default 3s timeout per host
+
 		ctx := context.Background()
 		results := refresher.Tick(ctx, hosts)
 
