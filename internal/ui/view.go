@@ -10,6 +10,7 @@ import (
 
 	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/ui/hosts"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and
@@ -77,6 +78,16 @@ func (m *Model) View() string {
 	if m.err != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.err)))
 		b.WriteString("\n\n")
+	}
+
+	// v0.17.0 Phase 1c: Hosts tab dispatches to its own subpackage
+	// renderer. Bypasses the projectlist + empty-tab handling below
+	// because hosts have their own row shape (and own empty state).
+	if m.tab == tabHosts {
+		b.WriteString(m.renderHostsTab())
+		b.WriteString("\n\n")
+		b.WriteString(m.renderHelpLine())
+		return b.String()
 	}
 
 	// Empty-tab onboarding text. projectlist's own emptyState() shows
@@ -195,9 +206,15 @@ func (m *Model) renderTabBar() string {
 		}
 	}
 
+	// v0.17.0 Phase 1c: Hosts tab is "alive" if any hosts are
+	// registered. Empty registry = dimmed pill (matches the
+	// "tabs without content render dim" rule).
+	hasHosts := m.hostsHasEntries()
+
 	local := tabPill(localLabel, m.tab == tabLocal, hasLocal)
 	global := tabPill("Global", m.tab == tabGlobal, hasGlobal)
-	return local + " " + global
+	hosts := tabPill("Hosts", m.tab == tabHosts, hasHosts)
+	return local + " " + global + " " + hosts
 }
 
 // renderSearchLine returns the search input pill (when in search mode)
@@ -236,6 +253,26 @@ func (m *Model) renderSearchLine() string {
 // the field directly (decoupling internal storage from renderers).
 func (m *Model) allRowsOrFallback() []state.GlobalRow {
 	return m.allRows
+}
+
+// hostsHasEntries returns whether any hosts are registered. Used by
+// renderTabBar to dim/highlight the Hosts pill — empty registry =
+// dim, matching the "empty tabs render dim" convention. v0.17.0
+// Phase 1c.
+func (m *Model) hostsHasEntries() bool {
+	return len(m.hostList) > 0
+}
+
+// renderHostsTab is the Hosts tab body. Delegates to the
+// internal/ui/hosts subpackage's BuildRows + Render. Width-aware per
+// the D2 design decision (tiered column drop at narrow widths).
+func (m *Model) renderHostsTab() string {
+	rows := hosts.BuildRows(m.hostList, m.remoteSnaps)
+	w := m.width
+	if w <= 0 {
+		w = 100 // reasonable default before WindowSizeMsg lands
+	}
+	return hosts.Render(rows, w)
 }
 
 // renderConfirmRetry renders the y/N gate for `R` on a non-broken

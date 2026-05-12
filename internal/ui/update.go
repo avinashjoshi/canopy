@@ -164,9 +164,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// rows in m.remoteRows; the next filteredRows() call combines
 		// them with local m.allRows. Errors are non-fatal — last-known
 		// remote rows stay visible.
+		//
+		// Phase 1c also stashes the host registry list + per-host
+		// snapshots so the Hosts tab can render fleet status without
+		// re-reading the registry on every frame.
 		m.remoteRefreshing = false
 		if msg.rows != nil {
 			m.remoteRows = msg.rows
+		}
+		if msg.hosts != nil {
+			m.hostList = msg.hosts
+		}
+		if msg.snaps != nil {
+			m.remoteSnaps = msg.snaps
 		}
 		m.list.SetRows(m.filteredRows())
 		return m, nil
@@ -577,19 +587,41 @@ func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // broken — neither helps the user. The cursor row's ProjectRoot
 // becomes the new Local context.
 func actionTabSwitch(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.tab == tabLocal {
+	// v0.17.0 Phase 1c: cycle Local → Global → Hosts → Local.
+	// Hosts tab only inserts into the cycle when at least one host
+	// is registered — otherwise users hitting Tab repeatedly never
+	// land on an empty Hosts tab and get confused.
+	switch m.tab {
+	case tabLocal:
 		m.tab = tabGlobal
 		m.list.SetRows(m.filteredRows())
 		return m, nil
-	}
-	if m.currentProject == "" {
-		row, ok := m.list.CursorRow()
-		if ok && row.ProjectRoot != "" {
-			return actionFocusProject(m, msg)
+	case tabGlobal:
+		if m.hostsHasEntries() {
+			m.tab = tabHosts
+			return m, nil
 		}
+		// No hosts registered → skip past Hosts tab to Local.
+		if m.currentProject == "" {
+			row, ok := m.list.CursorRow()
+			if ok && row.ProjectRoot != "" {
+				return actionFocusProject(m, msg)
+			}
+		}
+		m.tab = tabLocal
+		m.list.SetRows(m.filteredRows())
+		return m, nil
+	case tabHosts:
+		if m.currentProject == "" {
+			row, ok := m.list.CursorRow()
+			if ok && row.ProjectRoot != "" {
+				return actionFocusProject(m, msg)
+			}
+		}
+		m.tab = tabLocal
+		m.list.SetRows(m.filteredRows())
+		return m, nil
 	}
-	m.tab = tabLocal
-	m.list.SetRows(m.filteredRows())
 	return m, nil
 }
 

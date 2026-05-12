@@ -318,6 +318,17 @@ type Model struct {
 	// attempts so we don't fan-out twice on overlapping TUI ticks.
 	remoteRefreshing bool
 
+	// hostList is the snapshot of registered hosts at the most recent
+	// refresh. Drives the Hosts tab. Repopulated as part of every
+	// remote refresh so the Hosts tab stays in sync without a separate
+	// load path. v0.17.0 Phase 1c.
+	hostList []host.Host
+
+	// remoteSnaps is the in-memory mirror of remotes-cache.json,
+	// keyed by host name. Used by the Hosts tab to render status
+	// pills + last-seen. v0.17.0 Phase 1c.
+	remoteSnaps map[string]*state.RemoteHostSnapshot
+
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
 	// instead of forwarding to the listMode keymap.
@@ -510,6 +521,12 @@ const (
 	// projects. Pre-selected when canopy was invoked from outside any
 	// project; the "give me everything" view.
 	tabGlobal
+	// tabHosts shows the fleet of registered remote canopy hosts —
+	// status, project + workspace counts, version, last-seen. v0.17.0
+	// Phase 1c. Empty section when no hosts are registered (the user
+	// just sees `n: add host`). Tab cycles through Project → Global →
+	// Hosts.
+	tabHosts
 )
 
 // managerForRow returns a *workspace.Manager scoped to the row's project.
@@ -841,8 +858,9 @@ type rowsLoadedMsg struct {
 // Phase 1b. Bubbletea routes this in parallel with the local
 // rowsLoadedMsg; the Model merges both into the rendered listing.
 type remoteRowsLoadedMsg struct {
-	rows  []state.GlobalRow                  // already host-tagged + flattened
-	snaps map[string]*state.RemoteHostSnapshot // for persistence to remotes-cache.json
+	rows  []state.GlobalRow                    // already host-tagged + flattened
+	snaps map[string]*state.RemoteHostSnapshot // for persistence to remotes-cache.json + Hosts tab
+	hosts []host.Host                          // host registry snapshot, for the Hosts tab
 	err   error
 }
 
@@ -970,7 +988,7 @@ func refreshRemoteCmd() tea.Cmd {
 			}
 		}
 
-		return remoteRowsLoadedMsg{rows: rows, snaps: snaps}
+		return remoteRowsLoadedMsg{rows: rows, snaps: snaps, hosts: hosts}
 	}
 }
 
