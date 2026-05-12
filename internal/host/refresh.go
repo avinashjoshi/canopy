@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -139,19 +140,34 @@ func refreshOneHost(parent context.Context, h Host, timeout time.Duration) Resul
 	defer cancel()
 
 	start := time.Now()
-	// `canopy ls --json` doesn't need a project cwd (uses global state)
-	// so no cd dance. PATH-prepending matches the dispatch path.
+	// Pipe the script via stdin to `bash -l` on the remote — NOT
+	// `bash -lc <script>` as an argv. SSH joins all remote args with
+	// spaces, so the latter form ends up word-split on the remote
+	// shell: bash receives `bash -lc export PATH=...` where only
+	// "export" is the -c command and everything else becomes $0/$1/...
+	// (silently ignored). Stdin avoids the whole quoting nightmare —
+	// bash reads the script as one stream of bytes.
+	//
+	// PATH-prepending: `~/.local/bin` is where canopy's curl-installer
+	// puts the binary, but non-interactive SSH-command shells skip
+	// .bashrc (interactive guard on omarchy / Arch / Debian), so we
+	// can't rely on profile PATH-additions. Set it explicitly.
+	//
 	// SSHCmdBatch (NOT SSHCmd): BatchMode=yes prevents password prompts
 	// from hanging this goroutine. Without it, a host that doesn't have
 	// SSH key auth set up would hang the refresh forever AND corrupt
 	// the Bubbletea TUI render (SSH writes password prompts to /dev/tty
 	// directly, bypassing our captured stdout/stderr).
-	remoteCmd := `export PATH="$HOME/.local/bin:$PATH"; exec canopy ls --json --all`
-	cmd := SSHCmdBatch(ctx, h.SSHTarget, "bash", "-lc", remoteCmd)
+	script := `set -e
+export PATH="$HOME/.local/bin:$PATH"
+exec canopy ls --json --all
+`
+	cmd := SSHCmdBatch(ctx, h.SSHTarget, "bash", "-l")
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	cmd.Stdin = strings.NewReader(script)
 
 	if err := cmd.Run(); err != nil {
 		// Don't include full stderr in the wrapped error — keeps the
