@@ -206,39 +206,64 @@ type probeOutcome struct {
 	detail        string // user-facing error detail, empty on success
 }
 
-// probeSSH runs the same shell script the refresher uses, but
-// synchronously and with detailed error classification. Returns
-// quickly (≤5s) thanks to BatchMode + ConnectTimeout.
+// probeSSH runs a lightweight version probe on the remote, with detailed
+// error classification. Returns quickly (≤5s) thanks to BatchMode +
+// ConnectTimeout.
+//
+// Probe shape:
+//
+//	export PATH=$HOME/.local/bin:$PATH
+//	canopy version 2>&1
+//
+// `canopy version` is the actual subcommand (not --version). On
+// success it prints the version. On missing-binary the shell prints
+// "canopy: command not found" and exits non-zero. We distinguish:
+//
+//   - SSH-level errors (Permission denied, network) → probePermissionDenied
+//     or probeOffline, NO canopy on the remote was reached.
+//   - SSH OK + bash "command not found" → probeBroken, SSH reaches but
+//     canopy isn't installed.
+//   - SSH OK + canopy ran but exited non-zero (e.g., old canopy that
+//     doesn't have the version subcommand) → probeBroken with the
+//     output as the detail. User sees "canopy too old" guidance.
+//   - SSH OK + canopy printed version → probeOK.
 func probeSSH(ctx context.Context, sshTarget string, timeout time.Duration) probeOutcome {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
 	cmd := host.SSHCmdBatch(ctx, sshTarget, "bash", "-l")
-	cmd.Stdin = strings.NewReader(`set -e
-export PATH="$HOME/.local/bin:$PATH"
-exec canopy --version 2>&1 || canopy version 2>&1 || echo "canopy: not found"
+	cmd.Stdin = strings.NewReader(`export PATH="$HOME/.local/bin:$PATH"
+canopy version 2>&1
 `)
 	out, err := cmd.CombinedOutput()
 	rtt := time.Since(start)
 	outStr := string(out)
 
+	// SSH-level failures: detect from the stderr/output content.
+	// These mean we never reached canopy on the remote at all.
+	if strings.Contains(outStr, "Permission denied") {
+		return probeOutcome{kind: probePermissionDenied, rtt: rtt, detail: "Permission denied"}
+	}
+	if strings.Contains(outStr, "Connection refused") ||
+		strings.Contains(outStr, "Could not resolve hostname") ||
+		strings.Contains(outStr, "no route to host") ||
+		strings.Contains(outStr, "timed out") ||
+		strings.Contains(outStr, "Connection timed out") {
+		return probeOutcome{kind: probeOffline, rtt: rtt, detail: truncateProbe(outStr)}
+	}
+	// SSH reached, but canopy not installed.
+	if strings.Contains(outStr, "command not found") ||
+		strings.Contains(outStr, "canopy: not found") {
+		return probeOutcome{kind: probeBroken, rtt: rtt, detail: "canopy not installed on remote"}
+	}
+	// SSH reached, canopy found but exited non-zero (likely an older
+	// canopy that doesn't know the version subcommand, or some other
+	// wire-format mismatch).
 	if err != nil {
-		switch {
-		case strings.Contains(outStr, "Permission denied"):
-			return probeOutcome{kind: probePermissionDenied, rtt: rtt, detail: "Permission denied"}
-		case strings.Contains(outStr, "Connection refused"),
-			strings.Contains(outStr, "Could not resolve hostname"),
-			strings.Contains(outStr, "no route to host"),
-			strings.Contains(outStr, "timed out"):
-			return probeOutcome{kind: probeOffline, rtt: rtt, detail: truncateProbe(outStr)}
-		default:
-			return probeOutcome{kind: probeOffline, rtt: rtt, detail: truncateProbe(outStr)}
-		}
+		return probeOutcome{kind: probeBroken, rtt: rtt, detail: truncateProbe(outStr)}
 	}
-	if strings.Contains(outStr, "canopy: not found") {
-		return probeOutcome{kind: probeBroken, rtt: rtt, detail: "binary not on PATH"}
-	}
+	// Success: canopy ran and printed version info.
 	return probeOutcome{kind: probeOK, canopyVersion: firstLine(outStr), rtt: rtt}
 }
 
