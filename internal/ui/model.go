@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -32,6 +33,7 @@ import (
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/git"
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
@@ -304,6 +306,17 @@ type Model struct {
 	// or global tab is selected). The tab + searchQuery filter
 	// projects allRows down to what list renders.
 	allRows []state.GlobalRow
+
+	// remoteRows is the last result of host.Refresher.Tick, merged
+	// into the rendered listing AFTER allRows (local). v0.17.0 Phase 1b.
+	// Each row has its Host field set to the registered host name so
+	// the projectlist's render path groups it under a host section header.
+	remoteRows []state.GlobalRow
+
+	// remoteRefreshing is true between dispatching a remote refresh Cmd
+	// and receiving the result. Used to gate concurrent remote refresh
+	// attempts so we don't fan-out twice on overlapping TUI ticks.
+	remoteRefreshing bool
 
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
@@ -823,6 +836,16 @@ type rowsLoadedMsg struct {
 	err  error
 }
 
+// remoteRowsLoadedMsg carries the result of a host.Refresher.Tick that
+// fanned out `canopy ls --json` calls to each registered host. v0.17.0
+// Phase 1b. Bubbletea routes this in parallel with the local
+// rowsLoadedMsg; the Model merges both into the rendered listing.
+type remoteRowsLoadedMsg struct {
+	rows  []state.GlobalRow                  // already host-tagged + flattened
+	snaps map[string]*state.RemoteHostSnapshot // for persistence to remotes-cache.json
+	err   error
+}
+
 // refreshCmd reconciles state, then loads workspaces + the main row.
 // Runs in a goroutine via tea.Cmd so the UI doesn't block on tmux/disk.
 //
@@ -838,8 +861,109 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea
 // column when a memCache is configured — auto-load is the right
 // default since Bubbletea's async Cmd model keeps the first render
 // instant and the populated values arrive on the next tick.
+//
+// v0.17.0 Phase 1b: also dispatches a remote-host refresh in parallel
+// (when any hosts are registered). Local rows arrive via
+// rowsLoadedMsg as before; remote rows arrive via remoteRowsLoadedMsg.
+// The Update handler merges both into the rendered listing.
 func (m *Model) refresh() tea.Cmd {
-	return refreshCmdWithMem(m.mgr, m.tc, m.store, m.memCache)
+	cmds := []tea.Cmd{refreshCmdWithMem(m.mgr, m.tc, m.store, m.memCache)}
+	if !m.remoteRefreshing {
+		if cmd := refreshRemoteCmd(); cmd != nil {
+			m.remoteRefreshing = true
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+// refreshRemoteCmd returns a tea.Cmd that fans out `canopy ls --json`
+// to every registered remote host, merges results into []state.GlobalRow
+// (each tagged with its Host name), and emits remoteRowsLoadedMsg.
+//
+// Per D8: each host gets its own 3s deadline so one slow/offline host
+// can't block the others. Per the Phase 1b backend commit: results are
+// also persisted to ~/.canopy/remotes-cache.json so the next session
+// has last-known rows even if some hosts are offline at startup.
+//
+// Returns nil if there are no registered hosts (saves a tea.Batch
+// no-op slot) or if the registry can't be loaded (logged + ignored).
+func refreshRemoteCmd() tea.Cmd {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	canopyHome := filepath.Join(home, ".canopy")
+	reg, err := host.NewRegistry(canopyHome)
+	if err != nil {
+		log.Warn("ui.refresh.remote.registry-failed", "err", err)
+		return nil
+	}
+	hosts, err := reg.List()
+	if err != nil {
+		log.Warn("ui.refresh.remote.list-failed", "err", err)
+		return nil
+	}
+	if len(hosts) == 0 {
+		return nil
+	}
+	cache, _ := state.NewRemotesCache(canopyHome)
+	refresher := &host.Refresher{} // default 3s timeout per host
+
+	return func() tea.Msg {
+		ctx := context.Background()
+		results := refresher.Tick(ctx, hosts)
+
+		// Convert to GlobalRow + build the persistence snapshot in one pass.
+		rows := make([]state.GlobalRow, 0)
+		snaps := make(map[string]*state.RemoteHostSnapshot, len(results))
+		for _, r := range results {
+			snap := &state.RemoteHostSnapshot{
+				CanopyVersion:      r.CanopyVersion,
+				LastSeen:           r.LastSeen,
+				LastRefreshAttempt: time.Now(),
+			}
+			if r.Err != nil {
+				snap.LastError = r.Err.Error()
+				snaps[r.HostName] = snap
+				continue
+			}
+			snap.Workspaces = make([]state.RemoteWorkspaceRow, 0, len(r.Workspaces))
+			for _, w := range r.Workspaces {
+				snap.Workspaces = append(snap.Workspaces, state.RemoteWorkspaceRow{
+					Name: w.Name, Project: w.Project, Branch: w.Branch,
+					Status: w.Status, Port: w.Port,
+					TmuxSession: w.TmuxSession, Alive: w.Alive,
+				})
+				rows = append(rows, state.GlobalRow{
+					Host:        r.HostName,
+					Project:     w.Project,
+					Name:        w.Name,
+					Branch:      w.Branch,
+					Status:      state.Status(w.Status),
+					Port:        w.Port,
+					TmuxSession: w.TmuxSession,
+					Alive:       w.Alive,
+				})
+			}
+			snaps[r.HostName] = snap
+		}
+
+		// Best-effort persist to disk. Failure doesn't affect the UI
+		// — the snapshots will retry on the next tick.
+		if cache != nil {
+			if err := cache.WithLock(func(stored map[string]*state.RemoteHostSnapshot) error {
+				for name, snap := range snaps {
+					stored[name] = snap
+				}
+				return nil
+			}); err != nil {
+				log.Warn("ui.refresh.remote.cache-save-failed", "err", err)
+			}
+		}
+
+		return remoteRowsLoadedMsg{rows: rows, snaps: snaps}
+	}
 }
 
 // tmuxLoadAdapter wraps *tmux.Client to satisfy state.LoadProbe. The

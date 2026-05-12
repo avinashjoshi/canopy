@@ -128,6 +128,13 @@ type GlobalRow struct {
 	// Populated by BuildGlobalRowsWithHints; the older BuildGlobalRows
 	// leaves this empty for callers that don't need detector decoration.
 	Hints []Hint
+
+	// Host is the registered host name this workspace lives on. Empty
+	// string for local workspaces (the laptop's own state). Non-empty
+	// for rows merged in from remote canopies via host.Refresher
+	// (v0.17.0 Phase 1b). Drives the Global tab's section grouping
+	// AND the `c` keybind's transport choice (local tmux vs remote mosh).
+	Host string
 }
 
 // BuildGlobalRows is the single source of truth for the cross-project

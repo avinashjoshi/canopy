@@ -358,13 +358,47 @@ func (m Model) renderTable() string {
 	}
 
 	var b strings.Builder
+	prevHost := "" // tracked separately so host changes also reset the project header
 	prevProject := ""
 
+	// Detect whether we have ANY non-local rows. If yes, render a
+	// "local" host section header above the laptop's own rows for
+	// clarity. If everything is local (status quo before v0.17.0),
+	// skip the header entirely — it would just be noise.
+	hasRemote := false
+	for _, r := range m.rows {
+		if r.Host != "" {
+			hasRemote = true
+			break
+		}
+	}
+
 	for i, r := range m.rows {
-		// New project group: blank separator + flush-left header. Header
-		// sits at column 0 so it visually outdents from the rows below
-		// (which start at column 2 = caret + space) — gives the eye a
-		// clear "section / contents" hierarchy.
+		// New HOST section: blank separator + bolder flush-left header.
+		// Renders the host name only when we have at least one remote
+		// row in the listing (otherwise the listing looks like it
+		// always did pre-v0.17.0).
+		if r.Host != prevHost {
+			if prevHost != "" || (hasRemote && i > 0) {
+				b.WriteString("\n")
+			}
+			if hasRemote {
+				label := r.Host
+				if label == "" {
+					label = "local"
+				}
+				b.WriteString(hostHeaderStyle().Render(label))
+				b.WriteString("\n")
+			}
+			prevHost = r.Host
+			prevProject = "" // reset so the first project under this host gets a header
+		}
+
+		// New project group within the current host: blank separator
+		// + flush-left header. Header sits at column 0 so it visually
+		// outdents from the rows below (which start at column 2 =
+		// caret + space) — gives the eye a clear "section / contents"
+		// hierarchy.
 		if r.Project != prevProject {
 			if prevProject != "" {
 				b.WriteString("\n")
@@ -828,6 +862,19 @@ func projectHeaderStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("99")).
 		Bold(true)
+}
+
+// hostHeaderStyle is the host-section banner above local and each remote
+// host's rows in v0.17.0+. Underline so it visually outdents from the
+// (already-bold) project headers below it — host > project > workspace
+// is the three-level hierarchy when remote hosts are present. Pale
+// violet matches the brand pill so the eye groups it with title chrome,
+// not with row content.
+func hostHeaderStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("99")).
+		Bold(true).
+		Underline(true)
 }
 
 // hintRenameStyle: amber/orange — "your attention is wanted but it's

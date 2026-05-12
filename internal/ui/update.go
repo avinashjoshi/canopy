@@ -159,6 +159,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.upgradeCancel = nil
 		return m, nil
 
+	case remoteRowsLoadedMsg:
+		// v0.17.0 Phase 1b: result of the remote-host fan-out. Stash the
+		// rows in m.remoteRows; the next filteredRows() call combines
+		// them with local m.allRows. Errors are non-fatal — last-known
+		// remote rows stay visible.
+		m.remoteRefreshing = false
+		if msg.rows != nil {
+			m.remoteRows = msg.rows
+		}
+		m.list.SetRows(m.filteredRows())
+		return m, nil
+
 	case rowsLoadedMsg:
 		// Refresh result. Apply rows to allRows + push the filtered
 		// (tab + search) subset to projectlist for rendering.
@@ -1040,11 +1052,29 @@ func (m *Model) handleConfirmRetryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Search filter: fzf-style subsequence match against name + project +
 // branch. Empty query passes everything.
 func (m *Model) filteredRows() []state.GlobalRow {
-	out := make([]state.GlobalRow, 0, len(m.allRows))
-	for _, r := range m.allRows {
-		if m.tab == tabLocal && m.currentProject != "" &&
-			r.ProjectRoot != "" && r.ProjectRoot != m.currentProject {
-			continue
+	// Phase 1b: combine local m.allRows (Host="") and remote m.remoteRows
+	// (Host=<hostname>) into one slice for the projectlist renderer.
+	// Order: local first, then remote rows grouped by host (host names
+	// are sorted in refreshRemoteCmd's output already, but the
+	// projectlist render path relies on prevHost transitions so any
+	// row order works visually — local first is the principle).
+	combined := make([]state.GlobalRow, 0, len(m.allRows)+len(m.remoteRows))
+	combined = append(combined, m.allRows...)
+	combined = append(combined, m.remoteRows...)
+
+	out := make([]state.GlobalRow, 0, len(combined))
+	for _, r := range combined {
+		// Local tab filtering applies only to local rows. Remote rows
+		// never have a ProjectRoot that matches the current local
+		// project (different filesystems), so the Local tab simply
+		// excludes all remote rows. Global tab shows everything.
+		if m.tab == tabLocal {
+			if r.Host != "" {
+				continue
+			}
+			if m.currentProject != "" && r.ProjectRoot != "" && r.ProjectRoot != m.currentProject {
+				continue
+			}
 		}
 		if m.searchQuery != "" && !rowMatchesQuery(r, m.searchQuery) {
 			continue
@@ -1113,6 +1143,15 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 	}
 	ctx := context.Background()
 
+	// v0.17.0 Phase 1b: remote rows dispatch through `canopy switch
+	// --on <host> <name>` as a subprocess. The subprocess does the
+	// SSH/mosh dance and exec-replaces itself with mosh; mosh runs in
+	// the terminal Bubbletea hands over, and on detach control returns
+	// here for the refresh that re-syncs cached remote-row state.
+	if row.Host != "" {
+		return m, m.attachRemoteRow(row)
+	}
+
 	if row.IsMain {
 		if row.Alive {
 			return m, m.attachOrSwitch(row.TmuxSession)
@@ -1176,6 +1215,53 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 	log.Warn("ui.attach.unknown-status", "name", row.Name, "status", row.Status)
 	_ = ctx
 	return m, nil
+}
+
+// attachRemoteRow dispatches a remote-host attach via canopy-as-subprocess.
+// v0.17.0 Phase 1b. The subprocess is `<this-canopy> switch --on <host>
+// <name>`, which itself uses syscall.Exec to mosh-attach. tea.ExecProcess
+// hands the terminal to that subprocess; when mosh exits (user `prefix d`,
+// network drop, or remote tmux ended), control returns and we kick a
+// refresh to repopulate cached rows.
+//
+// Why subprocess (not direct mosh exec from the TUI)? Two reasons:
+//  1. We get the entire canopy-switch flow for free — reconcile,
+//     resurrect-if-stopped, role backfill, error-message normalization.
+//     Reproducing that in the TUI doubles the maintenance burden.
+//  2. Bubbletea stays alive across the attach. syscall.Exec inside the
+//     TUI would replace the whole process tree; the TUI couldn't redraw
+//     on detach. tea.ExecProcess is the canonical tmux-attach idiom for
+//     Bubbletea apps; reusing it for mosh-attach matches the pattern.
+func (m *Model) attachRemoteRow(row Row) tea.Cmd {
+	canopyBin, err := os.Executable()
+	if err != nil || canopyBin == "" {
+		// Fallback to os.Args[0]; this is what we got launched as so
+		// it'll always resolve. Edge case is if the user moved the
+		// binary after launch — rare enough to not engineer around.
+		canopyBin = os.Args[0]
+	}
+	args := []string{"switch", "--on", row.Host, row.Name}
+	cmd := exec.Command(canopyBin, args...)
+	cmd.Env = os.Environ()
+	// Canopy switch wraps itself in a nested-canopy guard that blocks
+	// running inside a canopy tmux session. The TUI IS canopy, and
+	// we're about to hand off to mosh which is OK (mosh+tmux on a
+	// DIFFERENT machine doesn't conflict with the local tmux pane the
+	// TUI lives in), so allow nesting here. Removing the env var
+	// after the subprocess exits would be ideal but tea.ExecProcess
+	// inherits env at exec time; mosh's child gets the var too, which
+	// is harmless (only affects in-mosh-session canopy invocations
+	// that the user would have to do deliberately).
+	cmd.Env = append(cmd.Env, "CANOPY_ALLOW_NESTED=1")
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		// Detached (or error). Trigger a refresh so cached remote rows
+		// reflect any state changes that happened during the attach
+		// (e.g., workspace deleted on the remote, status flipped).
+		if err != nil {
+			log.Warn("ui.attach-remote.failed", "host", row.Host, "name", row.Name, "err", err)
+		}
+		return refreshCmd(m.mgr, m.tc, m.store)()
+	})
 }
 
 // effectiveStatus returns the status the Enter dispatcher should act on.
