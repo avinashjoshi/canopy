@@ -103,7 +103,10 @@ var listModeBindings = []Binding{
 		Action: actionTabNext,
 	},
 	{
-		K:      key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "prev tab")),
+		// shift+tab is the standard "reverse tab" idiom across nearly
+		// every TUI / form library. Aliased onto actionTabPrev so it
+		// composes with ← / h as one consistent prev-tab affordance.
+		K:      key.NewBinding(key.WithKeys("left", "h", "shift+tab"), key.WithHelp("←/h/⇧⇥", "prev tab")),
 		Action: actionTabPrev,
 	},
 	{
