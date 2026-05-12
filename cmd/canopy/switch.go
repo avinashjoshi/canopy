@@ -16,7 +16,8 @@ import (
 
 // switchFlags holds the parsed --on flag for v0.17.0 Phase 0.
 var switchFlags struct {
-	onHost string
+	onHost    string
+	remoteCwd string
 }
 
 // switchCmd returns the `canopy switch <name>` cobra subcommand.
@@ -118,6 +119,8 @@ func switchCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&switchFlags.onHost, "on", "",
 		"attach to a workspace on remote canopy at <ssh-target> via mosh+tmux (v0.17.0 Phase 0)")
+	c.Flags().StringVar(&switchFlags.remoteCwd, "remote-cwd", "",
+		"with --on: cd to <path> on the remote before invoking canopy (Phase 0; Phase 1 absorbs into hosts.json)")
 	return c
 }
 
@@ -158,7 +161,18 @@ func dispatchSwitchToRemote(ctx context.Context, target, wsName string) error {
 	// .bashrc (interactive guard), so omarchy / Arch / similar setups
 	// don't inherit the user's ~/.local/bin from their login profile.
 	// Phase 1 absorbs the path into the hosts.json registry.
-	remoteCmd := `export PATH="$HOME/.local/bin:$PATH"; exec canopy switch ` + shellQuote(wsName)
+	//
+	// --remote-cwd: canopy switch runs loadManager() which walks up
+	// from cwd to find canopy.json. mosh-server starts in $HOME by
+	// default, which has no project. Without an explicit cd, switch
+	// fails and the exec chain dies before tmux attach takes the PTY,
+	// leaving the user staring at "[mosh is exiting]". Phase 1
+	// absorbs this into hosts.json (per-host project registry).
+	remoteCmd := `export PATH="$HOME/.local/bin:$PATH"; `
+	if switchFlags.remoteCwd != "" {
+		remoteCmd += "cd " + shellQuote(switchFlags.remoteCwd) + "; "
+	}
+	remoteCmd += "exec canopy switch " + shellQuote(wsName)
 	argv := []string{"mosh", target, "--", "bash", "-lc", remoteCmd}
 	// syscall.Exec replaces this process with mosh. On success, this
 	// call does not return; on failure we fall through to the error.
