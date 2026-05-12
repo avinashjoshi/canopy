@@ -141,8 +141,13 @@ func refreshOneHost(parent context.Context, h Host, timeout time.Duration) Resul
 	start := time.Now()
 	// `canopy ls --json` doesn't need a project cwd (uses global state)
 	// so no cd dance. PATH-prepending matches the dispatch path.
+	// SSHCmdBatch (NOT SSHCmd): BatchMode=yes prevents password prompts
+	// from hanging this goroutine. Without it, a host that doesn't have
+	// SSH key auth set up would hang the refresh forever AND corrupt
+	// the Bubbletea TUI render (SSH writes password prompts to /dev/tty
+	// directly, bypassing our captured stdout/stderr).
 	remoteCmd := `export PATH="$HOME/.local/bin:$PATH"; exec canopy ls --json --all`
-	cmd := SSHCmd(ctx, h.SSHTarget, "bash", "-lc", remoteCmd)
+	cmd := SSHCmdBatch(ctx, h.SSHTarget, "bash", "-lc", remoteCmd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

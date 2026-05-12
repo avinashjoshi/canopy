@@ -40,16 +40,24 @@ func canopyHome() string {
 	return filepath.Join(home, ".canopy")
 }
 
-// SSHCmd builds an ssh invocation that dispatches `canopy <args>` to the
-// remote target with ControlMaster multiplex enabled.
+// SSHCmd builds an ssh invocation for INTERACTIVE dispatch (canopy new
+// --on, canopy switch --on). BatchMode is off so first-time-user
+// password prompts can surface in the terminal the user is actively
+// attached to.
 //
-// ControlMaster keeps one SSH connection alive per (user, host, port)
+// For BACKGROUND polling (TUI refresh tick), use SSHCmdBatch instead —
+// it sets BatchMode=yes so SSH never prompts for a password, which
+// would otherwise hang the refresh goroutine AND corrupt the TUI
+// render (SSH writes password prompts to /dev/tty, bypassing our
+// stdout/stderr capture).
+//
+// ControlMaster: keeps one SSH connection alive per (user, host, port)
 // tuple. The first call pays the full handshake cost (~50-300ms over
-// tailscale-WAN). Subsequent calls reuse the same socket and skip the
-// handshake entirely — measurable on the second `canopy ls --json`
-// refresh tick. ControlPersist=300 keeps the master alive for 5 minutes
-// after the last client exits, which covers the polling window of an
-// active canopy session without leaving zombie sockets forever.
+// tailscale-WAN). Subsequent calls reuse the socket and skip the
+// handshake — measurable on the second `canopy ls --json` refresh
+// tick. ControlPersist=300 keeps the master alive for 5 minutes after
+// the last client exits, covering the polling window of an active
+// canopy session without leaving zombie sockets forever.
 //
 // %C in ControlPath is ssh's per-target hash, so each distinct target
 // gets its own socket and we don't multiplex unrelated connections.
@@ -61,6 +69,26 @@ func canopyHome() string {
 //	cmd.Stderr = os.Stderr
 //	err := cmd.Run()
 func SSHCmd(ctx context.Context, target string, args ...string) *exec.Cmd {
+	return sshCmdInternal(ctx, target, false /* not batch */, args...)
+}
+
+// SSHCmdBatch is the non-interactive variant: BatchMode=yes so SSH
+// never prompts for a password. Required for background polling (the
+// TUI's refresh tick): without it, a host with no key auth set up
+// would hang the refresh goroutine on /dev/tty and visibly corrupt
+// the Bubbletea render. With it, the same host fails fast with a
+// "Permission denied (publickey)" error that the cache surfaces as
+// a "host degraded" pill.
+//
+// Same ControlMaster / ConnectTimeout / ServerAlive options as the
+// interactive variant; only BatchMode differs.
+func SSHCmdBatch(ctx context.Context, target string, args ...string) *exec.Cmd {
+	return sshCmdInternal(ctx, target, true /* batch */, args...)
+}
+
+// sshCmdInternal is the shared implementation. Splits on the batch
+// flag, otherwise identical options.
+func sshCmdInternal(ctx context.Context, target string, batch bool, args ...string) *exec.Cmd {
 	socketPath := filepath.Join(canopyHome(), "ssh-%C.sock")
 	sshArgs := []string{
 		"-o", "ControlMaster=auto",
@@ -69,13 +97,20 @@ func SSHCmd(ctx context.Context, target string, args ...string) *exec.Cmd {
 		"-o", "ConnectTimeout=5",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
-		// BatchMode=no by default so first-time-user password / key prompts
-		// surface in the terminal. Once an SSH key is set up the prompt
-		// never appears.
-		target,
 	}
+	if batch {
+		sshArgs = append(sshArgs,
+			"-o", "BatchMode=yes",
+			// Belt-and-suspenders: forbid SSH from asking for any password
+			// in case BatchMode misses a path. NumberOfPasswordPrompts=0
+			// disables interactive password auth entirely; the SSH client
+			// gives up immediately if pubkey auth fails.
+			"-o", "NumberOfPasswordPrompts=0",
+		)
+	}
+	sshArgs = append(sshArgs, target)
 	sshArgs = append(sshArgs, args...)
-	log.Debug("ssh.cmd", "target", target, "args", args)
+	log.Debug("ssh.cmd", "target", target, "batch", batch, "args", args)
 	return exec.CommandContext(ctx, "ssh", sshArgs...)
 }
 
