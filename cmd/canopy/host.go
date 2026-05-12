@@ -50,9 +50,55 @@ func hostCmd() *cobra.Command {
 	}
 	cmd.AddCommand(hostAddCmd())
 	cmd.AddCommand(hostLsCmd())
+	cmd.AddCommand(hostShowCmd())
 	cmd.AddCommand(hostRmCmd())
 	cmd.AddCommand(hostProjectCmd())
 	return cmd
+}
+
+// hostShowCmd renders the detailed view of one host: SSH target, type,
+// added timestamp, and the full list of registered projects. Replaces
+// the awkward-reading `canopy host project ls <host>` (which was just
+// a project list with no host context). Now project-related output
+// has a single natural home.
+func hostShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show details for one host (SSH target, projects, etc.)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := loadHostRegistry()
+			if err != nil {
+				return err
+			}
+			h, err := reg.Resolve(args[0])
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintf(tw, "HOST\t%s\n", h.Name)
+			fmt.Fprintf(tw, "SSH TARGET\t%s\n", h.SSHTarget)
+			fmt.Fprintf(tw, "TYPE\t%s\n", h.Type)
+			fmt.Fprintf(tw, "ADDED\t%s\n", h.AddedAt.Local().Format("2006-01-02 15:04"))
+			tw.Flush()
+
+			projs, err := reg.ListProjects(args[0])
+			if err != nil {
+				return err
+			}
+			if len(projs) == 0 {
+				fmt.Fprintf(out, "\nPROJECTS (0)\n  — none yet. Run: canopy host project add %s <project-name> <remote-path>\n", h.Name)
+				return nil
+			}
+			fmt.Fprintf(out, "\nPROJECTS (%d)\n", len(projs))
+			ptw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			for _, p := range projs {
+				fmt.Fprintf(ptw, "  %s\t%s\n", p.Name, p.Path)
+			}
+			return ptw.Flush()
+		},
+	}
 }
 
 func hostAddCmd() *cobra.Command {
@@ -152,13 +198,13 @@ func hostRmCmd() *cobra.Command {
 func hostProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "project",
-		Short: "Manage projects on a registered host",
+		Short: "Manage projects on a registered host (add/rm; see `canopy host show` for listing)",
 		Long: "Each host can serve multiple projects — `canopy host project add tower canopy /home/cassy/Work/canopy` " +
 			"tells canopy that on host `tower`, the project named `canopy` lives at `/home/cassy/Work/canopy`. " +
-			"The project name should match the local project's directory basename so cwd-driven dispatch works.",
+			"The project name should match the local project's directory basename so cwd-driven dispatch works. " +
+			"To LIST projects on a host, use `canopy host show <name>` (gives host details + projects together).",
 	}
 	cmd.AddCommand(hostProjectAddCmd())
-	cmd.AddCommand(hostProjectLsCmd())
 	cmd.AddCommand(hostProjectRmCmd())
 	return cmd
 }
@@ -179,36 +225,6 @@ func hostProjectAddCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(),
 				"Registered project %q on host %q → %s\n", args[1], args[0], args[2])
 			return nil
-		},
-	}
-}
-
-func hostProjectLsCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "ls <host>",
-		Short: "List projects registered on a host",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			reg, err := loadHostRegistry()
-			if err != nil {
-				return err
-			}
-			projs, err := reg.ListProjects(args[0])
-			if err != nil {
-				return err
-			}
-			if len(projs) == 0 {
-				fmt.Fprintf(cmd.OutOrStdout(),
-					"No projects registered on %q. Try: canopy host project add %s <project-name> <remote-path>\n",
-					args[0], args[0])
-				return nil
-			}
-			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "PROJECT\tREMOTE PATH")
-			for _, p := range projs {
-				fmt.Fprintf(tw, "%s\t%s\n", p.Name, p.Path)
-			}
-			return tw.Flush()
 		},
 	}
 }
