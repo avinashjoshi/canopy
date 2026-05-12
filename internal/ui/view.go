@@ -214,7 +214,15 @@ func (m *Model) renderTabBar() string {
 	local := tabPill(localLabel, m.tab == tabLocal, hasLocal)
 	global := tabPill("Global", m.tab == tabGlobal, hasGlobal)
 	hosts := tabPill("Hosts", m.tab == tabHosts, hasHosts)
-	return local + " " + global + " " + hosts
+
+	// v0.17.0 Phase 1c polish: ← / → indicators bracket the tab list
+	// so users can see at a glance that left/right (and h/l) navigate
+	// between tabs. Subtle gray so they don't compete with the
+	// active pill for attention.
+	arrow := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	left := arrow.Render("‹")
+	right := arrow.Render("›")
+	return left + " " + local + " " + global + " " + hosts + " " + right
 }
 
 // renderSearchLine returns the search input pill (when in search mode)

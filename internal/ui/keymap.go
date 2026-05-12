@@ -94,6 +94,19 @@ var listModeBindings = []Binding{
 		Action: actionTabSwitch,
 	},
 	{
+		// v0.17.0 Phase 1c polish: left/h prev-tab, right/l next-tab.
+		// Mirrors j/k for up/down so the keymap stays vim-ergonomic.
+		// Single help entry covers both bindings; rendering is in the
+		// tab bar (← Local | Global | Hosts →) so the directionality
+		// is visible at a glance.
+		K:      key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "next tab")),
+		Action: actionTabNext,
+	},
+	{
+		K:      key.NewBinding(key.WithKeys("left", "h"), key.WithHelp("←/h", "prev tab")),
+		Action: actionTabPrev,
+	},
+	{
 		K:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 		Action: actionSearchEntry,
 	},
@@ -107,7 +120,10 @@ var listModeBindings = []Binding{
 		Action:    actionNewWorkspace,
 	},
 	{
-		K:         key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "focus project")),
+		// `f` (focus project): renamed from `o` in v0.17.0 Phase 1c
+		// polish. Avi's call — `f` reads more obviously than `o`
+		// ("focus" vs the older "open project" framing).
+		K:         key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "focus project")),
 		Available: availableFocusProject,
 		Action:    actionFocusProject,
 	},

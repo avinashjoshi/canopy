@@ -587,10 +587,23 @@ func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // broken — neither helps the user. The cursor row's ProjectRoot
 // becomes the new Local context.
 func actionTabSwitch(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// v0.17.0 Phase 1c: cycle Local → Global → Hosts → Local.
-	// Hosts tab only inserts into the cycle when at least one host
-	// is registered — otherwise users hitting Tab repeatedly never
-	// land on an empty Hosts tab and get confused.
+	// Tab key uses the same "next" cycle as right/l. v0.17.0 Phase 1c
+	// polish unified the three forward-cycle keys behind one helper.
+	return actionTabNext(m, msg)
+}
+
+// actionTabNext cycles forward through tabs: Local → Global → Hosts
+// → back to Local. Hosts tab inserts into the cycle only when at
+// least one host is registered (empty Hosts tab is uninteresting and
+// hitting tab repeatedly to land on nothing is confusing). v0.17.0
+// Phase 1c polish — bound to Tab AND `right`/`l`.
+//
+// One quirk preserved from the original actionTabSwitch: tabGlobal →
+// tabLocal when currentProject is unset routes through
+// actionFocusProject so the cursor row's project becomes Local's
+// context. Without that, Local would either show every row (no
+// filter) or feel broken.
+func actionTabNext(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.tab {
 	case tabLocal:
 		m.tab = tabGlobal
@@ -601,7 +614,7 @@ func actionTabSwitch(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.tab = tabHosts
 			return m, nil
 		}
-		// No hosts registered → skip past Hosts tab to Local.
+		// No hosts → skip Hosts and wrap to Local.
 		if m.currentProject == "" {
 			row, ok := m.list.CursorRow()
 			if ok && row.ProjectRoot != "" {
@@ -619,6 +632,31 @@ func actionTabSwitch(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.tab = tabLocal
+		m.list.SetRows(m.filteredRows())
+		return m, nil
+	}
+	return m, nil
+}
+
+// actionTabPrev cycles backward: Local ← Global ← Hosts. Bound to
+// `left`/`h`. Same Hosts-skip-when-empty logic as actionTabNext.
+func actionTabPrev(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.tab {
+	case tabLocal:
+		// Wrap to Hosts if any registered, else Global.
+		if m.hostsHasEntries() {
+			m.tab = tabHosts
+			return m, nil
+		}
+		m.tab = tabGlobal
+		m.list.SetRows(m.filteredRows())
+		return m, nil
+	case tabGlobal:
+		m.tab = tabLocal
+		m.list.SetRows(m.filteredRows())
+		return m, nil
+	case tabHosts:
+		m.tab = tabGlobal
 		m.list.SetRows(m.filteredRows())
 		return m, nil
 	}
