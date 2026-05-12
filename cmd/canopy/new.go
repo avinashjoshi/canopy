@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -27,6 +27,7 @@ var newWorkspaceFlags struct {
 	prompt     string // --prompt: initial agent message; sent after creation
 	promptFile string // --prompt-file: read --prompt content from file (multi-line)
 	onHost     string // --on <ssh-target>: dispatch to remote canopy (v0.17.0 Phase 0)
+	remoteCwd  string // --remote-cwd <path>: cwd on the remote before running canopy (Phase 0)
 }
 
 // newCmd returns the `canopy new` cobra subcommand.
@@ -189,6 +190,8 @@ func newCmd() *cobra.Command {
 		"read --prompt content from file (multi-line; max 32KB)")
 	cmd.Flags().StringVar(&newWorkspaceFlags.onHost, "on", "",
 		"dispatch to remote canopy at <ssh-target> instead of running locally (v0.17.0 Phase 0)")
+	cmd.Flags().StringVar(&newWorkspaceFlags.remoteCwd, "remote-cwd", "",
+		"with --on: cd to <path> on the remote before invoking canopy (Phase 0; Phase 1 absorbs into hosts.json project registry)")
 	return cmd
 }
 
@@ -215,43 +218,92 @@ func dispatchNewToRemote(ctx context.Context, target string, posArgs []string, s
 			target)
 	}
 
-	remoteArgs := []string{"canopy", "new"}
+	var canopyArgs []string
+	canopyArgs = append(canopyArgs, "canopy", "new")
 	if newWorkspaceFlags.name != "" {
-		remoteArgs = append(remoteArgs, "--name", newWorkspaceFlags.name)
+		canopyArgs = append(canopyArgs, "--name", newWorkspaceFlags.name)
 	}
 	// Phase 0 default: --no-attach on remote. The local user can't be
 	// attached to a tmux session that lives on tower from inside an
 	// SSH-only invocation; they need to run `canopy switch --on <target>`
 	// separately to mosh-attach.
-	remoteArgs = append(remoteArgs, "--no-attach")
+	canopyArgs = append(canopyArgs, "--no-attach")
 	if newWorkspaceFlags.pr != 0 {
-		remoteArgs = append(remoteArgs, "--pr", fmt.Sprintf("%d", newWorkspaceFlags.pr))
+		canopyArgs = append(canopyArgs, "--pr", fmt.Sprintf("%d", newWorkspaceFlags.pr))
 	}
 	if newWorkspaceFlags.issue != 0 {
-		remoteArgs = append(remoteArgs, "--issue", fmt.Sprintf("%d", newWorkspaceFlags.issue))
+		canopyArgs = append(canopyArgs, "--issue", fmt.Sprintf("%d", newWorkspaceFlags.issue))
 	}
 	if newWorkspaceFlags.branch != "" {
-		remoteArgs = append(remoteArgs, "--branch", newWorkspaceFlags.branch)
+		canopyArgs = append(canopyArgs, "--branch", newWorkspaceFlags.branch)
 	}
 	if newWorkspaceFlags.allowLoc {
-		remoteArgs = append(remoteArgs, "--allow-local")
+		canopyArgs = append(canopyArgs, "--allow-local")
 	}
 	// Pass through any positional args (cobra collects unparsed; in
 	// practice `canopy new` takes none today but future-proof the call).
-	remoteArgs = append(remoteArgs, posArgs...)
+	canopyArgs = append(canopyArgs, posArgs...)
 
-	fmt.Fprintf(stderr, "Dispatching to %s: %s\n", target, joinArgs(remoteArgs))
+	// Build a small shell script and pipe it to `bash -l` on the remote
+	// via stdin. The login shell sources ~/.bash_profile / ~/.profile,
+	// which is where most install scripts add ~/.local/bin to PATH.
+	// `set -e` halts on cd failure so we don't accidentally run canopy
+	// in the wrong directory.
+	script := buildRemoteScript(newWorkspaceFlags.remoteCwd, canopyArgs)
+	fmt.Fprintf(stderr, "Dispatching to %s:\n%s", target, indent(script, "  "))
 
-	c := host.SSHCmd(ctx, target, remoteArgs...)
+	c := host.SSHCmd(ctx, target, "bash", "-l")
 	c.Stdout = stdout
 	c.Stderr = stderr
-	c.Stdin = os.Stdin // pass through in case remote canopy prompts (shouldn't, but harmless)
+	c.Stdin = strings.NewReader(script)
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("remote canopy new failed: %w", err)
 	}
 
 	fmt.Fprintf(stdout, "\nRemote workspace created. Attach with:\n  canopy switch --on %s <name>\n", target)
 	return nil
+}
+
+// buildRemoteScript assembles the shell script piped into the remote
+// login shell. `set -e` ensures cd failure short-circuits the canopy
+// invocation. `exec` replaces bash with canopy so the exit code is
+// canopy's, not bash's. Single-quoted cwd is shell-escaped against the
+// rare-but-possible apostrophe in a path.
+func buildRemoteScript(remoteCwd string, canopyArgs []string) string {
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	// Ensure ~/.local/bin is on PATH. The canopy curl-installer puts the
+	// binary there, but many distros (including omarchy) have an
+	// interactive-only .bashrc guard that doesn't fire for non-
+	// interactive SSH-command shells. Phase 1 absorbs this knowledge
+	// into the hosts.json registry (per-host canopy path / pre-command).
+	b.WriteString(`export PATH="$HOME/.local/bin:$PATH"` + "\n")
+	if remoteCwd != "" {
+		fmt.Fprintf(&b, "cd %s\n", shellQuote(remoteCwd))
+	}
+	b.WriteString("exec ")
+	for i, a := range canopyArgs {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(shellQuote(a))
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+// indent prepends `prefix` to each line of `s`. Used to display the
+// remote script in stderr so it's clear what was dispatched.
+func indent(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	out := ""
+	for i, line := range lines {
+		if i == len(lines)-1 && line == "" {
+			continue
+		}
+		out += prefix + line + "\n"
+	}
+	return out
 }
 
 // joinArgs is a tiny display helper for the "Dispatching to X: canopy

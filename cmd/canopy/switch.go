@@ -153,7 +153,13 @@ func dispatchSwitchToRemote(ctx context.Context, target, wsName string) error {
 		return &host.ErrMoshMissing{Inner: err}
 	}
 
-	argv := []string{"mosh", target, "--", "canopy", "switch", wsName}
+	// Wrap remote command in `bash -lc '...'` and explicitly prepend
+	// ~/.local/bin to PATH. Non-interactive SSH-command shells skip
+	// .bashrc (interactive guard), so omarchy / Arch / similar setups
+	// don't inherit the user's ~/.local/bin from their login profile.
+	// Phase 1 absorbs the path into the hosts.json registry.
+	remoteCmd := `export PATH="$HOME/.local/bin:$PATH"; exec canopy switch ` + shellQuote(wsName)
+	argv := []string{"mosh", target, "--", "bash", "-lc", remoteCmd}
 	// syscall.Exec replaces this process with mosh. On success, this
 	// call does not return; on failure we fall through to the error.
 	if err := syscall.Exec(moshBin, argv, os.Environ()); err != nil {
