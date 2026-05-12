@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -18,7 +20,8 @@ import (
 )
 
 var lsFlags struct {
-	all bool
+	all    bool
+	asJSON bool
 }
 
 // lsCmd returns the `canopy ls` cobra subcommand.
@@ -64,6 +67,17 @@ func lsCmd() *cobra.Command {
 			// gracefully falls back to global.
 			global := lsFlags.all || cfg == nil
 			out := cmd.OutOrStdout()
+
+			// --json forces global mode (all workspaces) and emits a
+			// stable JSON document instead of the tab-aligned table.
+			// Used by v0.17.0 host.Refresher to fetch a remote host's
+			// workspace listing without parsing free-form text. Always
+			// global so the remote caller sees the full picture, not
+			// just whatever project tower happens to be cwd'd into.
+			if lsFlags.asJSON {
+				return lsGlobalJSON(cmd.Context(), out)
+			}
+
 			var lsErr error
 			if global {
 				lsErr = lsGlobal(cmd.Context(), out)
@@ -83,6 +97,8 @@ func lsCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&lsFlags.all, "all", false,
 		"list workspaces across all projects (implicit when no canopy.json is found)")
+	cmd.Flags().BoolVar(&lsFlags.asJSON, "json", false,
+		"emit a stable JSON document instead of the tabular view (used by v0.17 host.Refresher to read remote workspace state)")
 	return cmd
 }
 
@@ -246,6 +262,76 @@ func lsGlobal(ctx context.Context, out io.Writer) error {
 			badge, r.Project, r.Name, r.Branch, r.Status, port, r.TmuxSession)
 	}
 	return tw.Flush()
+}
+
+// LsJSONOutput is the wire format emitted by `canopy ls --json`. v0.17
+// host.Refresher on the LAPTOP parses this struct from each remote
+// host's response, so this is effectively a stable cross-version API.
+// Schema_version bumps on any backwards-incompatible field change so
+// the refresher can detect drift and degrade gracefully.
+type LsJSONOutput struct {
+	SchemaVersion int                `json:"schema_version"`
+	CanopyVersion string             `json:"canopy_version"`
+	Hostname      string             `json:"hostname,omitempty"`
+	GeneratedAt   string             `json:"generated_at"`
+	Workspaces    []LsJSONWorkspace  `json:"workspaces"`
+}
+
+// LsJSONWorkspace is the per-row shape. Mirrors state.GlobalRow with
+// the fields the refresher actually needs (and excludes UI-display-only
+// ephemera like MemRSS/CPUPct/Hints which would balloon the payload).
+type LsJSONWorkspace struct {
+	Name        string `json:"name"`
+	Project     string `json:"project"`
+	Branch      string `json:"branch"`
+	Status      string `json:"status"`
+	Port        int    `json:"port,omitempty"`
+	TmuxSession string `json:"tmux_session"`
+	Alive       bool   `json:"alive"`
+}
+
+// canopyVersionInfo is populated at link time by versionCmd.go; for the
+// JSON output we fall back to "(unknown)" if not set. The refresher
+// uses this to detect version drift between laptop and remote canopy.
+var canopyVersionInfo = "(unknown)"
+
+const lsJSONSchemaVersion = 1
+
+func lsGlobalJSON(ctx context.Context, out io.Writer) error {
+	store, err := openStateReadOnly()
+	if err != nil {
+		return err
+	}
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	tc := tmux.New()
+	rows := st.BuildGlobalRows(ctx, tc)
+
+	doc := LsJSONOutput{
+		SchemaVersion: lsJSONSchemaVersion,
+		CanopyVersion: canopyVersionInfo,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		Workspaces:    make([]LsJSONWorkspace, 0, len(rows)),
+	}
+	if host, herr := os.Hostname(); herr == nil {
+		doc.Hostname = host
+	}
+	for _, r := range rows {
+		doc.Workspaces = append(doc.Workspaces, LsJSONWorkspace{
+			Name:        r.Name,
+			Project:     r.Project,
+			Branch:      r.Branch,
+			Status:      string(r.Status),
+			Port:        r.Port,
+			TmuxSession: r.TmuxSession,
+			Alive:       r.Alive,
+		})
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(doc)
 }
 
 // openStateReadOnly returns a state.Store rooted at ~/.canopy. Used for
