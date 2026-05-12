@@ -2,9 +2,14 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // projectCmd returns the `canopy project` parent command. Manages
@@ -73,55 +78,123 @@ func projectLsCmd() *cobra.Command {
 	var onHost string
 	c := &cobra.Command{
 		Use:   "ls",
-		Short: "List project registrations across all hosts, or filter with --on",
-		Long: "Without --on: shows every (host, project) pair in the registry. With --on, filters " +
-			"to a single host's projects. Sorted by host then by name.",
+		Short: "List project registrations across all hosts (local + remote), or filter with --on",
+		Long: "Without --on: shows every project canopy knows about — local projects from state.json " +
+			"(initialized via `canopy init`) AND remote-host project registrations from hosts.json. " +
+			"Local projects appear with HOST=\"local\". With --on <host>: filters to one host's projects; " +
+			"--on local shows just the local projects.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			reg, err := loadHostRegistry()
-			if err != nil {
-				return err
-			}
 			out := cmd.OutOrStdout()
 
-			if onHost != "" {
-				projs, err := reg.ListProjects(onHost)
+			// Build the combined list. Local projects come from
+			// state.json (Projects map keyed by canonical path);
+			// remote projects come from the host registry. Sort by
+			// host then by name for stable output.
+			var entries []projectListEntry
+			if onHost == "" || onHost == "local" {
+				localEntries, err := loadLocalProjects()
 				if err != nil {
 					return err
 				}
-				if len(projs) == 0 {
-					fmt.Fprintf(out,
-						"No projects on %q. Run: canopy project add <name> <path> --on %s\n",
-						onHost, onHost)
-					return nil
+				entries = append(entries, localEntries...)
+			}
+			if onHost != "local" {
+				reg, err := loadHostRegistry()
+				if err != nil {
+					return err
 				}
-				tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-				fmt.Fprintln(tw, "NAME\tREMOTE PATH")
-				for _, p := range projs {
-					fmt.Fprintf(tw, "%s\t%s\n", p.Name, p.Path)
+				if onHost != "" {
+					projs, err := reg.ListProjects(onHost)
+					if err != nil {
+						return err
+					}
+					for _, p := range projs {
+						entries = append(entries, projectListEntry{Host: onHost, Name: p.Name, Path: p.Path})
+					}
+				} else {
+					all, err := reg.ListAllProjects()
+					if err != nil {
+						return err
+					}
+					for _, e := range all {
+						entries = append(entries, projectListEntry{Host: e.HostName, Name: e.Name, Path: e.Path})
+					}
 				}
-				return tw.Flush()
 			}
 
-			// Cross-host listing.
-			all, err := reg.ListAllProjects()
-			if err != nil {
-				return err
-			}
-			if len(all) == 0 {
-				fmt.Fprintln(out, "No projects registered on any host. Try: canopy project add <name> <path> --on <host>")
+			if len(entries) == 0 {
+				switch onHost {
+				case "local":
+					fmt.Fprintln(out, "No local projects. Run `canopy init` from a project directory.")
+				case "":
+					fmt.Fprintln(out, "No projects anywhere. Run `canopy init` locally or `canopy project add <name> <path> --on <host>` for a remote.")
+				default:
+					fmt.Fprintf(out, "No projects on %q. Run: canopy project add <name> <path> --on %s\n", onHost, onHost)
+				}
 				return nil
 			}
+
+			// When filtered to a single host, drop the HOST column —
+			// it's redundant and the table reads cleaner without it.
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "HOST\tPROJECT\tREMOTE PATH")
-			for _, e := range all {
-				fmt.Fprintf(tw, "%s\t%s\t%s\n", e.HostName, e.Name, e.Path)
+			if onHost != "" {
+				fmt.Fprintln(tw, "NAME\tPATH")
+				for _, e := range entries {
+					fmt.Fprintf(tw, "%s\t%s\n", e.Name, e.Path)
+				}
+			} else {
+				fmt.Fprintln(tw, "HOST\tPROJECT\tPATH")
+				for _, e := range entries {
+					fmt.Fprintf(tw, "%s\t%s\t%s\n", e.Host, e.Name, e.Path)
+				}
 			}
 			return tw.Flush()
 		},
 	}
-	c.Flags().StringVar(&onHost, "on", "", "filter to one host's projects (omit for all-hosts view)")
+	c.Flags().StringVar(&onHost, "on", "",
+		"filter: <hostname> for one remote, 'local' for laptop-only, omitted for everything")
 	return c
+}
+
+// projectListEntry is the unified shape used by `canopy project ls`.
+// Combines local projects (from state.json) and remote registrations
+// (from hosts.json) into one cross-source view. Host="local" for
+// laptop projects; otherwise the registered host name.
+type projectListEntry struct {
+	Host string
+	Name string
+	Path string
+}
+
+// loadLocalProjects reads state.json's Projects map and converts each
+// entry to a projectListEntry with Host="local". Sorted by basename.
+//
+// Empty state.json (first-time-canopy laptop) returns an empty slice,
+// not an error — local-projects-empty is a normal first-run state.
+func loadLocalProjects() ([]projectListEntry, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil, fmt.Errorf("loadLocalProjects: $HOME not set: %w", err)
+	}
+	store, err := state.NewStore(filepath.Join(home, ".canopy"))
+	if err != nil {
+		return nil, fmt.Errorf("loadLocalProjects: open state.Store: %w", err)
+	}
+	st, err := store.Load()
+	if err != nil {
+		return nil, fmt.Errorf("loadLocalProjects: read state.json: %w", err)
+	}
+	out := make([]projectListEntry, 0, len(st.Projects))
+	for root := range st.Projects {
+		out = append(out, projectListEntry{
+			Host: "local",
+			Name: filepath.Base(root),
+			Path: root,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 func projectRmCmd() *cobra.Command {
