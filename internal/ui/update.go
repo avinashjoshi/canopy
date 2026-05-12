@@ -651,6 +651,13 @@ func actionSearchEntry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // construction error), surface via m.err and stay in listMode — the
 // picker doesn't open against a half-resolved target.
 func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// v0.17.0 Phase 1c: on Hosts tab, `n` opens the add-host wizard
+	// instead of the new-workspace picker. The wizard runs as a
+	// subprocess via tea.ExecProcess so it can take over the terminal
+	// for huh's form and the ssh-copy-id offer.
+	if m.tab == tabHosts {
+		return m, m.execHostAddWizard()
+	}
 	var (
 		mgr      *workspace.Manager
 		root     string
@@ -1247,6 +1254,30 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 	log.Warn("ui.attach.unknown-status", "name", row.Name, "status", row.Status)
 	_ = ctx
 	return m, nil
+}
+
+// execHostAddWizard hands the terminal off to `canopy host add
+// --interactive` as a subprocess via tea.ExecProcess. The subprocess
+// runs the huh form, probes connectivity, offers ssh-copy-id, and
+// registers the host. On return, the TUI refreshes so the new host
+// appears in the Hosts tab. v0.17.0 Phase 1c.
+func (m *Model) execHostAddWizard() tea.Cmd {
+	canopyBin, err := os.Executable()
+	if err != nil || canopyBin == "" {
+		canopyBin = os.Args[0]
+	}
+	cmd := exec.Command(canopyBin, "host", "add", "--interactive")
+	cmd.Env = append(os.Environ(), "CANOPY_ALLOW_NESTED=1")
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			log.Warn("ui.host-add-wizard.failed", "err", err)
+		}
+		// Force a fresh refresh so the new host appears immediately.
+		// m.remoteRefreshing is reset by the rowsLoadedMsg handler;
+		// we drop the in-flight latch here so refreshRemoteCmd fires.
+		m.remoteRefreshing = false
+		return refreshCmd(m.mgr, m.tc, m.store)()
+	})
 }
 
 // attachRemoteRow dispatches a remote-host attach via canopy-as-subprocess.

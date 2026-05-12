@@ -101,15 +101,33 @@ func hostShowCmd() *cobra.Command {
 }
 
 func hostAddCmd() *cobra.Command {
+	var interactive bool
 	c := &cobra.Command{
-		Use:   "add <name> <ssh-target>",
-		Short: "Register a remote canopy host (e.g. `canopy host add tower avi@tower.tail.ts.net`)",
-		Long: "Registers a name → SSH-target mapping in ~/.canopy/hosts.json. " +
+		Use:   "add [<name> <ssh-target>]",
+		Short: "Register a remote canopy host (positional args, or --interactive for a guided form)",
+		Long: "Registers a name → SSH-target mapping in ~/.canopy/hosts.json.\n\n" +
+			"Two modes:\n" +
+			"  canopy host add tower avi@tower.tail.ts.net    # positional, no probe\n" +
+			"  canopy host add --interactive                  # huh form + connectivity probe + ssh-copy-id offer\n\n" +
 			"Bare add registers no projects; use `canopy project add <name> <path> --on <host>` " +
 			"to tell canopy where each project lives on this host. Name must not look like an " +
 			"SSH target (no @ or :).",
-		Args: cobra.ExactArgs(2),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if interactive {
+				if len(args) != 0 {
+					return fmt.Errorf("--interactive takes no positional args (use the form)")
+				}
+				return nil
+			}
+			if len(args) != 2 {
+				return fmt.Errorf("accepts 2 positional args (name, ssh-target) OR --interactive")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if interactive {
+				return runHostAddWizard(cmd.Context(), os.Stdin, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			}
 			reg, err := loadHostRegistry()
 			if err != nil {
 				return err
@@ -125,6 +143,8 @@ func hostAddCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&interactive, "interactive", false,
+		"open a guided form (huh) that prompts for name + ssh-target, probes connectivity, and offers ssh-copy-id if key auth isn't set up")
 	return c
 }
 
