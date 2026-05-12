@@ -36,13 +36,23 @@ This gives the user visibility into "canopy IS trying tower, here's why it can't
 
 ---
 
-## 📋 OPEN (P1) — Overlay shortcuts (Ctrl+Alt+c, prefix+g) broken when remote rows loaded (added 2026-05-12)
+## 💡 PARKED — Wild idea — Cross-machine overlay (always shows laptop registry from any session) (added 2026-05-12)
 
-Avi reports: when the TUI is running with remote rows visible, the canopy-summon overlay shortcuts don't fire. Specifically Ctrl+Alt+c (from v0.15.2's prefix-less chord) and prefix+g (from `canopy install tmux`).
+Captured from Phase 1b dogfood (2026-05-12). Avi noticed: when inside a mosh session attached to tower's tmux, `Ctrl+Alt+c` opens tower's local canopy view — which is correct, tower's tmux has its own keybind triggering its own canopy installation. But the experience is asymmetric: laptop-tmux overlay shows everything (laptop + tower + pi); tower-tmux overlay shows only tower.
 
-Suspected: the popup-mode `canopy` invocation (CANOPY_IN_POPUP=1) does the same remote refresh that the fullscreen TUI does, and either (a) the BatchMode SSH ConnectTimeout=5 makes the popup hang for ~5s before rendering, or (b) the popup terminal-mode + background goroutine combination deadlocks, or (c) refreshRemoteCmd's tea.Cmd dispatch interferes with the popup's much-shorter lifecycle.
+A "universal overlay" would always show the laptop's full registry view regardless of which tmux server the chord fires in. That'd let you summon "the canopy" from anywhere, treating canopy as one logical surface across all machines.
 
-Need to repro + diagnose. Likely fix: popup mode should SKIP the remote refresh entirely (it's transient — fullscreen mode handles polling) and just render from the cache. Or: respect a shorter timeout in popup mode.
+How it might work (sketches, not committed direction):
+
+1. **Reverse-SSH RPC**: tower's canopy popup, when launched with CANOPY_IN_POPUP=1, opens an SSH back-channel to laptop (via tailscale magicdns) and asks for the laptop's registry view. Renders that locally. The "owning machine" is implicit by network reachability.
+
+2. **Network-accessible registry**: ~/.canopy/hosts.json + remotes-cache.json synced via tailscale-shared filesystem mount, or via a small networked service (canopy-registryd). Every canopy instance reads the same registry.
+
+3. **Forward-from-laptop chord**: laptop's tmux installs the keybind on every connected mosh session via a wrapper that always shells back to the laptop's canopy. Cleanest UX, requires the canopy install-tmux step to do something different on remote machines.
+
+Why parked: the current design ("each (host, canopy installation) is its own world") is explicit per docs/design/v0.17-remote-workspaces.md, premise #1 ("Each host is an independent canopy installation. They don't sync."). Cross-machine overlay would relax that premise in service of UX. Worth considering once Phase 1c-1f land and we see how often the asymmetry bites in practice.
+
+Avi's read of the trade-off: "okay for now" — current behavior is correct, future work TBD.
 
 ---
 
