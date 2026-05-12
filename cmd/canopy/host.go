@@ -13,15 +13,30 @@ import (
 
 // hostCmd returns the `canopy host` parent command. Subcommands manage
 // the ~/.canopy/hosts.json registry: add a remote SSH-reachable canopy
-// installation, list registered hosts, remove one.
+// installation, list registered hosts, remove one, and manage the
+// projects-on-host map under `canopy host project`.
 //
-// v0.17.0 Phase 1a: registry is metadata-only — `canopy host add` does
-// NOT verify the SSH target is reachable or that canopy is installed
-// on the remote. That's a Phase 1d concern (the huh-wizard
-// `canopy host project init` flow ping-probes before registering).
-// Bare add lets users seed registrations against hosts that aren't
-// online yet (a Fly Machine that's stopped, a home server that's
-// asleep), which matches "remote workspaces survive disconnects" thesis.
+// Schema (v0.17.0 Phase 1a, registry version 2):
+//
+//	{
+//	  "hosts": {
+//	    "tower": {
+//	      "type": "ssh",
+//	      "ssh_target": "avi@tower.tail.ts.net",
+//	      "projects": {
+//	        "canopy": "/home/avi/Work/canopy",
+//	        "cravd":  "/home/avi/Work/cravd"
+//	      }
+//	    }
+//	  }
+//	}
+//
+// Host registration is metadata-only — `canopy host add` does NOT
+// verify the SSH target is reachable. Bare add lets users seed
+// registrations against hosts that aren't online yet (a Fly Machine
+// that's stopped, a home server that's asleep), which matches the
+// "remote workspaces survive disconnects" thesis. Phase 1d's huh
+// wizard `canopy host project init` adds connectivity-probing UX.
 //
 // See docs/design/v0.17-remote-workspaces.md.
 func hostCmd() *cobra.Command {
@@ -30,51 +45,41 @@ func hostCmd() *cobra.Command {
 		Short: "Manage registered remote canopy hosts (v0.17.0)",
 		Long: "Hosts let you dispatch `canopy new --on <name>` and `canopy switch --on <name>` " +
 			"to a remote canopy installation reachable over SSH. The registry lives at " +
-			"~/.canopy/hosts.json. Project paths registered alongside the SSH target mean " +
-			"you don't have to pass --remote-cwd every command.",
+			"~/.canopy/hosts.json. A host can serve multiple projects — each with its own " +
+			"remote path — managed via `canopy host project add/ls/rm`.",
 	}
 	cmd.AddCommand(hostAddCmd())
 	cmd.AddCommand(hostLsCmd())
 	cmd.AddCommand(hostRmCmd())
+	cmd.AddCommand(hostProjectCmd())
 	return cmd
 }
 
 func hostAddCmd() *cobra.Command {
-	var projectPath string
 	c := &cobra.Command{
 		Use:   "add <name> <ssh-target>",
 		Short: "Register a remote canopy host (e.g. `canopy host add tower avi@tower.tail.ts.net`)",
 		Long: "Registers a name → SSH-target mapping in ~/.canopy/hosts.json. " +
-			"--project-path is the remote directory where canopy runs (where the host's " +
-			"canopy.json walk-up succeeds); future `canopy new --on <name>` invocations " +
-			"cd there before dispatching. Name must not look like an SSH target (no @ or :).",
+			"Bare add registers no projects; use `canopy host project add <host> <name> <path>` " +
+			"to tell canopy where each project lives on this host. Name must not look like an " +
+			"SSH target (no @ or :).",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reg, err := loadHostRegistry()
 			if err != nil {
 				return err
 			}
-			h := host.Host{
-				SSHTarget:   args[1],
-				ProjectPath: projectPath,
-			}
-			if err := reg.Add(args[0], h); err != nil {
+			if err := reg.Add(args[0], host.Host{SSHTarget: args[1]}); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(),
 				"Registered host %q → %s\n", args[0], args[1])
-			if projectPath != "" {
-				fmt.Fprintf(cmd.OutOrStdout(),
-					"  project_path: %s\n", projectPath)
-			} else {
-				fmt.Fprintf(cmd.OutOrStdout(),
-					"  Tip: pass --project-path /path/to/project so you don't need --remote-cwd on every command.\n")
-			}
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"\nNext: register one or more projects on %s:\n  canopy host project add %s <project-name> <remote-path>\n",
+				args[0], args[0])
 			return nil
 		},
 	}
-	c.Flags().StringVar(&projectPath, "project-path", "",
-		"absolute path to the project directory on the remote (where canopy.json walk-up succeeds)")
 	return c
 }
 
@@ -94,17 +99,23 @@ func hostLsCmd() *cobra.Command {
 			}
 			if len(list) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(),
-					"No hosts registered. Try: canopy host add tower avi@tower.tail.ts.net --project-path /home/avi/Work/yourproject")
+					"No hosts registered. Try: canopy host add tower avi@tower.tail.ts.net")
 				return nil
 			}
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tSSH TARGET\tPROJECT PATH")
+			fmt.Fprintln(tw, "NAME\tSSH TARGET\tPROJECTS")
 			for _, h := range list {
-				project := h.ProjectPath
-				if project == "" {
-					project = "—"
+				projects := fmt.Sprintf("%d", len(h.Projects))
+				if len(h.Projects) == 0 {
+					projects = "— (run `canopy host project add " + h.Name + " ...`)"
+				} else {
+					names := make([]string, 0, len(h.Projects))
+					for n := range h.Projects {
+						names = append(names, n)
+					}
+					projects = fmt.Sprintf("%d (%s)", len(h.Projects), joinNamesShort(names))
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\n", h.Name, h.SSHTarget, project)
+				fmt.Fprintf(tw, "%s\t%s\t%s\n", h.Name, h.SSHTarget, projects)
 			}
 			return tw.Flush()
 		},
@@ -113,9 +124,7 @@ func hostLsCmd() *cobra.Command {
 
 func hostRmCmd() *cobra.Command {
 	// --force reserved for Phase 1b when remotes-cache.json exists and
-	// we can refuse rm if the host has cached workspaces. Phase 1a
-	// just removes from the registry; the flag is here so we don't
-	// have to change the CLI surface later.
+	// we can refuse rm if the host has cached workspaces.
 	var force bool
 	c := &cobra.Command{
 		Use:   "rm <name>",
@@ -136,6 +145,113 @@ func hostRmCmd() *cobra.Command {
 	c.Flags().BoolVar(&force, "force", false,
 		"reserved for Phase 1b: force removal even if the host has cached workspaces")
 	return c
+}
+
+// --- `canopy host project` parent + add/ls/rm subcommands ---
+
+func hostProjectCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "project",
+		Short: "Manage projects on a registered host",
+		Long: "Each host can serve multiple projects — `canopy host project add tower canopy /home/cassy/Work/canopy` " +
+			"tells canopy that on host `tower`, the project named `canopy` lives at `/home/cassy/Work/canopy`. " +
+			"The project name should match the local project's directory basename so cwd-driven dispatch works.",
+	}
+	cmd.AddCommand(hostProjectAddCmd())
+	cmd.AddCommand(hostProjectLsCmd())
+	cmd.AddCommand(hostProjectRmCmd())
+	return cmd
+}
+
+func hostProjectAddCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add <host> <project-name> <remote-path>",
+		Short: "Register a project on a host (e.g. `canopy host project add tower canopy /home/cassy/Work/canopy`)",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := loadHostRegistry()
+			if err != nil {
+				return err
+			}
+			if err := reg.AddProject(args[0], args[1], args[2]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"Registered project %q on host %q → %s\n", args[1], args[0], args[2])
+			return nil
+		},
+	}
+}
+
+func hostProjectLsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ls <host>",
+		Short: "List projects registered on a host",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := loadHostRegistry()
+			if err != nil {
+				return err
+			}
+			projs, err := reg.ListProjects(args[0])
+			if err != nil {
+				return err
+			}
+			if len(projs) == 0 {
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"No projects registered on %q. Try: canopy host project add %s <project-name> <remote-path>\n",
+					args[0], args[0])
+				return nil
+			}
+			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "PROJECT\tREMOTE PATH")
+			for _, p := range projs {
+				fmt.Fprintf(tw, "%s\t%s\n", p.Name, p.Path)
+			}
+			return tw.Flush()
+		},
+	}
+}
+
+func hostProjectRmCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rm <host> <project-name>",
+		Short: "Remove a project from a host",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := loadHostRegistry()
+			if err != nil {
+				return err
+			}
+			if err := reg.RemoveProject(args[0], args[1]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Removed project %q from host %q.\n", args[1], args[0])
+			return nil
+		},
+	}
+}
+
+// joinNamesShort formats a sorted list of project names for the ls
+// output, truncating long lists with an ellipsis so the table stays
+// readable when a host has 10+ projects.
+func joinNamesShort(names []string) string {
+	const max = 3
+	if len(names) <= max {
+		return joinComma(names)
+	}
+	return joinComma(names[:max]) + ", …"
+}
+
+func joinComma(names []string) string {
+	out := ""
+	for i, n := range names {
+		if i > 0 {
+			out += ", "
+		}
+		out += n
+	}
+	return out
 }
 
 // loadHostRegistry opens ~/.canopy/hosts.json. Used by all `canopy host`

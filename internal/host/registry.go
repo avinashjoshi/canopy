@@ -17,17 +17,30 @@ import (
 // stores SSH-reachable hosts; future phases (canopy.cloud thesis, Fly
 // Machines) add other Type values without changing the registry shape.
 //
-// ProjectPath is the host's canonical project directory: where
-// `canopy new --on <name>` cd's before invoking canopy on the remote.
-// Phase 0 required this as a per-command --remote-cwd flag; Phase 1a
-// moves it into the registry so the CLI surface becomes `--on tower`
-// with everything else inferred.
+// Projects is the host's per-project path map. Key is the project name
+// (matches local project basename for cwd-driven lookup); value is the
+// absolute path on the remote where that project lives. A host can
+// host any number of projects — laptop has `canopy` and `cravd`, tower
+// might have `canopy` only, fly-iad might have `canopy` AND `cravd` AND
+// a private fork. The matching key is convention, not enforcement:
+// `tower.Projects["canopy"]` is "what tower knows about a project named
+// canopy", which is what the local `canopy` project gets dispatched into.
+//
+// Empty Projects map = host registered but no projects yet. Dispatch
+// still works if --remote-cwd is passed explicitly, but the daily verb
+// `canopy new --on tower` needs the project resolved.
 type Host struct {
-	Name        string    `json:"-"` // map key in registryFile.Hosts
-	Type        string    `json:"type"`
-	SSHTarget   string    `json:"ssh_target,omitempty"`
-	ProjectPath string    `json:"project_path,omitempty"`
-	AddedAt     time.Time `json:"added_at"`
+	Name      string            `json:"-"` // map key in registryFile.Hosts
+	Type      string            `json:"type"`
+	SSHTarget string            `json:"ssh_target,omitempty"`
+	Projects  map[string]string `json:"projects,omitempty"`
+	AddedAt   time.Time         `json:"added_at"`
+
+	// LegacyProjectPath is preserved here ONLY for one-shot migration
+	// from registry version 1 (single project_path per host). On load,
+	// it gets moved into Projects under a "default" key with a warning
+	// logged. New writes never include this field.
+	LegacyProjectPath string `json:"project_path,omitempty"`
 }
 
 // Registry is the on-disk hosts.json read/write surface.
@@ -49,13 +62,16 @@ type registryFile struct {
 	Hosts   map[string]*Host `json:"hosts"`
 }
 
-const registryVersion = 1
+const registryVersion = 2
 
 // Sentinels for the cmd/canopy/host.go CLI to detect specific cases.
 var (
-	ErrHostExists   = errors.New("host already exists in registry")
-	ErrHostNotFound = errors.New("host not found in registry")
-	ErrHostInvalid  = errors.New("host name is invalid")
+	ErrHostExists      = errors.New("host already exists in registry")
+	ErrHostNotFound    = errors.New("host not found in registry")
+	ErrHostInvalid     = errors.New("host name is invalid")
+	ErrProjectExists   = errors.New("project already registered on this host")
+	ErrProjectNotFound = errors.New("project not registered on this host")
+	ErrProjectInvalid  = errors.New("project name is invalid")
 )
 
 // NewRegistry returns a Registry rooted at canopyHome (typically
@@ -111,12 +127,113 @@ func (r *Registry) Remove(name string) error {
 	})
 }
 
+// AddProject registers a project on an existing host. Errors:
+//   - ErrHostNotFound: host not registered
+//   - ErrProjectExists: project already registered on this host (use
+//     RemoveProject first, or use a different name)
+//   - ErrProjectInvalid: name contains forbidden chars
+//
+// remotePath should be the absolute path on the remote where the
+// project's canopy.json lives. v0.17.0 doesn't ping-probe the path
+// (network might be down, host might be asleep) — Phase 1d's `host
+// project init` wizard adds a connectivity check.
+func (r *Registry) AddProject(hostName, projectName, remotePath string) error {
+	if err := validateProjectName(projectName); err != nil {
+		return err
+	}
+	return r.withLock(func(rf *registryFile) error {
+		h, exists := rf.Hosts[hostName]
+		if !exists {
+			return fmt.Errorf("host.AddProject(%q, %q): %w", hostName, projectName, ErrHostNotFound)
+		}
+		if h.Projects == nil {
+			h.Projects = map[string]string{}
+		}
+		if _, dup := h.Projects[projectName]; dup {
+			return fmt.Errorf("host.AddProject(%q, %q): %w", hostName, projectName, ErrProjectExists)
+		}
+		h.Projects[projectName] = remotePath
+		return nil
+	})
+}
+
+// RemoveProject drops a project from a host's project map. Errors with
+// ErrHostNotFound or ErrProjectNotFound; the host itself stays.
+func (r *Registry) RemoveProject(hostName, projectName string) error {
+	return r.withLock(func(rf *registryFile) error {
+		h, exists := rf.Hosts[hostName]
+		if !exists {
+			return fmt.Errorf("host.RemoveProject(%q, %q): %w", hostName, projectName, ErrHostNotFound)
+		}
+		if _, found := h.Projects[projectName]; !found {
+			return fmt.Errorf("host.RemoveProject(%q, %q): %w", hostName, projectName, ErrProjectNotFound)
+		}
+		delete(h.Projects, projectName)
+		return nil
+	})
+}
+
+// GetProject returns the remote path for a (host, project) pair.
+// Distinguishes "host unknown" from "host known but project not
+// registered on it" so the dispatcher can print the right error
+// (the latter is recoverable with `canopy host project add`; the
+// former requires `canopy host add` first).
+func (r *Registry) GetProject(hostName, projectName string) (string, error) {
+	rf, err := r.load()
+	if err != nil {
+		return "", err
+	}
+	h, exists := rf.Hosts[hostName]
+	if !exists {
+		return "", fmt.Errorf("host.GetProject(%q, %q): %w", hostName, projectName, ErrHostNotFound)
+	}
+	path, found := h.Projects[projectName]
+	if !found {
+		return "", fmt.Errorf("host.GetProject(%q, %q): %w", hostName, projectName, ErrProjectNotFound)
+	}
+	return path, nil
+}
+
+// ListProjects returns a host's projects as a name-sorted slice of
+// (name, path) pairs. Empty slice (not nil) for hosts with no projects.
+func (r *Registry) ListProjects(hostName string) ([]ProjectEntry, error) {
+	rf, err := r.load()
+	if err != nil {
+		return nil, err
+	}
+	h, exists := rf.Hosts[hostName]
+	if !exists {
+		return nil, fmt.Errorf("host.ListProjects(%q): %w", hostName, ErrHostNotFound)
+	}
+	names := make([]string, 0, len(h.Projects))
+	for name := range h.Projects {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]ProjectEntry, 0, len(names))
+	for _, name := range names {
+		out = append(out, ProjectEntry{Name: name, Path: h.Projects[name]})
+	}
+	return out, nil
+}
+
+// ProjectEntry is the listing-friendly shape returned by ListProjects.
+type ProjectEntry struct {
+	Name string
+	Path string
+}
+
 // Resolve returns a copy of the named host. ErrHostNotFound if missing.
 // Callers should treat the returned Host as read-only; mutations must
 // go through Add (re-add after Remove) so they're persisted under the
 // flock contract.
+//
+// Side effect: if the on-disk hosts.json is v1, this call persists the
+// v2-migrated form to disk under the flock. That way the user sees a
+// "freshly normalized" file after any read-only Resolve/List call,
+// not just after a write-like Add/Remove.
 func (r *Registry) Resolve(name string) (Host, error) {
-	rf, err := r.load()
+	rf, err := r.loadAndMaybePersistMigration()
 	if err != nil {
 		return Host{}, err
 	}
@@ -130,9 +247,10 @@ func (r *Registry) Resolve(name string) (Host, error) {
 }
 
 // List returns all registered hosts in deterministic name-sorted order.
-// Empty slice (not nil) when the registry has no entries.
+// Empty slice (not nil) when the registry has no entries. Like Resolve,
+// triggers a persisted v1→v2 migration if needed.
 func (r *Registry) List() ([]Host, error) {
-	rf, err := r.load()
+	rf, err := r.loadAndMaybePersistMigration()
 	if err != nil {
 		return nil, err
 	}
@@ -154,6 +272,12 @@ func (r *Registry) List() ([]Host, error) {
 
 // load reads hosts.json. Missing file is treated as an empty registry
 // (first-time use). Malformed JSON returns a wrapped error.
+//
+// Migrations: registry v1 stored a single `project_path` per host; v2
+// stores a `projects: {name: path}` map. On load, any v1 host with a
+// non-empty LegacyProjectPath has it folded into Projects under a
+// "default" key and a warning is logged. New writes never serialize
+// LegacyProjectPath (omitempty).
 func (r *Registry) load() (*registryFile, error) {
 	data, err := os.ReadFile(r.path)
 	if err != nil {
@@ -170,6 +294,26 @@ func (r *Registry) load() (*registryFile, error) {
 		rf.Hosts = map[string]*Host{}
 	}
 	if rf.Version == 0 {
+		rf.Version = 1
+	}
+	// v1 → v2 migration.
+	if rf.Version < 2 {
+		for name, h := range rf.Hosts {
+			if h.LegacyProjectPath != "" {
+				if h.Projects == nil {
+					h.Projects = map[string]string{}
+				}
+				if _, exists := h.Projects["default"]; !exists {
+					h.Projects["default"] = h.LegacyProjectPath
+					log.Warn("host.registry.migrated", "host", name,
+						"from", "v1 project_path",
+						"to", "v2 projects.default",
+						"path", h.LegacyProjectPath,
+						"hint", "rename with `canopy host project rm "+name+" default; canopy host project add "+name+" <name> <path>`")
+				}
+				h.LegacyProjectPath = ""
+			}
+		}
 		rf.Version = registryVersion
 	}
 	return &rf, nil
@@ -194,6 +338,34 @@ func (r *Registry) save(rf *registryFile) error {
 		return fmt.Errorf("host.save: rename %s -> %s: %w", tmp, r.path, err)
 	}
 	return nil
+}
+
+// loadAndMaybePersistMigration loads + saves under the flock IF the
+// on-disk file needed migration. Used by read-only methods (Resolve,
+// List, GetProject) so the migrated shape lands on disk without
+// requiring a write-like Add/Remove first. Reads on already-v2 files
+// skip the flock entirely.
+func (r *Registry) loadAndMaybePersistMigration() (*registryFile, error) {
+	// Quick check: peek at the on-disk version. If it's already
+	// current, skip the flock dance.
+	data, rerr := os.ReadFile(r.path)
+	if rerr == nil {
+		var probe struct {
+			Version int `json:"version"`
+		}
+		if json.Unmarshal(data, &probe) == nil && probe.Version >= registryVersion {
+			return r.load() // fast path: no migration needed
+		}
+	}
+	// Either missing-file, malformed, or out-of-date version. Run
+	// load (which handles the missing-file case + does the v1→v2
+	// transform in-memory). If migration ran, persist under the flock.
+	var rf *registryFile
+	err := r.withLock(func(loaded *registryFile) error {
+		rf = loaded
+		return nil
+	})
+	return rf, err
 }
 
 // withLock load+mutate+save under an exclusive flock. Matches the
@@ -241,6 +413,20 @@ func validateName(name string) error {
 	}
 	if name == "local" {
 		return fmt.Errorf("%w: %q is reserved for future use", ErrHostInvalid, name)
+	}
+	return nil
+}
+
+// validateProjectName mirrors the host-name rules. Project names must
+// match the local project basename (canopy walks up cwd, takes the
+// final path segment as the project name), so the same character
+// restrictions apply. Slashes and whitespace would break that.
+func validateProjectName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: empty name", ErrProjectInvalid)
+	}
+	if strings.ContainsAny(name, "@:/ \t\n") {
+		return fmt.Errorf("%w: name %q contains @, :, /, or whitespace", ErrProjectInvalid, name)
 	}
 	return nil
 }

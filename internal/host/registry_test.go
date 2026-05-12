@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,8 +22,11 @@ func TestRegistry_AddListResolveRemove(t *testing.T) {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 
-	if err := reg.Add("tower", Host{SSHTarget: "avi@tower.tail.ts.net", ProjectPath: "/home/avi/Work/canopy"}); err != nil {
+	if err := reg.Add("tower", Host{SSHTarget: "avi@tower.tail.ts.net"}); err != nil {
 		t.Fatalf("Add: %v", err)
+	}
+	if err := reg.AddProject("tower", "canopy", "/home/avi/Work/canopy"); err != nil {
+		t.Fatalf("AddProject: %v", err)
 	}
 	if err := reg.Add("fly-iad", Host{SSHTarget: "fly@iad.fly.dev"}); err != nil {
 		t.Fatalf("Add: %v", err)
@@ -53,8 +57,8 @@ func TestRegistry_AddListResolveRemove(t *testing.T) {
 	if h.SSHTarget != "avi@tower.tail.ts.net" {
 		t.Errorf("ssh_target: got %q, want avi@tower.tail.ts.net", h.SSHTarget)
 	}
-	if h.ProjectPath != "/home/avi/Work/canopy" {
-		t.Errorf("project_path: got %q, want /home/avi/Work/canopy", h.ProjectPath)
+	if h.Projects["canopy"] != "/home/avi/Work/canopy" {
+		t.Errorf("projects[canopy]: got %q, want /home/avi/Work/canopy", h.Projects["canopy"])
 	}
 	if h.Type != "ssh" {
 		t.Errorf("type: got %q, want ssh (default)", h.Type)
@@ -71,6 +75,108 @@ func TestRegistry_AddListResolveRemove(t *testing.T) {
 	reg3, _ := NewRegistry(home)
 	if _, err := reg3.Resolve("tower"); !errors.Is(err, ErrHostNotFound) {
 		t.Errorf("expected ErrHostNotFound after Remove, got %v", err)
+	}
+}
+
+// TestRegistry_ProjectLifecycle covers AddProject / GetProject /
+// ListProjects / RemoveProject in one round-trip. Verifies the
+// multi-project shape that v0.17.0 Phase 1a's revised schema enables:
+// one host can serve multiple projects, each with its own remote path.
+func TestRegistry_ProjectLifecycle(t *testing.T) {
+	home := t.TempDir()
+	reg, _ := NewRegistry(home)
+	if err := reg.Add("tower", Host{SSHTarget: "a@t"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if err := reg.AddProject("tower", "canopy", "/home/cassy/Work/canopy"); err != nil {
+		t.Fatalf("AddProject canopy: %v", err)
+	}
+	if err := reg.AddProject("tower", "cravd", "/home/cassy/Work/cravd"); err != nil {
+		t.Fatalf("AddProject cravd: %v", err)
+	}
+
+	// Lookup the path back.
+	path, err := reg.GetProject("tower", "canopy")
+	if err != nil || path != "/home/cassy/Work/canopy" {
+		t.Errorf("GetProject(tower,canopy): got %q,%v want /home/cassy/Work/canopy,nil", path, err)
+	}
+
+	// List sorted.
+	projs, err := reg.ListProjects("tower")
+	if err != nil || len(projs) != 2 {
+		t.Fatalf("ListProjects: got %v,%v want 2 entries,nil", projs, err)
+	}
+	if projs[0].Name != "canopy" || projs[1].Name != "cravd" {
+		t.Errorf("ListProjects order: got %v,%v want canopy,cravd", projs[0].Name, projs[1].Name)
+	}
+
+	// Duplicate add rejected.
+	if err := reg.AddProject("tower", "canopy", "/another/path"); !errors.Is(err, ErrProjectExists) {
+		t.Errorf("duplicate AddProject: got %v want ErrProjectExists", err)
+	}
+
+	// Remove + verify lookup fails.
+	if err := reg.RemoveProject("tower", "canopy"); err != nil {
+		t.Fatalf("RemoveProject: %v", err)
+	}
+	if _, err := reg.GetProject("tower", "canopy"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("GetProject after Remove: got %v want ErrProjectNotFound", err)
+	}
+
+	// Removing a project that doesn't exist.
+	if err := reg.RemoveProject("tower", "missing"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("RemoveProject missing: got %v want ErrProjectNotFound", err)
+	}
+
+	// Operations on unknown host.
+	if err := reg.AddProject("unknown", "x", "/p"); !errors.Is(err, ErrHostNotFound) {
+		t.Errorf("AddProject on unknown host: got %v want ErrHostNotFound", err)
+	}
+}
+
+// TestRegistry_V1Migration verifies that hand-edited v1 hosts.json
+// files (with project_path on the host) get migrated to v2's projects
+// map on load, with the original path stored under the "default" key.
+func TestRegistry_V1Migration(t *testing.T) {
+	home := t.TempDir()
+	v1json := `{
+  "version": 1,
+  "hosts": {
+    "tower": {
+      "type": "ssh",
+      "ssh_target": "avi@tower",
+      "project_path": "/home/avi/Work/canopy",
+      "added_at": "2026-05-12T00:00:00Z"
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(home, "hosts.json"), []byte(v1json), 0o644); err != nil {
+		t.Fatalf("seed v1 json: %v", err)
+	}
+	reg, _ := NewRegistry(home)
+	h, err := reg.Resolve("tower")
+	if err != nil {
+		t.Fatalf("Resolve after v1 load: %v", err)
+	}
+	if got := h.Projects["default"]; got != "/home/avi/Work/canopy" {
+		t.Errorf("v1 project_path → projects.default: got %q want /home/avi/Work/canopy", got)
+	}
+	if h.LegacyProjectPath != "" {
+		t.Errorf("LegacyProjectPath should be cleared after migration; got %q", h.LegacyProjectPath)
+	}
+
+	// Trigger a Save by adding another host. Verify the on-disk file
+	// is now v2 (no project_path key on the migrated host).
+	if err := reg.Add("other", Host{SSHTarget: "x@y"}); err != nil {
+		t.Fatalf("Add to trigger save: %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(home, "hosts.json"))
+	if strings.Contains(string(data), `"project_path":`) {
+		t.Errorf("v2 hosts.json should not contain project_path key; got:\n%s", data)
+	}
+	if !strings.Contains(string(data), `"version": 2`) {
+		t.Errorf("hosts.json should declare version=2; got:\n%s", data)
 	}
 }
 

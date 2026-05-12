@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -68,7 +69,9 @@ func newCmd() *cobra.Command {
 			// laptop-side state-cache integration so the new workspace
 			// shows up in the local TUI without manual refresh.
 			if newWorkspaceFlags.onHost != "" {
-				resolved, err := resolveOn(newWorkspaceFlags.onHost)
+				cwd, _ := os.Getwd()
+				localProject := localProjectBasename(cwd)
+				resolved, err := resolveOnForNew(newWorkspaceFlags.onHost, localProject, newWorkspaceFlags.remoteCwd)
 				if err != nil {
 					return err
 				}
@@ -249,21 +252,14 @@ func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []s
 	// practice `canopy new` takes none today but future-proof the call).
 	canopyArgs = append(canopyArgs, posArgs...)
 
-	// Resolve the remote working directory. Per-command --remote-cwd
-	// wins; otherwise fall back to the registered host's project_path.
-	// Phase 0 required the explicit flag every time; Phase 1a's
-	// registry stores the path per-host so the daily verb is just
-	// `--on tower --name foo`.
-	cwd := newWorkspaceFlags.remoteCwd
-	if cwd == "" {
-		cwd = resolved.ProjectPath
-	}
+	// resolved.RemoteCwd already factored in --remote-cwd (per-command
+	// override) and the registry's host.Projects[<local-project>] lookup.
 	// Build a small shell script and pipe it to `bash -l` on the remote
 	// via stdin. The login shell sources ~/.bash_profile / ~/.profile,
 	// which is where most install scripts add ~/.local/bin to PATH.
 	// `set -e` halts on cd failure so we don't accidentally run canopy
 	// in the wrong directory.
-	script := buildRemoteScript(cwd, canopyArgs)
+	script := buildRemoteScript(resolved.RemoteCwd, canopyArgs)
 	fmt.Fprintf(stderr, "Dispatching to %s (%s):\n%s", target, resolved.Source, indent(script, "  "))
 
 	c := host.SSHCmd(ctx, target, "bash", "-l")

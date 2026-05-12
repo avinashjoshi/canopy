@@ -57,7 +57,9 @@ func switchCmd() *cobra.Command {
 			// canopy version and project layout). Tower's canopy figures
 			// it out. Laptop is the renderer; tower is the brain.
 			if switchFlags.onHost != "" {
-				resolved, err := resolveOn(switchFlags.onHost)
+				cwd, _ := os.Getwd()
+				preferred := localProjectBasename(cwd)
+				resolved, err := resolveOnForSwitch(switchFlags.onHost, preferred, switchFlags.remoteCwd)
 				if err != nil {
 					return err
 				}
@@ -167,20 +169,14 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	// don't inherit the user's ~/.local/bin from their login profile.
 	// Phase 1 absorbs the path into the hosts.json registry.
 	//
-	// --remote-cwd: canopy switch runs loadManager() which walks up
-	// from cwd to find canopy.json. mosh-server starts in $HOME by
-	// default, which has no project. Without an explicit cd, switch
-	// fails and the exec chain dies before tmux attach takes the PTY,
-	// leaving the user staring at "[mosh is exiting]". Phase 1a
-	// absorbs this into hosts.json (per-host project registry); the
-	// explicit --remote-cwd still wins as a per-command override.
-	cwd := switchFlags.remoteCwd
-	if cwd == "" {
-		cwd = resolved.ProjectPath
-	}
+	// resolved.RemoteCwd factored in --remote-cwd (per-command override),
+	// preferred-project lookup, and first-registered-project fallback.
+	// canopy switch on the remote walks up cwd looking for canopy.json,
+	// and the global-workspace lookup finds the workspace by name across
+	// projects — so ANY registered project works as the cd target.
 	remoteCmd := `export PATH="$HOME/.local/bin:$PATH"; `
-	if cwd != "" {
-		remoteCmd += "cd " + shellQuote(cwd) + "; "
+	if resolved.RemoteCwd != "" {
+		remoteCmd += "cd " + shellQuote(resolved.RemoteCwd) + "; "
 	}
 	remoteCmd += "exec canopy switch " + shellQuote(wsName)
 	argv := []string{"mosh", target, "--", "bash", "-lc", remoteCmd}
