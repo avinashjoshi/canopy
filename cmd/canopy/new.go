@@ -1,17 +1,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
 // newWorkspaceFlags holds parsed CLI flags. Package-level so they're
 // easy to test/inspect. v0.6 added --pr / --issue / --branch /
 // --allow-local for the source-variant flows; the original --name
-// and --no-attach still work as before.
+// and --no-attach still work as before. v0.17.0 Phase 0 adds --on
+// for remote dispatch (see docs/design/v0.17-remote-workspaces.md).
 var newWorkspaceFlags struct {
 	name       string
 	noAttach   bool
@@ -21,6 +26,7 @@ var newWorkspaceFlags struct {
 	allowLoc   bool   // --allow-local: with --branch, allow non-existent on origin
 	prompt     string // --prompt: initial agent message; sent after creation
 	promptFile string // --prompt-file: read --prompt content from file (multi-line)
+	onHost     string // --on <ssh-target>: dispatch to remote canopy (v0.17.0 Phase 0)
 }
 
 // newCmd returns the `canopy new` cobra subcommand.
@@ -47,11 +53,27 @@ func newCmd() *cobra.Command {
 			"  --branch <n>   check out existing branch <n> from origin\n" +
 			"  --allow-local  with --branch, allow checkout of a local-only branch",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
+			// v0.17.0 Phase 0: --on <ssh-target> dispatches the rest of
+			// the invocation to a remote canopy. Phase 0 is intentionally
+			// minimal — the remote owns the workspace lifecycle entirely;
+			// laptop's role here is just "run canopy new over there with
+			// these args, stream the output back."
+			//
+			// Phase 1 will add: hosts.json registry (so users say
+			// `--on tower` instead of full ssh-target), --prompt support
+			// over SSH (via stdin-pipe + remote temp-file dance), and
+			// laptop-side state-cache integration so the new workspace
+			// shows up in the local TUI without manual refresh.
+			if newWorkspaceFlags.onHost != "" {
+				return dispatchNewToRemote(ctx, newWorkspaceFlags.onHost, args, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			}
+
 			mgr, err := loadManager()
 			if err != nil {
 				return err
 			}
-			ctx := cmd.Context()
 
 			// Pre-validate the prompt BEFORE workspace creation. Bad
 			// flag combos / unreadable / oversized files exit 1 with
@@ -165,5 +187,83 @@ func newCmd() *cobra.Command {
 		"initial agent message; sent to the agent pane after creation (single-line)")
 	cmd.Flags().StringVar(&newWorkspaceFlags.promptFile, "prompt-file", "",
 		"read --prompt content from file (multi-line; max 32KB)")
+	cmd.Flags().StringVar(&newWorkspaceFlags.onHost, "on", "",
+		"dispatch to remote canopy at <ssh-target> instead of running locally (v0.17.0 Phase 0)")
 	return cmd
+}
+
+// dispatchNewToRemote SSHes the `canopy new` invocation to a remote host
+// and streams output back. Phase 0 builds the argv by hand from the
+// parsed flags rather than re-serializing os.Args, so this stays robust
+// against future flag additions on the local side that aren't yet on
+// the remote.
+//
+// Phase 0 limitation: --prompt / --prompt-file are not supported with
+// --on (would leak prompt text via remote process listing). User flow
+// for prompted remote workspaces in Phase 0:
+//  1. canopy new --on tower --name oauth-fix --branch oauth-fix
+//  2. canopy switch --on tower oauth-fix  (mosh-attach + type prompt manually)
+//
+// Phase 1 will pipe prompt text via SSH stdin into a remote temp file
+// so it never appears in `ps aux` on either side.
+func dispatchNewToRemote(ctx context.Context, target string, posArgs []string, stdout, stderr io.Writer) error {
+	if newWorkspaceFlags.prompt != "" || newWorkspaceFlags.promptFile != "" {
+		return fmt.Errorf(
+			"--on does not support --prompt / --prompt-file in v0.17.0 Phase 0.\n"+
+				"Create the remote workspace first, then attach with `canopy switch --on %s <name>` and type the prompt.\n"+
+				"Phase 1 will pipe prompt text via SSH stdin (see TODOS.md).",
+			target)
+	}
+
+	remoteArgs := []string{"canopy", "new"}
+	if newWorkspaceFlags.name != "" {
+		remoteArgs = append(remoteArgs, "--name", newWorkspaceFlags.name)
+	}
+	// Phase 0 default: --no-attach on remote. The local user can't be
+	// attached to a tmux session that lives on tower from inside an
+	// SSH-only invocation; they need to run `canopy switch --on <target>`
+	// separately to mosh-attach.
+	remoteArgs = append(remoteArgs, "--no-attach")
+	if newWorkspaceFlags.pr != 0 {
+		remoteArgs = append(remoteArgs, "--pr", fmt.Sprintf("%d", newWorkspaceFlags.pr))
+	}
+	if newWorkspaceFlags.issue != 0 {
+		remoteArgs = append(remoteArgs, "--issue", fmt.Sprintf("%d", newWorkspaceFlags.issue))
+	}
+	if newWorkspaceFlags.branch != "" {
+		remoteArgs = append(remoteArgs, "--branch", newWorkspaceFlags.branch)
+	}
+	if newWorkspaceFlags.allowLoc {
+		remoteArgs = append(remoteArgs, "--allow-local")
+	}
+	// Pass through any positional args (cobra collects unparsed; in
+	// practice `canopy new` takes none today but future-proof the call).
+	remoteArgs = append(remoteArgs, posArgs...)
+
+	fmt.Fprintf(stderr, "Dispatching to %s: %s\n", target, joinArgs(remoteArgs))
+
+	c := host.SSHCmd(ctx, target, remoteArgs...)
+	c.Stdout = stdout
+	c.Stderr = stderr
+	c.Stdin = os.Stdin // pass through in case remote canopy prompts (shouldn't, but harmless)
+	if err := c.Run(); err != nil {
+		return fmt.Errorf("remote canopy new failed: %w", err)
+	}
+
+	fmt.Fprintf(stdout, "\nRemote workspace created. Attach with:\n  canopy switch --on %s <name>\n", target)
+	return nil
+}
+
+// joinArgs is a tiny display helper for the "Dispatching to X: canopy
+// new ..." log line. Not for safe shell quoting (we never pass through
+// /bin/sh in Phase 0 — ssh argv flows direct to argv on the other side).
+func joinArgs(args []string) string {
+	out := ""
+	for i, a := range args {
+		if i > 0 {
+			out += " "
+		}
+		out += a
+	}
+	return out
 }
