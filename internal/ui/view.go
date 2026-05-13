@@ -42,6 +42,10 @@ func (m *Model) View() string {
 		return m.renderConfirmKill()
 	case confirmAttachMode:
 		return m.renderConfirmAttach()
+	case confirmHostRemoveMode:
+		return m.renderConfirmHostRemove()
+	case addHostNameMode, addHostTargetMode:
+		return m.renderAddHost()
 	case drawerMode:
 		return m.renderDrawer()
 	case busyMode:
@@ -211,9 +215,13 @@ func (m *Model) renderTabBar() string {
 		}
 		pills = append(pills, tabPill(proj, m.tab == tabLocal, hasLocal))
 	}
-	pills = append(pills, tabPill("Projects", m.tab == tabGlobal, hasGlobal))
-	if m.hostsHasEntries() {
-		pills = append(pills, tabPill("Hosts", m.tab == tabHosts, true))
+	pills = append(pills, tabPill("Workspaces", m.tab == tabGlobal, hasGlobal))
+	// Hosts pill is always shown when the registry is non-empty OR when
+	// the user is currently on it (so an empty-state view is still
+	// reachable as a fallback). v0.17 Phase 1l rename: "Remote hosts"
+	// makes the tab's purpose obvious without scanning the body.
+	if m.hostsHasEntries() || m.tab == tabHosts {
+		pills = append(pills, tabPill("Remote hosts", m.tab == tabHosts, m.hostsHasEntries()))
 	}
 	pills = append(pills, arrow.Render("›"))
 	return joinWithSpaces(pills)
@@ -288,7 +296,62 @@ func (m *Model) renderHostsTab() string {
 	if w <= 0 {
 		w = 100 // reasonable default before WindowSizeMsg lands
 	}
-	return hosts.Render(rows, w)
+	// Clamp the cursor to the rendered row count so a host that
+	// vanished between ticks doesn't leave the caret hanging past the
+	// end. v0.17 Phase 1l.
+	cursor := m.hostsCursor
+	if cursor >= len(rows) {
+		cursor = len(rows) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	return hosts.Render(rows, w, cursor)
+}
+
+// renderConfirmHostRemove is the y/N gate for `d` on the Hosts tab.
+// v0.17 Phase 1l. Mirrors renderConfirmKill's shape.
+func (m *Model) renderConfirmHostRemove() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("remove host"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  Remove host %q from the registry?\n\n", m.hostRemoveTarget))
+	b.WriteString(subtleStyle.Render("  Only the registry entry goes (~/.canopy/hosts.json). The remote\n"))
+	b.WriteString(subtleStyle.Render("  canopy install, its workspaces, and any cached state on the\n"))
+	b.WriteString(subtleStyle.Render("  laptop (~/.canopy/remotes-cache.json) are not touched.\n"))
+	b.WriteString("\n  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to remove  ·  any other key to cancel")
+	return b.String()
+}
+
+// renderAddHost is the two-step in-TUI add-host form (name → target).
+// Mode determines which input is focused; the other field renders as
+// a captured value chip. v0.17 Phase 1l — replaces the subprocess
+// huh-wizard handoff.
+func (m *Model) renderAddHost() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("add remote host"))
+	b.WriteString("\n\n")
+	b.WriteString(subtleStyle.Render("  A remote host is an SSH-reachable machine with canopy installed.\n"))
+	b.WriteString(subtleStyle.Render("  After adding, register one or more projects with `canopy project add`.\n"))
+	b.WriteString("\n")
+	switch m.mode {
+	case addHostNameMode:
+		b.WriteString("  name:    " + m.nameInput.View() + "\n")
+		b.WriteString(subtleStyle.Render("  target:  (enter after name)\n"))
+	case addHostTargetMode:
+		b.WriteString("  name:    " + m.hostAddName + "\n")
+		b.WriteString("  target:  " + m.nameInput.View() + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render("  enter to confirm  ·  esc to "))
+	if m.mode == addHostNameMode {
+		b.WriteString(subtleStyle.Render("cancel"))
+	} else {
+		b.WriteString(subtleStyle.Render("go back"))
+	}
+	return b.String()
 }
 
 // renderConfirmRetry renders the y/N gate for `R` on a non-broken

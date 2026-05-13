@@ -126,21 +126,26 @@ func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot
 }
 
 // Render returns the rendered Hosts tab as a string. Width drives
-// column visibility per the D2 tiered drop.
-func Render(rows []Row, width int) string {
+// column visibility per the D2 tiered drop. cursor indicates the
+// selected row (-1 for "no cursor", e.g. when the cursor is out of
+// bounds or rendering for a non-interactive context). v0.17 Phase 1l.
+func Render(rows []Row, width int, cursor int) string {
 	if len(rows) == 0 {
 		return emptyState()
 	}
 	var b strings.Builder
-	for _, r := range rows {
-		b.WriteString(renderRow(r, width))
+	for i, r := range rows {
+		b.WriteString(renderRow(r, width, i == cursor))
 		b.WriteByte('\n')
 	}
 	return b.String()
 }
 
 // renderRow is the per-host line. Format adapts to terminal width.
-func renderRow(r Row, width int) string {
+// selected toggles the `❯ ` caret + selection bg (matches the
+// workspace list's selected-row treatment so the two tabs feel like
+// the same surface).
+func renderRow(r Row, width int, selected bool) string {
 	// Minimum row format: <glyph> <name>  <detail>
 	// Adds columns as width permits.
 	glyph := statusGlyph(r.Status)
@@ -159,7 +164,11 @@ func renderRow(r Row, width int) string {
 		parts = append(parts, subtleStyle().Render(r.SSHTarget))
 	}
 	parts = append(parts, detail)
-	return strings.Join(parts, "  ")
+	body := strings.Join(parts, "  ")
+	if selected {
+		return lipgloss.NewStyle().Background(lipgloss.Color("237")).Render("❯ " + body)
+	}
+	return "  " + body
 }
 
 func emptyState() string {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/git"
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
@@ -529,6 +531,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmKillKey(msg)
 	case confirmAttachMode:
 		return m.handleConfirmAttachKey(msg)
+	case confirmHostRemoveMode:
+		return m.handleConfirmHostRemoveKey(msg)
+	case addHostNameMode:
+		return m.handleAddHostNameKey(msg)
+	case addHostTargetMode:
+		return m.handleAddHostTargetKey(msg)
 	case confirmRetryMode:
 		return m.handleConfirmRetryKey(msg)
 	case drawerMode:
@@ -717,7 +725,7 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// subprocess via tea.ExecProcess so it can take over the terminal
 	// for huh's form and the ssh-copy-id offer.
 	if m.tab == tabHosts {
-		return m, m.execHostAddWizard()
+		return m, m.openAddHostName()
 	}
 	// v0.17 Phase 1k: on a remote row, open the SAME TUI picker as
 	// local rows — Fresh + Prompt submit handlers branch on
@@ -1148,12 +1156,25 @@ func actionRetry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // (Model, tea.Cmd); projectlist returns (Model value, tea.Cmd) so we
 // reassign m.list with the returned value.
 func actionCursorUp(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.tab == tabHosts {
+		if m.hostsCursor > 0 {
+			m.hostsCursor--
+		}
+		return m, nil
+	}
 	next, cmd := m.list.Update(msg)
 	m.list = next
 	return m, cmd
 }
 
 func actionCursorDown(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.tab == tabHosts {
+		maxIdx := len(m.hostList) - 1
+		if m.hostsCursor < maxIdx {
+			m.hostsCursor++
+		}
+		return m, nil
+	}
 	next, cmd := m.list.Update(msg)
 	m.list = next
 	return m, cmd
@@ -1585,28 +1606,169 @@ func (m *Model) resolveHostForExec(name string) (string, error) {
 	return "", fmt.Errorf("host %q not found in registry snapshot", name)
 }
 
-// execHostAddWizard hands the terminal off to `canopy host add
-// --interactive` as a subprocess via tea.ExecProcess. The subprocess
-// runs the huh form, probes connectivity, offers ssh-copy-id, and
-// registers the host. On return, the TUI refreshes so the new host
-// appears in the Hosts tab. v0.17.0 Phase 1c.
-func (m *Model) execHostAddWizard() tea.Cmd {
-	canopyBin, err := os.Executable()
-	if err != nil || canopyBin == "" {
-		canopyBin = os.Args[0]
+// actionHostEnter is the Hosts tab's enter handler. v0.17 Phase 1l —
+// for now this surfaces a status hint with the host's SSH target;
+// follow-up may open a detail drawer.
+func actionHostEnter(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	h, ok := m.selectedHost()
+	if !ok {
+		return m, nil
 	}
-	cmd := exec.Command(canopyBin, "host", "add", "--interactive")
-	cmd.Env = append(os.Environ(), "CANOPY_ALLOW_NESTED=1")
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+	// Surface a non-error info hint via m.err — the status line is the
+	// only quick channel right now. Future: a host-detail drawer.
+	m.err = fmt.Errorf("%s → %s (run `canopy host show %s` for full detail)",
+		h.Name, h.SSHTarget, h.Name)
+	return m, nil
+}
+
+// actionHostRemove opens the confirm modal for removing the cursor's
+// host from the registry. v0.17 Phase 1l.
+func actionHostRemove(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	h, ok := m.selectedHost()
+	if !ok {
+		return m, nil
+	}
+	m.hostRemoveTarget = h.Name
+	m.mode = confirmHostRemoveMode
+	return m, nil
+}
+
+// selectedHost returns the currently-cursored host on the Hosts tab.
+// Returns (zero, false) when the cursor is out of range — e.g. an
+// empty registry or a refresh that dropped the row.
+func (m *Model) selectedHost() (host.Host, bool) {
+	if m.tab != tabHosts {
+		return host.Host{}, false
+	}
+	if m.hostsCursor < 0 || m.hostsCursor >= len(m.hostList) {
+		return host.Host{}, false
+	}
+	// hostList isn't necessarily sorted alphabetically; hosts.BuildRows
+	// re-sorts by name for the render. Mirror that ordering here so the
+	// cursor index matches what the user sees on screen.
+	sorted := make([]host.Host, len(m.hostList))
+	copy(sorted, m.hostList)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	return sorted[m.hostsCursor], true
+}
+
+// handleConfirmHostRemoveKey is the y/N gate for `d` on a host.
+// v0.17 Phase 1l. Mirrors handleConfirmKillKey's shape: y/Y proceeds,
+// anything else cancels.
+func (m *Model) handleConfirmHostRemoveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	target := m.hostRemoveTarget
+	m.mode = listMode
+	m.hostRemoveTarget = ""
+	if msg.String() != "y" && msg.String() != "Y" {
+		return m, nil
+	}
+	return m, removeHostCmd(target)
+}
+
+// removeHostCmd runs registry.Remove in a goroutine and emits
+// refreshAllMsg so the Hosts tab repaints without the deleted row.
+func removeHostCmd(name string) tea.Cmd {
+	return func() tea.Msg {
+		home, err := os.UserHomeDir()
 		if err != nil {
-			log.Warn("ui.host-add-wizard.failed", "err", err)
+			log.Warn("ui.host-remove.home-failed", "err", err)
+			return refreshAllMsg{}
 		}
-		// Force a fresh refresh so the new host appears immediately.
-		// m.remoteRefreshing is reset by the rowsLoadedMsg handler;
-		// we drop the in-flight latch here so refreshRemoteCmd fires.
-		m.remoteRefreshing = false
+		reg, err := host.NewRegistry(filepath.Join(home, ".canopy"))
+		if err != nil {
+			log.Warn("ui.host-remove.registry-failed", "err", err)
+			return refreshAllMsg{}
+		}
+		if err := reg.Remove(name); err != nil {
+			log.Warn("ui.host-remove.remove-failed", "name", name, "err", err)
+		}
 		return refreshAllMsg{}
-	})
+	}
+}
+
+// openAddHostName transitions to the in-TUI add-host name input. The
+// nameInput textinput is shared with the workspace-name flow but
+// cleared per-entry so values don't leak across flows. v0.17 Phase 1l.
+func (m *Model) openAddHostName() tea.Cmd {
+	m.mode = addHostNameMode
+	m.hostAddName = ""
+	m.nameInput.Reset()
+	m.nameInput.Placeholder = "e.g. tower"
+	m.nameInput.Focus()
+	return textinputBlink()
+}
+
+// handleAddHostNameKey is the keymap for the host-name input.
+// Enter advances to the ssh-target input (carrying the typed name);
+// esc cancels back to listMode.
+func (m *Model) handleAddHostNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = listMode
+		m.hostAddName = ""
+		m.nameInput.Reset()
+		m.nameInput.Blur()
+		return m, nil
+	case "enter":
+		name := strings.TrimSpace(m.nameInput.Value())
+		if name == "" {
+			return m, nil
+		}
+		m.hostAddName = name
+		m.mode = addHostTargetMode
+		m.nameInput.Reset()
+		m.nameInput.Placeholder = "user@host or host.tail.ts.net"
+		return m, textinputBlink()
+	}
+	var cmd tea.Cmd
+	m.nameInput, cmd = m.nameInput.Update(msg)
+	return m, cmd
+}
+
+// handleAddHostTargetKey is the keymap for the ssh-target input.
+// Enter submits (writes the registry); esc steps back to the name
+// input so the user can retry without retyping.
+func (m *Model) handleAddHostTargetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = addHostNameMode
+		m.nameInput.SetValue(m.hostAddName)
+		return m, textinputBlink()
+	case "enter":
+		target := strings.TrimSpace(m.nameInput.Value())
+		if target == "" {
+			return m, nil
+		}
+		name := m.hostAddName
+		m.mode = listMode
+		m.hostAddName = ""
+		m.nameInput.Reset()
+		m.nameInput.Blur()
+		return m, addHostCmd(name, target)
+	}
+	var cmd tea.Cmd
+	m.nameInput, cmd = m.nameInput.Update(msg)
+	return m, cmd
+}
+
+// addHostCmd writes the registry on a background goroutine and emits
+// refreshAllMsg so the Hosts tab sees the new row. Failures land on
+// m.err via a separate errMsg path.
+func addHostCmd(name, sshTarget string) tea.Cmd {
+	return func() tea.Msg {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return errMsg{err: fmt.Errorf("add host: $HOME: %w", err)}
+		}
+		reg, err := host.NewRegistry(filepath.Join(home, ".canopy"))
+		if err != nil {
+			return errMsg{err: fmt.Errorf("add host: %w", err)}
+		}
+		if err := reg.Add(name, host.Host{SSHTarget: sshTarget, Type: "ssh"}); err != nil {
+			return errMsg{err: fmt.Errorf("add host: %w", err)}
+		}
+		return refreshAllMsg{}
+	}
 }
 
 // attachRemoteRow dispatches a remote-host attach via canopy-as-subprocess.

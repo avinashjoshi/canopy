@@ -114,8 +114,17 @@ var listModeBindings = []Binding{
 		Action: actionSearchEntry,
 	},
 	{
-		K:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "attach")),
-		Action: actionAttach,
+		K:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "attach")),
+		Available: availableInWorkspaceContext, // Hosts tab enter handled separately
+		Action:    actionAttach,
+	},
+	{
+		// Hosts tab: enter on a selected host runs `canopy host show
+		// <name>` semantics in-TUI — for v0.17 Phase 1l just opens the
+		// detail drawer-ish surface (a follow-up).
+		K:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "host detail")),
+		Available: availableOnHostsTab,
+		Action:    actionHostEnter,
 	},
 	{
 		K:         key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
@@ -144,8 +153,18 @@ var listModeBindings = []Binding{
 		Action:    actionOpenBrowser,
 	},
 	{
-		K:      key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
-		Action: actionDelete,
+		// d on Hosts tab deletes the cursor's host from the registry;
+		// elsewhere it deletes a workspace. Single key, tab-aware
+		// dispatch via actionDeleteRouter — both bindings exist so the
+		// help line surfaces the right verb on the right tab.
+		K:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		Available: availableInWorkspaceContext,
+		Action:    actionDelete,
+	},
+	{
+		K:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove host")),
+		Available: availableOnHostsTab,
+		Action:    actionHostRemove,
 	},
 	{
 		// K (capital) kills the workspace's tmux session without
@@ -153,20 +172,23 @@ var listModeBindings = []Binding{
 		// the muscle-memory case is nav, the deliberate-keypress
 		// case is destructive. Same shift-key friction as F (force-
 		// remove). Re-pressing Enter after kill resurrects.
-		K:      key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "kill tmux")),
-		Action: actionKill,
+		K:         key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "kill tmux")),
+		Available: availableInWorkspaceContext,
+		Action:    actionKill,
 	},
 	{
 		// `i` opens the diagnostic detail drawer for the selected
 		// workspace. Read-only; scope-capped to "what's the state
 		// of this one workspace right now?". See drawerMode docstring
 		// in model.go for the load-bearing scope cap rationale.
-		K:      key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inspect")),
-		Action: actionInspect,
+		K:         key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inspect")),
+		Available: availableInWorkspaceContext,
+		Action:    actionInspect,
 	},
 	{
-		K:      key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "retry")),
-		Action: actionRetry,
+		K:         key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "retry")),
+		Available: availableInWorkspaceContext,
+		Action:    actionRetry,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
@@ -262,6 +284,25 @@ func availableOpenBrowser(m *Model) bool {
 	}
 	return row.Alive && row.Port > 0
 }
+
+// availableInWorkspaceContext is the predicate for verbs that act on
+// the workspace list (d/K/i/R/B/P/enter). Hidden on the Hosts tab so
+// pressing them there doesn't accidentally fire against whatever
+// workspace cursor row is stale. v0.17 Phase 1l.
+func availableInWorkspaceContext(m *Model) bool {
+	return m.tab != tabHosts
+}
+
+// availableOnHostsTab is the inverse — gates host-specific verbs to
+// only fire while the Hosts tab is active.
+func availableOnHostsTab(m *Model) bool {
+	return m.tab == tabHosts && len(m.hostList) > 0
+}
+
+// availableOpenPR and availableOpenBrowser already short-circuit when
+// the cursor row has no Path or no Port; both implicitly disqualify
+// the Hosts tab (no cursor row). The explicit gate above is for the
+// other verbs whose predicates would otherwise pass through.
 
 // availableShortHelp returns the bindings that pass IsAvailable, in
 // declared order. This is what bubbles/help.Bubble's ShortHelp consumes

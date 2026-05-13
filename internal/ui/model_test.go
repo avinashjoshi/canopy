@@ -2632,6 +2632,96 @@ func TestActionOpenBrowser_NoPortNoOp(t *testing.T) {
 	}
 }
 
+// TestCursorNav_HostsTabUsesHostsCursor: v0.17 Phase 1l — when on
+// the Hosts tab, up/down navigate hostsCursor, not the workspace
+// list. Verifies the two cursors are independent.
+func TestCursorNav_HostsTabUsesHostsCursor(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "alpha"}, {Name: "bravo"}, {Name: "charlie"},
+	}
+	m.hostsCursor = 0
+	_, _ = actionCursorDown(m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.hostsCursor != 1 {
+		t.Errorf("after down: hostsCursor = %d; want 1", m.hostsCursor)
+	}
+	_, _ = actionCursorDown(m, tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = actionCursorDown(m, tea.KeyMsg{Type: tea.KeyDown}) // try to go past end
+	if m.hostsCursor != 2 {
+		t.Errorf("after 3 downs (bounded): hostsCursor = %d; want 2", m.hostsCursor)
+	}
+	_, _ = actionCursorUp(m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.hostsCursor != 1 {
+		t.Errorf("after up: hostsCursor = %d; want 1", m.hostsCursor)
+	}
+}
+
+// TestAvailableWorkspaceVerbs_HiddenOnHostsTab: regression for the
+// user-reported "Hosts tab still shows workspace verb shortcuts"
+// bug. d / K / i / R / B / P / enter (workspace attach) must NOT
+// be available on the Hosts tab. v0.17 Phase 1l.
+func TestAvailableWorkspaceVerbs_HiddenOnHostsTab(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	if availableInWorkspaceContext(m) {
+		t.Errorf("availableInWorkspaceContext true on Hosts tab; want false")
+	}
+	// Sanity: returns true on the workspace tabs.
+	m.tab = tabGlobal
+	if !availableInWorkspaceContext(m) {
+		t.Errorf("availableInWorkspaceContext false on Global tab; want true")
+	}
+}
+
+// TestAvailableOnHostsTab_GatesHostVerbs: complement — host-specific
+// verbs (d→remove, enter→detail) must ONLY fire on the Hosts tab.
+func TestAvailableOnHostsTab_GatesHostVerbs(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	if availableOnHostsTab(m) {
+		t.Errorf("availableOnHostsTab true on Global tab; want false")
+	}
+	m.tab = tabHosts
+	if availableOnHostsTab(m) {
+		t.Errorf("availableOnHostsTab true on empty Hosts tab; want false (no host to act on)")
+	}
+	m.hostList = []host.Host{{Name: "tower"}}
+	if !availableOnHostsTab(m) {
+		t.Errorf("availableOnHostsTab false on populated Hosts tab; want true")
+	}
+}
+
+// TestActionHostRemove_OpensConfirmModal: pressing d on a host opens
+// the confirm-remove modal with the selected host pre-loaded.
+func TestActionHostRemove_OpensConfirmModal(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "alpha"}, {Name: "bravo"},
+	}
+	m.hostsCursor = 1 // bravo
+	_, _ = actionHostRemove(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if m.mode != confirmHostRemoveMode {
+		t.Errorf("mode = %v; want confirmHostRemoveMode", m.mode)
+	}
+	if m.hostRemoveTarget != "bravo" {
+		t.Errorf("hostRemoveTarget = %q; want bravo", m.hostRemoveTarget)
+	}
+}
+
+// TestActionNewWorkspace_HostsTabOpensInTUIForm: v0.17 Phase 1l —
+// pressing n on the Hosts tab opens the in-TUI add-host name input,
+// NOT the legacy huh subprocess wizard.
+func TestActionNewWorkspace_HostsTabOpensInTUIForm(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	_, _ = actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.mode != addHostNameMode {
+		t.Errorf("mode = %v; want addHostNameMode", m.mode)
+	}
+}
+
 // TestVisibleTabs_DropsLocalWhenNoProject: visibleTabs is the source
 // of truth for the tab cycle. It drops tabLocal when there's no
 // currentProject and tabHosts when no hosts are registered. v0.17

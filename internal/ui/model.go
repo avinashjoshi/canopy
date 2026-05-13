@@ -106,6 +106,15 @@ const (
 	// session. Skipped when the target is the workspace canopy was
 	// launched from (re-attaching your own session is the normal flow).
 	confirmAttachMode
+	// confirmHostRemoveMode is the y/N gate before deleting a host
+	// from the registry. v0.17 Phase 1l. Same shape as
+	// confirmDeleteMode but scoped to hosts.json instead of state.json.
+	confirmHostRemoveMode
+	// addHostNameMode + addHostTargetMode drive the in-TUI add-host
+	// flow. Name first, ssh-target second; submit writes the registry.
+	// v0.17 Phase 1l — replaces the subprocess wizard handoff.
+	addHostNameMode
+	addHostTargetMode
 	// drawerMode is the diagnostic detail drawer (opened with `i`).
 	// Read-only view of one workspace's process tree, recent logs, env,
 	// status history, and last setup log. The drawer is opt-in (no
@@ -352,6 +361,19 @@ type Model struct {
 	// keyed by host name. Used by the Hosts tab to render status
 	// pills + last-seen. v0.17.0 Phase 1c.
 	remoteSnaps map[string]*state.RemoteHostSnapshot
+
+	// hostsCursor indexes the Hosts tab's selected row. Separate from
+	// the workspace-list cursor (projectlist owns its own) so the two
+	// tabs navigate independently. v0.17 Phase 1l.
+	hostsCursor int
+
+	// hostRemoveTarget is the host name pending removal via the
+	// confirmHostRemoveMode modal. Cleared on dismiss.
+	hostRemoveTarget string
+
+	// hostAddName is the name typed in addHostNameMode, carried
+	// forward to addHostTargetMode for the registry.Add call.
+	hostAddName string
 
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
