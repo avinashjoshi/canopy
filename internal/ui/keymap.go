@@ -209,9 +209,32 @@ var listModeBindings = []Binding{
 		// upgrade is available and the closures are wired (via
 		// availableUpgrade); pressing U otherwise is silently
 		// ignored. The flow is full-screen and owned by upgradeMode.
+		// Tab-gated to non-Hosts contexts so it doesn't collide with
+		// the per-host upgrade dispatch below.
 		K:         key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "upgrade")),
-		Available: availableUpgrade,
+		Available: availableLocalUpgrade,
 		Action:    actionUpgrade,
+	},
+	{
+		// U on Hosts tab triggers `canopy upgrade --yes` on the
+		// cursor's host over SSH. Output streams into the TUI
+		// (no flicker, errors stay on screen). Available whenever
+		// the selected host reported a non-dev version on its most
+		// recent successful refresh — see availableHostUpgrade.
+		K:         key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "upgrade host")),
+		Available: availableHostUpgrade,
+		Action:    actionHostUpgrade,
+	},
+	{
+		// S on Hosts tab triggers `canopy use release` on the
+		// cursor's host — the recovery path for hosts running a
+		// dev binary, where `canopy upgrade` would refuse. Same
+		// streaming machinery as U; differs only in the remote
+		// command + labels. Hidden on release-binary hosts (where
+		// the call would be a no-op).
+		K:         key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "switch to release")),
+		Available: availableHostSwitchRelease,
+		Action:    actionHostSwitchRelease,
 	},
 	{
 		// D dismisses the current "upgrade available" pill. Only
@@ -329,6 +352,72 @@ func availableHostAuth(m *Model) bool {
 	}
 	return strings.Contains(snap.LastError, "Permission denied") ||
 		strings.Contains(snap.LastError, "publickey")
+}
+
+// availableLocalUpgrade is the gate for the in-TUI upgrade flow (U on
+// the workspace lists). Hosts tab gets its own U binding for remote
+// dispatch, so we exclude it here to avoid two bindings firing on the
+// same key.
+func availableLocalUpgrade(m *Model) bool {
+	if m.tab == tabHosts {
+		return false
+	}
+	return availableUpgrade(m)
+}
+
+// availableHostUpgrade gates the U key on the Hosts tab. Three
+// conditions must hold:
+//   - Last refresh succeeded (snap.LastError == "")
+//   - Remote reported a canopy_version (proves canopy is installed
+//     and the JSON output schema is the one we expect)
+//   - The reported version is not "dev" — `canopy upgrade` on the
+//     remote will refuse a dev build ("Switch to the released canopy
+//     first"), and surfacing U for those hosts would dispatch a
+//     guaranteed-to-fail SSH command. Hide it instead.
+func availableHostUpgrade(m *Model) bool {
+	if !availableOnHostsTab(m) {
+		return false
+	}
+	h, ok := m.selectedHost()
+	if !ok {
+		return false
+	}
+	snap := m.remoteSnaps[h.Name]
+	if snap == nil {
+		return false
+	}
+	if snap.LastError != "" || snap.CanopyVersion == "" {
+		return false
+	}
+	return snap.CanopyVersion != "dev"
+}
+
+// availableHostSwitchRelease gates the S key. Surface it whenever we
+// CAN'T rule out that the remote is a dev binary:
+//
+//   - CanopyVersion == "dev"           — clearly dev, S is the recovery.
+//   - CanopyVersion == "" or "(unknown)" — old canopy that predates the
+//     version-emit fix (legitimately can't tell if it's dev or release).
+//     Better to surface S as a no-op-if-already-release than to hide it
+//     from a user who knows their fleet has dev installs.
+//
+// On hosts whose snapshot reports a real semver, `canopy use release`
+// would be a no-op — hide S there to keep the help bar honest.
+// Requires a successful most-recent refresh so we don't act on stale data.
+func availableHostSwitchRelease(m *Model) bool {
+	if !availableOnHostsTab(m) {
+		return false
+	}
+	h, ok := m.selectedHost()
+	if !ok {
+		return false
+	}
+	snap := m.remoteSnaps[h.Name]
+	if snap == nil || snap.LastError != "" {
+		return false
+	}
+	v := snap.CanopyVersion
+	return v == "dev" || v == "" || v == "(unknown)"
 }
 
 // availableOpenPR and availableOpenBrowser already short-circuit when

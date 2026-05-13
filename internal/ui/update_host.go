@@ -261,6 +261,10 @@ func probeHostCmd(name, sshTarget string) tea.Cmd {
 	}
 }
 
+// actionHostUpgrade — the U-key handler on the Hosts tab — lives in
+// update_host_upgrade.go, which owns the multi-state TUI flow
+// (confirm → run → done) for upgrading canopy on a remote host.
+
 // handleConfirmSSHCopyIDKey: y/Y runs ssh-copy-id as a subprocess
 // (which prompts for the remote password); anything else dismisses.
 // v0.17 Phase 1l.

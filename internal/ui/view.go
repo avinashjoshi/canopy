@@ -58,6 +58,8 @@ func (m *Model) View() string {
 		return m.renderBusyView()
 	case upgradeMode:
 		return m.renderUpgrade()
+	case hostUpgradeMode:
+		return m.renderHostUpgrade()
 	}
 
 	if m.mode == confirmRetryMode {

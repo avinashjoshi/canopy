@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -326,10 +327,25 @@ type LsJSONWorkspace struct {
 	AgentState string `json:"agent_state,omitempty"`
 }
 
-// canopyVersionInfo is populated at link time by versionCmd.go; for the
-// JSON output we fall back to "(unknown)" if not set. The refresher
-// uses this to detect version drift between laptop and remote canopy.
+// canopyVersionInfo is what `canopy ls --json` reports under
+// canopy_version. The refresher on the laptop side surfaces this in
+// the Hosts tab + workspace-detail drawer. Tied to the package-level
+// `version` (ldflags-injected at build time, "dev" otherwise) via an
+// init so this stays a single source of truth — earlier this was a
+// hardcoded "(unknown)" and the bug was that every remote reported
+// itself as unknown, which broke the Hosts-tab version column.
 var canopyVersionInfo = "(unknown)"
+
+func init() {
+	// Strip the conventional leading "v" so consumers can render
+	// "v" + canopy_version without ending up with "vv0.17.0.0+abc".
+	// The package-level `version` is built as `v<semver>+<sha>` by the
+	// Makefile LDFLAGS; the wire format is intentionally the bare
+	// semver. Dev builds report "dev" (no "v" to strip).
+	if version != "" {
+		canopyVersionInfo = strings.TrimPrefix(version, "v")
+	}
+}
 
 const lsJSONSchemaVersion = 3 // v0.17 Phase 1d.2: + agent_state
 
