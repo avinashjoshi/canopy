@@ -959,17 +959,26 @@ func refreshRemoteCmd() tea.Cmd {
 				snap.Workspaces = append(snap.Workspaces, state.RemoteWorkspaceRow{
 					Name: w.Name, Project: w.Project, Branch: w.Branch,
 					Status: w.Status, Port: w.Port,
-					TmuxSession: w.TmuxSession, Alive: w.Alive,
+					TmuxSession:   w.TmuxSession,
+					Alive:         w.Alive,
+					MemRSS:        w.MemRSS,
+					CPU:           w.CPU,
+					Hints:         w.Hints,
+					LastErrorHint: w.LastErrorHint,
 				})
 				rows = append(rows, state.GlobalRow{
-					Host:        r.HostName,
-					Project:     w.Project,
-					Name:        w.Name,
-					Branch:      w.Branch,
-					Status:      state.Status(w.Status),
-					Port:        w.Port,
-					TmuxSession: w.TmuxSession,
-					Alive:       w.Alive,
+					Host:          r.HostName,
+					Project:       w.Project,
+					Name:          w.Name,
+					Branch:        w.Branch,
+					Status:        state.Status(w.Status),
+					Port:          w.Port,
+					TmuxSession:   w.TmuxSession,
+					Alive:         w.Alive,
+					MemRSS:        w.MemRSS,
+					CPU:           w.CPU,
+					Hints:         w.Hints,
+					LastErrorHint: w.LastErrorHint,
 				})
 			}
 			snaps[r.HostName] = snap

@@ -67,22 +67,22 @@ type Hint struct {
 	// Kind is one of: "rename_suggested", "shipped", "pr_status".
 	// Adding a new kind: register the detector in internal/lifecycle/
 	// and document the kind in docs/design/v0.6-agent-lifecycle.md.
-	Kind string
+	Kind string `json:"kind"`
 
 	// Message is human-readable, one line, present tense. E.g.:
 	// "branch 'ancient-hornet' has 3 commits past main; rename to reflect intent"
-	Message string
+	Message string `json:"message,omitempty"`
 
 	// Action is an optional suggested command for the user OR the
 	// agent to run. E.g. "git branch -m <name>". Surfaced in TUI
 	// hover (eventually) and in the AGENT.md briefing's hint section.
 	// Empty when no specific action applies.
-	Action string
+	Action string `json:"action,omitempty"`
 
 	// DetectedAt is when this hint was last refreshed. Used by stale-
 	// data indicators (e.g., pr_status hint from a 1h-old cache shows
 	// "stale" tag). Not persisted; reset on every detector run.
-	DetectedAt time.Time
+	DetectedAt time.Time `json:"detected_at,omitempty"`
 }
 
 // Status enumerates the five workspace states from the design doc.

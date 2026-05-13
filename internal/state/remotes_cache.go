@@ -73,6 +73,13 @@ type RemoteWorkspaceRow struct {
 	Port        int    `json:"port,omitempty"`
 	TmuxSession string `json:"tmux_session"`
 	Alive       bool   `json:"alive"`
+
+	// v0.17 Phase 1g: cached load + hints + diagnosis. Persisted so
+	// last-known values render when the host is offline.
+	MemRSS        int64  `json:"mem_rss,omitempty"`
+	CPU           float64 `json:"cpu,omitempty"`
+	Hints         []Hint  `json:"hints,omitempty"`
+	LastErrorHint string  `json:"last_error_hint,omitempty"`
 }
 
 const remotesCacheVersion = 1

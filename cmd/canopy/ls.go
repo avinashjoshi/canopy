@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 )
@@ -278,8 +279,13 @@ type LsJSONOutput struct {
 }
 
 // LsJSONWorkspace is the per-row shape. Mirrors state.GlobalRow with
-// the fields the refresher actually needs (and excludes UI-display-only
-// ephemera like MemRSS/CPUPct/Hints which would balloon the payload).
+// the fields the refresher actually needs to render a workspace row in
+// the laptop TUI. v0.17 Phase 1g added MemRSS, CPU, Hints, and
+// LastErrorHint so remote rows reach feature parity with local rows
+// (CPU/mem column, PR-status badge, broken-row hint line).
+//
+// Schema is additive: older laptop clients ignore unknown fields, so
+// rolling out a new column doesn't require coordinated upgrades.
 type LsJSONWorkspace struct {
 	Name        string `json:"name"`
 	Project     string `json:"project"`
@@ -288,6 +294,24 @@ type LsJSONWorkspace struct {
 	Port        int    `json:"port,omitempty"`
 	TmuxSession string `json:"tmux_session"`
 	Alive       bool   `json:"alive"`
+
+	// MemRSS is the summed resident set size (bytes) across every pane
+	// in this row's tmux session. Zero for non-alive rows. Phase 1g.
+	MemRSS int64 `json:"mem_rss,omitempty"`
+
+	// CPU is the summed pcpu (single-core normalized). Zero for
+	// non-alive rows. Phase 1g.
+	CPU float64 `json:"cpu,omitempty"`
+
+	// Hints are lifecycle detector results (rename_suggested, shipped,
+	// pr_status, etc). Empty for rows the remote couldn't run detectors
+	// against. Phase 1g.
+	Hints []state.Hint `json:"hints,omitempty"`
+
+	// LastErrorHint is the auto-detected diagnosis for broken
+	// workspaces. Surfaced under the table when the cursor is on a
+	// broken row. Empty for healthy rows. Phase 1g.
+	LastErrorHint string `json:"last_error_hint,omitempty"`
 }
 
 // canopyVersionInfo is populated at link time by versionCmd.go; for the
@@ -295,7 +319,7 @@ type LsJSONWorkspace struct {
 // uses this to detect version drift between laptop and remote canopy.
 var canopyVersionInfo = "(unknown)"
 
-const lsJSONSchemaVersion = 1
+const lsJSONSchemaVersion = 2 // v0.17 Phase 1g: + mem_rss, cpu, hints, last_error_hint
 
 func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 	store, err := openStateReadOnly()
@@ -307,7 +331,11 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	tc := tmux.New()
-	rows := st.BuildGlobalRows(ctx, tc)
+	// v0.17 Phase 1g: build rows with CPU/mem populated. Hints run
+	// after — they need each row's Path+ProjectRoot, which the cheaper
+	// BuildGlobalRowsWithLoad path already attaches.
+	memCache := state.NewMemCache(state.DefaultMemCacheTTL)
+	rows := st.BuildGlobalRowsWithLoad(ctx, tc, lsLoadAdapter{c: tc}, memCache)
 
 	doc := LsJSONOutput{
 		SchemaVersion: lsJSONSchemaVersion,
@@ -318,20 +346,58 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 	if host, herr := os.Hostname(); herr == nil {
 		doc.Hostname = host
 	}
+	// Look up per-workspace LastErrorHint from state.json (only set for
+	// broken workspaces; healthy rows leave it empty).
+	hintByKey := make(map[string]string, len(st.Workspaces))
+	for _, w := range st.Workspaces {
+		hintByKey[w.ProjectRoot+"|"+w.Name] = w.LastErrorHint
+	}
 	for _, r := range rows {
+		var hints []state.Hint
+		// Main rows have no Path / no detector input — skip them.
+		if !r.IsMain && r.Path != "" {
+			ws := state.Workspace{
+				Name:        r.Name,
+				Branch:      r.Branch,
+				Path:        r.Path,
+				ProjectRoot: r.ProjectRoot,
+				Status:      r.Status,
+			}
+			hints = lifecycle.RunFast(ctx, ws)
+		}
 		doc.Workspaces = append(doc.Workspaces, LsJSONWorkspace{
-			Name:        r.Name,
-			Project:     r.Project,
-			Branch:      r.Branch,
-			Status:      string(r.Status),
-			Port:        r.Port,
-			TmuxSession: r.TmuxSession,
-			Alive:       r.Alive,
+			Name:          r.Name,
+			Project:       r.Project,
+			Branch:        r.Branch,
+			Status:        string(r.Status),
+			Port:          r.Port,
+			TmuxSession:   r.TmuxSession,
+			Alive:         r.Alive,
+			MemRSS:        r.MemRSS,
+			CPU:           r.CPU,
+			Hints:         hints,
+			LastErrorHint: hintByKey[r.ProjectRoot+"|"+r.Name],
 		})
 	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
+}
+
+// lsLoadAdapter wraps *tmux.Client to satisfy state.LoadProbe.
+// Mirrors the ui.tmuxLoadAdapter — copied here to avoid importing
+// internal/ui from cmd/canopy.
+type lsLoadAdapter struct{ c *tmux.Client }
+
+func (a lsLoadAdapter) SessionLoad(ctx context.Context, session string) (state.LoadValue, error) {
+	if a.c == nil {
+		return state.LoadValue{}, nil
+	}
+	got, err := a.c.SessionLoad(ctx, session)
+	if err != nil {
+		return state.LoadValue{}, err
+	}
+	return state.LoadValue{RSS: got.RSS, CPU: got.CPU}, nil
 }
 
 // openStateReadOnly returns a state.Store rooted at ~/.canopy. Used for

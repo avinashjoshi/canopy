@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/avinashjoshi/canopy/internal/state"
 )
 
 // Refresher fans out per-host `canopy ls --json` queries with bounded
@@ -75,6 +77,15 @@ type RemoteWorkspace struct {
 	Port        int    `json:"port,omitempty"`
 	TmuxSession string `json:"tmux_session"`
 	Alive       bool   `json:"alive"`
+
+	// v0.17 Phase 1g: load + hints + diagnosis. Additive — older
+	// remotes that don't emit these fields leave them zero/nil and the
+	// laptop renders the workspace without a CPU/mem cell or hints
+	// section, same as a local workspace whose probe failed.
+	MemRSS        int64       `json:"mem_rss,omitempty"`
+	CPU           float64     `json:"cpu,omitempty"`
+	Hints         []state.Hint `json:"hints,omitempty"`
+	LastErrorHint string      `json:"last_error_hint,omitempty"`
 }
 
 // remoteLsResponse mirrors LsJSONOutput on the cmd/canopy side. Kept
