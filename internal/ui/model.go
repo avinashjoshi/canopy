@@ -513,10 +513,17 @@ func upgradeRefreshCmd(fn UpgradeRefreshFn) tea.Cmd {
 type tabKind int
 
 const (
+	// tabInbox is the "what needs me NOW" triage queue. Sorts every
+	// row in canopy's view by agent state: awaiting-input → thinking
+	// (stale first) → idle → inactive. v0.17.0 Phase 1d. Friendly
+	// "All caught up" empty state. Lives at position 0 in the cycle
+	// because it's the most-urgent-first daily verb in a multi-agent
+	// workflow.
+	tabInbox tabKind = iota
 	// tabLocal shows only rows whose ProjectRoot matches m.currentProject.
 	// Pre-selected when canopy was invoked from inside a project; the
 	// "scope is what I'm working on right now" view.
-	tabLocal tabKind = iota
+	tabLocal
 	// tabGlobal shows every workspace canopy knows about across all
 	// projects. Pre-selected when canopy was invoked from outside any
 	// project; the "give me everything" view.

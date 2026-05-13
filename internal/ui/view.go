@@ -11,6 +11,7 @@ import (
 	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/ui/hosts"
+	"github.com/avinashjoshi/canopy/internal/ui/inbox"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and
@@ -85,6 +86,16 @@ func (m *Model) View() string {
 	// because hosts have their own row shape (and own empty state).
 	if m.tab == tabHosts {
 		b.WriteString(m.renderHostsTab())
+		b.WriteString("\n\n")
+		b.WriteString(m.renderHelpLine())
+		return b.String()
+	}
+
+	// v0.17.0 Phase 1d: Inbox tab is the sorted triage queue. Same
+	// dispatch pattern as Hosts — own subpackage renderer + own
+	// empty state, no projectlist.
+	if m.tab == tabInbox {
+		b.WriteString(m.renderInboxTab())
 		b.WriteString("\n\n")
 		b.WriteString(m.renderHelpLine())
 		return b.String()
@@ -211,6 +222,11 @@ func (m *Model) renderTabBar() string {
 	// "tabs without content render dim" rule).
 	hasHosts := m.hostsHasEntries()
 
+	// v0.17.0 Phase 1d: Inbox tab is "alive" if any rows would surface
+	// — i.e., any local or remote rows exist. Empty canopy = dimmed.
+	hasInbox := len(m.allRows) > 0 || len(m.remoteRows) > 0
+
+	inbox := tabPill("Inbox", m.tab == tabInbox, hasInbox)
 	local := tabPill(localLabel, m.tab == tabLocal, hasLocal)
 	global := tabPill("Global", m.tab == tabGlobal, hasGlobal)
 	hosts := tabPill("Hosts", m.tab == tabHosts, hasHosts)
@@ -222,7 +238,7 @@ func (m *Model) renderTabBar() string {
 	arrow := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	left := arrow.Render("‹")
 	right := arrow.Render("›")
-	return left + " " + local + " " + global + " " + hosts + " " + right
+	return left + " " + inbox + " " + local + " " + global + " " + hosts + " " + right
 }
 
 // renderSearchLine returns the search input pill (when in search mode)
@@ -281,6 +297,26 @@ func (m *Model) renderHostsTab() string {
 		w = 100 // reasonable default before WindowSizeMsg lands
 	}
 	return hosts.Render(rows, w)
+}
+
+// renderInboxTab is the Inbox tab body — the sorted triage queue
+// across all local and remote workspaces. Delegates to the
+// internal/ui/inbox subpackage. v0.17.0 Phase 1d.
+//
+// Combines the local m.allRows with m.remoteRows and lets inbox.BuildFromRows
+// merge them. Agent state for local rows comes from m.agentStates;
+// remote rows are tagged Unknown in Phase 1d.1 (1d.2 adds remote
+// agent state via `canopy ls --json` schema extension).
+func (m *Model) renderInboxTab() string {
+	combined := make([]state.GlobalRow, 0, len(m.allRows)+len(m.remoteRows))
+	combined = append(combined, m.allRows...)
+	combined = append(combined, m.remoteRows...)
+	rows := inbox.BuildFromRows(combined, m.agentStates)
+	w := m.width
+	if w <= 0 {
+		w = 100
+	}
+	return inbox.Render(rows, w)
 }
 
 // renderConfirmRetry renders the y/N gate for `R` on a non-broken
