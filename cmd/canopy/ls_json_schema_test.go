@@ -62,6 +62,34 @@ func TestLsJSONWorkspace_Phase1gFields(t *testing.T) {
 	}
 }
 
+// TestCanopyVersionInfo_TracksPackageVersion verifies the wire format
+// reports the package-level `version` var (stripped of the "v" prefix)
+// so the laptop Hosts tab can render `v` + canopy_version without
+// double-prefixing, and so a remote canopy never reports as
+// "(unknown)" the way it did before init() was wired up.
+//
+// Regression target: canopyVersionInfo used to default to "(unknown)"
+// and was never assigned, so every remote reported itself as unknown
+// in the Hosts tab.
+func TestCanopyVersionInfo_TracksPackageVersion(t *testing.T) {
+	if version == "" {
+		t.Fatal("package version is empty — bare build should still default to \"dev\"")
+	}
+	// canopyVersionInfo is init()-set; in the test binary `version`
+	// is "dev" (no ldflags), so canopyVersionInfo should be "dev" too.
+	if canopyVersionInfo == "(unknown)" {
+		t.Errorf("canopyVersionInfo still \"(unknown)\" — init() didn't wire it from `version`")
+	}
+	want := strings.TrimPrefix(version, "v")
+	if canopyVersionInfo != want {
+		t.Errorf("canopyVersionInfo = %q, want %q (version=%q stripped)", canopyVersionInfo, want, version)
+	}
+	// And it must not start with "v" — display layer adds that.
+	if strings.HasPrefix(canopyVersionInfo, "v") {
+		t.Errorf("canopyVersionInfo leaked the leading \"v\": %q", canopyVersionInfo)
+	}
+}
+
 // TestLsJSONWorkspace_OmitEmptyKeepsPayloadLean: a fully-empty workspace
 // (no port, no load, no hints, no diagnosis) should not emit those keys
 // at all. Keeps the payload from ballooning across 50-workspace hosts.
