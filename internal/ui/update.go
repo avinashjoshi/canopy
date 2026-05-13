@@ -705,6 +705,15 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.tab == tabHosts {
 		return m, m.execHostAddWizard()
 	}
+	// v0.17 Phase 1i: on a remote row, `n` can't go through the local
+	// Manager (no canopy.json on the laptop for a project that lives
+	// on tower). Hand off to the CLI's interactive `canopy new --on
+	// <host>` flow instead — the user gets the same prompts in the
+	// terminal as if they'd run that command themselves. Future work:
+	// plug remote targets through the TUI picker for full parity.
+	if row, ok := m.list.CursorRow(); ok && row.Host != "" {
+		return m, m.execRemoteNew(row.Host)
+	}
 	var (
 		mgr      *workspace.Manager
 		root     string
@@ -1411,6 +1420,34 @@ func (m *Model) execRemoteVerb(hostName, verb string, args []string, force bool)
 		// Refresh BOTH local and remote so the row updates / disappears
 		// as appropriate. The remote-rows fan-out is what reflects the
 		// rm/retry side effect we just dispatched. v0.17 Phase 1h.
+		m.remoteRefreshing = false
+		return refreshAllMsg{}
+	})
+}
+
+// execRemoteNew hands off to `<this-canopy> new --on <host>` as a
+// subprocess via tea.ExecProcess. The user gets the CLI's interactive
+// flow (prompts for name + scripts.setup streaming) in the terminal;
+// when canopy new returns, the TUI repaints and a refresh kicks in
+// so the newly-created remote workspace shows up. v0.17 Phase 1i.
+//
+// Why subprocess (not picker → ExecProcess submit): the existing TUI
+// picker is tightly coupled to a local workspace.Manager (createCmd
+// calls mgr.Create directly). A full picker-on-remote pipeline would
+// need a parallel submit path that builds CLI flag args for each
+// variant. Future work — for now subprocess gets `n` working with
+// minimum surface area.
+func (m *Model) execRemoteNew(hostName string) tea.Cmd {
+	canopyBin, err := os.Executable()
+	if err != nil || canopyBin == "" {
+		canopyBin = os.Args[0]
+	}
+	cmd := exec.Command(canopyBin, "new", "--on", hostName)
+	cmd.Env = append(os.Environ(), "CANOPY_ALLOW_NESTED=1")
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			log.Warn("ui.remote-new.failed", "host", hostName, "err", err)
+		}
 		m.remoteRefreshing = false
 		return refreshAllMsg{}
 	})

@@ -380,6 +380,52 @@ func TestListModeBinding_OpenPR_IsCapital(t *testing.T) {
 	}
 }
 
+// TestAvailableNewWorkspace_RemoteRow: v0.17 Phase 1i — remote rows
+// have no ProjectRoot but `n` should still be available (the dispatch
+// hands off to `canopy new --on <host>` instead of going through the
+// local Manager).
+func TestAvailableNewWorkspace_RemoteRow(t *testing.T) {
+	m := newTestModel(false)
+	m.mgr = nil
+	m.tab = tabGlobal
+	m.setTestRows([]Row{
+		{Project: "cravd", Name: "foo", Status: state.StatusReady, Host: "tower"},
+	})
+	if !availableNewWorkspace(m) {
+		t.Errorf("availableNewWorkspace on remote row = false; want true (dispatch via canopy new --on)")
+	}
+}
+
+// TestAvailableNewWorkspace_HostsTab: on the Hosts tab, `n` opens the
+// add-host wizard — so it's always available regardless of cursor.
+func TestAvailableNewWorkspace_HostsTab(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	if !availableNewWorkspace(m) {
+		t.Errorf("availableNewWorkspace on Hosts tab = false; want true (add-host wizard)")
+	}
+}
+
+// TestActionNewWorkspace_RemoteRowReturnsCmd: pressing n on a remote
+// row returns a non-nil cmd (the execRemoteNew handoff). We don't run
+// the cmd (would actually fork canopy) — just check the wiring picks
+// the remote branch before falling through to managerForRow.
+func TestActionNewWorkspace_RemoteRowReturnsCmd(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.setTestRows([]Row{
+		{Project: "cravd", Name: "foo", Status: state.StatusReady, Host: "tower"},
+	})
+	_, cmd := actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd == nil {
+		t.Fatalf("actionNewWorkspace on remote row returned nil cmd; want execRemoteNew handoff")
+	}
+	// Should NOT have opened the picker (that's the local path).
+	if m.mode == newPickerMode {
+		t.Errorf("actionNewWorkspace on remote row opened local picker; want subprocess handoff")
+	}
+}
+
 // TestActionNewWorkspace_Local: from Local tab, n populates newTargetMgr
 // from m.mgr (the launch-context Manager). Title/root mirror the project
 // the user is actively working in.

@@ -219,12 +219,17 @@ func availableNewWorkspace(m *Model) bool {
 	if m.tab == tabLocal {
 		return m.mgr != nil
 	}
-	// tabGlobal: need a cursor row with a project to point at.
+	if m.tab == tabHosts {
+		// Hosts tab: `n` opens the add-host wizard.
+		return true
+	}
 	row, ok := m.list.CursorRow()
 	if !ok {
 		return false
 	}
-	return row.ProjectRoot != ""
+	// Remote row: `n` dispatches to `canopy new --on <host>`. Local row:
+	// need a non-empty ProjectRoot so managerForRow can resolve.
+	return row.Host != "" || row.ProjectRoot != ""
 }
 
 // availableOpenPR is the Available predicate for `P`. Hidden when the
