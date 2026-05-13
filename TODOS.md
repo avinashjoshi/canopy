@@ -56,6 +56,18 @@ Avi's read of the trade-off: "okay for now" — current behavior is correct, fut
 
 ---
 
+## 📋 OPEN (P2) — Configurable prompt-send timeout for slow remote agents (added 2026-05-12)
+
+v0.17.0 Phase 1f verified `canopy new --on tower --prompt "..."` delivers the prompt text correctly via SSH stdin + base64 + remote temp file. But the prompt-send step that comes after workspace creation has a hardcoded 5-second timeout in `internal/workspace/initprompt.go::phaseBudget`. On tower (and likely most remote machines), claude takes longer than 5s from launch to "ready marker visible." The prompt-send aborts with "Phase 1 timeout" and the user has to manually attach and type the prompt.
+
+Fix: make phaseBudget configurable via env var (e.g., `CANOPY_PROMPT_PHASE_BUDGET=15s`) OR auto-scale based on whether the workspace was launched from a remote dispatch (look for a CANOPY_REMOTE_DISPATCH=1 env var set by Phase 1f's script).
+
+Simple fix: bump default to 15s. Slower-but-correct beats fast-and-fails for slow machines / first-launch claude installs. The local-fast-claude case loses a few seconds before timeout-on-failure but everything else works the same.
+
+Repro: `canopy new --on tower --name X --prompt "test"`. Workspace creates fine; prompt step times out with "Phase 1 timeout". Verified the prompt text IS in the agent-briefing temp file on the remote — claude just isn't ready in 5s.
+
+---
+
 ## 📋 OPEN (P3) — Nested-canopy guard scope (added 2026-05-12)
 
 The CANOPY_ALLOW_NESTED guard in `cmd/canopy/guard.go` fires for every canopy subcommand when invoked inside a canopy tmux session, including pure-metadata verbs like `canopy host add/ls/rm` and `canopy version`. The guard exists because canopy's tmux launch/attach plumbing gets confused when canopy creates a session from inside another canopy session. But host-registry CLI doesn't touch tmux at all.

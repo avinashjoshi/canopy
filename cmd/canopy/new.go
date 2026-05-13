@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -68,6 +69,15 @@ func newCmd() *cobra.Command {
 			// over SSH (via stdin-pipe + remote temp-file dance), and
 			// laptop-side state-cache integration so the new workspace
 			// shows up in the local TUI without manual refresh.
+			// Pre-validate the prompt BEFORE any dispatch (local or remote).
+			// Bad flag combos / unreadable / oversized files exit 1 with
+			// no workspace created — same for `canopy new` and `canopy new
+			// --on tower`. v0.17.0 Phase 1f.
+			promptText, err := loadPrompt(newWorkspaceFlags.prompt, newWorkspaceFlags.promptFile)
+			if err != nil {
+				return err
+			}
+
 			if newWorkspaceFlags.onHost != "" {
 				cwd, _ := os.Getwd()
 				localProject := localProjectBasename(cwd)
@@ -75,18 +85,10 @@ func newCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return dispatchNewToRemote(ctx, resolved, args, cmd.OutOrStdout(), cmd.ErrOrStderr())
+				return dispatchNewToRemote(ctx, resolved, args, promptText, cmd.OutOrStdout(), cmd.ErrOrStderr())
 			}
 
 			mgr, err := loadManager()
-			if err != nil {
-				return err
-			}
-
-			// Pre-validate the prompt BEFORE workspace creation. Bad
-			// flag combos / unreadable / oversized files exit 1 with
-			// no workspace created (per v3 failure-modes table).
-			promptText, err := loadPrompt(newWorkspaceFlags.prompt, newWorkspaceFlags.promptFile)
 			if err != nil {
 				return err
 			}
@@ -203,28 +205,22 @@ func newCmd() *cobra.Command {
 }
 
 // dispatchNewToRemote SSHes the `canopy new` invocation to a remote host
-// and streams output back. Phase 0 builds the argv by hand from the
-// parsed flags rather than re-serializing os.Args, so this stays robust
+// and streams output back. Builds the argv by hand from the parsed
+// flags rather than re-serializing os.Args, so this stays robust
 // against future flag additions on the local side that aren't yet on
 // the remote.
 //
-// Phase 0 limitation: --prompt / --prompt-file are not supported with
-// --on (would leak prompt text via remote process listing). User flow
-// for prompted remote workspaces in Phase 0:
-//  1. canopy new --on tower --name oauth-fix --branch oauth-fix
-//  2. canopy switch --on tower oauth-fix  (mosh-attach + type prompt manually)
-//
-// Phase 1 will pipe prompt text via SSH stdin into a remote temp file
-// so it never appears in `ps aux` on either side.
-func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []string, stdout, stderr io.Writer) error {
+// promptText (v0.17.0 Phase 1f): when non-empty, it's base64-encoded
+// and embedded in the bash script via a heredoc; the remote shell
+// decodes it into a umask-077 temp file, then invokes canopy with
+// --prompt-file <temp>. The trap line cleans up the temp file
+// regardless of exit code. Base64 + heredoc means the prompt can
+// contain ANY characters (quotes, backticks, $vars, even the heredoc
+// marker) without escaping concerns. The prompt text never appears
+// in `ps aux` on either machine — it lives only in the script (sent
+// via SSH stdin) and the temp file (umask 077).
+func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []string, promptText string, stdout, stderr io.Writer) error {
 	target := resolved.SSHTarget
-	if newWorkspaceFlags.prompt != "" || newWorkspaceFlags.promptFile != "" {
-		return fmt.Errorf(
-			"--on does not support --prompt / --prompt-file in v0.17.0 Phase 0/1a.\n"+
-				"Create the remote workspace first, then attach with `canopy switch --on %s <name>` and type the prompt.\n"+
-				"Phase 1f will pipe prompt text via SSH stdin (see TODOS.md).",
-			newWorkspaceFlags.onHost)
-	}
 
 	var canopyArgs []string
 	canopyArgs = append(canopyArgs, "canopy", "new")
@@ -259,7 +255,7 @@ func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []s
 	// which is where most install scripts add ~/.local/bin to PATH.
 	// `set -e` halts on cd failure so we don't accidentally run canopy
 	// in the wrong directory.
-	script := buildRemoteScript(resolved.RemoteCwd, canopyArgs)
+	script := buildRemoteScript(resolved.RemoteCwd, canopyArgs, promptText)
 	fmt.Fprintf(stderr, "Dispatching to %s (%s):\n%s", target, resolved.Source, indent(script, "  "))
 
 	c := host.SSHCmd(ctx, target, "bash", "-l")
@@ -277,29 +273,81 @@ func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []s
 // buildRemoteScript assembles the shell script piped into the remote
 // login shell. `set -e` ensures cd failure short-circuits the canopy
 // invocation. `exec` replaces bash with canopy so the exit code is
-// canopy's, not bash's. Single-quoted cwd is shell-escaped against the
-// rare-but-possible apostrophe in a path.
-func buildRemoteScript(remoteCwd string, canopyArgs []string) string {
+// canopy's, not bash's.
+//
+// When promptText is non-empty (v0.17.0 Phase 1f), the script:
+//  1. Creates an umask-077 temp file via mktemp.
+//  2. Registers a trap that removes the temp file on shell exit
+//     (success, failure, signal — all paths).
+//  3. base64-decodes the prompt text into the temp file from an
+//     inline heredoc. Base64 + heredoc avoids ALL escaping concerns —
+//     the prompt can contain backticks, $vars, the literal string
+//     "EOF", anything; base64 maps it to a single-character alphabet
+//     that never collides with shell metachars.
+//  4. Appends --prompt-file <temp> to the canopy invocation.
+//
+// The prompt text never lands in `ps aux` on either machine (only the
+// canopy process reads the temp file; the file is deleted before any
+// other process can list it). Security decision 3A from
+// /plan-ceo-review.
+func buildRemoteScript(remoteCwd string, canopyArgs []string, promptText string) string {
 	var b strings.Builder
 	b.WriteString("set -e\n")
 	// Ensure ~/.local/bin is on PATH. The canopy curl-installer puts the
 	// binary there, but many distros (including omarchy) have an
 	// interactive-only .bashrc guard that doesn't fire for non-
-	// interactive SSH-command shells. Phase 1 absorbs this knowledge
-	// into the hosts.json registry (per-host canopy path / pre-command).
+	// interactive SSH-command shells.
 	b.WriteString(`export PATH="$HOME/.local/bin:$PATH"` + "\n")
 	if remoteCwd != "" {
 		fmt.Fprintf(&b, "cd %s\n", shellQuote(remoteCwd))
 	}
+
+	// Prompt path: write the prompt to a temp file, run canopy as a
+	// CHILD (not exec), then unlink the temp file after canopy exits.
+	// Crucial: NOT `exec canopy` because exec replaces the shell, so
+	// any cleanup line after exec never runs AND a trap registered
+	// on the bash process is gone with the shell. Run-then-rm keeps
+	// the shell alive long enough to delete the file.
+	if promptText != "" {
+		b.WriteString(`__CANOPY_PROMPT_FILE=$(umask 077 && mktemp /tmp/canopy-prompt-XXXXXX)` + "\n")
+		// Defensive trap covers signal-kill / power-cut paths where
+		// the explicit rm below never runs. EXIT fires on any bash
+		// exit including signals.
+		b.WriteString(`trap 'rm -f "$__CANOPY_PROMPT_FILE"' EXIT INT TERM` + "\n")
+		b.WriteString(`base64 -d > "$__CANOPY_PROMPT_FILE" <<'__CANOPY_PROMPT_B64__'` + "\n")
+		b.WriteString(base64.StdEncoding.EncodeToString([]byte(promptText)))
+		b.WriteString("\n__CANOPY_PROMPT_B64__\n")
+		canopyArgs = append(canopyArgs, "--prompt-file", `"$__CANOPY_PROMPT_FILE"`)
+		// No `exec` prefix — we need to outlive canopy so the trap
+		// fires + the explicit rm runs. canopy's exit code propagates
+		// via the script's last command (this canopy invocation).
+		writeCanopyArgs(&b, canopyArgs)
+		b.WriteByte('\n')
+		return b.String()
+	}
+
+	// No prompt: exec replacement is fine — canopy becomes the shell.
 	b.WriteString("exec ")
-	for i, a := range canopyArgs {
+	writeCanopyArgs(&b, canopyArgs)
+	b.WriteByte('\n')
+	return b.String()
+}
+
+// writeCanopyArgs is the shared per-arg writer. The prompt-file
+// argument is pre-tagged as `"$__CANOPY_PROMPT_FILE"` so bash expands
+// the variable; shellQuote would wrap that in single quotes and break
+// the expansion.
+func writeCanopyArgs(b *strings.Builder, args []string) {
+	for i, a := range args {
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		b.WriteString(shellQuote(a))
+		if strings.HasPrefix(a, `"$`) {
+			b.WriteString(a)
+		} else {
+			b.WriteString(shellQuote(a))
+		}
 	}
-	b.WriteByte('\n')
-	return b.String()
 }
 
 // indent prepends `prefix` to each line of `s`. Used to display the
