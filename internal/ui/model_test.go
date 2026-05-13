@@ -109,10 +109,9 @@ func TestNewUnified_DefaultTab(t *testing.T) {
 	})
 }
 
-// TestHandleKey_TabSwitch: tab key cycles m.tab through Inbox →
-// Local → Global → Hosts → Inbox. Hosts inserts only when at least
-// one host is registered; with no hosts the cycle is three-step.
-// v0.17.0 Phase 1d expanded the cycle from 2 to 4 tabs.
+// TestHandleKey_TabSwitch: tab key flips m.tab between Local and Global.
+// Resets cursor to 0 so a long-list scroll position doesn't carry over
+// into a different tab confusingly.
 func TestHandleKey_TabSwitch(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabLocal
@@ -120,29 +119,28 @@ func TestHandleKey_TabSwitch(t *testing.T) {
 	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
 	got := model.(*Model)
 	if got.tab != tabGlobal {
-		t.Errorf("after tab from Local: tab = %v; want tabGlobal", got.tab)
+		t.Errorf("after tab key: tab = %v; want tabGlobal", got.tab)
 	}
 
-	// No hosts registered → Global wraps to Inbox.
-	model, _ = got.handleKey(tea.KeyMsg{Type: tea.KeyTab})
-	got = model.(*Model)
-	if got.tab != tabInbox {
-		t.Errorf("after tab from Global (no hosts): tab = %v; want tabInbox", got.tab)
-	}
-
-	// Inbox → Local closes the loop.
 	model, _ = got.handleKey(tea.KeyMsg{Type: tea.KeyTab})
 	got = model.(*Model)
 	if got.tab != tabLocal {
-		t.Errorf("after third tab: tab = %v; want tabLocal (cycle complete)", got.tab)
+		t.Errorf("after second tab key: tab = %v; want tabLocal (round-trip)", got.tab)
 	}
 }
 
-// TestHandleKey_TabSwitch_GlobalNoAutoFocus: the pre-1d "Tab from
-// Global auto-focuses cursor row's project" magic was removed. With
-// a four-tab cycle, Tab from Global goes forward to Inbox (when no
-// hosts), not back to Local. Explicit project-focus moved to `f`.
-func TestHandleKey_TabSwitch_GlobalNoAutoFocus(t *testing.T) {
+// TestHandleKey_TabSwitch_GlobalToLocalAutoFocus is the regression test
+// for the user-reported "tab from Global doesn't enter Local" bug:
+// when canopy is launched outside any project (currentProject == ""),
+// Local has no meaningful filter, so Tab → Local would either show
+// every row (no-op) or feel broken. The fix routes Global → Local
+// through actionFocusProject when there's a cursor row, so Tab
+// behaves as "enter the project I'm looking at."
+func TestHandleKey_TabSwitch_GlobalToLocalAutoFocus(t *testing.T) {
+	// Set up a temp project with canopy.json so actionFocusProject's
+	// LoadFrom + workspace.New succeeds. The test only cares about the
+	// post-Tab Model state, not Manager construction success — but we
+	// need the load to not fail loudly.
 	projectRoot := t.TempDir()
 	canopyJSON := []byte(`{"scripts": {"setup": "x", "run": "y", "archive": "z"}}`)
 	if err := os.WriteFile(filepath.Join(projectRoot, "canopy.json"), canopyJSON, 0o644); err != nil {
@@ -159,18 +157,19 @@ func TestHandleKey_TabSwitch_GlobalNoAutoFocus(t *testing.T) {
 
 	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
 	got := model.(*Model)
-	if got.tab != tabInbox {
-		t.Errorf("after Tab from Global: tab = %v; want tabInbox (forward cycle, no auto-focus)", got.tab)
+	if got.tab != tabLocal {
+		t.Errorf("after Tab from Global w/ empty currentProject: tab = %v; want tabLocal", got.tab)
 	}
-	if got.currentProject != "" {
-		t.Errorf("after Tab: currentProject = %q; want \"\" (Tab no longer auto-focuses; use `f` instead)", got.currentProject)
+	if got.currentProject != projectRoot {
+		t.Errorf("after Tab: currentProject = %q; want %q (auto-focus from cursor row)", got.currentProject, projectRoot)
 	}
 }
 
-// TestHandleKey_TabSwitch_NoRowsForwardCycle covers the no-rows edge:
-// Tab from Global with no rows just advances the cycle. currentProject
-// stays empty (no auto-focus magic).
-func TestHandleKey_TabSwitch_NoRowsForwardCycle(t *testing.T) {
+// TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext covers the no-row
+// edge case: Tab from Global with no rows can't auto-focus (nothing to
+// focus on), so it falls through to the plain tab flip. currentProject
+// stays empty; user sees the "no projects" empty state.
+func TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabGlobal
 	m.currentProject = ""
@@ -179,11 +178,11 @@ func TestHandleKey_TabSwitch_NoRowsForwardCycle(t *testing.T) {
 
 	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
 	got := model.(*Model)
-	if got.tab != tabInbox {
-		t.Errorf("after Tab w/ no rows: tab = %v; want tabInbox (plain forward cycle)", got.tab)
+	if got.tab != tabLocal {
+		t.Errorf("after Tab w/ no rows: tab = %v; want tabLocal (plain flip)", got.tab)
 	}
 	if got.currentProject != "" {
-		t.Errorf("after Tab w/ no rows: currentProject = %q; want \"\"", got.currentProject)
+		t.Errorf("after Tab w/ no rows: currentProject = %q; want \"\" (nothing to focus)", got.currentProject)
 	}
 }
 
