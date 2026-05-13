@@ -154,23 +154,49 @@ func runHostAddWizard(ctx context.Context, in io.Reader, out, errOut io.Writer) 
 
 	case probeBroken:
 		fmt.Fprintf(errOut, "⚠ Connected to %s but canopy isn't installed there (or isn't on PATH): %s\n", sshTarget, probeResult.detail)
-		fmt.Fprintln(out, "Install canopy on the remote first:")
-		fmt.Fprintln(out, "  ssh "+sshTarget+" 'curl -fsSL https://canopy.dev/install.sh | sh'")
-		fmt.Fprintln(out, "Or scp a built binary to ~/.local/bin/ on that host.")
-		var registerAnyway bool
+		// Auto-offer install. Replaces the old "do it yourself" message.
+		// Saves the user a copy-paste step AND gets the host registered
+		// in a working state without a second round-trip through the
+		// CLI. We pass yes=true so runHostInstall skips its own local
+		// confirmation — this huh confirm IS the gate.
+		var installNow bool
 		err := huh.NewForm(
 			huh.NewGroup(
 				huh.NewConfirm().
-					Title("Register anyway?").
-					Description("Refreshes will fail until canopy is installed on the remote.").
-					Affirmative("Yes, register").
-					Negative("No, cancel").
-					Value(&registerAnyway),
+					Title("Install canopy on "+sshTarget+" now?").
+					Description("Pipes install.sh to bash over SSH. Missing deps (git, tmux, Go, make) get auto-installed via the remote's package manager. Requires passwordless sudo on the remote if deps are missing.").
+					Affirmative("Yes, install").
+					Negative("No, register without install").
+					Value(&installNow),
 			),
 		).Run()
-		if err != nil || !registerAnyway {
-			fmt.Fprintln(errOut, "Cancelled.")
-			return nil
+		if err != nil && !errors.Is(err, huh.ErrUserAborted) {
+			return fmt.Errorf("wizard: %w", err)
+		}
+		if installNow {
+			// Synthesize a Host value just for the install call —
+			// not yet in the registry, but runHostInstall only uses
+			// the SSHTarget + Name for output messages.
+			h := host.Host{Name: name, SSHTarget: sshTarget}
+			if ierr := runHostInstall(ctx, out, errOut, in, h, false /* reinstall */, true /* yes */); ierr != nil {
+				fmt.Fprintf(errOut, "Install failed: %v\nRegistering host anyway — you can retry with `canopy host install %s`.\n", ierr, name)
+			}
+		} else {
+			var registerAnyway bool
+			rerr := huh.NewForm(
+				huh.NewGroup(
+					huh.NewConfirm().
+						Title("Register anyway?").
+						Description("Refreshes will fail until canopy is installed on the remote. You can install it later with `canopy host install "+name+"`.").
+						Affirmative("Yes, register").
+						Negative("No, cancel").
+						Value(&registerAnyway),
+				),
+			).Run()
+			if rerr != nil || !registerAnyway {
+				fmt.Fprintln(errOut, "Cancelled.")
+				return nil
+			}
 		}
 	}
 
