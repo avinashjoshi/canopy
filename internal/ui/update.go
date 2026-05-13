@@ -118,6 +118,43 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, upgradeProgressTickCmd(msg.buf)
 
+	case hostUpgradeShellStartedMsg:
+		// Lazy-spawn bridge from hostUpgradeStartCmd. Same shape as
+		// upgradeShellStartedMsg: latch buf + cancel, kick off the
+		// tick + waitDone Cmds. State was already set to Running by
+		// the confirming-state Y handler.
+		m.hostUpgradeBuf = msg.buf
+		m.hostUpgradeCancel = msg.cancel
+		return m, tea.Batch(
+			hostUpgradeTickCmd(msg.buf),
+			hostUpgradeWaitDoneCmd(msg.done),
+		)
+
+	case hostUpgradeTickMsg:
+		if msg.chunk != "" {
+			m.hostUpgradeOutput += msg.chunk
+		}
+		if m.hostUpgradeState != hostUpgradeStateRunning {
+			return m, nil
+		}
+		return m, hostUpgradeTickCmd(msg.buf)
+
+	case hostUpgradeShellDoneMsg:
+		// Terminal state. Same shape as upgradeShellDoneMsg but writes
+		// into the host-upgrade fields so both flows can coexist
+		// without aliasing.
+		if msg.output != "" {
+			m.hostUpgradeOutput += msg.output
+		}
+		m.hostUpgradeErr = msg.err
+		if msg.err == nil {
+			m.hostUpgradeState = hostUpgradeStateDoneOK
+		} else {
+			m.hostUpgradeState = hostUpgradeStateDoneError
+		}
+		m.hostUpgradeCancel = nil
+		return m, nil
+
 	case upgradeShellDoneMsg:
 		// Terminal state. Append any trailing buffer content the
 		// final tick missed; flip to doneOK or doneError so the
@@ -551,6 +588,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleBusyModeKey(msg)
 	case upgradeMode:
 		return m.handleUpgradeKey(msg)
+	case hostUpgradeMode:
+		return m.handleHostUpgradeKey(msg)
 	}
 
 	// Search-mode keystrokes: capture into searchQuery, refilter on each

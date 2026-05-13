@@ -140,6 +140,13 @@ const (
 	// loading → preview → running → doneOK/doneError. See
 	// internal/ui/upgrade.go for the state machine and key handling.
 	upgradeMode
+	// hostUpgradeMode is the in-TUI flow for upgrading canopy on a
+	// remote host (U on the Hosts tab). Mirrors upgradeMode's
+	// confirm → running → doneOK/doneError state machine but runs
+	// `canopy upgrade --yes` over SSH and streams the output into a
+	// captured buffer (no tty pass-through; no flicker). See
+	// internal/ui/update_host_upgrade.go for the state machine.
+	hostUpgradeMode
 )
 
 // inNewFlow reports whether the current mode is any step of the
@@ -514,6 +521,29 @@ type Model struct {
 	upgradeChangelogFn   UpgradeChangelogFn
 	upgradeShellFn       UpgradeShellFn
 	upgradeDismissFn     UpgradeDismissFn
+
+	// Host-upgrade flow state. Active only when mode == hostUpgradeMode.
+	// Reset to zero on dismiss (resetHostUpgradeMode). State machine lives
+	// in update_host_upgrade.go; parallel to upgradeMode but for a remote
+	// canopy installation reached over SSH.
+	//
+	// The same state machine handles `canopy upgrade` AND `canopy use
+	// release` because they share the shape (confirm → run → done) and
+	// rendering chrome — they differ only in title, action verb, and
+	// the remote command. Carrying the variants here keeps callers
+	// from threading per-flow plumbing through every msg type.
+	hostUpgradeState     hostUpgradeState
+	hostUpgradeHost      string // selected host name
+	hostUpgradeTarget    string // resolved ssh_target
+	hostUpgradeVersion   string // remote's current canopy_version at action time
+	hostUpgradeAction    string // short label: "upgrade", "use release"
+	hostUpgradeVerb      string // present-continuous: "Upgrading", "Switching to release"
+	hostUpgradeSuccess   string // doneOK headline: "Upgrade complete", "Switched to release"
+	hostUpgradeRemoteCmd string // shell-parseable command to run over SSH
+	hostUpgradeOutput    string
+	hostUpgradeErr       error
+	hostUpgradeBuf       *safeBuffer
+	hostUpgradeCancel    context.CancelFunc
 }
 
 // UpgradeRefreshFn performs the async cache refresh: fetches the

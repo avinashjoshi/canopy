@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
@@ -2914,6 +2915,251 @@ func TestAvailableHostAuth_GatesOnAuthFailedStatus(t *testing.T) {
 	}
 	if availableHostAuth(m) {
 		t.Errorf("Online: `a` should NOT be available")
+	}
+}
+
+// TestAvailableHostUpgrade_RequiresKnownVersion verifies the gate on
+// the Hosts-tab `U` binding. The host must have responded successfully
+// at least once (snap.LastError == "") AND reported a CanopyVersion
+// other than "dev"; without those signals the remote `canopy upgrade`
+// would fail (binary missing, schema mismatch, or the dev-binary
+// refuse). Hiding U is the right UX — pressing it on a doomed host
+// would just silently flicker.
+func TestAvailableHostUpgrade_RequiresKnownVersion(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{{Name: "pi"}}
+	m.hostsCursor = 0
+
+	// No snapshot → host never reached → hide.
+	if availableHostUpgrade(m) {
+		t.Errorf("unknown status: U must NOT be available")
+	}
+	// Snapshot with version but stale error → hide (most recent
+	// refresh failed, so canopy may have disappeared since).
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {CanopyVersion: "0.17.0", LastError: "timeout"},
+	}
+	if availableHostUpgrade(m) {
+		t.Errorf("LastError set: U must NOT be available")
+	}
+	// Snapshot success but version empty → hide (we can't be sure
+	// the remote has canopy installed).
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: ""},
+	}
+	if availableHostUpgrade(m) {
+		t.Errorf("empty version: U must NOT be available")
+	}
+	// Dev binary → hide. `canopy upgrade` refuses to run on a dev
+	// build (it requires switching to a released canopy first), so
+	// surfacing U for these hosts would dispatch a guaranteed-fail SSH.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "", CanopyVersion: "dev"},
+	}
+	if availableHostUpgrade(m) {
+		t.Errorf("dev binary: U must NOT be available")
+	}
+	// Snapshot success with released version → show.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "", CanopyVersion: "0.17.0"},
+	}
+	if !availableHostUpgrade(m) {
+		t.Errorf("ready host: U must be available")
+	}
+	// Wrong tab → hide regardless.
+	m.tab = tabGlobal
+	if availableHostUpgrade(m) {
+		t.Errorf("non-Hosts tab: U must NOT be available")
+	}
+}
+
+// TestAvailableHostSwitchRelease_ShowsOnDevOrUnknown verifies the
+// gate on the Hosts-tab `S` binding. Surfaces S when the remote
+// EITHER reports "dev" OR reports nothing useful ("" / "(unknown)" —
+// the latter is what old canopies emitted before the version-emit
+// fix landed). Hidden only when the remote reports a real semver
+// (release host where `canopy use release` would be a no-op).
+func TestAvailableHostSwitchRelease_ShowsOnDevOrUnknown(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{{Name: "pi"}}
+	m.hostsCursor = 0
+
+	if availableHostSwitchRelease(m) {
+		t.Errorf("no snapshot: S must NOT be available")
+	}
+	// Real release version → hide S (use release would be a no-op).
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "", CanopyVersion: "0.17.0"},
+	}
+	if availableHostSwitchRelease(m) {
+		t.Errorf("release binary: S must NOT be available")
+	}
+	// Explicit dev → show.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "", CanopyVersion: "dev"},
+	}
+	if !availableHostSwitchRelease(m) {
+		t.Errorf("dev binary: S must be available")
+	}
+	// Legacy "(unknown)" — old canopy without the version-emit fix.
+	// Could be dev or release; safer to offer S as a no-op-if-release
+	// than to hide it from a known-dev host.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "", CanopyVersion: "(unknown)"},
+	}
+	if !availableHostSwitchRelease(m) {
+		t.Errorf("(unknown) version: S must be available")
+	}
+	// Empty version (snap exists but no canopy_version field) — same
+	// reasoning: surface S.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "", CanopyVersion: ""},
+	}
+	if !availableHostSwitchRelease(m) {
+		t.Errorf("empty version: S must be available")
+	}
+	// Stale error → hide (we don't trust the version).
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "timeout", CanopyVersion: "dev"},
+	}
+	if availableHostSwitchRelease(m) {
+		t.Errorf("LastError set: S must NOT be available")
+	}
+}
+
+// TestActionHostSwitchRelease_EntersConfirmingState verifies the S
+// action primes the same state machine as U but with the "use release"
+// labels and remote command. Regression target: if action / verb /
+// remoteCmd are left blank, the renderer falls back to upgrade-style
+// labels and the SSH dispatches the wrong command.
+func TestActionHostSwitchRelease_EntersConfirmingState(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{{Name: "pi", SSHTarget: "cassy@pi"}}
+	m.hostsCursor = 0
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "", CanopyVersion: "dev"},
+	}
+	model, _ := actionHostSwitchRelease(m, tea.KeyMsg{})
+	mm := model.(*Model)
+	if mm.mode != hostUpgradeMode {
+		t.Errorf("mode = %v; want hostUpgradeMode", mm.mode)
+	}
+	if mm.hostUpgradeAction != "use release" {
+		t.Errorf("action = %q; want 'use release'", mm.hostUpgradeAction)
+	}
+	if !strings.Contains(mm.hostUpgradeRemoteCmd, "canopy use release") {
+		t.Errorf("remoteCmd missing 'canopy use release': %q", mm.hostUpgradeRemoteCmd)
+	}
+	if strings.Contains(mm.hostUpgradeRemoteCmd, "upgrade") {
+		t.Errorf("remoteCmd leaked upgrade verb: %q", mm.hostUpgradeRemoteCmd)
+	}
+}
+
+// TestActionHostUpgrade_EntersConfirmingState verifies that the U
+// action sets up hostUpgradeMode in the confirming substate, capturing
+// the host name + ssh target + current version so the confirm screen
+// can show them. Regression target: a stale m.hostUpgradeHost from a
+// previous entry would surface "Upgrading <wrong host>" in the
+// confirm screen — resetHostUpgradeMode (called on dismiss) must keep
+// these fields tied to the current cursor row.
+func TestActionHostUpgrade_EntersConfirmingState(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "avi@tower"},
+	}
+	m.hostsCursor = 0
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"tower": {LastError: "", CanopyVersion: "0.17.0"},
+	}
+	model, cmd := actionHostUpgrade(m, tea.KeyMsg{})
+	mm := model.(*Model)
+	if mm.mode != hostUpgradeMode {
+		t.Errorf("mode = %v; want hostUpgradeMode", mm.mode)
+	}
+	if mm.hostUpgradeState != hostUpgradeStateConfirming {
+		t.Errorf("state = %v; want confirming", mm.hostUpgradeState)
+	}
+	if mm.hostUpgradeHost != "tower" {
+		t.Errorf("host = %q; want tower", mm.hostUpgradeHost)
+	}
+	if mm.hostUpgradeTarget != "avi@tower" {
+		t.Errorf("target = %q; want avi@tower", mm.hostUpgradeTarget)
+	}
+	if mm.hostUpgradeVersion != "0.17.0" {
+		t.Errorf("version = %q; want 0.17.0", mm.hostUpgradeVersion)
+	}
+	if mm.hostUpgradeAction != "upgrade" {
+		t.Errorf("action = %q; want 'upgrade'", mm.hostUpgradeAction)
+	}
+	if !strings.Contains(mm.hostUpgradeRemoteCmd, "canopy upgrade --yes") {
+		t.Errorf("remoteCmd missing 'canopy upgrade --yes': %q", mm.hostUpgradeRemoteCmd)
+	}
+	if cmd != nil {
+		t.Errorf("entering confirm should NOT dispatch SSH yet")
+	}
+}
+
+// TestHandleHostUpgradeKey_ConfirmRunsCmd: pressing y in the
+// confirming substate flips to running and returns a non-nil Cmd
+// (the SSH spawner). Esc cancels back to listMode + clears state.
+func TestHandleHostUpgradeKey_ConfirmRunsCmd(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = hostUpgradeMode
+	m.hostUpgradeState = hostUpgradeStateConfirming
+	m.hostUpgradeHost = "tower"
+	m.hostUpgradeTarget = "avi@tower"
+
+	model, cmd := m.handleHostUpgradeKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	mm := model.(*Model)
+	if mm.hostUpgradeState != hostUpgradeStateRunning {
+		t.Errorf("y: state = %v; want running", mm.hostUpgradeState)
+	}
+	if cmd == nil {
+		t.Errorf("y: cmd must be non-nil (the SSH spawner)")
+	}
+
+	// Esc from confirming → reset + listMode.
+	m2 := newTestModel(false)
+	m2.mode = hostUpgradeMode
+	m2.hostUpgradeState = hostUpgradeStateConfirming
+	m2.hostUpgradeHost = "tower"
+	model2, _ := m2.handleHostUpgradeKey(tea.KeyMsg{Type: tea.KeyEsc})
+	mm2 := model2.(*Model)
+	if mm2.mode != listMode {
+		t.Errorf("esc: mode = %v; want listMode", mm2.mode)
+	}
+	if mm2.hostUpgradeState != hostUpgradeStateNone {
+		t.Errorf("esc: state = %v; want none", mm2.hostUpgradeState)
+	}
+	if mm2.hostUpgradeHost != "" {
+		t.Errorf("esc: host not cleared: %q", mm2.hostUpgradeHost)
+	}
+}
+
+// TestAvailableLocalUpgrade_HiddenOnHostsTab verifies the in-TUI local
+// upgrade is gated off the Hosts tab so it doesn't collide with the
+// host-upgrade dispatch on the same key. The pre-existing
+// availableUpgrade predicate stays the inner condition; the new
+// availableLocalUpgrade just adds a tab check on top.
+func TestAvailableLocalUpgrade_HiddenOnHostsTab(t *testing.T) {
+	m := newTestModel(false)
+	// Pretend an upgrade is available + closures wired so the inner
+	// predicate returns true.
+	m.upgradeAvailable = "0.18.0"
+	m.upgradeChangelogFn = func(ctx context.Context) (string, error) { return "", nil }
+	m.upgradeShellFn = func(ctx context.Context, w io.Writer) error { return nil }
+
+	m.tab = tabGlobal
+	if !availableLocalUpgrade(m) {
+		t.Errorf("Global tab + upgrade available: U must fire local flow")
+	}
+	m.tab = tabHosts
+	if availableLocalUpgrade(m) {
+		t.Errorf("Hosts tab: local upgrade gate must be closed")
 	}
 }
 
