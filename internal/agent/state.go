@@ -142,6 +142,44 @@ func (d *Detector) Observe(paneID, launcher, current string) (State, int) {
 	return StateUnknown, 4
 }
 
+// ClassifyOneShot returns a state from a single pane capture using
+// static pattern matching only — no motion / history needed. Used by
+// `canopy ls --json` to stamp each workspace's agent_state per
+// invocation; the laptop Refresher reads it into the remote row's
+// AgentState. v0.17 Phase 1d.2.
+//
+// Tradeoff vs Detector.Observe: a single-shot can't see motion, so
+// "Thinking" is never returned — agents that ARE working but match
+// no idle/awaiting marker fall through to Unknown. That's acceptable
+// for the remote-row badge: the load-bearing signal is "this is
+// blocked on me" (AwaitingInput), which pattern matching handles
+// well. Local rows keep the diff-based Observe path for the full
+// Idle/Thinking/AwaitingInput trio.
+//
+// launcher mirrors LauncherFromRole(roleTag); empty means malformed
+// role → Unknown. Empty content also → Unknown.
+func ClassifyOneShot(launcher, content string) State {
+	if content == "" || launcher == "" {
+		return StateUnknown
+	}
+	if launcher != "claude" {
+		// Other launchers (codex, opencode, aider) have no registered
+		// idle/awaiting patterns yet — can't classify without motion.
+		return StateUnknown
+	}
+	for _, p := range claudeAwaitingPatterns {
+		if p.MatchString(content) {
+			return StateAwaitingInput
+		}
+	}
+	for _, p := range claudeIdleMarkers {
+		if p.MatchString(content) {
+			return StateIdle
+		}
+	}
+	return StateUnknown
+}
+
 // Prune drops history entries whose paneID is not in activeIDs. Called
 // every TUI poll tick to bound memory as panes are killed/recreated;
 // without it the map grows unboundedly across a long TUI session.

@@ -86,6 +86,11 @@ type RemoteWorkspace struct {
 	CPU           float64     `json:"cpu,omitempty"`
 	Hints         []state.Hint `json:"hints,omitempty"`
 	LastErrorHint string      `json:"last_error_hint,omitempty"`
+
+	// AgentState is the workspace agent pane's classification: "idle",
+	// "thinking", "awaiting_input", or empty. Populated by canopy ls
+	// --json's single-shot ClassifyOneShot. v0.17 Phase 1d.2.
+	AgentState string `json:"agent_state,omitempty"`
 }
 
 // remoteLsResponse mirrors LsJSONOutput on the cmd/canopy side. Kept

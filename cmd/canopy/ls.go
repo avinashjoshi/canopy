@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
@@ -313,6 +314,16 @@ type LsJSONWorkspace struct {
 	// workspaces. Surfaced under the table when the cursor is on a
 	// broken row. Empty for healthy rows. Phase 1g.
 	LastErrorHint string `json:"last_error_hint,omitempty"`
+
+	// AgentState is the workspace agent pane's classification at
+	// emit time: "idle", "thinking", "awaiting_input", or "" (unknown
+	// / no agent pane). Single-shot pattern match via
+	// agent.ClassifyOneShot — so "thinking" is never set from this
+	// path (it requires motion across observations the laptop tracks).
+	// The laptop Refresher reads this onto GlobalRow.AgentState which
+	// the row renderer uses to populate the badge for remote rows.
+	// v0.17 Phase 1d.2.
+	AgentState string `json:"agent_state,omitempty"`
 }
 
 // canopyVersionInfo is populated at link time by versionCmd.go; for the
@@ -320,7 +331,7 @@ type LsJSONWorkspace struct {
 // uses this to detect version drift between laptop and remote canopy.
 var canopyVersionInfo = "(unknown)"
 
-const lsJSONSchemaVersion = 2 // v0.17 Phase 1g: + mem_rss, cpu, hints, last_error_hint
+const lsJSONSchemaVersion = 3 // v0.17 Phase 1d.2: + agent_state
 
 func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 	store, err := openStateReadOnly()
@@ -373,6 +384,13 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 		}
 		mainBranchByRoot[r.ProjectRoot] = b
 	}
+	// v0.17 Phase 1d.2: classify each workspace's agent pane via
+	// single-shot pattern matching so the laptop can render the
+	// awaiting-input / idle badge on remote rows. One ListAgentPanes
+	// call up front; per-pane CapturePane bounded by a tight timeout
+	// so a wedged pane can't stall ls --json. Errors fail-open: the
+	// row's agent_state stays empty and the laptop renders blank.
+	agentStateBySession := classifyAgentPanes(ctx, tc)
 	for _, r := range rows {
 		var hints []state.Hint
 		// Main rows have no Path / no detector input — skip them.
@@ -392,6 +410,10 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 				branch = resolved
 			}
 		}
+		var agentState string
+		if s, ok := agentStateBySession[r.TmuxSession]; ok && s != agent.StateUnknown {
+			agentState = s.String()
+		}
 		doc.Workspaces = append(doc.Workspaces, LsJSONWorkspace{
 			Name:          r.Name,
 			Project:       r.Project,
@@ -404,6 +426,7 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 			CPU:           r.CPU,
 			Hints:         hints,
 			LastErrorHint: hintByKey[r.ProjectRoot+"|"+r.Name],
+			AgentState:    agentState,
 		})
 	}
 	enc := json.NewEncoder(out)
@@ -425,6 +448,39 @@ func (a lsLoadAdapter) SessionLoad(ctx context.Context, session string) (state.L
 		return state.LoadValue{}, err
 	}
 	return state.LoadValue{RSS: got.RSS, CPU: got.CPU}, nil
+}
+
+// classifyAgentPanes runs ListAgentPanes + per-pane CapturePane,
+// classifies each pane via agent.ClassifyOneShot, and returns a map
+// keyed by tmux session name. Used by lsGlobalJSON to stamp each row's
+// agent_state. v0.17 Phase 1d.2.
+//
+// Failure modes are all fail-open — the map just doesn't carry an
+// entry for the missing/timed-out pane, and the row's agent_state in
+// the JSON output stays empty. Per-pane CapturePane wrapped in a
+// 500ms timeout so one wedged pane can't stall the whole emit.
+func classifyAgentPanes(ctx context.Context, tc *tmux.Client) map[string]agent.State {
+	out := make(map[string]agent.State)
+	listCtx, listCancel := context.WithTimeout(ctx, 1*time.Second)
+	defer listCancel()
+	panes, err := tc.ListAgentPanes(listCtx)
+	if err != nil || len(panes) == 0 {
+		return out
+	}
+	for _, p := range panes {
+		launcher := agent.LauncherFromRole(p.Role)
+		if launcher == "" {
+			continue
+		}
+		capCtx, capCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		content, err := tc.CapturePane(capCtx, p.ID)
+		capCancel()
+		if err != nil {
+			continue
+		}
+		out[p.Session] = agent.ClassifyOneShot(launcher, content)
+	}
+	return out
 }
 
 // openStateReadOnly returns a state.Store rooted at ~/.canopy. Used for

@@ -1335,3 +1335,39 @@ func TestAgentBadge_LocalRowStillShowsNoAIAfterPoll(t *testing.T) {
 		t.Errorf("agentBadge(local row, post-poll, no state) = blank; want No-AI dot")
 	}
 }
+
+// TestAgentBadge_RemoteRowReadsAgentStateField: v0.17 Phase 1d.2 —
+// remote rows carry their agent state on r.AgentState (wired from
+// the canopy ls --json `agent_state` field). agentBadge must read
+// from that field, not from the local agentStates map.
+func TestAgentBadge_RemoteRowReadsAgentStateField(t *testing.T) {
+	cases := []struct {
+		state    string
+		wantBare string // visible glyph (after ansi stripping)
+	}{
+		{"awaiting_input", "✋"},
+		{"thinking", "⚡"},
+		{"idle", "💤"},
+		{"", ""}, // unknown → blank
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			r := state.GlobalRow{
+				Name: "remote-foo", Status: state.StatusReady,
+				Alive: true, TmuxSession: "cravd/remote-foo",
+				Host:       "tower",
+				AgentState: tc.state,
+			}
+			got := agentBadge(r, nil, true)
+			if tc.wantBare == "" {
+				if got != "  " {
+					t.Errorf("AgentState=%q: got %q; want blank", tc.state, got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.wantBare) {
+				t.Errorf("AgentState=%q: got %q; want to contain %q", tc.state, got, tc.wantBare)
+			}
+		})
+	}
+}

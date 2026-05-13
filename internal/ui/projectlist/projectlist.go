@@ -1029,13 +1029,24 @@ func agentBadge(r state.GlobalRow, states map[string]agent.State, polled bool) s
 	if !r.Alive || r.IsMain || r.TmuxSession == "" {
 		return "  "
 	}
-	// v0.17 Phase 1k follow-up: remote rows aren't in the local
-	// agentStates map (the poll only probes local tmux), so falling
-	// through to the No-AI fallback below renders a misleading "no
-	// agent" dot even when the remote workspace has an active Claude
-	// pane. Render a blank slot for remote rows until Phase 1d.2
-	// propagates remote agent state through canopy ls --json.
+	// v0.17 Phase 1d.2: remote rows carry their agent state as a
+	// string on r.AgentState (populated by host.Refresher from the
+	// canopy ls --json wire field). The remote canopy classified via
+	// single-shot pattern match so "thinking" is never set from this
+	// path — only idle / awaiting_input / "" (unknown). We still get
+	// the load-bearing ✋ awaiting-input badge, which is the
+	// "blocked on me" signal users care about most. Blank when the
+	// remote couldn't classify, matches the local "polled, no state"
+	// fallback's quietness.
 	if r.Host != "" {
+		switch r.AgentState {
+		case "awaiting_input":
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("✋")
+		case "thinking":
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Render("⚡")
+		case "idle":
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("💤")
+		}
 		return "  "
 	}
 	s, ok := states[r.TmuxSession]

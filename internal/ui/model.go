@@ -990,6 +990,7 @@ func refreshRemoteCmd() tea.Cmd {
 					CPU:           w.CPU,
 					Hints:         w.Hints,
 					LastErrorHint: w.LastErrorHint,
+					AgentState:    w.AgentState,
 				})
 				rows = append(rows, state.GlobalRow{
 					Host:    r.HostName,
@@ -1012,6 +1013,7 @@ func refreshRemoteCmd() tea.Cmd {
 					CPU:           w.CPU,
 					Hints:         w.Hints,
 					LastErrorHint: w.LastErrorHint,
+					AgentState:    w.AgentState,
 				})
 			}
 			snaps[r.HostName] = snap

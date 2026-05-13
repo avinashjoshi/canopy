@@ -80,6 +80,9 @@ type RemoteWorkspaceRow struct {
 	CPU           float64 `json:"cpu,omitempty"`
 	Hints         []Hint  `json:"hints,omitempty"`
 	LastErrorHint string  `json:"last_error_hint,omitempty"`
+
+	// AgentState mirrors LsJSONWorkspace.AgentState (v0.17 Phase 1d.2).
+	AgentState string `json:"agent_state,omitempty"`
 }
 
 const remotesCacheVersion = 1
