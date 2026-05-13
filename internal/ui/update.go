@@ -434,6 +434,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.drawerRow = Row{}
 		return m, m.attachOrSwitch(msg.session)
 
+	case errMsg:
+		// Deferred error from a tea.Cmd (e.g. openRemoteBrowser). Surface
+		// it in the status bar but don't kick off a refresh — the cmd has
+		// already failed and a refresh won't re-attempt it.
+		if msg.err != nil {
+			m.err = msg.err
+		}
+		return m, nil
+
 	case killDoneMsg:
 		// `K` kill finished. Invalidate the cache for the killed
 		// session so a later resurrect re-probes immediately rather
@@ -839,20 +848,18 @@ func actionOpenBrowser(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok || row.Port <= 0 {
 		return m, nil
 	}
-	// v0.17.0: remote workspaces bind their dev server to the REMOTE's
-	// localhost — opening laptop's browser at localhost:<port> would
-	// hit the laptop's port (probably a totally different process).
-	// Until we add port forwarding (e.g., `ssh -L` on demand), surface
-	// the limitation clearly with a copy-pasteable hint.
+	// v0.17.0: remote workspaces auto-open via ssh -L port forwarding.
+	// Backgrounds `ssh -fNL <port>:localhost:<port> <target>` (one-
+	// shot port-forward listener) then opens http://localhost:<port>.
+	// The tunnel persists in the background; killed when the user logs
+	// out or runs `pkill ssh` (not pretty but functional for v0.17).
 	if row.Host != "" {
-		if target, err := m.resolveHostForExec(row.Host); err == nil {
-			m.err = fmt.Errorf(
-				"remote ports aren't auto-forwarded yet. To browse %s's dev server, run:\n  ssh -L %d:localhost:%d %s\nThen open http://localhost:%d locally.",
-				row.Host, row.Port, row.Port, target, row.Port)
-		} else {
-			m.err = fmt.Errorf("remote browser opening not yet supported (workspace lives on %s)", row.Host)
+		target, err := m.resolveHostForExec(row.Host)
+		if err != nil {
+			m.err = fmt.Errorf("open browser on %s: %w", row.Host, err)
+			return m, nil
 		}
-		return m, nil
+		return m, m.openRemoteBrowser(target, row.Host, row.Port)
 	}
 	url := fmt.Sprintf("http://localhost:%d", row.Port)
 	cmd := exec.Command("xdg-open", url)
@@ -863,6 +870,62 @@ func actionOpenBrowser(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	go func() { _ = cmd.Wait() }()
 	return m, nil
 }
+
+// openRemoteBrowser establishes an SSH port forward to the remote host
+// (background, one-shot listener) then xdg-opens the localhost URL.
+// v0.17.0 Phase 1. The tunnel uses `ssh -fNL` which:
+//
+//	-f  fork to background after auth
+//	-N  no remote command (port-forward only, no shell)
+//	-L  local-port:remote-host:remote-port
+//
+// The forwarded listener stays alive until ssh exits (e.g., user
+// logout, system reboot, pkill ssh). Not pretty for production —
+// proper tunnel management is post-v0.17 — but unblocks the daily
+// "press B on a remote row, see the dev server" loop.
+//
+// Idempotent: if a tunnel for this port already exists (laptop's port
+// is in use), ssh -L errors with "bind: Address already in use"; we
+// ignore that and proceed to xdg-open assuming the existing tunnel
+// is the one we want.
+func (m *Model) openRemoteBrowser(sshTarget, hostName string, port int) tea.Cmd {
+	return func() tea.Msg {
+		// Stand up the tunnel (background process; returns when forked).
+		tunnel := exec.Command("ssh",
+			"-o", "ControlMaster=auto",
+			"-o", "ControlPath="+filepath.Join(os.Getenv("HOME"), ".canopy", "ssh-%C.sock"),
+			"-o", "ControlPersist=300",
+			"-o", "BatchMode=yes",
+			"-o", "ExitOnForwardFailure=yes",
+			"-fNL", fmt.Sprintf("%d:localhost:%d", port, port),
+			sshTarget,
+		)
+		if out, err := tunnel.CombinedOutput(); err != nil {
+			outStr := string(out)
+			// "bind: Address already in use" means we already have a
+			// tunnel (probably from a previous B press). That's fine —
+			// just proceed to open the URL.
+			if !strings.Contains(outStr, "Address already in use") {
+				log.Warn("ui.open-remote-browser.tunnel-failed",
+					"host", hostName, "port", port, "err", err, "out", outStr)
+				return errMsg{err: fmt.Errorf("ssh -L tunnel to %s failed: %v (%s)", hostName, err, outStr)}
+			}
+		}
+		// Open the browser at the laptop-local port (now forwarded to
+		// the remote's port).
+		url := fmt.Sprintf("http://localhost:%d", port)
+		open := exec.Command("xdg-open", url)
+		if err := open.Start(); err != nil {
+			return errMsg{err: fmt.Errorf("xdg-open %s: %w", url, err)}
+		}
+		go func() { _ = open.Wait() }()
+		return nil
+	}
+}
+
+// errMsg lets a tea.Cmd report a deferred error back to the Update
+// handler, which surfaces it on m.err.
+type errMsg struct{ err error }
 
 // actionDelete opens the confirm-delete modal for the cursor row. Cross-
 // project rows construct a transient Manager via managerForRow; same
@@ -875,6 +938,21 @@ func actionDelete(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if row.IsMain {
 		m.err = fmt.Errorf("can't delete the main session via canopy rm — use `tmux kill-session -t %s` if you want it gone",
 			row.TmuxSession)
+		return m, nil
+	}
+	// v0.17.0: remote rows skip the local Manager + SafetyPreflight
+	// path entirely. The local canopy doesn't have a Manager for a
+	// project that lives on tower — Manager construction needs a
+	// canopy.json on disk locally, which doesn't exist for a remote
+	// project. The REMOTE canopy runs its own SafetyPreflight when
+	// `canopy rm <name> --on tower --yes` dispatches. So we just
+	// open the modal with the row's name; deleteHangs stays empty
+	// (the remote will refuse if hanging work exists).
+	if row.Host != "" {
+		m.mode = confirmDeleteMode
+		m.deleteTarget = row.Name
+		m.deleteTargetRoot = "" // remote rows have no local ProjectRoot
+		m.deleteHangs = nil     // remote-side preflight runs on confirm
 		return m, nil
 	}
 	mgr, err := m.managerForRow(row)

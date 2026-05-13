@@ -15,6 +15,7 @@ import (
 
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
@@ -2499,5 +2500,103 @@ func TestUpgradeRefreshCmd_swallowsError(t *testing.T) {
 	got := msg.(upgradeCheckedMsg)
 	if got.latest != "" {
 		t.Errorf("latest on error = %q, want empty", got.latest)
+	}
+}
+
+// TestActionDelete_RemoteRowSkipsManagerForRow verifies the v0.17.0
+// branch: when the cursor row has a Host (remote workspace), actionDelete
+// opens the confirm modal WITHOUT going through managerForRow +
+// SafetyPreflight. Prior to the fix, pressing `d` on a remote row failed
+// with "no projectroot — can't resolve" because the local canopy has no
+// canopy.json for a project that lives on tower. Remote-side safety
+// preflight runs at confirm time via `canopy rm --on <host> --yes`.
+func TestActionDelete_RemoteRowSkipsManagerForRow(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.setTestRows([]Row{
+		{
+			Project: "cravd", ProjectRoot: "", // remote rows have no local ProjectRoot
+			Name: "remote-foo", Status: state.StatusReady,
+			Host: "tower",
+			Path: "/home/cassy/.canopy/workspaces/cravd/remote-foo",
+		},
+	})
+
+	_, _ = actionDelete(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+
+	if m.mode != confirmDeleteMode {
+		t.Fatalf("remote-row d did not open confirm modal; mode=%v err=%v", m.mode, m.err)
+	}
+	if m.deleteTarget != "remote-foo" {
+		t.Errorf("deleteTarget = %q; want remote-foo", m.deleteTarget)
+	}
+	if m.deleteTargetRoot != "" {
+		t.Errorf("deleteTargetRoot = %q; want empty for remote row", m.deleteTargetRoot)
+	}
+	if len(m.deleteHangs) != 0 {
+		t.Errorf("deleteHangs = %v; want empty (remote preflight runs on confirm)", m.deleteHangs)
+	}
+}
+
+// TestActionOpenBrowser_RemoteRowReturnsCmd verifies the v0.17.0 branch:
+// pressing B on a remote row returns a non-nil tea.Cmd (the SSH tunnel +
+// xdg-open closure) and does NOT set m.err synchronously. Prior to the
+// fix, B on a remote row showed an instructional error string instead
+// of actually port-forwarding.
+//
+// We don't run the returned Cmd (it would shell out to ssh); we just
+// check the wiring: remote row → resolveHostForExec succeeds → returns
+// the deferred tunnel command, not an immediate error.
+func TestActionOpenBrowser_RemoteRowReturnsCmd(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "cassy@tower.invalid", Type: "ssh"},
+	}
+	m.setTestRows([]Row{
+		{
+			Project: "cravd", Name: "remote-foo", Status: state.StatusReady,
+			Host: "tower",
+			Port: 3001,
+		},
+	})
+
+	_, cmd := actionOpenBrowser(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
+	if m.err != nil {
+		t.Fatalf("remote-row B set m.err synchronously: %v (want deferred cmd)", m.err)
+	}
+	if cmd == nil {
+		t.Fatalf("remote-row B returned nil cmd; want openRemoteBrowser closure")
+	}
+}
+
+// TestActionOpenBrowser_NoPortNoOp: pressing B on a row without a port
+// (e.g. setting_up workspace) returns no cmd and no error. Same shape
+// for local and remote so the new remote branch can't change behavior.
+func TestActionOpenBrowser_NoPortNoOp(t *testing.T) {
+	m := newTestModel(false)
+	m.setTestRows([]Row{
+		{Project: "x", Name: "w", Status: state.StatusSettingUp, Port: 0},
+	})
+	_, cmd := actionOpenBrowser(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
+	if cmd != nil {
+		t.Errorf("port=0 returned non-nil cmd; want nil")
+	}
+	if m.err != nil {
+		t.Errorf("port=0 set m.err = %v; want nil", m.err)
+	}
+}
+
+// TestErrMsg_SetsErrAndStaysIdle: an errMsg delivered to Update sets
+// m.err and returns no follow-up cmd (no refresh, no retry).
+func TestErrMsg_SetsErrAndStaysIdle(t *testing.T) {
+	m := newTestModel(false)
+	_, cmd := m.Update(errMsg{err: fmt.Errorf("boom")})
+	mm := m
+	if mm.err == nil || mm.err.Error() != "boom" {
+		t.Errorf("m.err = %v; want 'boom'", mm.err)
+	}
+	if cmd != nil {
+		t.Errorf("errMsg returned cmd %v; want nil (no refresh)", cmd)
 	}
 }
