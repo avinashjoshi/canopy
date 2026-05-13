@@ -433,6 +433,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.drawerRow = Row{}
 		return m, m.attachOrSwitch(msg.session)
 
+	case refreshAllMsg:
+		// Trigger a full local+remote refresh. Emitted by tea.Cmds (e.g.
+		// post-remote-rm) that need to invalidate the cached remote rows
+		// too — refreshCmd alone only updates local. v0.17 Phase 1h.
+		return m, m.refresh()
+
 	case errMsg:
 		// Deferred error from a tea.Cmd (e.g. openRemoteBrowser). Surface
 		// it in the status bar but don't kick off a refresh — the cmd has
@@ -861,6 +867,12 @@ func (m *Model) openRemoteBrowser(sshTarget, hostName string, port int) tea.Cmd 
 // errMsg lets a tea.Cmd report a deferred error back to the Update
 // handler, which surfaces it on m.err.
 type errMsg struct{ err error }
+
+// refreshAllMsg asks Update to dispatch a combined local+remote refresh.
+// Use this from inside tea.Cmd closures (e.g. post-remote-action
+// callbacks) when both row sources may have changed — local-only
+// refreshCmd would leave remote rows stale until the next 2s tick.
+type refreshAllMsg struct{}
 
 // actionDelete opens the confirm-delete modal for the cursor row. Cross-
 // project rows construct a transient Manager via managerForRow; same
@@ -1396,9 +1408,11 @@ func (m *Model) execRemoteVerb(hostName, verb string, args []string, force bool)
 		if err != nil {
 			log.Warn("ui.remote-verb.failed", "verb", verb, "host", hostName, "err", err)
 		}
-		// Refresh so the row updates / disappears as appropriate.
+		// Refresh BOTH local and remote so the row updates / disappears
+		// as appropriate. The remote-rows fan-out is what reflects the
+		// rm/retry side effect we just dispatched. v0.17 Phase 1h.
 		m.remoteRefreshing = false
-		return refreshCmd(m.mgr, m.tc, m.store)()
+		return refreshAllMsg{}
 	})
 }
 
@@ -1422,7 +1436,7 @@ func (m *Model) execRemoteKill(hostName, sessionName string) tea.Cmd {
 	if err != nil {
 		return func() tea.Msg {
 			log.Warn("ui.remote-kill.resolve-failed", "host", hostName, "err", err)
-			return refreshCmd(m.mgr, m.tc, m.store)()
+			return refreshAllMsg{}
 		}
 	}
 	cmd := exec.Command("ssh",
@@ -1441,7 +1455,7 @@ func (m *Model) execRemoteKill(hostName, sessionName string) tea.Cmd {
 			log.Warn("ui.remote-kill.failed", "host", hostName, "session", sessionName, "err", err, "out", string(out))
 		}
 		m.remoteRefreshing = false
-		return refreshCmd(m.mgr, m.tc, m.store)()
+		return refreshAllMsg{}
 	}
 }
 
@@ -1477,7 +1491,7 @@ func (m *Model) execHostAddWizard() tea.Cmd {
 		// m.remoteRefreshing is reset by the rowsLoadedMsg handler;
 		// we drop the in-flight latch here so refreshRemoteCmd fires.
 		m.remoteRefreshing = false
-		return refreshCmd(m.mgr, m.tc, m.store)()
+		return refreshAllMsg{}
 	})
 }
 
@@ -1524,7 +1538,8 @@ func (m *Model) attachRemoteRow(row Row) tea.Cmd {
 		if err != nil {
 			log.Warn("ui.attach-remote.failed", "host", row.Host, "name", row.Name, "err", err)
 		}
-		return refreshCmd(m.mgr, m.tc, m.store)()
+		m.remoteRefreshing = false
+		return refreshAllMsg{}
 	})
 }
 

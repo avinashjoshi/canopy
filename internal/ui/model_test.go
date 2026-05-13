@@ -2599,6 +2599,28 @@ func TestNextInCycle_WrapsBothWays(t *testing.T) {
 	}
 }
 
+// TestRefreshAllMsg_TriggersBothLocalAndRemote: regression for the
+// user-reported "I have to manually refresh after rm/K on a remote
+// row." Post-remote-action callbacks emit refreshAllMsg, which must
+// kick off m.refresh() — that's what fans out the remote tick.
+// refreshCmd alone (the prior implementation) only updated local rows,
+// so the deleted remote row stayed visible until the next 2s tick.
+func TestRefreshAllMsg_TriggersBothLocalAndRemote(t *testing.T) {
+	m := newTestModel(false)
+	m.remoteRefreshing = false // free to dispatch a remote tick
+
+	_, cmd := m.Update(refreshAllMsg{})
+	if cmd == nil {
+		t.Fatalf("refreshAllMsg returned nil cmd; want a refresh batch")
+	}
+	// m.refresh() flips remoteRefreshing to true to latch the in-flight
+	// remote fan-out. If that didn't happen, the dispatched cmd was the
+	// local-only path — which is the bug we're guarding against.
+	if !m.remoteRefreshing {
+		t.Errorf("refreshAllMsg did not latch remoteRefreshing; remote tick was not dispatched")
+	}
+}
+
 // TestErrMsg_SetsErrAndStaysIdle: an errMsg delivered to Update sets
 // m.err and returns no follow-up cmd (no refresh, no retry).
 func TestErrMsg_SetsErrAndStaysIdle(t *testing.T) {
