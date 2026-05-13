@@ -40,6 +40,8 @@ func (m *Model) View() string {
 		return m.renderConfirmDelete()
 	case confirmKillMode:
 		return m.renderConfirmKill()
+	case confirmAttachMode:
+		return m.renderConfirmAttach()
 	case drawerMode:
 		return m.renderDrawer()
 	case busyMode:
@@ -989,6 +991,34 @@ func (m *Model) renderConfirmDelete() string {
 	b.WriteString("  ")
 	b.WriteString(brokenStyle.Render("y"))
 	b.WriteString(" to remove  ·  any other key to cancel")
+	return b.String()
+}
+
+// renderConfirmAttach is the y/N prompt before attaching to a tmux
+// session that already has another client connected. v0.17 Phase 1j.
+//
+// Tmux semantics: a second client on the same session sees the same
+// panes live — keystrokes and selections from both clients interleave.
+// For an active agent (Claude/aider) that's almost always a foot-gun:
+// two terminals pasting prompts is chaos. The prompt makes that
+// explicit so the user opts in deliberately.
+func (m *Model) renderConfirmAttach() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("workspace is already open"))
+	b.WriteString("\n\n")
+	row := m.attachTarget
+	label := row.Name
+	if row.Project != "" {
+		label = row.Project + "/" + row.Name
+	}
+	b.WriteString(fmt.Sprintf("  %q has an active tmux client already connected.\n\n", label))
+	b.WriteString(subtleStyle.Render("  Attaching here will share the session — keystrokes from both\n"))
+	b.WriteString(subtleStyle.Render("  terminals interleave, so any agent in this workspace will see\n"))
+	b.WriteString(subtleStyle.Render("  input from both windows. Usually that's not what you want.\n"))
+	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to attach anyway  ·  any other key to cancel")
 	return b.String()
 }
 

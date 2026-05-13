@@ -2645,6 +2645,77 @@ func TestNextInCycle_WrapsBothWays(t *testing.T) {
 	}
 }
 
+// TestAttachSelected_WarnsWhenAnotherClientAttached: v0.17 Phase 1j —
+// pressing Enter on a row whose session already has a tmux client
+// connected pops the confirm modal instead of attaching immediately.
+// Tmux's default is to share the session (both clients see the same
+// panes), which is usually wrong for an active agent workspace.
+func TestAttachSelected_WarnsWhenAnotherClientAttached(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal // newTestModel defaults to Local with /tmp/test-project filter
+	m.setTestRows([]Row{
+		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "foo",
+			Status: state.StatusReady, Alive: true, Attached: true},
+	})
+	_, _ = m.attachSelected()
+	if m.mode != confirmAttachMode {
+		t.Fatalf("expected confirmAttachMode; got %v", m.mode)
+	}
+	if m.attachTarget.Name != "foo" {
+		t.Errorf("attachTarget.Name = %q; want foo", m.attachTarget.Name)
+	}
+}
+
+// TestAttachSelected_SkipsWarnForCurrentWorkspace: re-attaching to
+// the workspace canopy was launched from is the expected flow (the
+// popup user pressing Enter on their own row to "go back"). The
+// "already attached" client IS the one we just launched from — no
+// warning needed.
+func TestAttachSelected_SkipsWarnForCurrentWorkspace(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.currentWorkspace = "foo"
+	m.currentWorkspaceRoot = "/p/cravd"
+	m.setTestRows([]Row{
+		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "foo",
+			Status: state.StatusReady, Alive: true, Attached: true},
+	})
+	_, _ = m.attachSelected()
+	if m.mode == confirmAttachMode {
+		t.Errorf("expected attach to proceed for current workspace; got confirmAttachMode")
+	}
+}
+
+// TestAttachSelected_NoWarnWhenNotAttached: the common case — sole
+// client — attaches straight through, no modal.
+func TestAttachSelected_NoWarnWhenNotAttached(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.setTestRows([]Row{
+		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "foo",
+			Status: state.StatusReady, Alive: true, Attached: false},
+	})
+	_, _ = m.attachSelected()
+	if m.mode == confirmAttachMode {
+		t.Errorf("unattached row triggered confirmAttachMode; want straight attach")
+	}
+}
+
+// TestHandleConfirmAttachKey_NCancels: cancel-by-default — anything
+// other than y/Y/Enter returns to listMode without attaching.
+func TestHandleConfirmAttachKey_NCancels(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = confirmAttachMode
+	m.attachTarget = Row{Name: "foo"}
+	_, _ = m.handleConfirmAttachKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.mode != listMode {
+		t.Errorf("n keypress: mode = %v; want listMode", m.mode)
+	}
+	if m.attachTarget.Name != "" {
+		t.Errorf("attachTarget not cleared: %+v", m.attachTarget)
+	}
+}
+
 // TestRefreshAllMsg_TriggersBothLocalAndRemote: regression for the
 // user-reported "I have to manually refresh after rm/K on a remote
 // row." Post-remote-action callbacks emit refreshAllMsg, which must

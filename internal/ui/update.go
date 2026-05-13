@@ -515,6 +515,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmDeleteKey(msg)
 	case confirmKillMode:
 		return m.handleConfirmKillKey(msg)
+	case confirmAttachMode:
+		return m.handleConfirmAttachKey(msg)
 	case confirmRetryMode:
 		return m.handleConfirmRetryKey(msg)
 	case drawerMode:
@@ -1017,6 +1019,27 @@ type killDoneMsg struct {
 	err     error
 }
 
+// handleConfirmAttachKey is the y/N gate for attaching to a session
+// that already has another client. v0.17 Phase 1j.
+//
+// y or Y proceeds with the attach; anything else cancels. Cancel-by-
+// default — accidental Enter shouldn't auto-share a live agent
+// session. Tmux's native behavior is to share, not steal (multiple
+// clients on the same session is fine), but the user wants explicit
+// confirmation that two-people-on-one-agent state is intentional.
+func (m *Model) handleConfirmAttachKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "y" || msg.String() == "Y" || msg.Type == tea.KeyEnter {
+		target := m.attachTarget
+		m.mode = listMode
+		m.attachTarget = Row{}
+		return m.doAttach(target)
+	}
+	// Anything else (n, N, esc, q, etc.) cancels.
+	m.mode = listMode
+	m.attachTarget = Row{}
+	return m, nil
+}
+
 // killCmd runs `tmux kill-session -t <session>` async via tea.Cmd. The
 // kill is fast (~5ms) but we still go through tea.Cmd so the UI stays
 // responsive and we can surface errors via the message channel rather
@@ -1298,6 +1321,34 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+
+	// v0.17 Phase 1j: warn before stealing/sharing a session that
+	// already has another client connected. Skip the prompt when the
+	// target is the workspace canopy itself was launched from — that's
+	// "re-attach my own session," the normal expected flow.
+	if row.Attached && !m.isCurrentRow(row) {
+		m.mode = confirmAttachMode
+		m.attachTarget = row
+		return m, nil
+	}
+	return m.doAttach(row)
+}
+
+// isCurrentRow reports whether a row is the workspace canopy was
+// invoked from. Used by attachSelected to skip the "already attached"
+// warning when the user is re-attaching their own session — that's
+// the normal flow, not a steal.
+func (m *Model) isCurrentRow(row Row) bool {
+	if m.currentWorkspace == "" {
+		return false
+	}
+	return row.Name == m.currentWorkspace && row.ProjectRoot == m.currentWorkspaceRoot
+}
+
+// doAttach is the actual attach logic — extracted from attachSelected
+// so confirmAttachMode's `y` handler can re-enter without re-running
+// the warn check.
+func (m *Model) doAttach(row Row) (tea.Model, tea.Cmd) {
 	ctx := context.Background()
 
 	// v0.17.0 Phase 1b: remote rows dispatch through `canopy switch

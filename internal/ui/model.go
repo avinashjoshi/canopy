@@ -99,6 +99,13 @@ const (
 	// the workspace cleanly. The friction here is "did you really mean
 	// to drop this session?", not "are you sure you want to lose work?".
 	confirmKillMode
+	// confirmAttachMode is the y/N gate before attaching to a session
+	// that already has another client connected. v0.17 Phase 1j —
+	// surfaces the "this workspace is open in another terminal/window"
+	// case so the user doesn't accidentally share/steal a live agent
+	// session. Skipped when the target is the workspace canopy was
+	// launched from (re-attaching your own session is the normal flow).
+	confirmAttachMode
 	// drawerMode is the diagnostic detail drawer (opened with `i`).
 	// Read-only view of one workspace's process tree, recent logs, env,
 	// status history, and last setup log. The drawer is opt-in (no
@@ -250,6 +257,12 @@ type Model struct {
 	// (Project, Name) match at confirm time.
 	deleteTargetRoot string
 	deleteHangs      []string // v0.6 safety check results — populated when 'd' is pressed; non-empty triggers the force-required path in renderConfirmDelete + handleConfirmDeleteKey
+
+	// attachTarget snapshots the row the user pressed Enter on when its
+	// session already has another client connected. confirmAttachMode
+	// reads it to render the "already attached" prompt; y/Enter proceeds
+	// with the original attach. v0.17 Phase 1j.
+	attachTarget Row
 
 	// Long-running operation in progress (mode == busyMode). Reused by
 	// Create, Remove, and Retry flows.
