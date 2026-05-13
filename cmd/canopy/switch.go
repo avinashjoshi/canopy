@@ -18,6 +18,7 @@ import (
 var switchFlags struct {
 	onHost    string
 	remoteCwd string
+	share     bool // --share: don't detach other clients (multi-attach)
 }
 
 // switchCmd returns the `canopy switch <name>` cobra subcommand.
@@ -63,7 +64,16 @@ func switchCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return dispatchSwitchToRemote(ctx, resolved, name)
+				return dispatchSwitchToRemote(ctx, resolved, name, switchFlags.share)
+			}
+
+			// Local --share: set CANOPY_NO_DETACH=1 in the process env
+			// so subsequent tmux Attach calls skip the detach-others +
+			// -d behavior. shouldDetachOthers() reads from the env, so
+			// this propagates through Manager.Attach without a wider
+			// refactor. v0.17 Phase 1j.
+			if switchFlags.share {
+				_ = os.Setenv("CANOPY_NO_DETACH", "1")
 			}
 
 			mgr, err := loadManager()
@@ -127,6 +137,8 @@ func switchCmd() *cobra.Command {
 		"attach to a workspace on remote canopy at <ssh-target> via mosh+tmux (v0.17.0 Phase 0)")
 	c.Flags().StringVar(&switchFlags.remoteCwd, "remote-cwd", "",
 		"with --on: cd to <path> on the remote before invoking canopy (Phase 0; Phase 1 absorbs into hosts.json)")
+	c.Flags().BoolVar(&switchFlags.share, "share", false,
+		"don't detach existing tmux clients on the target session (multi-attach / parallel mosh)")
 	return c
 }
 
@@ -148,7 +160,7 @@ func switchCmd() *cobra.Command {
 // ctrl-c, and terminal modes all need to flow cleanly. Exec replacement
 // gives mosh a clean inheritance and avoids canopy sitting around as a
 // zombie parent.
-func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName string) error {
+func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName string, share bool) error {
 	target := resolved.SSHTarget
 	if err := host.CheckMoshAvailable(); err != nil {
 		return err
@@ -175,6 +187,14 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	// and the global-workspace lookup finds the workspace by name across
 	// projects — so ANY registered project works as the cd target.
 	remoteCmd := `export PATH="$HOME/.local/bin:$PATH"; `
+	// v0.17 Phase 1j: propagate --share over the mosh dispatch as a
+	// remote env var so the REMOTE canopy switch skips the
+	// detach-other-clients dance. mosh doesn't forward arbitrary env
+	// vars across the SSH-style boundary, so we set it explicitly in
+	// the remote shell.
+	if share {
+		remoteCmd += `export CANOPY_NO_DETACH=1; `
+	}
 	if resolved.RemoteCwd != "" {
 		remoteCmd += "cd " + shellQuote(resolved.RemoteCwd) + "; "
 	}

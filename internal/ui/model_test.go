@@ -2701,6 +2701,30 @@ func TestAttachSelected_NoWarnWhenNotAttached(t *testing.T) {
 	}
 }
 
+// TestRemoteCwdForRow_ResolvesFromRegistry: regression for the user-
+// reported "n on remote rows fails when not inside a project" bug.
+// execRemoteNew was passing only --on; canopy new then tried to walk
+// cwd for canopy.json and errored out with "needs a project but
+// you're not inside any". The fix: TUI pre-resolves the remote path
+// from the in-memory host registry snapshot and passes --remote-cwd
+// explicitly so the remote dispatch never needs cwd. v0.17 Phase 1i.
+func TestRemoteCwdForRow_ResolvesFromRegistry(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh",
+			Projects: map[string]string{"cravd": "/home/cassy/Work/cravd"}},
+	}
+	if got := m.remoteCwdForRow("tower", "cravd"); got != "/home/cassy/Work/cravd" {
+		t.Errorf("remoteCwdForRow(tower, cravd) = %q; want /home/cassy/Work/cravd", got)
+	}
+	if got := m.remoteCwdForRow("tower", "missing"); got != "" {
+		t.Errorf("remoteCwdForRow(tower, missing) = %q; want empty (let caller fall back)", got)
+	}
+	if got := m.remoteCwdForRow("unknown-host", "cravd"); got != "" {
+		t.Errorf("remoteCwdForRow(unknown-host, cravd) = %q; want empty", got)
+	}
+}
+
 // TestHandleConfirmAttachKey_NCancels: cancel-by-default — anything
 // other than y/Y/Enter returns to listMode without attaching.
 func TestHandleConfirmAttachKey_NCancels(t *testing.T) {

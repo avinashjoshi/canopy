@@ -223,6 +223,33 @@ func TestAttachCmd_AutoDetachFlag(t *testing.T) {
 	}
 }
 
+// TestAttachCmdWithOptions_SharedSkipsDetach: regression for the
+// v0.17 Phase 1j share-vs-steal split. AttachOptions{Shared: true}
+// must skip the -d flag so existing clients keep their attach.
+// CANOPY_NO_DETACH already provides a session-wide opt-out; Shared is
+// a per-call opt-in that doesn't require mutating process env.
+func TestAttachCmdWithOptions_SharedSkipsDetach(t *testing.T) {
+	requireTmux(t)
+	c := newClient(t)
+	ctx := context.Background()
+	if _, err := c.Create(ctx, "shared-test", t.TempDir(), ""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Force "outside tmux" so the -d-eligible attach verb is used.
+	t.Setenv("TMUX", "")
+	t.Setenv("CANOPY_NO_DETACH", "")
+
+	cmd, err := c.AttachCmdWithOptions(ctx, "shared-test", tmux.AttachOptions{Shared: true})
+	if err != nil {
+		t.Fatalf("AttachCmdWithOptions: %v", err)
+	}
+	for _, a := range cmd.Args {
+		if a == "-d" {
+			t.Errorf("Shared=true args=%v contains -d; want no -d", cmd.Args)
+		}
+	}
+}
+
 // TestDisplayPopup_noServer covers the error path when tmux isn't running.
 // display-popup needs a client/server, so against an empty socket it must
 // surface an error rather than silently succeeding.

@@ -714,7 +714,7 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// terminal as if they'd run that command themselves. Future work:
 	// plug remote targets through the TUI picker for full parity.
 	if row, ok := m.list.CursorRow(); ok && row.Host != "" {
-		return m, m.execRemoteNew(row.Host)
+		return m, m.execRemoteNew(row.Host, row.Project)
 	}
 	var (
 		mgr      *workspace.Manager
@@ -1348,7 +1348,13 @@ func (m *Model) isCurrentRow(row Row) bool {
 // doAttach is the actual attach logic — extracted from attachSelected
 // so confirmAttachMode's `y` handler can re-enter without re-running
 // the warn check.
+//
+// shared, when true, attaches without kicking off existing clients on
+// the same session (multi-attach). Set when the user explicitly opted
+// into sharing via the confirm-attach modal; the warning copy promises
+// "share" and this is what actually delivers it. v0.17 Phase 1j.
 func (m *Model) doAttach(row Row) (tea.Model, tea.Cmd) {
+	shared := row.Attached
 	ctx := context.Background()
 
 	// v0.17.0 Phase 1b: remote rows dispatch through `canopy switch
@@ -1357,12 +1363,12 @@ func (m *Model) doAttach(row Row) (tea.Model, tea.Cmd) {
 	// the terminal Bubbletea hands over, and on detach control returns
 	// here for the refresh that re-syncs cached remote-row state.
 	if row.Host != "" {
-		return m, m.attachRemoteRow(row)
+		return m, m.attachRemoteRow(row, shared)
 	}
 
 	if row.IsMain {
 		if row.Alive {
-			return m, m.attachOrSwitch(row.TmuxSession)
+			return m, m.attachOrSwitchWithOpts(row.TmuxSession, shared)
 		}
 		// Auto-start the main session and attach. Without this, enter on
 		// a dead main row sent the user back to a shell to run `canopy
@@ -1379,12 +1385,12 @@ func (m *Model) doAttach(row Row) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("start main session: %w", err)
 			return m, nil
 		}
-		return m, m.attachOrSwitch(session)
+		return m, m.attachOrSwitchWithOpts(session, shared)
 	}
 
 	switch effectiveStatus(row) {
 	case "main", state.StatusReady:
-		return m, m.attachOrSwitch(row.TmuxSession)
+		return m, m.attachOrSwitchWithOpts(row.TmuxSession, shared)
 
 	case state.StatusStopped:
 		// Resurrect, then attach. Cross-project: managerForRow gives the
@@ -1476,11 +1482,18 @@ func (m *Model) execRemoteVerb(hostName, verb string, args []string, force bool)
 	})
 }
 
-// execRemoteNew hands off to `<this-canopy> new --on <host>` as a
-// subprocess via tea.ExecProcess. The user gets the CLI's interactive
-// flow (prompts for name + scripts.setup streaming) in the terminal;
-// when canopy new returns, the TUI repaints and a refresh kicks in
-// so the newly-created remote workspace shows up. v0.17 Phase 1i.
+// execRemoteNew hands off to `<this-canopy> new --on <host>
+// --remote-cwd <path>` as a subprocess via tea.ExecProcess. The user
+// gets the CLI's interactive flow (prompts for name + scripts.setup
+// streaming) in the terminal; when canopy new returns, the TUI
+// repaints and a refresh kicks in so the newly-created remote
+// workspace shows up. v0.17 Phase 1i.
+//
+// projectName is the row's project (e.g. "cravd"); we resolve it
+// against the host's registry to get the remote path and pass it
+// explicitly via --remote-cwd. Without that, canopy new tries to
+// walk up cwd to find a project — which fails when the user launched
+// the TUI from outside any project (e.g. plain `canopy` from $HOME).
 //
 // Why subprocess (not picker → ExecProcess submit): the existing TUI
 // picker is tightly coupled to a local workspace.Manager (createCmd
@@ -1488,12 +1501,20 @@ func (m *Model) execRemoteVerb(hostName, verb string, args []string, force bool)
 // need a parallel submit path that builds CLI flag args for each
 // variant. Future work — for now subprocess gets `n` working with
 // minimum surface area.
-func (m *Model) execRemoteNew(hostName string) tea.Cmd {
+func (m *Model) execRemoteNew(hostName, projectName string) tea.Cmd {
 	canopyBin, err := os.Executable()
 	if err != nil || canopyBin == "" {
 		canopyBin = os.Args[0]
 	}
-	cmd := exec.Command(canopyBin, "new", "--on", hostName)
+	args := []string{"new", "--on", hostName}
+	// Resolve the remote path for this project from the in-memory host
+	// registry snapshot. Empty when the project isn't registered on
+	// this host — in that case we omit --remote-cwd and let canopy new
+	// surface its own clearer error ("project X not registered…").
+	if remoteCwd := m.remoteCwdForRow(hostName, projectName); remoteCwd != "" {
+		args = append(args, "--remote-cwd", remoteCwd)
+	}
+	cmd := exec.Command(canopyBin, args...)
 	cmd.Env = append(os.Environ(), "CANOPY_ALLOW_NESTED=1")
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
@@ -1502,6 +1523,23 @@ func (m *Model) execRemoteNew(hostName string) tea.Cmd {
 		m.remoteRefreshing = false
 		return refreshAllMsg{}
 	})
+}
+
+// remoteCwdForRow looks up the remote project path for (host, project)
+// from the in-memory host registry snapshot. Returns "" when the
+// registry doesn't know that pair (lets the caller fall back to
+// canopy's own resolution logic + error). v0.17 Phase 1i.
+func (m *Model) remoteCwdForRow(hostName, projectName string) string {
+	if hostName == "" || projectName == "" {
+		return ""
+	}
+	for _, h := range m.hostList {
+		if h.Name != hostName {
+			continue
+		}
+		return h.Projects[projectName]
+	}
+	return ""
 }
 
 // execRemoteKill kills a workspace's tmux session on a remote host by
@@ -1598,7 +1636,7 @@ func (m *Model) execHostAddWizard() tea.Cmd {
 //     TUI would replace the whole process tree; the TUI couldn't redraw
 //     on detach. tea.ExecProcess is the canonical tmux-attach idiom for
 //     Bubbletea apps; reusing it for mosh-attach matches the pattern.
-func (m *Model) attachRemoteRow(row Row) tea.Cmd {
+func (m *Model) attachRemoteRow(row Row, shared bool) tea.Cmd {
 	canopyBin, err := os.Executable()
 	if err != nil || canopyBin == "" {
 		// Fallback to os.Args[0]; this is what we got launched as so
@@ -1607,6 +1645,12 @@ func (m *Model) attachRemoteRow(row Row) tea.Cmd {
 		canopyBin = os.Args[0]
 	}
 	args := []string{"switch", "--on", row.Host, row.Name}
+	if shared {
+		// v0.17 Phase 1j: propagates the laptop-side "user confirmed
+		// share" decision through to the remote canopy switch so it
+		// skips detach-other-clients.
+		args = append(args, "--share")
+	}
 	cmd := exec.Command(canopyBin, args...)
 	cmd.Env = os.Environ()
 	// Canopy switch wraps itself in a nested-canopy guard that blocks
@@ -1659,7 +1703,19 @@ func effectiveStatus(row Row) state.Status {
 // which would panic when invoked from outside any project (mgr nil).
 // The post-attach refresh is dispatched via m.store + m.tc rather than
 // the project-only mgr.Reconcile path so it works in both contexts.
+// attachOrSwitch is the non-shared (default) attach: kicks off existing
+// clients to match canopy's solo-dev steal default. The shared variant
+// (multi-client) is attachOrSwitchShared, dispatched by doAttach when
+// the user confirmed the attach-already-attached prompt.
 func (m *Model) attachOrSwitch(session string) tea.Cmd {
+	return m.attachOrSwitchWithOpts(session, false)
+}
+
+// attachOrSwitchWithOpts is the underlying implementation. shared=false
+// matches the historical AttachCmd behavior; shared=true skips
+// detach-other-clients + the -d flag so multiple tmux clients can
+// coexist on the target session. v0.17 Phase 1j.
+func (m *Model) attachOrSwitchWithOpts(session string, shared bool) tea.Cmd {
 	// Backfill @canopy-role tags for v0.15-style sessions that never
 	// went through the v0.16+ buildSession (which tags at creation).
 	// Best-effort: errors logged, never block attach. Common path for
@@ -1676,7 +1732,10 @@ func (m *Model) attachOrSwitch(session string) tea.Cmd {
 
 	if m.inPopup {
 		return func() tea.Msg {
-			if err := m.tc.SwitchClient(context.Background(), session); err != nil {
+			// SwitchClientWithOptions honors `shared`: when true it
+			// skips the internal detachOtherClients call so pre-existing
+			// clients keep their attach. v0.17 Phase 1j.
+			if err := m.tc.SwitchClientWithOptions(context.Background(), session, tmux.AttachOptions{Shared: shared}); err != nil {
 				log.Warn("ui.popup.switch_client_failed", "session", session, "err", err.Error())
 			}
 			return tea.QuitMsg{}
@@ -1684,7 +1743,7 @@ func (m *Model) attachOrSwitch(session string) tea.Cmd {
 	}
 	// Fullscreen mode: tea.ExecProcess attach. Build the tmux command
 	// directly via the embedded tmux.Client; refresh on detach.
-	cmd, err := m.tc.AttachCmd(context.Background(), session)
+	cmd, err := m.tc.AttachCmdWithOptions(context.Background(), session, tmux.AttachOptions{Shared: shared})
 	if err != nil {
 		return func() tea.Msg { return rowsLoadedMsg{err: err} }
 	}
