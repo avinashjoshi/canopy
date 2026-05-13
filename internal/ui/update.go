@@ -313,6 +313,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.output != "" {
 			m.busyOutput += msg.output
 		}
+		// v0.17 Phase 1k: remote create doesn't return a tmuxSession
+		// (canopy new --on runs with --no-attach), and we can't
+		// local-attach to a session that lives on tower. Stay in
+		// busyMode so the user reads the streaming output; any key
+		// dismisses to the list (handleBusyModeKey triggers refresh)
+		// and they press Enter on the new row to mosh in.
+		if msg.remote {
+			if msg.err == nil {
+				m.busyTitle = "Remote workspace ready. Press any key, then Enter on the new row to attach."
+			}
+			return m, nil
+		}
 		if msg.err == nil && msg.tmuxSession != "" {
 			// "From a prompt" path: send the initial prompt to the
 			// agent pane BEFORE attaching. The send blocks while the
@@ -707,14 +719,19 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.tab == tabHosts {
 		return m, m.execHostAddWizard()
 	}
-	// v0.17 Phase 1i: on a remote row, `n` can't go through the local
-	// Manager (no canopy.json on the laptop for a project that lives
-	// on tower). Hand off to the CLI's interactive `canopy new --on
-	// <host>` flow instead — the user gets the same prompts in the
-	// terminal as if they'd run that command themselves. Future work:
-	// plug remote targets through the TUI picker for full parity.
+	// v0.17 Phase 1k: on a remote row, open the SAME TUI picker as
+	// local rows — Fresh + Prompt submit handlers branch on
+	// newTargetHost to dispatch `canopy new --on <host>` instead of
+	// the local createCmd. PR/Issue/Branch options are hidden in the
+	// picker for remote targets (they need remote gh integration).
 	if row, ok := m.list.CursorRow(); ok && row.Host != "" {
-		return m, m.execRemoteNew(row.Host, row.Project)
+		m.newTargetHost = row.Host
+		m.newTargetRemoteCwd = m.remoteCwdForRow(row.Host, row.Project)
+		m.newTargetName = row.Project
+		m.newTargetRoot = ""
+		m.newTargetMgr = nil
+		m.openNewPicker()
+		return m, nil
 	}
 	var (
 		mgr      *workspace.Manager
@@ -759,6 +776,8 @@ func (m *Model) clearNewTarget() {
 	m.newTargetMgr = nil
 	m.newTargetRoot = ""
 	m.newTargetName = ""
+	m.newTargetHost = ""
+	m.newTargetRemoteCwd = ""
 	m.pendingPrompt = ""
 }
 
@@ -1482,47 +1501,16 @@ func (m *Model) execRemoteVerb(hostName, verb string, args []string, force bool)
 	})
 }
 
-// execRemoteNew hands off to `<this-canopy> new --on <host>
-// --remote-cwd <path>` as a subprocess via tea.ExecProcess. The user
-// gets the CLI's interactive flow (prompts for name + scripts.setup
-// streaming) in the terminal; when canopy new returns, the TUI
-// repaints and a refresh kicks in so the newly-created remote
-// workspace shows up. v0.17 Phase 1i.
-//
-// projectName is the row's project (e.g. "cravd"); we resolve it
-// against the host's registry to get the remote path and pass it
-// explicitly via --remote-cwd. Without that, canopy new tries to
-// walk up cwd to find a project — which fails when the user launched
-// the TUI from outside any project (e.g. plain `canopy` from $HOME).
-//
-// Why subprocess (not picker → ExecProcess submit): the existing TUI
-// picker is tightly coupled to a local workspace.Manager (createCmd
-// calls mgr.Create directly). A full picker-on-remote pipeline would
-// need a parallel submit path that builds CLI flag args for each
-// variant. Future work — for now subprocess gets `n` working with
-// minimum surface area.
-func (m *Model) execRemoteNew(hostName, projectName string) tea.Cmd {
-	canopyBin, err := os.Executable()
-	if err != nil || canopyBin == "" {
-		canopyBin = os.Args[0]
+// canopyBinPath returns the absolute path to this canopy binary so
+// subprocess invocations resolve to the same build. Falls back to
+// os.Args[0] when os.Executable() fails (rare; e.g. binary deleted
+// after launch). v0.17 Phase 1k.
+func (m *Model) canopyBinPath() string {
+	bin, err := os.Executable()
+	if err != nil || bin == "" {
+		return os.Args[0]
 	}
-	args := []string{"new", "--on", hostName}
-	// Resolve the remote path for this project from the in-memory host
-	// registry snapshot. Empty when the project isn't registered on
-	// this host — in that case we omit --remote-cwd and let canopy new
-	// surface its own clearer error ("project X not registered…").
-	if remoteCwd := m.remoteCwdForRow(hostName, projectName); remoteCwd != "" {
-		args = append(args, "--remote-cwd", remoteCwd)
-	}
-	cmd := exec.Command(canopyBin, args...)
-	cmd.Env = append(os.Environ(), "CANOPY_ALLOW_NESTED=1")
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
-			log.Warn("ui.remote-new.failed", "host", hostName, "err", err)
-		}
-		m.remoteRefreshing = false
-		return refreshAllMsg{}
-	})
+	return bin
 }
 
 // remoteCwdForRow looks up the remote project path for (host, project)
@@ -1922,24 +1910,43 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 'f' is an alias if the user thinks "fresh".
 		return m.openNewFresh(), textinputBlink()
 	case "p":
+		// PR/Issue/Branch picker variants need a local Manager + gh
+		// against the project's repo — neither is available for a
+		// remote target. v0.17 Phase 1k hides those options from the
+		// remote picker and ignores the shortcut letters here.
+		if m.newTargetHost != "" {
+			return m, nil
+		}
 		return m, m.openNewPR()
 	case "i":
+		if m.newTargetHost != "" {
+			return m, nil
+		}
 		return m, m.openNewIssue()
 	case "b":
+		if m.newTargetHost != "" {
+			return m, nil
+		}
 		return m, m.openNewBranch()
 	case "t":
 		// 't' for "task" — see newPickerOptions for the letter-choice
 		// rationale (no good mnemonic for "prompt", and `p` is taken).
 		return m.openNewPrompt()
 
-	// Arrow nav for keyboard-discovery users.
+	// Arrow nav for keyboard-discovery users. Remote picker has only
+	// Fresh + Prompt (PR/Issue/Branch hidden), so bound the cursor
+	// at 1 instead of newPickerOptionCount-1.
 	case "up", "k":
 		if m.newPickerCursor > 0 {
 			m.newPickerCursor--
 		}
 		return m, nil
 	case "down", "j":
-		if m.newPickerCursor < newPickerOptionCount-1 {
+		maxIdx := newPickerOptionCount - 1
+		if m.newTargetHost != "" {
+			maxIdx = 1
+		}
+		if m.newPickerCursor < maxIdx {
 			m.newPickerCursor++
 		}
 		return m, nil
@@ -1999,6 +2006,9 @@ func (m *Model) handleNewFreshKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.busyErr = nil
 		m.mode = busyMode
 		m.nameInput.Blur()
+		if m.newTargetHost != "" {
+			return m, remoteCreateCmd(m.canopyBinPath(), m.newTargetHost, m.newTargetRemoteCwd, name, spec, "")
+		}
 		return m, createCmd(m.newTargetMgr, name, spec)
 	}
 	var cmd tea.Cmd
@@ -2053,6 +2063,14 @@ func (m *Model) handleNewPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.busyErr = nil
 		m.mode = busyMode
 		m.promptInput.Blur()
+		if m.newTargetHost != "" {
+			// Remote target: pass --prompt directly through canopy new
+			// --on host (which already base64-encodes + tempfile-dances
+			// per Phase 1f). The local pendingPrompt is consumed here,
+			// not stashed for a post-attach send.
+			m.pendingPrompt = ""
+			return m, remoteCreateCmd(m.canopyBinPath(), m.newTargetHost, m.newTargetRemoteCwd, "", spec, prompt)
+		}
 		return m, createCmd(m.newTargetMgr, "", spec)
 	}
 	var cmd tea.Cmd
@@ -2609,6 +2627,12 @@ type createDoneMsg struct {
 	output      string
 	tmuxSession string
 	err         error
+	// remote is true when this createDoneMsg came from a
+	// remoteCreateCmd dispatch. Update's createDoneMsg handler skips
+	// the auto-attach path for remote — we can't local-attach to a
+	// session on tower; user presses Enter on the new row to mosh in.
+	// v0.17 Phase 1k.
+	remote bool
 }
 
 // promptSentMsg fires after workspace.SendInitialPrompt finishes
@@ -2783,6 +2807,63 @@ func createCmd(mgr *workspace.Manager, name string, spec workspace.SourceSpec) t
 			if err == nil && ws != nil {
 				msg.tmuxSession = ws.TmuxSessionName()
 			}
+			done <- msg
+		}()
+		return createStartedMsg{buf: buf, done: done}
+	}
+}
+
+// remoteCreateCmd mirrors createCmd's lazy-spawn + streaming-buffer
+// shape, but instead of running mgr.Create it spawns `<canopy> new
+// --on <host> --remote-cwd <path> [flags] [<name>]` as a child
+// process and pipes its combined stdout/stderr into the safeBuffer
+// the TUI's busy view reads. v0.17 Phase 1k.
+//
+// Reuses createDoneMsg / createStartedMsg / progressTickMsg so the
+// Update handler doesn't need a parallel pipeline — only the goroutine
+// body differs. Sets done.remote = true so the post-create handler
+// knows to skip the auto-attach path (we can't local-attach to a
+// session on tower; user presses Enter on the new row to mosh).
+//
+// promptText is base64'd into a --prompt-file via the existing
+// Phase 1f mechanism on the canopy new side; we just pass --prompt
+// or --prompt-file via the local flag and let dispatchNewToRemote
+// handle the heredoc + tempfile dance.
+func remoteCreateCmd(canopyBin, host, remoteCwd, name string, spec workspace.SourceSpec, promptText string) tea.Cmd {
+	return func() tea.Msg {
+		buf := &safeBuffer{}
+		done := make(chan createDoneMsg, 1)
+
+		args := []string{"new", "--on", host}
+		if remoteCwd != "" {
+			args = append(args, "--remote-cwd", remoteCwd)
+		}
+		if name != "" {
+			args = append(args, "--name", name)
+		}
+		if spec.PR != 0 {
+			args = append(args, "--pr", fmt.Sprintf("%d", spec.PR))
+		}
+		if spec.Issue != 0 {
+			args = append(args, "--issue", fmt.Sprintf("%d", spec.Issue))
+		}
+		if spec.Branch != "" {
+			args = append(args, "--branch", spec.Branch)
+		}
+		if spec.AllowLocal {
+			args = append(args, "--allow-local")
+		}
+		if promptText != "" {
+			args = append(args, "--prompt", promptText)
+		}
+
+		go func() {
+			cmd := exec.Command(canopyBin, args...)
+			cmd.Stdout = buf
+			cmd.Stderr = buf
+			cmd.Env = append(os.Environ(), "CANOPY_ALLOW_NESTED=1")
+			err := cmd.Run()
+			msg := createDoneMsg{output: buf.Drain(), err: err, remote: true}
 			done <- msg
 		}()
 		return createStartedMsg{buf: buf, done: done}

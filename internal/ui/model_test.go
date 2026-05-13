@@ -406,23 +406,63 @@ func TestAvailableNewWorkspace_HostsTab(t *testing.T) {
 	}
 }
 
-// TestActionNewWorkspace_RemoteRowReturnsCmd: pressing n on a remote
-// row returns a non-nil cmd (the execRemoteNew handoff). We don't run
-// the cmd (would actually fork canopy) — just check the wiring picks
-// the remote branch before falling through to managerForRow.
-func TestActionNewWorkspace_RemoteRowReturnsCmd(t *testing.T) {
+// TestActionNewWorkspace_RemoteRowOpensPicker: v0.17 Phase 1k —
+// pressing n on a remote row opens the SAME TUI picker as a local
+// row, with newTargetHost set so submit handlers dispatch through
+// `canopy new --on <host>` instead of the local Manager. Prior
+// Phase 1i implementation handed off to a CLI subprocess; the user
+// asked for the rich TUI experience.
+func TestActionNewWorkspace_RemoteRowOpensPicker(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabGlobal
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh",
+			Projects: map[string]string{"cravd": "/home/cassy/Work/cravd"}},
+	}
 	m.setTestRows([]Row{
 		{Project: "cravd", Name: "foo", Status: state.StatusReady, Host: "tower"},
 	})
-	_, cmd := actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	if cmd == nil {
-		t.Fatalf("actionNewWorkspace on remote row returned nil cmd; want execRemoteNew handoff")
+	_, _ = actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.mode != newPickerMode {
+		t.Fatalf("remote n: mode = %v; want newPickerMode", m.mode)
 	}
-	// Should NOT have opened the picker (that's the local path).
-	if m.mode == newPickerMode {
-		t.Errorf("actionNewWorkspace on remote row opened local picker; want subprocess handoff")
+	if m.newTargetHost != "tower" {
+		t.Errorf("newTargetHost = %q; want tower", m.newTargetHost)
+	}
+	if m.newTargetRemoteCwd != "/home/cassy/Work/cravd" {
+		t.Errorf("newTargetRemoteCwd = %q; want /home/cassy/Work/cravd", m.newTargetRemoteCwd)
+	}
+	if m.newTargetMgr != nil {
+		t.Errorf("newTargetMgr should be nil for remote target; got %+v", m.newTargetMgr)
+	}
+}
+
+// TestNewPicker_RemoteSkipsPRIssueBranchShortcuts: when the picker is
+// open against a remote target, the p/i/b shortcut keys (PR / Issue /
+// Branch) are no-ops because those variants need a local gh against
+// the remote project's repo. Hidden options shouldn't be reachable.
+func TestNewPicker_RemoteSkipsPRIssueBranchShortcuts(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPickerMode
+	m.newTargetHost = "tower"
+
+	// p, i, b should NOT change mode (would otherwise open the PR /
+	// Issue / Branch sub-modal).
+	for _, k := range []string{"p", "i", "b"} {
+		m.mode = newPickerMode
+		_, _ = m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+		if m.mode != newPickerMode {
+			t.Errorf("remote picker: key %q changed mode to %v; want stays newPickerMode", k, m.mode)
+		}
+	}
+
+	// Down arrow should NOT advance past index 1 (Fresh + Prompt only).
+	m.newPickerCursor = 0
+	for i := 0; i < 5; i++ {
+		_, _ = m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.newPickerCursor > 1 {
+		t.Errorf("remote picker: cursor = %d after 5 down presses; want bounded to 1", m.newPickerCursor)
 	}
 }
 
