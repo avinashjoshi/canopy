@@ -142,17 +142,36 @@ func Render(rows []Row, width int, cursor int) string {
 }
 
 // renderRow is the per-host line. Format adapts to terminal width.
-// selected toggles the `❯ ` caret + selection bg (matches the
-// workspace list's selected-row treatment so the two tabs feel like
-// the same surface).
+// selected toggles the `❯ ` caret + selection bg padded across the
+// full terminal width — matches the workspace list's selected-row
+// treatment so the two tabs feel like the same surface.
 func renderRow(r Row, width int, selected bool) string {
-	// Minimum row format: <glyph> <name>  <detail>
-	// Adds columns as width permits.
+	// Build plain (un-styled) parts for the selection path so the
+	// outer style's background wins across the entire row; inner
+	// foreground colors are dropped by selectionStyle anyway.
+	if selected {
+		parts := []string{statusGlyphPlain(r.Status), r.Name}
+		if width >= 80 && r.Version != "" {
+			parts = append(parts, "v"+r.Version)
+		}
+		if width >= 100 {
+			parts = append(parts, fmt.Sprintf("%dp %dw", r.Projects, r.Workspaces))
+		}
+		if width >= 160 && r.SSHTarget != "" {
+			parts = append(parts, r.SSHTarget)
+		}
+		parts = append(parts, r.StatusDetail)
+		body := "❯ " + strings.Join(parts, "  ")
+		s := selectionStyle()
+		if width > 0 {
+			s = s.Width(width)
+		}
+		return s.Render(body)
+	}
+	// Non-selected: full per-column styling for visual density.
 	glyph := statusGlyph(r.Status)
 	name := nameStyle().Render(r.Name)
 	detail := statusDetailStyle(r.Status).Render(r.StatusDetail)
-
-	// Build optional middle columns based on width budget.
 	parts := []string{glyph, name}
 	if width >= 80 && r.Version != "" {
 		parts = append(parts, subtleStyle().Render("v"+r.Version))
@@ -164,11 +183,36 @@ func renderRow(r Row, width int, selected bool) string {
 		parts = append(parts, subtleStyle().Render(r.SSHTarget))
 	}
 	parts = append(parts, detail)
-	body := strings.Join(parts, "  ")
-	if selected {
-		return lipgloss.NewStyle().Background(lipgloss.Color("237")).Render("❯ " + body)
+	return "  " + strings.Join(parts, "  ")
+}
+
+// statusGlyphPlain returns the same glyph as statusGlyph but without
+// the foreground color — used in the selected-row path where the
+// outer selectionStyle's bright-white fg should win uniformly.
+func statusGlyphPlain(s Status) string {
+	switch s {
+	case StatusOnline:
+		return "●"
+	case StatusOffline:
+		return "○"
+	case StatusAuthFailed:
+		return "!"
+	case StatusBroken:
+		return "✗"
+	default:
+		return "·"
 	}
-	return "  " + body
+}
+
+// selectionStyle mirrors projectlist.selectionStyle: dark-grey bg +
+// bright-white fg + bold, padded to terminal width. The two tabs
+// share the same selected-row vocabulary so the user reads "this is
+// the cursor" identically across both surfaces. v0.17 Phase 1l polish.
+func selectionStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color("237")).
+		Foreground(lipgloss.Color("231")).
+		Bold(true)
 }
 
 func emptyState() string {
