@@ -21,7 +21,7 @@ All three script fields are optional. A `canopy.json` of `{}` is valid and means
 | Field | When it runs | If empty |
 |---|---|---|
 | `scripts.setup` | Once at workspace creation, after the worktree is checked out. Failure -> workspace marked `broken`. Re-runnable via `canopy retry <name>` (or `R` in the TUI) without losing the worktree, branch, port, or claude history. | Skipped silently. |
-| `scripts.run` | Reserved for future on-demand invocation (`canopy run` is a v0.5 TODO). v0 does NOT auto-launch this. | No effect today. |
+| `scripts.run` | Long-running dev-server command. Launched on demand by `canopy run` (or `<prefix>r` inside tmux), and on workspace resurrection. Inherits `CANOPY_PORT` so multiple workspaces don't collide. | Skipped silently. |
 | `scripts.archive` | At workspace removal, before the worktree is deleted. Failure logged but doesn't block removal. | Skipped silently. |
 
 Write `scripts.setup` to be safely re-runnable. If the first invocation crashes halfway through, the recovery path is `canopy retry <name>` — same script, same env, same workspace dir. A setup that hard-fails on `bin/rails db:create` because the DB already exists from the first attempt forces the user to fall back to `canopy rm` + `canopy new`, which throws away the worktree and claude history. Use `db:prepare` over `db:create`, `bundle install` over `bundle install --deployment`, idempotent symlinks (`ln -sf`), and existence checks before destructive ops.

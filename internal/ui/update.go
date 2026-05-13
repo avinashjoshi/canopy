@@ -21,13 +21,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		// Reserve lines for title + tab bar + help + spacing. The exact
-		// reserve count isn't critical — projectlist truncates if it
-		// runs out of vertical space rather than overflowing the
-		// terminal.
-		reserve := 6
+		// Reserve lines for the chrome above + below the table:
+		//   1 brand pill row
+		//   1 tab bar
+		//   1 blank
+		//   1 "add a project" hint (Global tab) OR per-row "hint:" badge
+		//   5 help legend (one group per line — see renderHelpLine)
+		//   1 trailing blank / margin
+		// projectlist now crops + shows ↑N/↓N more markers when its
+		// envelope is too small, so under-reserving is safe (the user
+		// still sees the scroll indicators) — over-reserving just
+		// shrinks the table unnecessarily.
+		reserve := 9
+		if m.height > 0 && m.height < 20 {
+			// Compact help collapses to one line — shave 4 lines.
+			reserve -= 4
+		}
 		if m.inPopup {
-			reserve = 5 // single-line tab bar + tighter chrome
+			reserve-- // single-line tab bar / tighter chrome
 		}
 		m.list.SetSize(msg.Width, msg.Height-reserve)
 		// Resize the upgrade viewport too if it's currently in use.

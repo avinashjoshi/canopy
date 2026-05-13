@@ -987,6 +987,121 @@ func TestRenderHelpLine_TabSwitch(t *testing.T) {
 	})
 }
 
+// TestRenderHelpLine_WrapsAtWidth covers the v0.17.1.1 width-aware
+// wrap. The legend used to be one line, which overflowed in tmux popups
+// and on narrow terminals. The wrap keeps groups (nav / tabs / open /
+// act / meta) intact and breaks between groups when the screen is too
+// narrow. m.width == 0 (pre-WindowSizeMsg) stays single-line for the
+// existing tests + render paths.
+func TestRenderHelpLine_WrapsAtWidth(t *testing.T) {
+	t.Run("width=0 (no resize yet) → single line", func(t *testing.T) {
+		m := newTestModel(false)
+		m.width = 0
+		out := stripAnsi(m.renderHelpLine())
+		if strings.Contains(out, "\n") {
+			t.Errorf("width=0 should render on one line; got:\n%q", out)
+		}
+	})
+
+	t.Run("wide width → one group per line", func(t *testing.T) {
+		m := newTestModel(false)
+		m.width = 240
+		out := stripAnsi(m.renderHelpLine())
+		// Even at wide width, the new contract is one group per line.
+		// On Local tab with default test rows, all 5 groups are present:
+		// nav / tabs / open / act / meta.
+		lines := strings.Split(out, "\n")
+		if len(lines) < 4 {
+			t.Errorf("wide width should still emit one group per line (≥4 lines); got %d:\n%s", len(lines), out)
+		}
+	})
+
+	t.Run("narrow width wraps within groups", func(t *testing.T) {
+		m := newTestModel(false)
+		m.width = 40
+		out := stripAnsi(m.renderHelpLine())
+		// At width=40, the wider groups (tabs, act) should split chip-
+		// by-chip across additional lines, pushing total line count
+		// above the base 5 groups.
+		lines := strings.Split(out, "\n")
+		if len(lines) <= 5 {
+			t.Errorf("width=40 should overflow some groups (>5 lines); got %d:\n%s", len(lines), out)
+		}
+		// Sanity: every line should be within the width budget
+		// (widthMargin=4 in renderHelpLine).
+		for _, line := range lines {
+			if len(line) > m.width {
+				t.Errorf("wrapped line exceeds width %d: %q", m.width, line)
+			}
+		}
+	})
+
+	t.Run("nav chip always leads line 1", func(t *testing.T) {
+		m := newTestModel(false)
+		m.width = 80
+		out := stripAnsi(m.renderHelpLine())
+		firstLine := strings.TrimLeft(strings.SplitN(out, "\n", 2)[0], " ")
+		// keyPillStyle adds horizontal padding around chips, so the nav
+		// chip starts with leading spaces — trim them before HasPrefix.
+		if !strings.HasPrefix(firstLine, "↑/↓") {
+			t.Errorf("nav chip should anchor line 1; got first line: %q", firstLine)
+		}
+	})
+
+	t.Run("short viewport → compact single line with ? more", func(t *testing.T) {
+		m := newTestModel(false)
+		m.width = 120
+		m.height = 12 // below compactHelpHeight (20)
+		out := stripAnsi(m.renderHelpLine())
+		if strings.Contains(out, "\n") {
+			t.Errorf("short viewport should render one line; got:\n%q", out)
+		}
+		// Essential chips present.
+		for _, want := range []string{"↑/↓", "nav", "enter", "attach", "?", "more", "q", "quit"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("compact help missing %q: %q", want, out)
+			}
+		}
+		// Non-essential verbs hidden behind `?`.
+		for _, hidden := range []string{"switch-tab", "search", "kill tmux", "inspect", "refresh"} {
+			if strings.Contains(out, hidden) {
+				t.Errorf("compact help should hide %q (behind ? more); got: %q", hidden, out)
+			}
+		}
+	})
+
+	t.Run("compact mode hides `n new` when binding unavailable", func(t *testing.T) {
+		m := newTestModel(false)
+		m.mgr = nil // disables availableNewWorkspace on Local
+		m.tab = tabLocal
+		m.width = 120
+		m.height = 12
+		out := stripAnsi(m.renderHelpLine())
+		if strings.Contains(out, "new") {
+			t.Errorf("compact help should hide `n new` when unavailable: %q", out)
+		}
+	})
+
+	t.Run("Hosts tab help wraps too (host-specific bindings still grouped)", func(t *testing.T) {
+		m := newTestModel(false)
+		m.tab = tabHosts
+		m.width = 80
+		out := stripAnsi(m.renderHelpLine())
+		// One group per line means any positive width produces multiple
+		// lines (≥ number of non-empty groups).
+		if !strings.Contains(out, "\n") {
+			t.Errorf("Hosts tab help should render multiple lines; got:\n%q", out)
+		}
+		// And the nav anchor still leads line 1.
+		firstLine := strings.TrimLeft(strings.SplitN(out, "\n", 2)[0], " ")
+		// keyPillStyle adds horizontal padding around chips, so the nav
+		// chip starts with leading spaces — trim them before HasPrefix.
+		if !strings.HasPrefix(firstLine, "↑/↓") {
+			t.Errorf("Hosts tab: nav chip should anchor line 1; got first line: %q", firstLine)
+		}
+	})
+}
+
 // TestRenderHelp_RKeybindCopy locks in the user-facing wording for the
 // `R` keybind. The original "retry scripts.setup" wording was ambiguous
 // ("retry what?") — readers of the help screen could not tell what

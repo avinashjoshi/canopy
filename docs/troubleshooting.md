@@ -80,7 +80,7 @@ Shouldn't happen — every command pane is wrapped in `; exec "$SHELL"` so quitt
 
 ## `bin/dev` in the shell pane says "port already in use"
 
-The port plan reserves `<base>` for `canopy main` and assigns `<base>+10/+20/...` to workspaces. If something else on your machine is bound to the assigned port, `bin/dev` will collide.
+The port plan reserves `<base>` for `canopy main` and assigns `<base>+10/+20/...` to workspaces. With defaults (`base: 40000`, `workspace_stride: 10`), the first project's main is 40000 and its first workspace is 40010. If something else on your machine is bound to the assigned port, `bin/dev` will collide.
 
 Check what's using it:
 
@@ -132,6 +132,77 @@ canopy ls --all      # rebuilds an empty state on first call
 ```
 
 You'll lose the workspace registry but the worktrees on disk and the tmux sessions still exist — `canopy reconcile` once you've got a few workspaces back, or just nuke the worktrees and start fresh.
+
+## Remote host (v0.17) troubleshooting
+
+### `canopy host add` probe fails with "permission denied"
+
+Key auth isn't set up. Two fixes:
+
+```bash
+canopy host add tower cassy@tower --interactive   # offers ssh-copy-id automatically
+# or, by hand:
+ssh-copy-id cassy@tower.tail.ts.net
+canopy host add tower cassy@tower.tail.ts.net
+```
+
+If the host is already registered and lost key auth, press `a` on its row in the TUI's **Remote hosts** tab to re-offer ssh-copy-id.
+
+### TUI shows `(unknown)` version for a remote
+
+That host is on canopy < v0.17.1.0 — older versions had a bug where `canopy_version` was always `"(unknown)"` over the wire (`cmd/canopy/ls.go` declared the var but never assigned it). Upgrade the host: select the row, press `U`. If `U` is hidden because the host is on a DEV binary, press `S` first (`canopy use release`).
+
+### `canopy new --on tower --prompt "..."` leaks a temp file on success
+
+Pre-v0.17.0.1 bug: the remote script used `exec canopy …`, which replaced bash before the cleanup trap could fire. Fixed in v0.17.0.1 (the `exec` was removed). Upgrade the host via `U`.
+
+### Remote workspace shows `·` (no agent pane) but claude is running
+
+Older remotes that didn't ship the v0.17.0 `agent.ClassifyOneShot` change can't classify their own agent panes — the laptop falls back to `·`. Upgrade the host. Or, if you've already done that and you still see `·`, the pane really did crash to a shell — `enter` to attach and inspect.
+
+### Refresh hangs the TUI on launch when a host is unreachable
+
+Pre-v0.17.0.1 bug. Refresher used to do flock I/O on the UI thread before returning the `tea.Cmd`, which froze the render against an unreachable host. Fixed: all I/O now lives inside the returned closure with a 3s deadline. Upgrade your laptop canopy.
+
+### `canopy switch --on tower` falls back to ssh instead of mosh
+
+Mosh is missing on one side. Install mosh on both, or accept the ssh fallback (works fine, just no UDP resilience):
+
+```bash
+# Arch / Omarchy
+sudo pacman -S mosh
+
+# Debian / Ubuntu
+sudo apt-get install mosh
+
+# macOS
+brew install mosh
+```
+
+Also: mosh's default UDP port range is 60000–61000. If the host is behind a firewall, either open that range or stick with the ssh fallback.
+
+### `canopy new --on tower` from `$HOME` says "needs a project but you're not inside any"
+
+The CLI doesn't auto-resolve the project from `$HOME` the way the TUI does. Either `cd` into a project dir first, or pass `--remote-cwd /path/on/remote` explicitly:
+
+```bash
+canopy new --on tower --remote-cwd /home/cassy/Work/cravd
+```
+
+(The TUI's `n` on a remote row does the right thing — it passes `--remote-cwd` resolved from the host registry.)
+
+### `canopy host project add` is gone
+
+Renamed to top-level `canopy project add` in v0.17.0. Old syntax is removed (no aliasing — clean v0.17 cut). Drop `host`:
+
+```bash
+canopy project add cravd /home/cassy/Work/cravd --on tower   # new
+# was: canopy host project add cravd /home/cassy/Work/cravd --on tower
+```
+
+### Remote `(main)` rows show status "main" or branch "↗ —"
+
+Pre-v0.17.0 wire format. Upgrade the host (`U`). v0.17.0+ runs `IsMain=true` and `fillMainBranches` on the remote side of `canopy ls --json` so the laptop gets real values.
 
 ## Logs
 

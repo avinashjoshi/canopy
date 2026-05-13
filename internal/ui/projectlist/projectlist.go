@@ -306,8 +306,82 @@ func (m Model) View() string {
 		b.WriteString(emptyState())
 		return b.String()
 	}
-	b.WriteString(m.renderTable())
+	table, cursorLine := m.renderTable()
+	if m.height > 0 {
+		// Subtract two for the err banner ("banner\n\n") when present
+		// so the visible window fits inside whatever envelope the
+		// parent gave us.
+		budget := m.height
+		if m.err != nil {
+			budget -= 2
+		}
+		table = clipTableToHeight(table, budget, cursorLine)
+	}
+	b.WriteString(table)
 	return b.String()
+}
+
+// clipTableToHeight crops a multi-line table to at most `height` lines
+// while keeping `cursorLine` visible. Returns the original input unchanged
+// when it already fits or height is non-positive. Reserves one line at
+// top/bottom for a dim "↑N more" / "↓N more" scroll indicator when there
+// are rows hidden in that direction.
+func clipTableToHeight(s string, height int, cursorLine int) string {
+	if height <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	// Many renderers (including renderTable) append a trailing newline
+	// after the last row, producing a phantom empty final element from
+	// strings.Split. Trim it so it doesn't eat a viewport slot.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) <= height {
+		return s
+	}
+	// Center the cursor in the window when possible; clamp at edges so
+	// we never show fewer than `height` lines.
+	start := cursorLine - height/2
+	if start < 0 {
+		start = 0
+	}
+	if start+height > len(lines) {
+		start = len(lines) - height
+	}
+	end := start + height
+	above := start
+	below := len(lines) - end
+
+	out := make([]string, 0, height)
+	// Replace the first viewport line with an indicator if rows are
+	// hidden above. Same idea for the bottom. The indicator REPLACES a
+	// content line rather than adding one, so the cropped view's total
+	// height stays exactly `height`.
+	if above > 0 {
+		out = append(out, scrollIndicator(above, true))
+		start++
+	}
+	mid := end
+	if below > 0 {
+		mid--
+	}
+	for i := start; i < mid; i++ {
+		out = append(out, lines[i])
+	}
+	if below > 0 {
+		out = append(out, scrollIndicator(below, false))
+	}
+	return strings.Join(out, "\n")
+}
+
+func scrollIndicator(n int, up bool) string {
+	arrow := "↓"
+	if up {
+		arrow = "↑"
+	}
+	// Subtle/dim styling so it reads as chrome, not content.
+	return subtleHelper().Render(fmt.Sprintf("  %s %d more", arrow, n))
 }
 
 // renderTable groups rows by project, emits a project-name header line for
@@ -332,7 +406,7 @@ func (m Model) View() string {
 // Column widths are derived once from the longest entries; lipgloss
 // doesn't help with column alignment when rows have styled cells of
 // different visible widths, so we compute widths ourselves.
-func (m Model) renderTable() string {
+func (m Model) renderTable() (string, int) {
 	// branchIcon prefixes every Branch cell. `⎇` is U+2387 (alternative
 	// key symbol) — renders as a small fork on terminals without nerd
 	// fonts, no font dependency. Single visible cell so column math is
@@ -360,6 +434,12 @@ func (m Model) renderTable() string {
 	var b strings.Builder
 	prevHost := "" // tracked separately so host changes also reset the project header
 	prevProject := ""
+	// lineCount tracks how many \n-separated lines we've emitted so far.
+	// We snapshot it when we emit the cursor row so View() can crop
+	// around the cursor and keep it visible. Each WriteString("\n")
+	// bumps the count; project + host headers count too.
+	lineCount := 0
+	cursorLine := 0
 
 	// Detect whether we have ANY non-local rows. If yes, render a
 	// "local" host section header above the laptop's own rows for
@@ -381,6 +461,7 @@ func (m Model) renderTable() string {
 		if r.Host != prevHost {
 			if prevHost != "" || (hasRemote && i > 0) {
 				b.WriteString("\n")
+				lineCount++
 			}
 			if hasRemote {
 				label := r.Host
@@ -389,6 +470,7 @@ func (m Model) renderTable() string {
 				}
 				b.WriteString(hostHeaderStyle().Render(label))
 				b.WriteString("\n")
+				lineCount++
 			}
 			prevHost = r.Host
 			prevProject = "" // reset so the first project under this host gets a header
@@ -402,9 +484,11 @@ func (m Model) renderTable() string {
 		if r.Project != prevProject {
 			if prevProject != "" {
 				b.WriteString("\n")
+				lineCount++
 			}
 			b.WriteString(projectHeaderStyle().Render(r.Project))
 			b.WriteString("\n")
+			lineCount++
 			prevProject = r.Project
 		}
 
@@ -523,9 +607,13 @@ func (m Model) renderTable() string {
 			}
 		}
 		b.WriteString(line)
+		if i == m.cursor {
+			cursorLine = lineCount
+		}
 		b.WriteString("\n")
+		lineCount++
 	}
-	return b.String()
+	return b.String(), cursorLine
 }
 
 // displayStatus returns the user-facing status string for a row.
