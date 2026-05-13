@@ -1300,3 +1300,38 @@ func TestRender_StuckStateBadge_LeftmostOfRename(t *testing.T) {
 			stuckIdx, renameIdx, out)
 	}
 }
+
+// TestAgentBadge_RemoteRowSkipsNoAIFallback: regression for the
+// user-reported "remote workspace has agent pane but TUI doesn't
+// show it." The laptop's agent poll only probes local tmux sessions,
+// so remote sessions are absent from the agentStates map. Pre-fix,
+// agentBadge fell through to the No-AI fallback `·` which falsely
+// signaled "this workspace has no agent." Now: blank slot for
+// remote rows until Phase 1d.2 propagates remote agent state.
+func TestAgentBadge_RemoteRowSkipsNoAIFallback(t *testing.T) {
+	r := state.GlobalRow{
+		Name: "remote-foo", Status: state.StatusReady,
+		Alive: true, TmuxSession: "cravd/remote-foo",
+		Host: "tower",
+	}
+	got := agentBadge(r, nil, true /* poll has landed */)
+	if got != "  " {
+		t.Errorf("agentBadge(remote row) = %q; want two-space blank", got)
+	}
+}
+
+// TestAgentBadge_LocalRowStillShowsNoAIAfterPoll: belt-and-suspenders
+// for the host-row short-circuit — local rows must keep the No-AI
+// fallback so local workspaces without an agent pane (e.g. an aider
+// session that quit) still surface the gray dot.
+func TestAgentBadge_LocalRowStillShowsNoAIAfterPoll(t *testing.T) {
+	r := state.GlobalRow{
+		Name: "local-foo", Status: state.StatusReady,
+		Alive: true, TmuxSession: "p/local-foo",
+		// Host empty → local row.
+	}
+	got := agentBadge(r, nil, true)
+	if got == "  " {
+		t.Errorf("agentBadge(local row, post-poll, no state) = blank; want No-AI dot")
+	}
+}

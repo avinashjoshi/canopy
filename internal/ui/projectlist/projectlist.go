@@ -1029,6 +1029,15 @@ func agentBadge(r state.GlobalRow, states map[string]agent.State, polled bool) s
 	if !r.Alive || r.IsMain || r.TmuxSession == "" {
 		return "  "
 	}
+	// v0.17 Phase 1k follow-up: remote rows aren't in the local
+	// agentStates map (the poll only probes local tmux), so falling
+	// through to the No-AI fallback below renders a misleading "no
+	// agent" dot even when the remote workspace has an active Claude
+	// pane. Render a blank slot for remote rows until Phase 1d.2
+	// propagates remote agent state through canopy ls --json.
+	if r.Host != "" {
+		return "  "
+	}
 	s, ok := states[r.TmuxSession]
 	if !ok {
 		// Not in the map. Two cases:

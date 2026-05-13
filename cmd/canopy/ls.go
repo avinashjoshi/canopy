@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
@@ -352,6 +353,26 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 	for _, w := range st.Workspaces {
 		hintByKey[w.ProjectRoot+"|"+w.Name] = w.LastErrorHint
 	}
+	// v0.17 Phase 1k follow-up: resolve each project's default branch
+	// ONCE per project and substitute it for the "—" placeholder on
+	// main rows. The laptop's fillMainBranches only fires for local
+	// rows; without doing this on the remote too, the laptop renders
+	// "(main) ↗ —" for remote projects. DetectDefaultBranch is one
+	// git rev-parse — cheap to amortize.
+	mainBranchByRoot := make(map[string]string)
+	for _, r := range rows {
+		if !r.IsMain || r.ProjectRoot == "" {
+			continue
+		}
+		if _, ok := mainBranchByRoot[r.ProjectRoot]; ok {
+			continue
+		}
+		b, err := git.DetectDefaultBranch(ctx, r.ProjectRoot)
+		if err != nil || b == "" {
+			b = "main" // fallback matches fillMainBranches'
+		}
+		mainBranchByRoot[r.ProjectRoot] = b
+	}
 	for _, r := range rows {
 		var hints []state.Hint
 		// Main rows have no Path / no detector input — skip them.
@@ -365,10 +386,16 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 			}
 			hints = lifecycle.RunFast(ctx, ws)
 		}
+		branch := r.Branch
+		if r.IsMain {
+			if resolved, ok := mainBranchByRoot[r.ProjectRoot]; ok {
+				branch = resolved
+			}
+		}
 		doc.Workspaces = append(doc.Workspaces, LsJSONWorkspace{
 			Name:          r.Name,
 			Project:       r.Project,
-			Branch:        r.Branch,
+			Branch:        branch,
 			Status:        string(r.Status),
 			Port:          r.Port,
 			TmuxSession:   r.TmuxSession,

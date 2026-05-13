@@ -992,8 +992,16 @@ func refreshRemoteCmd() tea.Cmd {
 					LastErrorHint: w.LastErrorHint,
 				})
 				rows = append(rows, state.GlobalRow{
-					Host:          r.HostName,
-					Project:       w.Project,
+					Host:    r.HostName,
+					Project: w.Project,
+					// IsMain mirrors BuildGlobalRows's synthetic main
+					// row convention. Without this, the local renderer
+					// can't tell remote main rows apart from workspace
+					// rows — displayStatus falls through to string(r.Status)
+					// which renders the literal "main" instead of
+					// "running"/"not started", and fillMainBranches
+					// skips them entirely. v0.17 Phase 1k follow-up.
+					IsMain:        w.Name == "(main)",
 					Name:          w.Name,
 					Branch:        w.Branch,
 					Status:        state.Status(w.Status),
