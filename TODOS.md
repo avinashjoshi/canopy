@@ -12,7 +12,7 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
-## 📋 OPEN (P1) — `canopy host add` connectivity probe + ssh-copy-id offer (added 2026-05-12, surfaced during Phase 1b dogfood)
+## ✅ SHIPPED — `canopy host add` connectivity probe + ssh-copy-id offer (v0.17.0.0, PR #40)
 
 Avi added `pi` as a host without SSH key auth set up. The TUI refresh fails fast (correct — BatchMode), but there's no help bridging the user from "I just registered this host" to "wait, I need keys." Add a connectivity probe to `canopy host add`:
 
@@ -95,7 +95,7 @@ Repro: any workspace created via v0.16+ buildSession, then attached via `canopy 
 
 ---
 
-## 📋 OPEN — v0.17.x — Remote canopy workspaces (BYO box, multi-host) (added 2026-05-11)
+## ✅ SHIPPED — v0.17.0.0 — Remote canopy workspaces (BYO box, multi-host) (PR #40)
 
 Greenlit via /office-hours + /plan-ceo-review on 2026-05-11. Design doc + CEO plan persisted:
 - Design: `~/.gstack/projects/avinashjoshi-canopy/avi-explore-remote-workspaces-design-20260511-202039.md`
