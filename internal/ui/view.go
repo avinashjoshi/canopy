@@ -157,12 +157,14 @@ func (m *Model) scopeLabel() string {
 	return "global"
 }
 
-// renderTabBar draws the Local/Global tab bar as styled pills. Active
-// tab uses the violet brand-color bg; inactive uses a darker grey-bg
-// pill so both read as buttons, not text.
+// renderTabBar draws the tab bar as styled pills. Active tab uses the
+// violet brand-color bg; inactive uses a darker grey-bg pill so both
+// read as buttons, not text.
 //
-// Empty tabs (no rows under the active filter) render dimmed so the
-// user doesn't feel pulled to switch to a tab with nothing there.
+// v0.17 Phase 1h: the project-scoped tab (tabLocal) only renders when
+// a current project context exists — launching canopy outside any
+// project drops it from the bar entirely. The Hosts tab dims when the
+// registry is empty.
 func (m *Model) renderTabBar() string {
 	hasLocal := false
 	hasGlobal := false
@@ -171,23 +173,6 @@ func (m *Model) renderTabBar() string {
 		if m.currentProject != "" && r.ProjectRoot == m.currentProject {
 			hasLocal = true
 		}
-	}
-
-	localLabel := "Local"
-	if m.currentProject != "" {
-		// Show the project name so the user knows what "Local" means
-		// in this invocation. Truncate aggressively for narrow popups.
-		proj := m.currentProject
-		for i := len(proj) - 1; i >= 0; i-- {
-			if proj[i] == '/' {
-				proj = proj[i+1:]
-				break
-			}
-		}
-		if len(proj) > 16 {
-			proj = proj[:16]
-		}
-		localLabel = "Local: " + proj
 	}
 
 	// Pill colors: active = bright white on violet (matches brand pill);
@@ -206,23 +191,44 @@ func (m *Model) renderTabBar() string {
 		}
 	}
 
-	// v0.17.0 Phase 1c: Hosts tab is "alive" if any hosts are
-	// registered. Empty registry = dimmed pill (matches the
-	// "tabs without content render dim" rule).
-	hasHosts := m.hostsHasEntries()
-
-	local := tabPill(localLabel, m.tab == tabLocal, hasLocal)
-	global := tabPill("Global", m.tab == tabGlobal, hasGlobal)
-	hosts := tabPill("Hosts", m.tab == tabHosts, hasHosts)
-
-	// v0.17.0 Phase 1c polish: ← / → indicators bracket the tab list
-	// so users can see at a glance that left/right (and h/l) navigate
-	// between tabs. Subtle gray so they don't compete with the
-	// active pill for attention.
 	arrow := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	left := arrow.Render("‹")
-	right := arrow.Render("›")
-	return left + " " + local + " " + global + " " + hosts + " " + right
+	pills := []string{arrow.Render("‹")}
+
+	if m.currentProject != "" {
+		// Use the project basename as the tab label so the user knows
+		// exactly which project they're scoped to.
+		proj := m.currentProject
+		for i := len(proj) - 1; i >= 0; i-- {
+			if proj[i] == '/' {
+				proj = proj[i+1:]
+				break
+			}
+		}
+		if len(proj) > 18 {
+			proj = proj[:18]
+		}
+		pills = append(pills, tabPill(proj, m.tab == tabLocal, hasLocal))
+	}
+	pills = append(pills, tabPill("Projects", m.tab == tabGlobal, hasGlobal))
+	if m.hostsHasEntries() {
+		pills = append(pills, tabPill("Hosts", m.tab == tabHosts, true))
+	}
+	pills = append(pills, arrow.Render("›"))
+	return joinWithSpaces(pills)
+}
+
+// joinWithSpaces joins pieces with a single ASCII space. Tiny helper
+// rather than strings.Join so it's obvious at the call site we're
+// padding tab pills, not building general text.
+func joinWithSpaces(pieces []string) string {
+	if len(pieces) == 0 {
+		return ""
+	}
+	out := pieces[0]
+	for _, p := range pieces[1:] {
+		out += " " + p
+	}
+	return out
 }
 
 // renderSearchLine returns the search input pill (when in search mode)

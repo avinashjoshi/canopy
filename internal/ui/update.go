@@ -16,7 +16,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
@@ -602,82 +601,69 @@ func actionTabSwitch(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return actionTabNext(m, msg)
 }
 
-// actionTabNext cycles forward through tabs: Local → Global → Hosts
-// → back to Local. Hosts tab inserts into the cycle only when at
-// least one host is registered (empty Hosts tab is uninteresting and
-// hitting tab repeatedly to land on nothing is confusing). v0.17.0
-// Phase 1c polish — bound to Tab AND `right`/`l`.
+// actionTabNext cycles forward through the visible tabs. Tab order is
+// contextual (v0.17 Phase 1h):
 //
-// One quirk preserved from the original actionTabSwitch: tabGlobal →
-// tabLocal when currentProject is unset routes through
-// actionFocusProject so the cursor row's project becomes Local's
-// context. Without that, Local would either show every row (no
-// filter) or feel broken.
-func actionTabNext(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Tab cycling clears any host-focus (set by `f` on a remote row).
-	// Keeps focus a Global-tab-only modifier — landing on Local with a
-	// stale focus would just be invisible (Local filters out remote
-	// rows anyway) but landing back on Global without an obvious way
-	// to clear it would confuse users.
-	m.focusHost = ""
-	switch m.tab {
-	case tabLocal:
-		m.tab = tabGlobal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	case tabGlobal:
-		if m.hostsHasEntries() {
-			m.tab = tabHosts
-			return m, nil
-		}
-		// No hosts → skip Hosts and wrap to Local.
-		if m.currentProject == "" {
-			row, ok := m.list.CursorRow()
-			if ok && row.ProjectRoot != "" {
-				return actionFocusProject(m, msg)
-			}
-		}
-		m.tab = tabLocal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	case tabHosts:
-		if m.currentProject == "" {
-			row, ok := m.list.CursorRow()
-			if ok && row.ProjectRoot != "" {
-				return actionFocusProject(m, msg)
-			}
-		}
-		m.tab = tabLocal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	}
+//	inside a project: <project> → Projects → Hosts → wrap
+//	outside (no currentProject): Projects → Hosts → wrap
+//
+// tabLocal is only reachable when m.currentProject is set — without a
+// project context it has nothing to filter to, so it isn't part of the
+// cycle at all. Hosts is similarly skipped when no hosts are registered.
+//
+// Bound to Tab AND `right`/`l`.
+func actionTabNext(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	tabs := m.visibleTabs()
+	m.tab = nextInCycle(tabs, m.tab, +1)
+	m.list.SetRows(m.filteredRows())
 	return m, nil
 }
 
-// actionTabPrev cycles backward: Local ← Global ← Hosts. Bound to
-// `left`/`h`. Same Hosts-skip-when-empty logic as actionTabNext.
+// actionTabPrev cycles backward through the visible tabs. Bound to
+// `left`/`h` and shift+tab.
 func actionTabPrev(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.focusHost = ""
-	switch m.tab {
-	case tabLocal:
-		// Wrap to Hosts if any registered, else Global.
-		if m.hostsHasEntries() {
-			m.tab = tabHosts
-			return m, nil
-		}
-		m.tab = tabGlobal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	case tabGlobal:
-		m.tab = tabLocal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	case tabHosts:
-		m.tab = tabGlobal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	}
+	tabs := m.visibleTabs()
+	m.tab = nextInCycle(tabs, m.tab, -1)
+	m.list.SetRows(m.filteredRows())
 	return m, nil
+}
+
+// visibleTabs returns the tabs the user can cycle through right now.
+// tabLocal only appears when a project context exists; tabHosts only
+// when at least one host is registered. tabGlobal is always present.
+func (m *Model) visibleTabs() []tabKind {
+	out := make([]tabKind, 0, 3)
+	if m.currentProject != "" {
+		out = append(out, tabLocal)
+	}
+	out = append(out, tabGlobal)
+	if m.hostsHasEntries() {
+		out = append(out, tabHosts)
+	}
+	return out
+}
+
+// nextInCycle returns the tab `step` positions away from current in
+// the cycle (step=+1 for next, -1 for prev). If `current` isn't in the
+// cycle (e.g., user was on tabLocal but currentProject just became
+// empty — defensive case, shouldn't happen) we land on the first
+// visible tab.
+func nextInCycle(tabs []tabKind, current tabKind, step int) tabKind {
+	if len(tabs) == 0 {
+		return current
+	}
+	idx := -1
+	for i, t := range tabs {
+		if t == current {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return tabs[0]
+	}
+	n := len(tabs)
+	return tabs[((idx+step)%n+n)%n]
 }
 
 // actionSearchEntry enters fuzzy-search mode. Subsequent keystrokes are
@@ -757,73 +743,6 @@ func (m *Model) clearNewTarget() {
 	m.newTargetRoot = ""
 	m.newTargetName = ""
 	m.pendingPrompt = ""
-}
-
-// actionFocusProject "loads into" the cursor row's project: sets it as
-// the current context, constructs its Manager (so `n` becomes available),
-// switches to Local tab. The unified TUI now behaves as if it were
-// launched from inside that project's source repo.
-//
-// Doesn't change the parent shell's cwd — that requires a shell wrapper
-// (lazygit-style env-var protocol) which canopy doesn't ship today
-// because the typical workflow uses `enter` on a project's main row to
-// switch tmux clients into that project's main session, which already
-// has shells in the project root.
-func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	row, ok := m.list.CursorRow()
-	if !ok {
-		return m, nil
-	}
-	// v0.17 Phase 1g: remote rows can't load a local Manager (no
-	// canopy.json on the laptop for a project that lives on tower),
-	// but `f` still has a useful job — narrow the Global tab to the
-	// one host the cursor is on. Checked BEFORE the ProjectRoot==""
-	// gate because remote rows always have an empty ProjectRoot.
-	// Press `f` on any local row, `esc`, or tab-cycle to clear.
-	if row.Host != "" {
-		m.focusHost = row.Host
-		m.tab = tabGlobal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	}
-	// Local row: any prior remote-host focus is no longer applicable.
-	m.focusHost = ""
-	if row.ProjectRoot == "" {
-		return m, nil
-	}
-	// Short-circuit when re-focusing the already-current project: just
-	// flip to Local tab and re-filter rows. Avoids a needless canopy.json
-	// reload (which would surface a spurious m.err if the file is
-	// transiently unreadable, even though the existing m.mgr is still
-	// valid). The visible side effect — landing on Local tab — happens
-	// either way.
-	if row.ProjectRoot == m.currentProject {
-		m.tab = tabLocal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	}
-	cfg, err := config.LoadFrom(row.ProjectRoot)
-	if err != nil {
-		m.err = fmt.Errorf("focus %s: %w", row.Project, err)
-		return m, nil
-	}
-	mgr, err := workspace.New(cfg)
-	if err != nil {
-		// Don't fail loudly — focus still works for read + cross-project
-		// d/R via the transient-Manager path. Just `n` stays unavailable
-		// until the user fixes the underlying state issue.
-		m.err = fmt.Errorf("focus %s (read-only — Manager construction failed: %v)",
-			row.Project, err)
-		m.mgr = nil
-	} else {
-		m.mgr = mgr
-		m.err = nil
-	}
-	m.currentProject = row.ProjectRoot
-	m.projectName = cfg.Project
-	m.tab = tabLocal
-	m.list.SetRows(m.filteredRows())
-	return m, nil
 }
 
 // actionOpenPR opens the cursor row's pull request in the user's
@@ -1292,13 +1211,6 @@ func (m *Model) filteredRows() []state.GlobalRow {
 			if m.currentProject != "" && r.ProjectRoot != "" && r.ProjectRoot != m.currentProject {
 				continue
 			}
-		}
-		// v0.17 Phase 1g: when the user pressed `f` on a remote row,
-		// narrow the Global tab to just that host. Doesn't affect
-		// Local tab (handled above) — Local tab already excludes all
-		// remote rows.
-		if m.focusHost != "" && m.tab == tabGlobal && r.Host != m.focusHost {
-			continue
 		}
 		if m.searchQuery != "" && !rowMatchesQuery(r, m.searchQuery) {
 			continue

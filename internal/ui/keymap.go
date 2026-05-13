@@ -123,14 +123,6 @@ var listModeBindings = []Binding{
 		Action:    actionNewWorkspace,
 	},
 	{
-		// `f` (focus project): renamed from `o` in v0.17.0 Phase 1c
-		// polish. Avi's call — `f` reads more obviously than `o`
-		// ("focus" vs the older "open project" framing).
-		K:         key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "focus project")),
-		Available: availableFocusProject,
-		Action:    actionFocusProject,
-	},
-	{
 		// P (capital) opens the cursor row's PR in the browser. Lower-
 		// case p is unbound: a stray `p` press used to fire an external
 		// `gh` invocation, which made the lowercase key feel hostile to
@@ -264,23 +256,6 @@ func availableOpenBrowser(m *Model) bool {
 		return false
 	}
 	return row.Alive && row.Port > 0
-}
-
-// availableFocusProject is the Available predicate for `o`. Only
-// meaningful on the Global tab (Local already IS the current project's
-// scope; pressing o there would be a no-op). The same-project case is
-// allowed — pressing o on the already-focused project is a harmless
-// re-focus + tab switch, and disabling it just creates muscle-memory
-// friction.
-func availableFocusProject(m *Model) bool {
-	if m.tab != tabGlobal {
-		return false
-	}
-	row, ok := m.list.CursorRow()
-	if !ok {
-		return false
-	}
-	return row.ProjectRoot != ""
 }
 
 // availableShortHelp returns the bindings that pass IsAvailable, in

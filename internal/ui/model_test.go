@@ -3,9 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -130,60 +128,55 @@ func TestHandleKey_TabSwitch(t *testing.T) {
 	}
 }
 
-// TestHandleKey_TabSwitch_GlobalToLocalAutoFocus is the regression test
-// for the user-reported "tab from Global doesn't enter Local" bug:
-// when canopy is launched outside any project (currentProject == ""),
-// Local has no meaningful filter, so Tab → Local would either show
-// every row (no-op) or feel broken. The fix routes Global → Local
-// through actionFocusProject when there's a cursor row, so Tab
-// behaves as "enter the project I'm looking at."
-func TestHandleKey_TabSwitch_GlobalToLocalAutoFocus(t *testing.T) {
-	// Set up a temp project with canopy.json so actionFocusProject's
-	// LoadFrom + workspace.New succeeds. The test only cares about the
-	// post-Tab Model state, not Manager construction success — but we
-	// need the load to not fail loudly.
-	projectRoot := t.TempDir()
-	canopyJSON := []byte(`{"scripts": {"setup": "x", "run": "y", "archive": "z"}}`)
-	if err := os.WriteFile(filepath.Join(projectRoot, "canopy.json"), canopyJSON, 0o644); err != nil {
-		t.Fatalf("write canopy.json: %v", err)
-	}
-
+// TestHandleKey_TabSwitch_NoProjectSkipsLocal verifies the v0.17 Phase
+// 1h contract: when canopy is launched outside any project
+// (currentProject == ""), the project-scoped tab is NOT part of the
+// cycle. Tab from Projects with no hosts wraps back to Projects;
+// with hosts it cycles to Hosts. The user never lands on an empty
+// project-tab — replaces the old "auto-focus into Local" behavior.
+func TestHandleKey_TabSwitch_NoProjectSkipsLocal(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabGlobal
 	m.currentProject = ""
 	m.mgr = nil
-	m.setTestRows([]Row{
-		{Project: filepath.Base(projectRoot), ProjectRoot: projectRoot, IsMain: true, Name: "(main)", Status: "main"},
-	})
-
+	// No hosts registered AND no current project — cycle is just
+	// [Projects]. Tab from Projects wraps to itself.
 	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
 	got := model.(*Model)
-	if got.tab != tabLocal {
-		t.Errorf("after Tab from Global w/ empty currentProject: tab = %v; want tabLocal", got.tab)
+	if got.tab != tabGlobal {
+		t.Errorf("Tab w/ no project + no hosts: tab = %v; want tabGlobal (stays)", got.tab)
 	}
-	if got.currentProject != projectRoot {
-		t.Errorf("after Tab: currentProject = %q; want %q (auto-focus from cursor row)", got.currentProject, projectRoot)
+	if got.currentProject != "" {
+		t.Errorf("Tab should not auto-focus a project: currentProject = %q; want empty", got.currentProject)
 	}
 }
 
-// TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext covers the no-row
-// edge case: Tab from Global with no rows can't auto-focus (nothing to
-// focus on), so it falls through to the plain tab flip. currentProject
-// stays empty; user sees the "no projects" empty state.
-func TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext(t *testing.T) {
+// TestHandleKey_TabSwitch_NoProjectWithHostsCyclesToHosts: when there's
+// no currentProject but at least one host is registered, the cycle
+// is [Projects, Hosts] and Tab from Projects lands on Hosts.
+func TestHandleKey_TabSwitch_NoProjectWithHostsCyclesToHosts(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabGlobal
 	m.currentProject = ""
-	m.mgr = nil
-	m.setTestRows(nil)
-
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "user@tower", Type: "ssh"}}
 	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
 	got := model.(*Model)
-	if got.tab != tabLocal {
-		t.Errorf("after Tab w/ no rows: tab = %v; want tabLocal (plain flip)", got.tab)
+	if got.tab != tabHosts {
+		t.Errorf("Tab w/ no project + hosts: tab = %v; want tabHosts", got.tab)
 	}
-	if got.currentProject != "" {
-		t.Errorf("after Tab w/ no rows: currentProject = %q; want \"\" (nothing to focus)", got.currentProject)
+}
+
+// TestHandleKey_TabSwitch_WithProjectCyclesThroughLocal: when launched
+// inside a project, the cycle is [<project>, Projects, Hosts?]. Tab
+// from the project tab lands on Projects.
+func TestHandleKey_TabSwitch_WithProjectCyclesThroughLocal(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabLocal
+	m.currentProject = "/p/cravd"
+	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	got := model.(*Model)
+	if got.tab != tabGlobal {
+		t.Errorf("Tab from project tab: tab = %v; want tabGlobal", got.tab)
 	}
 }
 
@@ -303,40 +296,6 @@ func TestAvailableNewWorkspace(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("availableNewWorkspace(mgr=%v, tab=%v, rows=%v) = %v; want %v",
 					tc.mgr, tc.tab, tc.rows, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestAvailableFocusProject covers the `o` predicate. Available on
-// Global tab whenever the cursor row has a non-empty ProjectRoot —
-// the same-project case is allowed (re-focus is a harmless no-op
-// switch instead of muscle-memory-killing friction).
-func TestAvailableFocusProject(t *testing.T) {
-	cases := []struct {
-		name        string
-		tab         tabKind
-		rowRoot     string
-		currentProj string
-		want        bool
-	}{
-		{"Local tab → never", tabLocal, "/tmp/p", "/tmp/p", false},
-		{"Global, row root empty → no", tabGlobal, "", "", false},
-		{"Global, row root != current → yes", tabGlobal, "/tmp/p", "/tmp/q", true},
-		{"Global, row root == current → yes (re-focus is fine)", tabGlobal, "/tmp/p", "/tmp/p", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := newTestModel(false)
-			m.tab = tc.tab
-			m.currentProject = tc.currentProj
-			if tc.rowRoot != "" {
-				m.setTestRows([]Row{{Project: "p", ProjectRoot: tc.rowRoot, Name: "ws", Status: state.StatusReady}})
-			} else if tc.tab == tabGlobal {
-				m.setTestRows([]Row{{Project: "p", Name: "ws", Status: state.StatusReady}})
-			}
-			if got := availableFocusProject(m); got != tc.want {
-				t.Errorf("availableFocusProject = %v; want %v", got, tc.want)
 			}
 		})
 	}
@@ -2587,102 +2546,56 @@ func TestActionOpenBrowser_NoPortNoOp(t *testing.T) {
 	}
 }
 
-// TestActionFocusProject_RemoteRowSetsHostFilter: pressing `f` on a
-// remote row narrows the Global tab to just that host's rows. Replaces
-// the prior "can't focus a remote project" error which gave the
-// keypress no useful behavior. v0.17 Phase 1g.
-func TestActionFocusProject_RemoteRowSetsHostFilter(t *testing.T) {
-	m := newTestModel(false)
-	m.tab = tabGlobal
-	// All-remote rows so cursor=0 lands on tower-foo (SetCursorTo
-	// requires a non-empty ProjectRoot which remote rows don't have).
-	m.remoteRows = []Row{
-		{Project: "cravd", Name: "tower-foo", Status: state.StatusReady, Host: "tower"},
-		{Project: "cravd", Name: "pi-foo", Status: state.StatusReady, Host: "pi"},
+// TestVisibleTabs_DropsLocalWhenNoProject: visibleTabs is the source
+// of truth for the tab cycle. It drops tabLocal when there's no
+// currentProject and tabHosts when no hosts are registered. v0.17
+// Phase 1h.
+func TestVisibleTabs_DropsLocalWhenNoProject(t *testing.T) {
+	cases := []struct {
+		name      string
+		project   string
+		withHosts bool
+		want      []tabKind
+	}{
+		{"no project, no hosts", "", false, []tabKind{tabGlobal}},
+		{"no project, with hosts", "", true, []tabKind{tabGlobal, tabHosts}},
+		{"with project, no hosts", "/p/x", false, []tabKind{tabLocal, tabGlobal}},
+		{"with project, with hosts", "/p/x", true, []tabKind{tabLocal, tabGlobal, tabHosts}},
 	}
-	m.list.SetRows(m.filteredRows())
-
-	_, _ = actionFocusProject(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
-
-	if m.focusHost != "tower" {
-		t.Errorf("focusHost = %q; want tower", m.focusHost)
-	}
-	if m.tab != tabGlobal {
-		t.Errorf("tab = %v; want tabGlobal", m.tab)
-	}
-	// filteredRows should now exclude the pi row.
-	visible := m.filteredRows()
-	for _, r := range visible {
-		if r.Host != "tower" {
-			t.Errorf("focus filter leaked row Host=%q Name=%q", r.Host, r.Name)
-		}
-	}
-	if len(visible) != 1 {
-		t.Errorf("visible rows = %d; want 1 (tower-foo)", len(visible))
-	}
-}
-
-// TestActionFocusProject_LocalRowClearsHostFilter: pressing `f` on a
-// local row after a remote focus reverts to the normal local-focus
-// behavior AND clears the host filter so the user isn't stuck inside
-// a stale narrow.
-func TestActionFocusProject_LocalRowClearsHostFilter(t *testing.T) {
-	m := newTestModel(false)
-	m.tab = tabGlobal
-	m.focusHost = "tower" // simulate prior remote focus
-	m.allRows = []Row{
-		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "local-foo", Status: state.StatusReady},
-	}
-	m.list.SetRows([]Row{m.allRows[0]})
-
-	// Cursor on the local row. actionFocusProject will try to build a
-	// Manager; we don't care if it succeeds (no canopy.json at /p/cravd
-	// in the test). The invariant under test is focusHost clearing.
-	_, _ = actionFocusProject(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
-
-	if m.focusHost != "" {
-		t.Errorf("focusHost = %q after f on local row; want cleared", m.focusHost)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(false)
+			m.currentProject = tc.project
+			if tc.withHosts {
+				m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+			}
+			got := m.visibleTabs()
+			if len(got) != len(tc.want) {
+				t.Fatalf("visibleTabs = %v; want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("visibleTabs[%d] = %v; want %v", i, got[i], tc.want[i])
+				}
+			}
+		})
 	}
 }
 
-// TestActionTabNext_ClearsFocusHost: cycling tabs clears the host
-// focus so a stale focus doesn't survive a navigation round-trip.
-func TestActionTabNext_ClearsFocusHost(t *testing.T) {
-	m := newTestModel(false)
-	m.tab = tabGlobal
-	m.focusHost = "tower"
-	_, _ = actionTabNext(m, tea.KeyMsg{Type: tea.KeyTab})
-	if m.focusHost != "" {
-		t.Errorf("focusHost = %q after tab next; want cleared", m.focusHost)
+// TestNextInCycle_WrapsBothWays: nextInCycle is the helper that does
+// the actual stepping. It must wrap forward (last → first) and
+// backward (first → last).
+func TestNextInCycle_WrapsBothWays(t *testing.T) {
+	tabs := []tabKind{tabLocal, tabGlobal, tabHosts}
+	if got := nextInCycle(tabs, tabHosts, +1); got != tabLocal {
+		t.Errorf("forward wrap: got %v; want tabLocal", got)
 	}
-}
-
-// TestFilteredRows_FocusHostScopesGlobalTab: filteredRows applies
-// focusHost only on tabGlobal; tabLocal already excludes remote rows
-// so the filter is a no-op there.
-func TestFilteredRows_FocusHostScopesGlobalTab(t *testing.T) {
-	m := newTestModel(false)
-	m.allRows = []Row{
-		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "local-foo", Status: state.StatusReady},
+	if got := nextInCycle(tabs, tabLocal, -1); got != tabHosts {
+		t.Errorf("backward wrap: got %v; want tabHosts", got)
 	}
-	m.remoteRows = []Row{
-		{Project: "cravd", Name: "tower-foo", Status: state.StatusReady, Host: "tower"},
-		{Project: "cravd", Name: "pi-foo", Status: state.StatusReady, Host: "pi"},
-	}
-	m.focusHost = "pi"
-
-	m.tab = tabGlobal
-	got := m.filteredRows()
-	if len(got) != 1 || got[0].Name != "pi-foo" {
-		t.Errorf("Global+focusHost=pi: got %d rows %+v; want only pi-foo", len(got), got)
-	}
-
-	// Local tab: focus has no effect (local tab excludes all remote anyway).
-	m.tab = tabLocal
-	m.currentProject = "/p/cravd"
-	got = m.filteredRows()
-	if len(got) != 1 || got[0].Name != "local-foo" {
-		t.Errorf("Local tab with focusHost: got %+v; want only local-foo", got)
+	// Current tab not in cycle (defensive case): land on first.
+	if got := nextInCycle([]tabKind{tabGlobal}, tabLocal, +1); got != tabGlobal {
+		t.Errorf("current not in cycle: got %v; want tabGlobal", got)
 	}
 }
 

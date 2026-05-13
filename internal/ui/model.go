@@ -283,13 +283,6 @@ type Model struct {
 	// or outside any workspace — fall back to row 0).
 	currentWorkspace string
 
-	// focusHost is the active Global-tab host filter. Set by `f` on a
-	// remote row to narrow the list to one host's rows; cleared by `f`
-	// on a local row, by `esc`, by starting a search, or by tab cycling.
-	// v0.17 Phase 1g — gives `f` a meaningful job on remote rows where
-	// the "load a local Manager" semantics don't apply.
-	focusHost string
-
 	// currentWorkspaceRoot is the ProjectRoot of currentWorkspace.
 	// Tracked alongside the name so escape/preselect logic disambiguates
 	// across projects with same-named workspaces — e.g. project A and
@@ -678,8 +671,9 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	pi.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	pi.BlurredStyle.CursorLine = lipgloss.NewStyle()
 
-	// Tab pre-selection: Local when the user has a current project
-	// context, Global otherwise. The user can tab away on either side.
+	// Tab pre-selection: the project-scoped tab when canopy was
+	// launched inside a project (so the user lands on their own
+	// workspaces), Projects (Global) otherwise. v0.17 Phase 1h.
 	defaultTab := tabLocal
 	if currentProject == "" {
 		defaultTab = tabGlobal
