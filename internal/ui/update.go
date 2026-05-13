@@ -453,6 +453,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// too — refreshCmd alone only updates local. v0.17 Phase 1h.
 		return m, m.refresh()
 
+	case hostProbeResultMsg:
+		// Post-Add probe result. AuthFailed → open the ssh-copy-id
+		// offer modal. Other errors surface on m.err so the user
+		// knows the host is registered but unreachable. Success is
+		// silent — the refresh will surface the green online pill.
+		if msg.authFail {
+			m.pendingProbeHost = msg.hostName
+			m.pendingProbeTarget = msg.sshTarget
+			m.mode = confirmSSHCopyIDMode
+			return m, nil
+		}
+		if msg.err != nil {
+			m.err = fmt.Errorf("host %q registered, but probe failed: %w", msg.hostName, msg.err)
+		}
+		return m, nil
+
 	case errMsg:
 		// Deferred error from a tea.Cmd (e.g. openRemoteBrowser). Surface
 		// it in the status bar but don't kick off a refresh — the cmd has
@@ -533,10 +549,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmAttachKey(msg)
 	case confirmHostRemoveMode:
 		return m.handleConfirmHostRemoveKey(msg)
-	case addHostNameMode:
-		return m.handleAddHostNameKey(msg)
-	case addHostTargetMode:
-		return m.handleAddHostTargetKey(msg)
+	case addHostFormMode:
+		return m.handleAddHostFormKey(msg)
+	case hostDetailMode:
+		return m.handleHostDetailKey(msg)
+	case confirmSSHCopyIDMode:
+		return m.handleConfirmSSHCopyIDKey(msg)
 	case confirmRetryMode:
 		return m.handleConfirmRetryKey(msg)
 	case drawerMode:
@@ -725,7 +743,7 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// subprocess via tea.ExecProcess so it can take over the terminal
 	// for huh's form and the ssh-copy-id offer.
 	if m.tab == tabHosts {
-		return m, m.openAddHostName()
+		return m, m.openAddHostForm()
 	}
 	// v0.17 Phase 1k: on a remote row, open the SAME TUI picker as
 	// local rows — Fresh + Prompt submit handlers branch on
@@ -1606,18 +1624,25 @@ func (m *Model) resolveHostForExec(name string) (string, error) {
 	return "", fmt.Errorf("host %q not found in registry snapshot", name)
 }
 
-// actionHostEnter is the Hosts tab's enter handler. v0.17 Phase 1l —
-// for now this surfaces a status hint with the host's SSH target;
-// follow-up may open a detail drawer.
+// actionHostEnter opens the read-only detail view for the selected
+// host. v0.17 Phase 1l. Replaces the placeholder m.err hint with a
+// real screen.
 func actionHostEnter(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	h, ok := m.selectedHost()
 	if !ok {
 		return m, nil
 	}
-	// Surface a non-error info hint via m.err — the status line is the
-	// only quick channel right now. Future: a host-detail drawer.
-	m.err = fmt.Errorf("%s → %s (run `canopy host show %s` for full detail)",
-		h.Name, h.SSHTarget, h.Name)
+	m.hostDetailTarget = h.Name
+	m.mode = hostDetailMode
+	return m, nil
+}
+
+// handleHostDetailKey: esc or any other key exits back to listMode.
+func (m *Model) handleHostDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" || msg.String() == "q" || msg.Type == tea.KeyEnter {
+		m.mode = listMode
+		m.hostDetailTarget = ""
+	}
 	return m, nil
 }
 
@@ -1686,68 +1711,86 @@ func removeHostCmd(name string) tea.Cmd {
 	}
 }
 
-// openAddHostName transitions to the in-TUI add-host name input. The
-// nameInput textinput is shared with the workspace-name flow but
-// cleared per-entry so values don't leak across flows. v0.17 Phase 1l.
-func (m *Model) openAddHostName() tea.Cmd {
-	m.mode = addHostNameMode
+// openAddHostForm transitions to the in-TUI add-host form. Two
+// textinputs (name + ssh-target) render side-by-side; Tab switches
+// focus. v0.17 Phase 1l polish — replaces the prior two-mode
+// sequential flow so the user sees both fields at once.
+func (m *Model) openAddHostForm() tea.Cmd {
+	m.mode = addHostFormMode
 	m.hostAddName = ""
+	m.hostAddTarget = ""
+	m.hostAddFocus = 0
 	m.nameInput.Reset()
 	m.nameInput.Placeholder = "e.g. tower"
 	m.nameInput.Focus()
+	m.targetInput.Reset()
+	m.targetInput.Placeholder = "user@host or host.tail.ts.net"
+	m.targetInput.Blur()
 	return textinputBlink()
 }
 
-// handleAddHostNameKey is the keymap for the host-name input.
-// Enter advances to the ssh-target input (carrying the typed name);
-// esc cancels back to listMode.
-func (m *Model) handleAddHostNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+// handleAddHostFormKey routes keys for the in-TUI add-host form.
+// Tab / shift+tab cycle focus between name and target inputs.
+// Enter submits when both fields are non-empty; esc cancels.
+// Anything else forwards to whichever input is focused.
+func (m *Model) handleAddHostFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.mode = listMode
 		m.hostAddName = ""
+		m.hostAddTarget = ""
 		m.nameInput.Reset()
 		m.nameInput.Blur()
+		m.targetInput.Reset()
+		m.targetInput.Blur()
 		return m, nil
+	case "tab", "shift+tab":
+		m.hostAddFocus ^= 1
+		if m.hostAddFocus == 0 {
+			m.nameInput.Focus()
+			m.targetInput.Blur()
+		} else {
+			m.nameInput.Blur()
+			m.targetInput.Focus()
+		}
+		return m, textinputBlink()
 	case "enter":
 		name := strings.TrimSpace(m.nameInput.Value())
+		target := strings.TrimSpace(m.targetInput.Value())
 		if name == "" {
-			return m, nil
+			m.hostAddFocus = 0
+			m.nameInput.Focus()
+			m.targetInput.Blur()
+			return m, textinputBlink()
 		}
-		m.hostAddName = name
-		m.mode = addHostTargetMode
-		m.nameInput.Reset()
-		m.nameInput.Placeholder = "user@host or host.tail.ts.net"
-		return m, textinputBlink()
-	}
-	var cmd tea.Cmd
-	m.nameInput, cmd = m.nameInput.Update(msg)
-	return m, cmd
-}
-
-// handleAddHostTargetKey is the keymap for the ssh-target input.
-// Enter submits (writes the registry); esc steps back to the name
-// input so the user can retry without retyping.
-func (m *Model) handleAddHostTargetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.mode = addHostNameMode
-		m.nameInput.SetValue(m.hostAddName)
-		return m, textinputBlink()
-	case "enter":
-		target := strings.TrimSpace(m.nameInput.Value())
 		if target == "" {
-			return m, nil
+			m.hostAddFocus = 1
+			m.nameInput.Blur()
+			m.targetInput.Focus()
+			return m, textinputBlink()
 		}
-		name := m.hostAddName
 		m.mode = listMode
 		m.hostAddName = ""
+		m.hostAddTarget = ""
 		m.nameInput.Reset()
 		m.nameInput.Blur()
-		return m, addHostCmd(name, target)
+		m.targetInput.Reset()
+		m.targetInput.Blur()
+		// After Add, probe the host. The probe Cmd emits
+		// hostProbeResultMsg which the Update handler turns into a
+		// confirm-ssh-copy-id modal when auth fails.
+		return m, tea.Batch(
+			addHostCmd(name, target),
+			probeHostCmd(name, target),
+		)
 	}
+	// Forward to focused input.
 	var cmd tea.Cmd
-	m.nameInput, cmd = m.nameInput.Update(msg)
+	if m.hostAddFocus == 0 {
+		m.nameInput, cmd = m.nameInput.Update(msg)
+	} else {
+		m.targetInput, cmd = m.targetInput.Update(msg)
+	}
 	return m, cmd
 }
 
@@ -1769,6 +1812,64 @@ func addHostCmd(name, sshTarget string) tea.Cmd {
 		}
 		return refreshAllMsg{}
 	}
+}
+
+// hostProbeResultMsg carries the outcome of the post-Add connectivity
+// probe. AuthFailed triggers the ssh-copy-id offer modal; other
+// errors are surfaced via m.err so the user knows registration
+// succeeded but the host isn't reachable. v0.17 Phase 1l.
+type hostProbeResultMsg struct {
+	hostName  string
+	sshTarget string
+	authFail  bool
+	err       error // any non-auth error (timeout, DNS, etc.)
+}
+
+// probeHostCmd runs an SSH BatchMode connection check against the
+// newly-added host. BatchMode=yes makes Permission-denied a hard fail
+// (no password prompt), which is exactly what we want to detect.
+//
+// 3s timeout — same shape as the refresh fan-out so we don't wedge
+// the TUI on an unreachable host.
+func probeHostCmd(name, sshTarget string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		cmd := host.SSHCmdBatch(ctx, sshTarget, "true")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return hostProbeResultMsg{hostName: name, sshTarget: sshTarget}
+		}
+		outStr := string(out)
+		// Permission denied = need ssh-copy-id. Everything else
+		// (timeout, no route, unknown host) is a non-auth failure.
+		if strings.Contains(outStr, "Permission denied") ||
+			strings.Contains(outStr, "publickey") {
+			return hostProbeResultMsg{hostName: name, sshTarget: sshTarget, authFail: true}
+		}
+		return hostProbeResultMsg{hostName: name, sshTarget: sshTarget, err: fmt.Errorf("%v: %s", err, strings.TrimSpace(outStr))}
+	}
+}
+
+// handleConfirmSSHCopyIDKey: y/Y runs ssh-copy-id as a subprocess
+// (which prompts for the remote password); anything else dismisses.
+// v0.17 Phase 1l.
+func (m *Model) handleConfirmSSHCopyIDKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	target := m.pendingProbeTarget
+	m.mode = listMode
+	m.pendingProbeHost = ""
+	m.pendingProbeTarget = ""
+	if msg.String() != "y" && msg.String() != "Y" {
+		return m, nil
+	}
+	cmd := exec.Command("ssh-copy-id", target)
+	cmd.Env = os.Environ()
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			log.Warn("ui.ssh-copy-id.failed", "target", target, "err", err)
+		}
+		return refreshAllMsg{}
+	})
 }
 
 // attachRemoteRow dispatches a remote-host attach via canopy-as-subprocess.

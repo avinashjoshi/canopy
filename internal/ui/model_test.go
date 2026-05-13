@@ -34,6 +34,7 @@ func newTestModel(_ bool) *Model {
 		projectName:    "test-project",
 		nameInput:      textinput.New(),
 		listInput:      textinput.New(),
+		targetInput:    textinput.New(),
 		promptInput:    textarea.New(),
 		mode:           listMode,
 		currentProject: "/tmp/test-project",
@@ -2717,8 +2718,102 @@ func TestActionNewWorkspace_HostsTabOpensInTUIForm(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabHosts
 	_, _ = actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	if m.mode != addHostNameMode {
-		t.Errorf("mode = %v; want addHostNameMode", m.mode)
+	if m.mode != addHostFormMode {
+		t.Errorf("mode = %v; want addHostFormMode", m.mode)
+	}
+}
+
+// TestHandleAddHostFormKey_TabCyclesFocus: regression for the user-
+// reported "I can't Tab between host name and ssh-target" bug.
+// v0.17 Phase 1l polish — the form is now a single mode with two
+// inputs that Tab cycles between (and Enter submits both).
+func TestHandleAddHostFormKey_TabCyclesFocus(t *testing.T) {
+	m := newTestModel(false)
+	_ = m.openAddHostForm() // sets mode + focuses name
+	if m.hostAddFocus != 0 || !m.nameInput.Focused() {
+		t.Fatalf("openAddHostForm did not focus name input")
+	}
+	_, _ = m.handleAddHostFormKey(tea.KeyMsg{Type: tea.KeyTab})
+	if m.hostAddFocus != 1 || !m.targetInput.Focused() || m.nameInput.Focused() {
+		t.Errorf("after Tab: focus didn't switch to target; name.Focused=%v target.Focused=%v",
+			m.nameInput.Focused(), m.targetInput.Focused())
+	}
+	_, _ = m.handleAddHostFormKey(tea.KeyMsg{Type: tea.KeyTab})
+	if m.hostAddFocus != 0 || !m.nameInput.Focused() {
+		t.Errorf("after second Tab: focus didn't cycle back to name")
+	}
+}
+
+// TestHandleAddHostFormKey_EnterRequiresBothFields: pressing Enter
+// with an empty field should re-focus that field instead of submitting
+// (and instead of doing nothing — that confuses users).
+func TestHandleAddHostFormKey_EnterRequiresBothFields(t *testing.T) {
+	m := newTestModel(false)
+	_ = m.openAddHostForm()
+	// Empty name + empty target → re-focus name.
+	_, _ = m.handleAddHostFormKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.mode != addHostFormMode {
+		t.Errorf("Enter with empty fields exited the form; want stay")
+	}
+	if m.hostAddFocus != 0 {
+		t.Errorf("Enter on empty name: focus = %d; want 0 (name)", m.hostAddFocus)
+	}
+	// Fill name, leave target empty → focus moves to target.
+	m.nameInput.SetValue("tower")
+	_, _ = m.handleAddHostFormKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.hostAddFocus != 1 {
+		t.Errorf("Enter with name+no-target: focus = %d; want 1 (target)", m.hostAddFocus)
+	}
+}
+
+// TestActionHostEnter_OpensDetail: regression for the user-reported
+// "enter on host shows an error message" bug. Now opens hostDetailMode
+// instead of stashing an info string in m.err.
+func TestActionHostEnter_OpensDetail(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh"},
+	}
+	m.hostsCursor = 0
+	_, _ = actionHostEnter(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.mode != hostDetailMode {
+		t.Errorf("mode = %v; want hostDetailMode", m.mode)
+	}
+	if m.err != nil {
+		t.Errorf("actionHostEnter set m.err = %v; want nil (no error)", m.err)
+	}
+	if m.hostDetailTarget != "tower" {
+		t.Errorf("hostDetailTarget = %q; want tower", m.hostDetailTarget)
+	}
+}
+
+// TestHandleHostDetailKey_EscDismisses: any "dismissive" key returns
+// to listMode.
+func TestHandleHostDetailKey_EscDismisses(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = hostDetailMode
+	m.hostDetailTarget = "tower"
+	_, _ = m.handleHostDetailKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.mode != listMode {
+		t.Errorf("esc: mode = %v; want listMode", m.mode)
+	}
+	if m.hostDetailTarget != "" {
+		t.Errorf("esc: hostDetailTarget = %q; want cleared", m.hostDetailTarget)
+	}
+}
+
+// TestHostProbeResultMsg_AuthFailOpensSSHCopyID: AuthFailed routes to
+// the confirm-ssh-copy-id modal with the probe target pre-loaded.
+func TestHostProbeResultMsg_AuthFailOpensSSHCopyID(t *testing.T) {
+	m := newTestModel(false)
+	_, _ = m.Update(hostProbeResultMsg{hostName: "pi", sshTarget: "pi@p", authFail: true})
+	mm := m
+	if mm.mode != confirmSSHCopyIDMode {
+		t.Errorf("authFail: mode = %v; want confirmSSHCopyIDMode", mm.mode)
+	}
+	if mm.pendingProbeHost != "pi" || mm.pendingProbeTarget != "pi@p" {
+		t.Errorf("probe target not loaded: host=%q target=%q", mm.pendingProbeHost, mm.pendingProbeTarget)
 	}
 }
 

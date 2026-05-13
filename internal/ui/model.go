@@ -110,11 +110,20 @@ const (
 	// from the registry. v0.17 Phase 1l. Same shape as
 	// confirmDeleteMode but scoped to hosts.json instead of state.json.
 	confirmHostRemoveMode
-	// addHostNameMode + addHostTargetMode drive the in-TUI add-host
-	// flow. Name first, ssh-target second; submit writes the registry.
+	// addHostFormMode is the in-TUI add-host form. Single mode with
+	// two textinputs (name + ssh-target); Tab switches focus, Enter
+	// submits when both are non-empty. Submit writes the registry.
 	// v0.17 Phase 1l — replaces the subprocess wizard handoff.
-	addHostNameMode
-	addHostTargetMode
+	addHostFormMode
+	// hostDetailMode renders read-only detail for the selected host:
+	// ssh-target, type, registered projects, version, last seen,
+	// last error. Esc back to listMode. v0.17 Phase 1l polish.
+	hostDetailMode
+	// confirmSSHCopyIDMode is the post-Add prompt offering to run
+	// ssh-copy-id when the connection probe came back AuthFailed.
+	// y/Y → tea.ExecProcess into ssh-copy-id (which prompts for the
+	// remote password); anything else → keep the host registered as-is.
+	confirmSSHCopyIDMode
 	// drawerMode is the diagnostic detail drawer (opened with `i`).
 	// Read-only view of one workspace's process tree, recent logs, env,
 	// status history, and last setup log. The drawer is opt-in (no
@@ -371,9 +380,25 @@ type Model struct {
 	// confirmHostRemoveMode modal. Cleared on dismiss.
 	hostRemoveTarget string
 
-	// hostAddName is the name typed in addHostNameMode, carried
-	// forward to addHostTargetMode for the registry.Add call.
-	hostAddName string
+	// hostAddName + hostAddTarget are the form fields for the in-TUI
+	// add-host flow. hostAddFocus toggles 0 (name) ↔ 1 (target). Tab
+	// cycles focus. v0.17 Phase 1l.
+	hostAddName    string
+	hostAddTarget  string
+	hostAddFocus   int // 0 = name input focused, 1 = target input focused
+	// targetInput is the second textinput for the form (ssh-target).
+	// We need a dedicated field because nameInput is shared with the
+	// workspace-name flow.
+	targetInput textinput.Model
+
+	// hostDetailTarget is the host name being viewed in hostDetailMode.
+	hostDetailTarget string
+
+	// pendingProbeHost stores the host name we just registered and
+	// are awaiting a connectivity probe for. On AuthFailed, used to
+	// build the ssh-copy-id command. v0.17 Phase 1l.
+	pendingProbeHost   string
+	pendingProbeTarget string
 
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
@@ -681,6 +706,14 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	li.CharLimit = 80
 	li.Width = 60
 
+	// targetInput backs the add-host form's ssh-target field. Kept
+	// separate from nameInput so both can render side-by-side and
+	// Tab can switch focus without juggling one widget's state.
+	tgti := textinput.New()
+	tgti.Placeholder = "user@host or host.tail.ts.net"
+	tgti.CharLimit = 200
+	tgti.Width = 40
+
 	// Multi-line textarea: Enter inserts newline, Ctrl+S submits
 	// (intercepted by handleNewPromptKey before this widget sees the
 	// key — see internal/ui/update.go). CharLimit 8KB caps the
@@ -737,6 +770,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 		projectName:          projectName,
 		nameInput:            ti,
 		listInput:            li,
+		targetInput:          tgti,
 		promptInput:          pi,
 		mode:                 listMode,
 		inPopup:              os.Getenv("CANOPY_IN_POPUP") == "1",

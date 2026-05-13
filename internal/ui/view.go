@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/ui/hosts"
 )
@@ -44,8 +46,12 @@ func (m *Model) View() string {
 		return m.renderConfirmAttach()
 	case confirmHostRemoveMode:
 		return m.renderConfirmHostRemove()
-	case addHostNameMode, addHostTargetMode:
-		return m.renderAddHost()
+	case addHostFormMode:
+		return m.renderAddHostForm()
+	case hostDetailMode:
+		return m.renderHostDetail()
+	case confirmSSHCopyIDMode:
+		return m.renderConfirmSSHCopyID()
 	case drawerMode:
 		return m.renderDrawer()
 	case busyMode:
@@ -325,32 +331,98 @@ func (m *Model) renderConfirmHostRemove() string {
 	return b.String()
 }
 
-// renderAddHost is the two-step in-TUI add-host form (name → target).
-// Mode determines which input is focused; the other field renders as
-// a captured value chip. v0.17 Phase 1l — replaces the subprocess
-// huh-wizard handoff.
-func (m *Model) renderAddHost() string {
+// renderAddHostForm draws the in-TUI add-host form. Two textinputs
+// stacked vertically — name first, ssh-target below. Tab/shift+tab
+// cycles focus; the focused input shows its caret while the other
+// renders dimmed. Enter submits when both fields are non-empty.
+// v0.17 Phase 1l polish.
+func (m *Model) renderAddHostForm() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("add remote host"))
 	b.WriteString("\n\n")
 	b.WriteString(subtleStyle.Render("  A remote host is an SSH-reachable machine with canopy installed.\n"))
-	b.WriteString(subtleStyle.Render("  After adding, register one or more projects with `canopy project add`.\n"))
+	b.WriteString(subtleStyle.Render("  After adding, canopy will probe the connection — if key auth\n"))
+	b.WriteString(subtleStyle.Render("  isn't set up, you'll be offered ssh-copy-id automatically.\n"))
 	b.WriteString("\n")
-	switch m.mode {
-	case addHostNameMode:
-		b.WriteString("  name:    " + m.nameInput.View() + "\n")
-		b.WriteString(subtleStyle.Render("  target:  (enter after name)\n"))
-	case addHostTargetMode:
-		b.WriteString("  name:    " + m.hostAddName + "\n")
-		b.WriteString("  target:  " + m.nameInput.View() + "\n")
+	b.WriteString("  name:    " + m.nameInput.View() + "\n")
+	b.WriteString("  target:  " + m.targetInput.View() + "\n")
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render("  tab to switch  ·  enter to confirm  ·  esc to cancel"))
+	return b.String()
+}
+
+// renderHostDetail is the read-only detail view for one host. Shows
+// everything the registry + remotes-cache knows about it. v0.17
+// Phase 1l polish. Esc dismisses back to the Hosts tab.
+func (m *Model) renderHostDetail() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("host: " + m.hostDetailTarget))
+	b.WriteString("\n\n")
+	var h host.Host
+	for _, hh := range m.hostList {
+		if hh.Name == m.hostDetailTarget {
+			h = hh
+			break
+		}
 	}
+	if h.Name == "" {
+		b.WriteString("  (host no longer in registry)\n")
+		b.WriteString("\n  " + subtleStyle.Render("esc to go back"))
+		return b.String()
+	}
+	b.WriteString(fmt.Sprintf("  ssh target:  %s\n", h.SSHTarget))
+	b.WriteString(fmt.Sprintf("  type:        %s\n", h.Type))
+	b.WriteString(fmt.Sprintf("  added:       %s\n", h.AddedAt.Format("2006-01-02 15:04")))
 	b.WriteString("\n")
-	b.WriteString(subtleStyle.Render("  enter to confirm  ·  esc to "))
-	if m.mode == addHostNameMode {
-		b.WriteString(subtleStyle.Render("cancel"))
+	if len(h.Projects) == 0 {
+		b.WriteString(subtleStyle.Render("  no projects registered\n"))
+		b.WriteString(subtleStyle.Render(fmt.Sprintf("  → canopy project add <name> <remote-path> --on %s\n", h.Name)))
 	} else {
-		b.WriteString(subtleStyle.Render("go back"))
+		b.WriteString("  projects:\n")
+		names := make([]string, 0, len(h.Projects))
+		for n := range h.Projects {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			b.WriteString(fmt.Sprintf("    %s  →  %s\n", n, h.Projects[n]))
+		}
 	}
+	if snap := m.remoteSnaps[h.Name]; snap != nil {
+		b.WriteString("\n")
+		if snap.CanopyVersion != "" {
+			b.WriteString(fmt.Sprintf("  canopy:      v%s\n", snap.CanopyVersion))
+		}
+		if !snap.LastSeen.IsZero() {
+			b.WriteString(fmt.Sprintf("  last seen:   %s\n", snap.LastSeen.Format("2006-01-02 15:04:05")))
+		}
+		b.WriteString(fmt.Sprintf("  workspaces:  %d\n", len(snap.Workspaces)))
+		if snap.LastError != "" {
+			b.WriteString("\n  ")
+			b.WriteString(brokenStyle.Render("last error: " + snap.LastError))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n  " + subtleStyle.Render("esc to go back"))
+	return b.String()
+}
+
+// renderConfirmSSHCopyID prompts the user to run ssh-copy-id after a
+// post-Add probe came back AuthFailed. y/Y kicks off the subprocess
+// (which prompts for the remote password); anything else dismisses
+// and the host stays registered without key auth. v0.17 Phase 1l.
+func (m *Model) renderConfirmSSHCopyID() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("set up passwordless ssh?"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  %s is registered, but ssh key auth isn't set up yet.\n", m.pendingProbeHost))
+	b.WriteString(fmt.Sprintf("  Without it, every canopy operation on %s would hang waiting\n", m.pendingProbeHost))
+	b.WriteString("  for a password (BatchMode in the refresher prevents that).\n\n")
+	b.WriteString(subtleStyle.Render(fmt.Sprintf("  Run: ssh-copy-id %s\n", m.pendingProbeTarget)))
+	b.WriteString(subtleStyle.Render("  (You'll be prompted for the remote password once.)\n"))
+	b.WriteString("\n  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to set it up now  ·  any other key to skip")
 	return b.String()
 }
 
