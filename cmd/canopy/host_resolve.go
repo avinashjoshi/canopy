@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +166,31 @@ func resolveOnForSwitch(spec, preferredProject, explicitRemoteCwd string) (resol
 		Source:    source,
 		HostName:  spec,
 	}, nil
+}
+
+// dispatchVerbToRemote runs an arbitrary canopy verb on a remote host
+// via SSH. Used by --on-aware CLI subcommands (rm, retry, etc.) that
+// don't need the prompt-file dance dispatchNewToRemote does for `new`.
+//
+// The script is piped via SSH stdin to `bash -l` on the remote, with
+// PATH-prepending for ~/.local/bin and optional cwd change. Stdout/
+// stderr stream back to the caller's writers so the CLI feels native.
+//
+// resolved.RemoteCwd takes the per-command --remote-cwd override
+// already; pass an empty string when not applicable.
+func dispatchVerbToRemote(ctx context.Context, resolved resolvedHost, verb string, args []string, stdout, stderr io.Writer) error {
+	canopyArgs := append([]string{"canopy", verb}, args...)
+	script := buildRemoteScript(resolved.RemoteCwd, canopyArgs, "")
+	fmt.Fprintf(stderr, "Dispatching to %s (%s):\n%s", resolved.SSHTarget, resolved.Source, indent(script, "  "))
+
+	cmd := host.SSHCmd(ctx, resolved.SSHTarget, "bash", "-l")
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Stdin = strings.NewReader(script)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("remote canopy %s failed: %w", verb, err)
+	}
+	return nil
 }
 
 // localProjectBasename returns the basename of the current canopy

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -757,6 +758,14 @@ func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok || row.ProjectRoot == "" {
 		return m, nil
 	}
+	// v0.17.0: remote rows don't have a local ProjectRoot. Focus is a
+	// laptop-side filter ("show only this project's local workspaces"),
+	// which has no meaning for a project that lives on tower. Inform
+	// the user instead of silently failing.
+	if row.Host != "" {
+		m.err = fmt.Errorf("can't focus a remote project — %s/%s lives on %s; cd into your local copy and run `canopy` there", row.Host, row.Project, row.Host)
+		return m, nil
+	}
 	// Short-circuit when re-focusing the already-current project: just
 	// flip to Local tab and re-filter rows. Avoids a needless canopy.json
 	// reload (which would surface a spurious m.err if the file is
@@ -828,6 +837,21 @@ func actionOpenPR(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 func actionOpenBrowser(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
 	if !ok || row.Port <= 0 {
+		return m, nil
+	}
+	// v0.17.0: remote workspaces bind their dev server to the REMOTE's
+	// localhost — opening laptop's browser at localhost:<port> would
+	// hit the laptop's port (probably a totally different process).
+	// Until we add port forwarding (e.g., `ssh -L` on demand), surface
+	// the limitation clearly with a copy-pasteable hint.
+	if row.Host != "" {
+		if target, err := m.resolveHostForExec(row.Host); err == nil {
+			m.err = fmt.Errorf(
+				"remote ports aren't auto-forwarded yet. To browse %s's dev server, run:\n  ssh -L %d:localhost:%d %s\nThen open http://localhost:%d locally.",
+				row.Host, row.Port, row.Port, target, row.Port)
+		} else {
+			m.err = fmt.Errorf("remote browser opening not yet supported (workspace lives on %s)", row.Host)
+		}
 		return m, nil
 	}
 	url := fmt.Sprintf("http://localhost:%d", row.Port)
@@ -932,6 +956,13 @@ func (m *Model) handleConfirmKillKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Row went away between modal open and confirm — treat as cancel.
 			return m, nil
 		}
+		// v0.17.0: remote rows dispatch to the host's tmux via SSH;
+		// canopy doesn't ship a `kill` verb (the existing TUI kill is
+		// "tmux kill-session" — workspace dir + state row + branch all
+		// survive, status flips to stopped, re-attach resurrects).
+		if target.Host != "" {
+			return m, m.execRemoteKill(target.Host, target.TmuxSession)
+		}
 		return m, killCmd(m.tc, target.TmuxSession, target.Name)
 	}
 	// Anything else cancels.
@@ -1001,6 +1032,21 @@ func actionRetry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if row.IsMain {
 		return m, nil
+	}
+	// v0.17.0: remote rows dispatch to the host's canopy retry via
+	// subprocess. The remote canopy handles status checks + the actual
+	// scripts.setup re-run; we just route the verb. The confirm-retry
+	// modal is skipped for remote rows (remote canopy will print its
+	// own confirmation messages in the subprocess output).
+	if row.Host != "" {
+		// Remote retry always uses --force for broken-status retries;
+		// for non-broken we still want to retry on the remote even if
+		// not broken (mirrors the local "F to force on healthy" flow,
+		// but folded into one path since the TUI confirm doesn't
+		// really translate to a subprocess flow). User can pass
+		// --force themselves via CLI for explicit safety.
+		force := row.Status != state.StatusBroken
+		return m, m.execRemoteVerb(row.Host, "retry", []string{row.Name}, force)
 	}
 	if _, err := m.managerForRow(row); err != nil {
 		m.err = err
@@ -1292,6 +1338,110 @@ func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 	log.Warn("ui.attach.unknown-status", "name", row.Name, "status", row.Status)
 	_ = ctx
 	return m, nil
+}
+
+// findDeleteTargetRemoteHost returns (host, true) when the confirmed
+// delete target is a remote row. Mirrors the resolveTargetMgr lookup
+// but stops at the Host field instead of building a Manager.
+func (m *Model) findDeleteTargetRemoteHost() (string, bool) {
+	for _, r := range m.filteredRows() {
+		if r.Name != m.deleteTarget {
+			continue
+		}
+		if m.deleteTargetRoot != "" && r.ProjectRoot != m.deleteTargetRoot {
+			continue
+		}
+		if r.Host != "" {
+			return r.Host, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// execRemoteVerb runs `<canopy-bin> <verb> --on <host> <args...>` as a
+// subprocess via tea.ExecProcess. Same handoff pattern as
+// attachRemoteRow + execHostAddWizard. Used for rm, retry, and the
+// project-scoped dispatch paths. v0.17.0 Phase 1.
+//
+// force, when true, appends --force to the remote canopy invocation.
+// Used by the delete handler when the user pressed F on hanging-work
+// confirmation (mirrors the local --force path).
+func (m *Model) execRemoteVerb(hostName, verb string, args []string, force bool) tea.Cmd {
+	canopyBin, err := os.Executable()
+	if err != nil || canopyBin == "" {
+		canopyBin = os.Args[0]
+	}
+	cmdArgs := []string{verb, "--on", hostName}
+	cmdArgs = append(cmdArgs, args...)
+	if force {
+		cmdArgs = append(cmdArgs, "--force")
+	}
+	cmd := exec.Command(canopyBin, cmdArgs...)
+	cmd.Env = append(os.Environ(), "CANOPY_ALLOW_NESTED=1")
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			log.Warn("ui.remote-verb.failed", "verb", verb, "host", hostName, "err", err)
+		}
+		// Refresh so the row updates / disappears as appropriate.
+		m.remoteRefreshing = false
+		return refreshCmd(m.mgr, m.tc, m.store)()
+	})
+}
+
+// execRemoteKill kills a workspace's tmux session on a remote host by
+// SSHing `tmux kill-session -t <session>` directly. Doesn't go through
+// canopy on the remote because there's no `canopy kill` verb — kill is
+// a tmux operation that leaves the workspace's worktree + state intact,
+// transitioning it to stopped (the existing canopy convention).
+func (m *Model) execRemoteKill(hostName, sessionName string) tea.Cmd {
+	canopyBin, err := os.Executable()
+	if err != nil || canopyBin == "" {
+		canopyBin = os.Args[0]
+	}
+	// Use canopy as a stable entry point: `canopy host exec --on tower tmux ...`
+	// would be cleaner, but that verb doesn't exist. Inline the SSH via
+	// a one-shot subprocess instead. We use ssh directly here (not via
+	// host.SSHCmd) because we're already in the parent process — no
+	// need to re-resolve through cmd/canopy. The TUI's host registry is
+	// the source of truth.
+	resolved, err := m.resolveHostForExec(hostName)
+	if err != nil {
+		return func() tea.Msg {
+			log.Warn("ui.remote-kill.resolve-failed", "host", hostName, "err", err)
+			return refreshCmd(m.mgr, m.tc, m.store)()
+		}
+	}
+	cmd := exec.Command("ssh",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath="+filepath.Join(os.Getenv("HOME"), ".canopy", "ssh-%C.sock"),
+		"-o", "ControlPersist=300",
+		"-o", "BatchMode=yes",
+		"-o", "NumberOfPasswordPrompts=0",
+		resolved,
+		"tmux", "kill-session", "-t", sessionName,
+	)
+	_ = canopyBin // placate the imports if we add a fallback later
+	return func() tea.Msg {
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Warn("ui.remote-kill.failed", "host", hostName, "session", sessionName, "err", err, "out", string(out))
+		}
+		m.remoteRefreshing = false
+		return refreshCmd(m.mgr, m.tc, m.store)()
+	}
+}
+
+// resolveHostForExec looks up the SSH target for a host name from the
+// in-memory registry snapshot the TUI already has (m.hostList).
+// Avoids re-loading hosts.json every time the user kills/deletes a row.
+func (m *Model) resolveHostForExec(name string) (string, error) {
+	for _, h := range m.hostList {
+		if h.Name == name {
+			return h.SSHTarget, nil
+		}
+	}
+	return "", fmt.Errorf("host %q not found in registry snapshot", name)
 }
 
 // execHostAddWizard hands the terminal off to `canopy host add
@@ -2150,6 +2300,29 @@ func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // we only proceed on a deliberate keypress.
 func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	hasHangs := len(m.deleteHangs) > 0
+
+	// v0.17.0: if the target is a remote row (row.Host != ""), dispatch
+	// to that host's canopy rm via subprocess instead of going through
+	// the local Manager. The same y/F gate applies — only proceed on
+	// the deliberate key.
+	if remoteHost, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
+		// Same keypress contract as the local path: F for hangs, y/Y
+		// otherwise; anything else cancels.
+		go_ := (hasHangs && msg.String() == "F") || (!hasHangs && (msg.String() == "y" || msg.String() == "Y"))
+		if !go_ {
+			m.mode = listMode
+			m.deleteTarget = ""
+			m.deleteTargetRoot = ""
+			m.deleteHangs = nil
+			return m, nil
+		}
+		name := m.deleteTarget
+		m.mode = listMode
+		m.deleteTarget = ""
+		m.deleteTargetRoot = ""
+		m.deleteHangs = nil
+		return m, m.execRemoteVerb(remoteHost, "rm", []string{name, "--yes"}, hasHangs /* --force */)
+	}
 
 	// Resolve the target row's Manager (may be transient for cross-project
 	// rows on Global tab). Match against BOTH ProjectRoot AND Name —
