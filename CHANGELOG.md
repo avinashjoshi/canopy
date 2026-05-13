@@ -5,6 +5,31 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2.0] - 2026-05-13 — Help legend wrap, viewport crop, refreshed docs
+
+Two TUI ergonomics fixes that surfaced when dogfooding canopy in small tmux popups and short terminals: the help legend overflowed the right edge in narrow windows, and the top of the workspace list scrolled off-screen in short ones. Plus a documentation pass that brings the README from v0.14 → v0.17 (the README was 13 minor releases behind the code).
+
+### Added
+
+- **Grouped, width-aware help legend.** Each keybinding chip carries a `Group` label (nav / tabs / open / act / meta). The bottom-bar renderer renders one group per line so the layout is predictable and the eye learns where each verb category lives. Groups that overflow a narrow width wrap chip-by-chip within the group; no chip is ever cut off. Applies to the Workspaces tab AND the Hosts tab — same code path, host-specific bindings (enter→host detail, d→remove host, a→set up auth, U→upgrade host, S→switch release) automatically get the right groups.
+- **Compact help mode for short viewports.** Below 20 rows of terminal height, the legend collapses to a single line: `↑/↓ nav   enter <verb>   n new   ?  more   q quit`. The full legend lives behind `?`. Frees up four lines of vertical space so the brand pill and tab bar stay on-screen.
+- **Viewport-aware projectlist.** The workspace table now crops to its allotted height instead of overflowing the terminal. The cursor row is centered when possible; rows hidden above/below show as dim `↑N more` / `↓N more` indicators on the top/bottom edge. The crop replaces a content line rather than adding one, so the visible window stays exactly the allotted height.
+- **`docs/remote-workspaces.md`** — new end-to-end guide for v0.17 remote dispatch: host registry, project registry, mosh+tmux attach, `U`/`S` maintenance flow, TUI Remote hosts tab keys, and a remote-only troubleshooting section.
+
+### Changed
+
+- **README rewritten for v0.17.** "What's new in v0.17" callout, agent-state badges section, workspace-health badges section, end-to-end walkthrough, remote-workspaces section with a screenshot of the Hosts tab, and a corrected port default (was incorrectly listed as 3000; actual default is 40000). New hero screenshot `docs/images/tui-workspaces.png` replaces the older `tui-global.png`.
+- **`docs/getting-started.md` refreshed.** Full keybinding table, agent + health badge legends, the `--prompt` / `--no-attach` fire-and-forget flow, `canopy rename` for branch identity, and a remote-workspaces pointer.
+- **`docs/troubleshooting.md` gained a remote-host section.** SSH auth recovery, `(unknown)` version recovery, mosh fallback, deprecated `host project` syntax, `--remote-cwd` from `$HOME`. Also fixed the stale port-default reference.
+- **`docs/canopy-json.md`** — fixed the stale claim that `scripts.run` was a "v0.5 TODO." It's been on-demand via `canopy run` (or `<prefix>r`) since v0.7.
+- **Chrome reserve bumped 6 → 9 lines** in the parent's `SetSize` call to make room for the 5-line grouped help. Auto-shaves 4 lines when compact mode is active.
+
+### Internal
+
+- New `Binding.Group` field. The five logical buckets are populated for every entry in `listModeBindings`; renderer falls back to "act" for any future binding that forgets to set one.
+- `projectlist.renderTable` now returns `(string, cursorLine int)` so the parent View can crop around the cursor without re-parsing the rendered output. Internal API only; no external callers.
+- 12 new tests across `internal/ui/model_test.go` (7 wrap + compact subtests) and `internal/ui/projectlist/clip_test.go` (5 crop subtests covering no-height, crop-to-fit, cursor visibility, and ↑N/↓N marker emission).
+
 ## [0.17.1.0] - 2026-05-13 — Remote canopy maintenance
 
 Two follow-ups to v0.17's Remote workspaces work, both surfaced by dogfooding: the laptop couldn't tell what version a remote was running, and it had no way to upgrade a remote without dropping out to a separate SSH session.
