@@ -27,6 +27,8 @@
 package ui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -167,6 +169,14 @@ var listModeBindings = []Binding{
 		Action:    actionHostRemove,
 	},
 	{
+		// `a` on a host with status=auth-failed offers ssh-copy-id.
+		// Lets the user recover from an earlier "skip" without
+		// re-adding the host. v0.17 Phase 1l polish.
+		K:         key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "set up auth")),
+		Available: availableHostAuth,
+		Action:    actionHostSetupAuth,
+	},
+	{
 		// K (capital) kills the workspace's tmux session without
 		// removing state. Lower-case k is cursor-up, intentional —
 		// the muscle-memory case is nav, the deliberate-keypress
@@ -297,6 +307,28 @@ func availableInWorkspaceContext(m *Model) bool {
 // only fire while the Hosts tab is active.
 func availableOnHostsTab(m *Model) bool {
 	return m.tab == tabHosts && len(m.hostList) > 0
+}
+
+// availableHostAuth gates the `a` key (set up auth) to Hosts-tab rows
+// whose most recent refresh failed with Permission-denied. Other
+// auth-related statuses (Online, Offline due to network) don't need
+// ssh-copy-id. v0.17 Phase 1l polish.
+func availableHostAuth(m *Model) bool {
+	if !availableOnHostsTab(m) {
+		return false
+	}
+	h, ok := m.selectedHost()
+	if !ok {
+		return false
+	}
+	snap := m.remoteSnaps[h.Name]
+	if snap == nil {
+		// Unknown status — allow `a` so the user can pre-emptively
+		// set up auth without first triggering a refresh failure.
+		return true
+	}
+	return strings.Contains(snap.LastError, "Permission denied") ||
+		strings.Contains(snap.LastError, "publickey")
 }
 
 // availableOpenPR and availableOpenBrowser already short-circuit when

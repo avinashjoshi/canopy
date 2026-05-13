@@ -1646,6 +1646,21 @@ func (m *Model) handleHostDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// actionHostSetupAuth opens the ssh-copy-id offer for the cursor's
+// host. Same modal the post-Add probe surfaces on AuthFailed; lets
+// the user retry auth setup without deleting and re-adding the host.
+// v0.17 Phase 1l polish.
+func actionHostSetupAuth(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	h, ok := m.selectedHost()
+	if !ok {
+		return m, nil
+	}
+	m.pendingProbeHost = h.Name
+	m.pendingProbeTarget = h.SSHTarget
+	m.mode = confirmSSHCopyIDMode
+	return m, nil
+}
+
 // actionHostRemove opens the confirm modal for removing the cursor's
 // host from the registry. v0.17 Phase 1l.
 func actionHostRemove(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2762,10 +2777,16 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// the local Manager. The same y/F gate applies — only proceed on
 	// the deliberate key.
 	if remoteHost, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
-		// Same keypress contract as the local path: F for hangs, y/Y
-		// otherwise; anything else cancels.
-		go_ := (hasHangs && msg.String() == "F") || (!hasHangs && (msg.String() == "y" || msg.String() == "Y"))
-		if !go_ {
+		// Remote path: laptop didn't run the safety check (canopy.json
+		// only exists on tower), so the modal offers both y AND F.
+		// y → dispatch without --force (remote will refuse on hanging
+		//     work but otherwise proceed).
+		// F → dispatch with --force (skip the safety check).
+		// Anything else cancels.
+		// v0.17 Phase 1l polish.
+		force := msg.String() == "F"
+		yes := msg.String() == "y" || msg.String() == "Y"
+		if !force && !yes {
 			m.mode = listMode
 			m.deleteTarget = ""
 			m.deleteTargetRoot = ""
@@ -2777,7 +2798,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.deleteTarget = ""
 		m.deleteTargetRoot = ""
 		m.deleteHangs = nil
-		return m, m.execRemoteVerb(remoteHost, "rm", []string{name, "--yes"}, hasHangs /* --force */)
+		return m, m.execRemoteVerb(remoteHost, "rm", []string{name, "--yes"}, force)
 	}
 
 	// Resolve the target row's Manager (may be transient for cross-project

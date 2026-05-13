@@ -2817,6 +2817,106 @@ func TestHostProbeResultMsg_AuthFailOpensSSHCopyID(t *testing.T) {
 	}
 }
 
+// TestHandleConfirmDeleteKey_RemoteForceWithoutLocalHangs: regression
+// for the user-reported flow where remote rm rejected on hanging
+// work and the TUI gave no way to escalate. Pre-fix: F was only
+// accepted when local hangs were detected (impossible for remote).
+// Now: F always works for remote rows; dispatches with --force.
+// v0.17 Phase 1l polish.
+func TestHandleConfirmDeleteKey_RemoteForceWithoutLocalHangs(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.remoteRows = []Row{
+		{Project: "canopy", Name: "testing-123", Status: state.StatusReady, Host: "tower"},
+	}
+	m.list.SetRows(m.filteredRows())
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+	m.mode = confirmDeleteMode
+	m.deleteTarget = "testing-123"
+	m.deleteHangs = nil // remote → no local hangs
+
+	_, cmd := m.handleConfirmDeleteKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("F")})
+	if cmd == nil {
+		t.Fatalf("F on remote with no local hangs: got nil cmd; want execRemoteVerb")
+	}
+	if m.mode != listMode {
+		t.Errorf("F on remote: mode = %v; want listMode (dispatched + closed modal)", m.mode)
+	}
+}
+
+// TestHandleConfirmDeleteKey_RemoteYDispatchesWithoutForce: same
+// modal, lowercase y dispatches without --force. The remote will
+// run its own safety check and refuse on hanging work; that's
+// surfaced as an error and the user can retry with F.
+func TestHandleConfirmDeleteKey_RemoteYDispatchesWithoutForce(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.remoteRows = []Row{
+		{Project: "canopy", Name: "foo", Status: state.StatusReady, Host: "tower"},
+	}
+	m.list.SetRows(m.filteredRows())
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+	m.mode = confirmDeleteMode
+	m.deleteTarget = "foo"
+
+	_, cmd := m.handleConfirmDeleteKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatalf("y on remote: got nil cmd; want execRemoteVerb")
+	}
+}
+
+// TestActionHostSetupAuth_OpensSSHCopyIDModal: pressing `a` on a host
+// pre-loads the probe target and opens the ssh-copy-id confirm flow.
+// Lets the user retry auth without deleting and re-adding.
+func TestActionHostSetupAuth_OpensSSHCopyIDModal(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "pi", SSHTarget: "jarvis@pi.tail.ts.net", Type: "ssh"},
+	}
+	m.hostsCursor = 0
+	_, _ = actionHostSetupAuth(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.mode != confirmSSHCopyIDMode {
+		t.Errorf("mode = %v; want confirmSSHCopyIDMode", m.mode)
+	}
+	if m.pendingProbeHost != "pi" {
+		t.Errorf("pendingProbeHost = %q; want pi", m.pendingProbeHost)
+	}
+	if m.pendingProbeTarget != "jarvis@pi.tail.ts.net" {
+		t.Errorf("pendingProbeTarget = %q; want jarvis@pi.tail.ts.net", m.pendingProbeTarget)
+	}
+}
+
+// TestAvailableHostAuth_GatesOnAuthFailedStatus: `a` is hidden when
+// the host's last refresh succeeded (auth is already working). Shown
+// when status=AuthFailed OR unknown (never refreshed; user can
+// pre-emptively set up auth).
+func TestAvailableHostAuth_GatesOnAuthFailedStatus(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{{Name: "pi"}}
+	m.hostsCursor = 0
+
+	// No snapshot yet → unknown → allow.
+	if !availableHostAuth(m) {
+		t.Errorf("unknown status: `a` should be available")
+	}
+	// Snapshot with Permission-denied → allow.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "Permission denied (publickey)"},
+	}
+	if !availableHostAuth(m) {
+		t.Errorf("AuthFailed: `a` should be available")
+	}
+	// Snapshot with success → hide.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: ""},
+	}
+	if availableHostAuth(m) {
+		t.Errorf("Online: `a` should NOT be available")
+	}
+}
+
 // TestVisibleTabs_DropsLocalWhenNoProject: visibleTabs is the source
 // of truth for the tab cycle. It drops tabLocal when there's no
 // currentProject and tabHosts when no hosts are registered. v0.17

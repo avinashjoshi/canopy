@@ -1132,6 +1132,20 @@ func (m *Model) renderConfirmDelete() string {
 	b.WriteString(subtleStyle.Render("  git worktree, deletes the underlying branch, and drops the row\n"))
 	b.WriteString(subtleStyle.Render("  from state.json.\n"))
 	b.WriteString("\n")
+	// Remote rows can't run a local SafetyPreflight (no canopy.json on
+	// the laptop for a project that lives on tower). The remote canopy
+	// does its own check at confirm time and may refuse with "hanging
+	// work" — so always surface F as an alternative path here so the
+	// user can pre-decide "force regardless" instead of dispatching a
+	// `y` that fails. v0.17 Phase 1l polish.
+	if _, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
+		b.WriteString("  ")
+		b.WriteString(brokenStyle.Render("y"))
+		b.WriteString(" to remove (refuses on hanging work)  ·  ")
+		b.WriteString(brokenStyle.Render("F"))
+		b.WriteString(" to force-remove  ·  any other key to cancel")
+		return b.String()
+	}
 	b.WriteString("  ")
 	b.WriteString(brokenStyle.Render("y"))
 	b.WriteString(" to remove  ·  any other key to cancel")
