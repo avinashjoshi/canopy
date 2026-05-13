@@ -5,6 +5,27 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1.0] - 2026-05-13 — Remote canopy maintenance
+
+Two follow-ups to v0.17's Remote workspaces work, both surfaced by dogfooding: the laptop couldn't tell what version a remote was running, and it had no way to upgrade a remote without dropping out to a separate SSH session.
+
+### Added
+
+- **`U` on the Hosts tab** runs `canopy upgrade --yes` on the selected remote and streams the output into the TUI. Confirm screen first (no flicker, no surprise SSH), then a streaming pane while `git pull && make install` runs on the host. Errors stay on screen instead of being hidden inside an alt-screen suspend the way `tea.ExecProcess` does. Ctrl-C cancels via `context.CancelFunc`; any key dismisses the done screen and refreshes the Hosts tab so the new version appears.
+- **`S` on the Hosts tab** runs `canopy use release` on the selected remote — the recovery path for hosts running a dev binary, where `canopy upgrade` refuses with "Switch to the released canopy first." Same streaming machinery as `U`; once it completes the next refresh tick reports a release version and `U` becomes available.
+- Both flows share a parameterized state machine (`hostUpgradeMode`: confirming → running → doneOK | doneError) in `internal/ui/update_host_upgrade.go`, so adding a third remote-maintenance verb later is a 10-line addition.
+
+### Changed
+
+- The previous `U` on Hosts shelled out via `tea.ExecProcess` with `ssh -t`, which flickered the alt-screen and hid the dev-binary error inside the suspended TUI. Replaced with the streaming flow above.
+- `availableHostUpgrade` and `availableHostSwitchRelease` gate the two keys against the remote's reported version: `U` hides on dev hosts (would error), `S` hides on hosts reporting a real semver (would no-op). Hosts reporting `"(unknown)"` or empty version surface both keys (legacy remotes pre-dating the version-emit fix below).
+- The pre-existing local `U` (the laptop's own upgrade flow) is now gated off the Hosts tab via `availableLocalUpgrade` so it doesn't collide with the new per-host dispatch on the same key.
+
+### Fixed
+
+- **`canopy_version` over the wire was always `"(unknown)"`.** `cmd/canopy/ls.go` declared `canopyVersionInfo = "(unknown)"` and never assigned it, so every `canopy ls --json` reported unknown to the laptop. The Hosts-tab version column showed `v(unknown)` for every host, and the workspace-detail drawer had no honest version line. Now wired from the package-level `version` (with the conventional leading `v` stripped so the laptop's display layer can prefix `v` without producing `vv0.17.1.0+abc`).
+- The host-upgrade SSH command earlier passed `bash -l -c <multi-line-script>` as separate argv tokens, which SSH joins with spaces — bash saw `-c set` (the script's first word) and dumped its full environment to stdout before any real command ran. The streaming flow uses a single-arg shell-parseable string, the same pitfall the `internal/host/refresh.go` script-via-stdin path documents.
+
 ## [0.17.0.0] - 2026-05-13 — Remote workspaces
 
 Canopy workspaces can now live on SSH-reachable machines. The laptop becomes a thin client; the heavy work (scripts.setup, scripts.run, agent panes) happens on the host. One unified TUI views and acts on every workspace across every host.
