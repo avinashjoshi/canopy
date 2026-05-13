@@ -5,6 +5,25 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.3.0] - 2026-05-13 — Remote canopy install
+
+The third Hosts-tab follow-up surfaced by dogfooding: adding a host that didn't have canopy yet meant dropping out to a separate SSH session to run the curl|sh installer. install.sh itself only detected missing OS deps (git / tmux 3.2+ / Go 1.22+ / make) and printed the right `apt-get`/`pacman`/`brew` line for the user to copy. Now both halves close: the installer can install its own prereqs, and the laptop can drive the install over SSH from three different surfaces.
+
+### Added
+
+- **`canopy host install <name>`** — new CLI verb. SSHes to the named host, pipes install.sh from main to bash with `--yes`, streams output to the laptop, then re-probes to confirm canopy is reachable on the new install. `--reinstall` wipes `~/.canopy/src` on the remote and re-clones fresh (state — workspaces, hosts.json, state.json — is preserved). Local y/N confirmation gate skips with `--yes`.
+- **`I` on the Hosts tab** — installs (or reinstalls) canopy on the selected remote. Reuses the existing `hostUpgradeMode` confirm → run → done state machine, so the UX matches `U` (upgrade) and `S` (use release). Always visible while the Hosts tab has rows — install.sh is idempotent, so pressing `I` on a healthy host is safe (it prints "already installed" and exits).
+- **install.sh `--yes`** — non-interactive mode. Auto-confirms dep installs. Required when install.sh runs over SSH (stdin isn't a tty), used by `canopy host install` automatically.
+- **install.sh `--reinstall`** — wipes `~/.canopy/src` before cloning fresh. Recovery path when the source clone is corrupt or you want to drop back to whatever main is right now without manually `rm -rf`'ing.
+- **install.sh dep auto-install** — when `git`, `tmux 3.2+`, `Go`, or `make` is missing, install.sh now prints the right `sudo apt-get install -y` / `sudo pacman -S --noconfirm` / `sudo dnf install -y` / `brew install` line and prompts y/N to run it. `--yes` auto-confirms. macOS uses brew (no sudo); Linux distros use their package manager (passwordless sudo required in `--yes` mode).
+- **Host-add wizard now auto-offers install** — the `probeBroken` branch (SSH works but no canopy on the remote) opens a confirm form and invokes the same install path instead of printing a "do it yourself" message. Same UX whether the install fires from the CLI, the TUI, or the wizard.
+
+### Changed
+
+- The shared `host.InstallScript(reinstall bool)` builder in `internal/host` is the single source of truth for the SSH payload (`curl`/`wget` fallback → `bash -s -- --yes [--reinstall]`). The CLI surface, the wizard, and the TUI all use it — single test surface, no drift.
+- Confirm screen in `update_host_upgrade.go` now suppresses the `current: v…` line when the remote hasn't reported a version yet (a fresh-install case). Install-flavored confirm copy ("Install canopy on this host?") replaces the back-tick `Run \`canopy install\`` line that fits upgrade but doesn't fit a curl|bash payload.
+- Carries the new `Binding.Group` field forward: the `I` keybind is grouped under `meta` alongside the other host-management verbs (`U`, `S`).
+
 ## [0.17.2.0] - 2026-05-13 — Help legend wrap, viewport crop, refreshed docs
 
 Two TUI ergonomics fixes that surfaced when dogfooding canopy in small tmux popups and short terminals: the help legend overflowed the right edge in narrow windows, and the top of the workspace list scrolled off-screen in short ones. Plus a documentation pass that brings the README from v0.14 → v0.17 (the README was 13 minor releases behind the code).
@@ -29,7 +48,6 @@ Two TUI ergonomics fixes that surfaced when dogfooding canopy in small tmux popu
 - New `Binding.Group` field. The five logical buckets are populated for every entry in `listModeBindings`; renderer falls back to "act" for any future binding that forgets to set one.
 - `projectlist.renderTable` now returns `(string, cursorLine int)` so the parent View can crop around the cursor without re-parsing the rendered output. Internal API only; no external callers.
 - 12 new tests across `internal/ui/model_test.go` (7 wrap + compact subtests) and `internal/ui/projectlist/clip_test.go` (5 crop subtests covering no-height, crop-to-fit, cursor visibility, and ↑N/↓N marker emission).
-
 ## [0.17.1.0] - 2026-05-13 — Remote canopy maintenance
 
 Two follow-ups to v0.17's Remote workspaces work, both surfaced by dogfooding: the laptop couldn't tell what version a remote was running, and it had no way to upgrade a remote without dropping out to a separate SSH session.

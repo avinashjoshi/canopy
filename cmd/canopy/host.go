@@ -52,6 +52,7 @@ func hostCmd() *cobra.Command {
 	cmd.AddCommand(hostLsCmd())
 	cmd.AddCommand(hostShowCmd())
 	cmd.AddCommand(hostRmCmd())
+	cmd.AddCommand(hostInstallCmd())
 	return cmd
 }
 

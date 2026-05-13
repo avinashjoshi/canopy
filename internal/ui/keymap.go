@@ -266,6 +266,23 @@ var listModeBindings = []Binding{
 		Action:    actionHostSwitchRelease,
 	},
 	{
+		// I on Hosts tab installs (or reinstalls) canopy on the
+		// cursor's host. Reuses the same SSH-streaming machinery as
+		// U/S; the remote command is install.sh piped to bash with
+		// --yes. The flow is idempotent: on a host that already has
+		// canopy, install.sh prints "already installed" and exits 0,
+		// so pressing I on a healthy host is safe.
+		//
+		// Always available on Hosts tab — install is the recovery
+		// path for `StatusBroken` hosts AND a no-op reinstall for
+		// healthy ones. Per-status gating would hide it from the
+		// hosts most in need (the broken ones).
+		K:         key.NewBinding(key.WithKeys("I"), key.WithHelp("I", "install canopy")),
+		Group:     "meta",
+		Available: availableOnHostsTab,
+		Action:    actionHostInstall,
+	},
+	{
 		// D dismisses the current "upgrade available" pill. Only
 		// bound when an upgrade is available + dismissal closure
 		// wired (via availableDismissUpgrade). Lowercase d is

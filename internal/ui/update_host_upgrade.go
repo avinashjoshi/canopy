@@ -38,6 +38,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/avinashjoshi/canopy/internal/host"
 )
 
 // hostUpgradeState identifies the host-upgrade flow phase. Drives the
@@ -193,6 +195,26 @@ func actionHostUpgrade(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	})
 }
 
+// actionHostInstall is the I-key handler on the Hosts tab. Installs
+// canopy on the cursor's host via the same SSH-streaming machinery as
+// upgrade — pipes install.sh from main to bash with --yes. The remote
+// command comes from host.InstallScript so the CLI surface
+// (`canopy host install <name>`) and this in-TUI surface stay in
+// lockstep.
+//
+// Available on every Hosts-tab row (no per-status gate): install
+// works whether the host is broken, online, or never-refreshed.
+// install.sh is idempotent — on a host that already has canopy, it
+// prints "already installed" and exits 0 cleanly.
+func actionHostInstall(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	return enterHostUpgrade(m, hostUpgradeOpts{
+		action:    "install",
+		verb:      "Installing",
+		success:   "Install complete",
+		remoteCmd: host.InstallScript(false),
+	})
+}
+
 // actionHostSwitchRelease is the S-key handler on the Hosts tab.
 // Reaches for hosts running a dev binary — `canopy upgrade` refuses
 // to run on those, but `canopy use release` flips the symlink back to
@@ -325,14 +347,28 @@ func (m *Model) renderHostUpgrade() string {
 
 	switch m.hostUpgradeState {
 	case hostUpgradeStateConfirming:
-		header := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("245")).
-			Render(fmt.Sprintf("  current: v%s", m.hostUpgradeVersion))
-		b.WriteString(header)
-		b.WriteString("\n")
+		// Suppress the `current: v…` line when the remote hasn't
+		// reported a version (e.g., install on a broken host, or a
+		// never-refreshed host). Printing `current: v` is uglier than
+		// just omitting the line.
+		if m.hostUpgradeVersion != "" {
+			header := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("245")).
+				Render(fmt.Sprintf("  current: v%s", m.hostUpgradeVersion))
+			b.WriteString(header)
+			b.WriteString("\n")
+		}
 		b.WriteString(subtleStyle.Render(fmt.Sprintf("  target:  %s", m.hostUpgradeTarget)))
 		b.WriteString("\n\n")
-		b.WriteString(fmt.Sprintf("  Run `canopy %s` on this host?\n\n", action))
+		// "install" is not literally a `canopy install` invocation
+		// (it's `curl|bash`), so route around the back-tick prompt
+		// that fits upgrade/use-release. The user sees "Install
+		// canopy on this host?" which matches their mental model.
+		if action == "install" {
+			b.WriteString("  Install canopy on this host? (runs install.sh via SSH; deps installed via\n  the remote's package manager if missing.)\n\n")
+		} else {
+			b.WriteString(fmt.Sprintf("  Run `canopy %s` on this host?\n\n", action))
+		}
 		b.WriteString("  " +
 			keyPillStyle.Render("y") + subtleStyle.Render(" yes") +
 			"   " +
