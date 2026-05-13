@@ -675,6 +675,26 @@ func (c *Client) Attach(ctx context.Context, name string) error {
 // at call time. Caller should still handle exec errors from running
 // the returned Cmd (terminal reset issues, tmux server crashed mid-attach).
 func (c *Client) AttachCmd(ctx context.Context, name string) (*exec.Cmd, error) {
+	return c.AttachCmdWithOptions(ctx, name, AttachOptions{})
+}
+
+// AttachOptions tweaks attach behavior. Zero value matches the
+// historical AttachCmd semantics (solo-dev steal: detach existing
+// clients, append -d to attach-session).
+type AttachOptions struct {
+	// Shared, when true, skips detach-client AND omits the -d flag,
+	// letting the target session keep its existing clients while a new
+	// one attaches. Used by the TUI's confirm-attach flow after the
+	// user explicitly opted into sharing — the warning copy promises
+	// "share" and this is what actually delivers it. v0.17 Phase 1j.
+	Shared bool
+}
+
+// AttachCmdWithOptions is AttachCmd with explicit control over the
+// share-vs-steal semantics. Same pre-flight (HasSession → returns
+// ErrSessionNotFound) and same verb selection
+// (switch-client inside tmux, attach-session outside).
+func (c *Client) AttachCmdWithOptions(ctx context.Context, name string, opts AttachOptions) (*exec.Cmd, error) {
 	exists, err := c.HasSession(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("tmux.AttachCmd(%s): %w", name, err)
@@ -683,10 +703,12 @@ func (c *Client) AttachCmd(ctx context.Context, name string) (*exec.Cmd, error) 
 		return nil, fmt.Errorf("tmux.AttachCmd(%s): %w", name, ErrSessionNotFound)
 	}
 	verb := attachVerbForCurrentEnv()
-	c.detachOtherClients(ctx, name, verb)
+	if !opts.Shared {
+		c.detachOtherClients(ctx, name, verb)
+	}
 
 	args := c.args(verb, "-t", name)
-	if verb == "attach" && shouldDetachOthers() {
+	if verb == "attach" && shouldDetachOthers() && !opts.Shared {
 		args = append(args, "-d")
 	}
 	return exec.CommandContext(ctx, "tmux", args...), nil

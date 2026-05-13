@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -32,6 +33,7 @@ import (
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/ghx"
 	"github.com/avinashjoshi/canopy/internal/git"
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
@@ -97,6 +99,31 @@ const (
 	// the workspace cleanly. The friction here is "did you really mean
 	// to drop this session?", not "are you sure you want to lose work?".
 	confirmKillMode
+	// confirmAttachMode is the y/N gate before attaching to a session
+	// that already has another client connected. v0.17 Phase 1j —
+	// surfaces the "this workspace is open in another terminal/window"
+	// case so the user doesn't accidentally share/steal a live agent
+	// session. Skipped when the target is the workspace canopy was
+	// launched from (re-attaching your own session is the normal flow).
+	confirmAttachMode
+	// confirmHostRemoveMode is the y/N gate before deleting a host
+	// from the registry. v0.17 Phase 1l. Same shape as
+	// confirmDeleteMode but scoped to hosts.json instead of state.json.
+	confirmHostRemoveMode
+	// addHostFormMode is the in-TUI add-host form. Single mode with
+	// two textinputs (name + ssh-target); Tab switches focus, Enter
+	// submits when both are non-empty. Submit writes the registry.
+	// v0.17 Phase 1l — replaces the subprocess wizard handoff.
+	addHostFormMode
+	// hostDetailMode renders read-only detail for the selected host:
+	// ssh-target, type, registered projects, version, last seen,
+	// last error. Esc back to listMode. v0.17 Phase 1l polish.
+	hostDetailMode
+	// confirmSSHCopyIDMode is the post-Add prompt offering to run
+	// ssh-copy-id when the connection probe came back AuthFailed.
+	// y/Y → tea.ExecProcess into ssh-copy-id (which prompts for the
+	// remote password); anything else → keep the host registered as-is.
+	confirmSSHCopyIDMode
 	// drawerMode is the diagnostic detail drawer (opened with `i`).
 	// Read-only view of one workspace's process tree, recent logs, env,
 	// status history, and last setup log. The drawer is opt-in (no
@@ -236,6 +263,17 @@ type Model struct {
 	newTargetRoot string // ProjectRoot of the target project
 	newTargetName string // display name (Cfg.Project) for the chip + headers
 
+	// newTargetHost + newTargetRemoteCwd: v0.17 Phase 1k. When the user
+	// presses n on a REMOTE row, the picker opens with these set
+	// (newTargetMgr stays nil — there's no local Manager for a project
+	// that lives on tower). Submit handlers branch on newTargetHost
+	// being non-empty to dispatch `canopy new --on <host> --remote-cwd
+	// <path>` as a subprocess (captured to safeBuffer like createCmd).
+	// PR/Issue/Branch picker options are hidden when newTargetHost is
+	// set — those need remote `gh` integration we don't have yet.
+	newTargetHost      string
+	newTargetRemoteCwd string
+
 	// Confirm-delete modal (mode == confirmDeleteMode).
 	deleteTarget string // workspace name pending removal
 	// deleteTargetRoot scopes deleteTarget to a specific project. Without
@@ -248,6 +286,12 @@ type Model struct {
 	// (Project, Name) match at confirm time.
 	deleteTargetRoot string
 	deleteHangs      []string // v0.6 safety check results — populated when 'd' is pressed; non-empty triggers the force-required path in renderConfirmDelete + handleConfirmDeleteKey
+
+	// attachTarget snapshots the row the user pressed Enter on when its
+	// session already has another client connected. confirmAttachMode
+	// reads it to render the "already attached" prompt; y/Enter proceeds
+	// with the original attach. v0.17 Phase 1j.
+	attachTarget Row
 
 	// Long-running operation in progress (mode == busyMode). Reused by
 	// Create, Remove, and Retry flows.
@@ -304,6 +348,57 @@ type Model struct {
 	// or global tab is selected). The tab + searchQuery filter
 	// projects allRows down to what list renders.
 	allRows []state.GlobalRow
+
+	// remoteRows is the last result of host.Refresher.Tick, merged
+	// into the rendered listing AFTER allRows (local). v0.17.0 Phase 1b.
+	// Each row has its Host field set to the registered host name so
+	// the projectlist's render path groups it under a host section header.
+	remoteRows []state.GlobalRow
+
+	// remoteRefreshing is true between dispatching a remote refresh Cmd
+	// and receiving the result. Used to gate concurrent remote refresh
+	// attempts so we don't fan-out twice on overlapping TUI ticks.
+	remoteRefreshing bool
+
+	// hostList is the snapshot of registered hosts at the most recent
+	// refresh. Drives the Hosts tab. Repopulated as part of every
+	// remote refresh so the Hosts tab stays in sync without a separate
+	// load path. v0.17.0 Phase 1c.
+	hostList []host.Host
+
+	// remoteSnaps is the in-memory mirror of remotes-cache.json,
+	// keyed by host name. Used by the Hosts tab to render status
+	// pills + last-seen. v0.17.0 Phase 1c.
+	remoteSnaps map[string]*state.RemoteHostSnapshot
+
+	// hostsCursor indexes the Hosts tab's selected row. Separate from
+	// the workspace-list cursor (projectlist owns its own) so the two
+	// tabs navigate independently. v0.17 Phase 1l.
+	hostsCursor int
+
+	// hostRemoveTarget is the host name pending removal via the
+	// confirmHostRemoveMode modal. Cleared on dismiss.
+	hostRemoveTarget string
+
+	// hostAddName + hostAddTarget are the form fields for the in-TUI
+	// add-host flow. hostAddFocus toggles 0 (name) ↔ 1 (target). Tab
+	// cycles focus. v0.17 Phase 1l.
+	hostAddName    string
+	hostAddTarget  string
+	hostAddFocus   int // 0 = name input focused, 1 = target input focused
+	// targetInput is the second textinput for the form (ssh-target).
+	// We need a dedicated field because nameInput is shared with the
+	// workspace-name flow.
+	targetInput textinput.Model
+
+	// hostDetailTarget is the host name being viewed in hostDetailMode.
+	hostDetailTarget string
+
+	// pendingProbeHost stores the host name we just registered and
+	// are awaiting a connectivity probe for. On AuthFailed, used to
+	// build the ssh-copy-id command. v0.17 Phase 1l.
+	pendingProbeHost   string
+	pendingProbeTarget string
 
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
@@ -497,6 +592,12 @@ const (
 	// projects. Pre-selected when canopy was invoked from outside any
 	// project; the "give me everything" view.
 	tabGlobal
+	// tabHosts shows the fleet of registered remote canopy hosts —
+	// status, project + workspace counts, version, last-seen. v0.17.0
+	// Phase 1c. Empty section when no hosts are registered (the user
+	// just sees `n: add host`). Tab cycles through Project → Global →
+	// Hosts.
+	tabHosts
 )
 
 // managerForRow returns a *workspace.Manager scoped to the row's project.
@@ -605,6 +706,14 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	li.CharLimit = 80
 	li.Width = 60
 
+	// targetInput backs the add-host form's ssh-target field. Kept
+	// separate from nameInput so both can render side-by-side and
+	// Tab can switch focus without juggling one widget's state.
+	tgti := textinput.New()
+	tgti.Placeholder = "user@host or host.tail.ts.net"
+	tgti.CharLimit = 200
+	tgti.Width = 40
+
 	// Multi-line textarea: Enter inserts newline, Ctrl+S submits
 	// (intercepted by handleNewPromptKey before this widget sees the
 	// key — see internal/ui/update.go). CharLimit 8KB caps the
@@ -641,8 +750,9 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	pi.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	pi.BlurredStyle.CursorLine = lipgloss.NewStyle()
 
-	// Tab pre-selection: Local when the user has a current project
-	// context, Global otherwise. The user can tab away on either side.
+	// Tab pre-selection: the project-scoped tab when canopy was
+	// launched inside a project (so the user lands on their own
+	// workspaces), Projects (Global) otherwise. v0.17 Phase 1h.
 	defaultTab := tabLocal
 	if currentProject == "" {
 		defaultTab = tabGlobal
@@ -660,6 +770,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 		projectName:          projectName,
 		nameInput:            ti,
 		listInput:            li,
+		targetInput:          tgti,
 		promptInput:          pi,
 		mode:                 listMode,
 		inPopup:              os.Getenv("CANOPY_IN_POPUP") == "1",
@@ -823,6 +934,17 @@ type rowsLoadedMsg struct {
 	err  error
 }
 
+// remoteRowsLoadedMsg carries the result of a host.Refresher.Tick that
+// fanned out `canopy ls --json` calls to each registered host. v0.17.0
+// Phase 1b. Bubbletea routes this in parallel with the local
+// rowsLoadedMsg; the Model merges both into the rendered listing.
+type remoteRowsLoadedMsg struct {
+	rows  []state.GlobalRow                    // already host-tagged + flattened
+	snaps map[string]*state.RemoteHostSnapshot // for persistence to remotes-cache.json + Hosts tab
+	hosts []host.Host                          // host registry snapshot, for the Hosts tab
+	err   error
+}
+
 // refreshCmd reconciles state, then loads workspaces + the main row.
 // Runs in a goroutine via tea.Cmd so the UI doesn't block on tmux/disk.
 //
@@ -838,8 +960,136 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea
 // column when a memCache is configured — auto-load is the right
 // default since Bubbletea's async Cmd model keeps the first render
 // instant and the populated values arrive on the next tick.
+//
+// v0.17.0 Phase 1b: also dispatches a remote-host refresh in parallel
+// (when any hosts are registered). Local rows arrive via
+// rowsLoadedMsg as before; remote rows arrive via remoteRowsLoadedMsg.
+// The Update handler merges both into the rendered listing.
 func (m *Model) refresh() tea.Cmd {
-	return refreshCmdWithMem(m.mgr, m.tc, m.store, m.memCache)
+	cmds := []tea.Cmd{refreshCmdWithMem(m.mgr, m.tc, m.store, m.memCache)}
+	if !m.remoteRefreshing {
+		// refreshRemoteCmd is always non-nil — it returns an empty
+		// remoteRowsLoadedMsg when no hosts are registered. We always
+		// dispatch it so the refreshing-latch lifecycle is consistent.
+		m.remoteRefreshing = true
+		cmds = append(cmds, refreshRemoteCmd())
+	}
+	return tea.Batch(cmds...)
+}
+
+// refreshRemoteCmd returns a tea.Cmd that fans out `canopy ls --json`
+// to every registered remote host, merges results into []state.GlobalRow
+// (each tagged with its Host name), and emits remoteRowsLoadedMsg.
+//
+// Per D8: each host gets its own 3s deadline so one slow/offline host
+// can't block the others. Per the Phase 1b backend commit: results are
+// also persisted to ~/.canopy/remotes-cache.json so the next session
+// has last-known rows even if some hosts are offline at startup.
+//
+// CRITICAL: ALL I/O happens inside the returned closure. The outer
+// function does no work — Bubbletea requires this so tea.Cmd dispatch
+// stays off the UI thread. Loading hosts.json, flock-and-migration,
+// SSH fan-out, and remotes-cache.json save all run in the goroutine
+// Bubbletea spawns for the closure.
+func refreshRemoteCmd() tea.Cmd {
+	return func() tea.Msg {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return remoteRowsLoadedMsg{}
+		}
+		canopyHome := filepath.Join(home, ".canopy")
+		reg, err := host.NewRegistry(canopyHome)
+		if err != nil {
+			log.Warn("ui.refresh.remote.registry-failed", "err", err)
+			return remoteRowsLoadedMsg{err: err}
+		}
+		hosts, err := reg.List()
+		if err != nil {
+			log.Warn("ui.refresh.remote.list-failed", "err", err)
+			return remoteRowsLoadedMsg{err: err}
+		}
+		if len(hosts) == 0 {
+			// No registered hosts; emit an empty msg so the UI
+			// clears remoteRefreshing and the next refresh tick is
+			// free to run. Without this, m.remoteRefreshing latches
+			// true forever and subsequent refreshes silently skip.
+			return remoteRowsLoadedMsg{}
+		}
+		cache, _ := state.NewRemotesCache(canopyHome)
+		refresher := &host.Refresher{} // default 3s timeout per host
+
+		ctx := context.Background()
+		results := refresher.Tick(ctx, hosts)
+
+		// Convert to GlobalRow + build the persistence snapshot in one pass.
+		rows := make([]state.GlobalRow, 0)
+		snaps := make(map[string]*state.RemoteHostSnapshot, len(results))
+		for _, r := range results {
+			snap := &state.RemoteHostSnapshot{
+				CanopyVersion:      r.CanopyVersion,
+				LastSeen:           r.LastSeen,
+				LastRefreshAttempt: time.Now(),
+			}
+			if r.Err != nil {
+				snap.LastError = r.Err.Error()
+				snaps[r.HostName] = snap
+				continue
+			}
+			snap.Workspaces = make([]state.RemoteWorkspaceRow, 0, len(r.Workspaces))
+			for _, w := range r.Workspaces {
+				snap.Workspaces = append(snap.Workspaces, state.RemoteWorkspaceRow{
+					Name: w.Name, Project: w.Project, Branch: w.Branch,
+					Status: w.Status, Port: w.Port,
+					TmuxSession:   w.TmuxSession,
+					Alive:         w.Alive,
+					MemRSS:        w.MemRSS,
+					CPU:           w.CPU,
+					Hints:         w.Hints,
+					LastErrorHint: w.LastErrorHint,
+					AgentState:    w.AgentState,
+				})
+				rows = append(rows, state.GlobalRow{
+					Host:    r.HostName,
+					Project: w.Project,
+					// IsMain mirrors BuildGlobalRows's synthetic main
+					// row convention. Without this, the local renderer
+					// can't tell remote main rows apart from workspace
+					// rows — displayStatus falls through to string(r.Status)
+					// which renders the literal "main" instead of
+					// "running"/"not started", and fillMainBranches
+					// skips them entirely. v0.17 Phase 1k follow-up.
+					IsMain:        w.Name == "(main)",
+					Name:          w.Name,
+					Branch:        w.Branch,
+					Status:        state.Status(w.Status),
+					Port:          w.Port,
+					TmuxSession:   w.TmuxSession,
+					Alive:         w.Alive,
+					MemRSS:        w.MemRSS,
+					CPU:           w.CPU,
+					Hints:         w.Hints,
+					LastErrorHint: w.LastErrorHint,
+					AgentState:    w.AgentState,
+				})
+			}
+			snaps[r.HostName] = snap
+		}
+
+		// Best-effort persist to disk. Failure doesn't affect the UI
+		// — the snapshots will retry on the next tick.
+		if cache != nil {
+			if err := cache.WithLock(func(stored map[string]*state.RemoteHostSnapshot) error {
+				for name, snap := range snaps {
+					stored[name] = snap
+				}
+				return nil
+			}); err != nil {
+				log.Warn("ui.refresh.remote.cache-save-failed", "err", err)
+			}
+		}
+
+		return remoteRowsLoadedMsg{rows: rows, snaps: snaps, hosts: hosts}
+	}
 }
 
 // tmuxLoadAdapter wraps *tmux.Client to satisfy state.LoadProbe. The

@@ -1,0 +1,123 @@
+// Remote-dispatch helpers shared across the rm / retry / kill flows
+// (and used by `n` for cwd resolution). Each helper is "given a host
+// name, do an SSH thing"; the workspace-action wrappers live next to
+// the keybind they implement (update_kill.go, update_retry.go, etc).
+// Carved out of update.go.
+
+package ui
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// execRemoteVerb runs `<canopy-bin> <verb> --on <host> <args...>` as a
+// subprocess via tea.ExecProcess. Used for rm and retry. v0.17.0 Phase 1.
+//
+// force, when true, appends --force to the remote canopy invocation.
+// Used by the delete handler when the user pressed F on hanging-work
+// confirmation (mirrors the local --force path).
+func (m *Model) execRemoteVerb(hostName, verb string, args []string, force bool) tea.Cmd {
+	canopyBin, err := os.Executable()
+	if err != nil || canopyBin == "" {
+		canopyBin = os.Args[0]
+	}
+	cmdArgs := []string{verb, "--on", hostName}
+	cmdArgs = append(cmdArgs, args...)
+	if force {
+		cmdArgs = append(cmdArgs, "--force")
+	}
+	cmd := exec.Command(canopyBin, cmdArgs...)
+	cmd.Env = append(os.Environ(), "CANOPY_ALLOW_NESTED=1")
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			log.Warn("ui.remote-verb.failed", "verb", verb, "host", hostName, "err", err)
+		}
+		// Refresh BOTH local and remote so the row updates / disappears
+		// as appropriate. The remote-rows fan-out is what reflects the
+		// rm/retry side effect we just dispatched. v0.17 Phase 1h.
+		m.remoteRefreshing = false
+		return refreshAllMsg{}
+	})
+}
+
+// canopyBinPath returns the absolute path to this canopy binary so
+// subprocess invocations resolve to the same build. Falls back to
+// os.Args[0] when os.Executable() fails (rare; e.g. binary deleted
+// after launch). v0.17 Phase 1k.
+func (m *Model) canopyBinPath() string {
+	bin, err := os.Executable()
+	if err != nil || bin == "" {
+		return os.Args[0]
+	}
+	return bin
+}
+
+// remoteCwdForRow looks up the remote project path for (host, project)
+// from the in-memory host registry snapshot. Returns "" when the
+// registry doesn't know that pair (lets the caller fall back to
+// canopy's own resolution logic + error). v0.17 Phase 1i.
+func (m *Model) remoteCwdForRow(hostName, projectName string) string {
+	if hostName == "" || projectName == "" {
+		return ""
+	}
+	for _, h := range m.hostList {
+		if h.Name != hostName {
+			continue
+		}
+		return h.Projects[projectName]
+	}
+	return ""
+}
+
+// execRemoteKill kills a workspace's tmux session on a remote host by
+// SSHing `tmux kill-session -t <session>` directly. Doesn't go through
+// canopy on the remote because there's no `canopy kill` verb — kill is
+// a tmux operation that leaves the workspace's worktree + state intact,
+// transitioning it to stopped (the existing canopy convention).
+func (m *Model) execRemoteKill(hostName, sessionName string) tea.Cmd {
+	// Inline the SSH via a one-shot subprocess. We use ssh directly here
+	// (not via host.SSHCmd) because we're already in the parent process —
+	// no need to re-resolve through cmd/canopy. The TUI's host registry
+	// is the source of truth.
+	resolved, err := m.resolveHostForExec(hostName)
+	if err != nil {
+		return func() tea.Msg {
+			log.Warn("ui.remote-kill.resolve-failed", "host", hostName, "err", err)
+			return refreshAllMsg{}
+		}
+	}
+	cmd := exec.Command("ssh",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath="+filepath.Join(os.Getenv("HOME"), ".canopy", "ssh-%C.sock"),
+		"-o", "ControlPersist=300",
+		"-o", "BatchMode=yes",
+		"-o", "NumberOfPasswordPrompts=0",
+		resolved,
+		"tmux", "kill-session", "-t", sessionName,
+	)
+	return func() tea.Msg {
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Warn("ui.remote-kill.failed", "host", hostName, "session", sessionName, "err", err, "out", string(out))
+		}
+		m.remoteRefreshing = false
+		return refreshAllMsg{}
+	}
+}
+
+// resolveHostForExec looks up the SSH target for a host name from the
+// in-memory registry snapshot the TUI already has (m.hostList).
+// Avoids re-loading hosts.json every time the user kills/deletes a row.
+func (m *Model) resolveHostForExec(name string) (string, error) {
+	for _, h := range m.hostList {
+		if h.Name == name {
+			return h.SSHTarget, nil
+		}
+	}
+	return "", fmt.Errorf("host %q not found in registry snapshot", name)
+}

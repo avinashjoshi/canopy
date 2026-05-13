@@ -12,6 +12,252 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## ✅ SHIPPED — `canopy host add` connectivity probe + ssh-copy-id offer (v0.17.0.0, PR #40)
+
+Avi added `pi` as a host without SSH key auth set up. The TUI refresh fails fast (correct — BatchMode), but there's no help bridging the user from "I just registered this host" to "wait, I need keys." Add a connectivity probe to `canopy host add`:
+
+1. After successful registration, run `ssh -o BatchMode=yes -o ConnectTimeout=5 <target> true`.
+2. On success: print "✓ connection confirmed".
+3. On `Permission denied (publickey)`: prompt "Set up passwordless SSH now? (runs `ssh-copy-id <target>`) [Y/n]". If yes, exec ssh-copy-id directly (it reuses the user's terminal for the password prompt). If no, print "OK; run `ssh-copy-id <target>` when ready. Refreshes will fail until then."
+4. On network unreachable: warn but don't block registration (host might be asleep).
+
+Phase 1c's huh wizard for `canopy host add` is the natural home for this — the wizard can run the probe interactively + offer key setup as a follow-up step. Schedule with 1c.
+
+---
+
+## 📋 OPEN (P2) — Surface refresh errors in TUI Global tab section header (added 2026-05-12)
+
+Right now hosts whose refresh failed (auth, network, etc.) don't appear in the TUI Global tab at all — their cache entry has empty `workspaces` and `last_error` set, but the projectlist render path skips them entirely. Better UX: render a section header for failed hosts too, with the error condition shown:
+
+  tower (auth failed)         — last seen never · key not configured
+  fly-iad (offline)           — last seen 2h ago
+
+This gives the user visibility into "canopy IS trying tower, here's why it can't reach it" rather than a silently empty listing. Implementation: extend `internal/ui/projectlist`'s render to walk the remotes-cache snapshots, not just `state.GlobalRow`s, so failed-host sections render alongside successful ones.
+
+---
+
+## 💡 PARKED — Wild idea — Cross-machine overlay (always shows laptop registry from any session) (added 2026-05-12)
+
+Captured from Phase 1b dogfood (2026-05-12). Avi noticed: when inside a mosh session attached to tower's tmux, `Ctrl+Alt+c` opens tower's local canopy view — which is correct, tower's tmux has its own keybind triggering its own canopy installation. But the experience is asymmetric: laptop-tmux overlay shows everything (laptop + tower + pi); tower-tmux overlay shows only tower.
+
+A "universal overlay" would always show the laptop's full registry view regardless of which tmux server the chord fires in. That'd let you summon "the canopy" from anywhere, treating canopy as one logical surface across all machines.
+
+How it might work (sketches, not committed direction):
+
+1. **Reverse-SSH RPC**: tower's canopy popup, when launched with CANOPY_IN_POPUP=1, opens an SSH back-channel to laptop (via tailscale magicdns) and asks for the laptop's registry view. Renders that locally. The "owning machine" is implicit by network reachability.
+
+2. **Network-accessible registry**: ~/.canopy/hosts.json + remotes-cache.json synced via tailscale-shared filesystem mount, or via a small networked service (canopy-registryd). Every canopy instance reads the same registry.
+
+3. **Forward-from-laptop chord**: laptop's tmux installs the keybind on every connected mosh session via a wrapper that always shells back to the laptop's canopy. Cleanest UX, requires the canopy install-tmux step to do something different on remote machines.
+
+Why parked: the current design ("each (host, canopy installation) is its own world") is explicit per docs/design/v0.17-remote-workspaces.md, premise #1 ("Each host is an independent canopy installation. They don't sync."). Cross-machine overlay would relax that premise in service of UX. Worth considering once Phase 1c-1f land and we see how often the asymmetry bites in practice.
+
+Avi's read of the trade-off: "okay for now" — current behavior is correct, future work TBD.
+
+---
+
+## 📋 OPEN (P2) — Configurable prompt-send timeout for slow remote agents (added 2026-05-12)
+
+v0.17.0 Phase 1f verified `canopy new --on tower --prompt "..."` delivers the prompt text correctly via SSH stdin + base64 + remote temp file. But the prompt-send step that comes after workspace creation has a hardcoded 5-second timeout in `internal/workspace/initprompt.go::phaseBudget`. On tower (and likely most remote machines), claude takes longer than 5s from launch to "ready marker visible." The prompt-send aborts with "Phase 1 timeout" and the user has to manually attach and type the prompt.
+
+Fix: make phaseBudget configurable via env var (e.g., `CANOPY_PROMPT_PHASE_BUDGET=15s`) OR auto-scale based on whether the workspace was launched from a remote dispatch (look for a CANOPY_REMOTE_DISPATCH=1 env var set by Phase 1f's script).
+
+Simple fix: bump default to 15s. Slower-but-correct beats fast-and-fails for slow machines / first-launch claude installs. The local-fast-claude case loses a few seconds before timeout-on-failure but everything else works the same.
+
+Repro: `canopy new --on tower --name X --prompt "test"`. Workspace creates fine; prompt step times out with "Phase 1 timeout". Verified the prompt text IS in the agent-briefing temp file on the remote — claude just isn't ready in 5s.
+
+---
+
+## 📋 OPEN (P3) — Nested-canopy guard scope (added 2026-05-12)
+
+The CANOPY_ALLOW_NESTED guard in `cmd/canopy/guard.go` fires for every canopy subcommand when invoked inside a canopy tmux session, including pure-metadata verbs like `canopy host add/ls/rm` and `canopy version`. The guard exists because canopy's tmux launch/attach plumbing gets confused when canopy creates a session from inside another canopy session. But host-registry CLI doesn't touch tmux at all.
+
+Fix: tag commands that don't interact with tmux (host, version, possibly statusline) so the guard exempts them. Either a per-command flag in the cobra setup or a small allowlist in main.go's pre-run hook.
+
+Defer until v0.17 ships and there are >1 of these subcommands; for now it's annoying-but-tolerable with the CANOPY_ALLOW_NESTED escape.
+
+---
+
+## 📋 OPEN (P3) — `BackfillRoles` re-tags already-tagged panes (added 2026-05-12)
+
+Observed during v0.17.0 Phase 0 dogfooding on the omarchy tower running canopy v0.16.2.1+cce6199.
+
+Sequence:
+1. `canopy new` (remote) creates a workspace; `buildSession` tags all 3 panes with `@canopy-role=...` at creation time.
+2. Verified via `tmux list-panes -t canopy/<name> -F '#{pane_id} @canopy-role=#{@canopy-role}'` — all panes correctly tagged.
+3. `canopy switch <name>` calls `workspace.BackfillRoles(...)`. The log shows `workspace.backfill.tagged panes_tagged: 3` — claiming it tagged 3 panes that were already tagged.
+
+Bug is in `internal/workspace/backfill.go`: either the "is this pane already tagged" check is failing (treats existing tag as "untagged"), or the log message fires unconditionally even when nothing was actually re-tagged.
+
+Cosmetic — no functional impact (tagging is idempotent). But it floods the canopy.log with spurious events and the metric is misleading. Worth fixing in a follow-up PR.
+
+Repro: any workspace created via v0.16+ buildSession, then attached via `canopy switch`. The "tagged" log fires every time.
+
+---
+
+## ✅ SHIPPED — v0.17.0.0 — Remote canopy workspaces (BYO box, multi-host) (PR #40)
+
+Greenlit via /office-hours + /plan-ceo-review on 2026-05-11. Design doc + CEO plan persisted:
+- Design: `~/.gstack/projects/avinashjoshi-canopy/avi-explore-remote-workspaces-design-20260511-202039.md`
+- CEO plan: `~/.gstack/projects/avinashjoshi-canopy/ceo-plans/2026-05-11-remote-canopy-workspaces.md`
+
+The thesis: laptop becomes a thin client (Sun ray lineage), each host is an independent canopy installation with its own project registry, the laptop's TUI aggregates rows across all registered hosts. Tower (or any SSH-reachable Linux box) holds the actual workspaces. Multi-agent fire-and-forget moves off the laptop's thermal envelope.
+
+v0.1 scope (after SELECTIVE EXPANSION cherry-picks):
+- Core: `internal/host` package; `~/.canopy/hosts.json` + `~/.canopy/remotes-cache.json`; `canopy host add/ls/rm` CLI; `canopy host project init` per-host registration; `canopy new --on <host>` flag; bare `canopy new` stays local.
+- Phase 0 (afternoon hack): hardcoded single remote, SSH-shellout, no cache, inline rows. Validates the loop end-to-end on tower over tailscale.
+- Phase 1 (production-shape): hosts.json, cache, Global tab section grouping, picker host field, project-init flow.
+- Cherry-picks accepted: Inbox tab (sorted triage queue), Hosts TUI tab (third tab + onboarding surface), SSH ControlMaster persistent multiplex, desktop notification bridge (Path 1: toast on `→ awaiting-input`, ~5s debounce), per-host version drift warning (pill + dispatch refuse on major mismatch), canopy.cloud TODOS.md entry (separate item below).
+- Architecture calls locked in: per-host goroutines with 3s deadline for refresh (not synchronous); remote hosts require their own git creds (not ssh-agent forwarding); E2E tests use localhost-as-remote with `-tags=e2e`; Inbox empty state "All caught up" + secondary sort by state-transition recency.
+- Security: `--prompt` text travels via stdin / temp file over SSH, not command-line args (prevents `ps aux` leakage on remote).
+
+Estimated effort: ~3-5 days human / ~1-2 weekends CC, in three phases (P0/P1/P2).
+
+Next skill in the chain: `/plan-eng-review` for file-by-file implementation plan.
+
+---
+
+## 💡 PARKED — `canopy.cloud` managed-tier thesis (added 2026-05-11)
+
+The BYO multi-host work (above) is the open-source play. The natural commercial extension is `canopy.cloud`: managed boxes auto-provisioned per workspace, billed per minute, near-zero idle cost via Fly Machines auto-stop. The MVP punts entirely.
+
+What stays the same vs. BYO multi-host:
+- The host abstraction. `canopy.cloud` is just one of many hosts in `~/.canopy/hosts.json`.
+- The dispatcher view, Inbox tab, notification bridge — all transport-agnostic.
+- The SSH protocol — `canopy.cloud` would issue short-lived SSH tokens (or use mTLS), but the wire protocol stays the same canopy CLI commands.
+
+What changes:
+- **Multi-tenancy** — `canopy.cloud` hosts have multiple users; per-user workspace isolation needed (currently single-user box assumption holds).
+- **Auth** — short-lived tokens / OIDC instead of long-lived SSH keys. `canopy host add canopy.cloud` would be a browser OAuth flow that drops a refreshable token.
+- **Billing** — per-workspace-minute or per-host-machine pricing. Out-of-band, surfaced in canopy via cost-hint in Hosts tab.
+- **Region selection** — `canopy new --on canopy.cloud --region us-east1`. The host abstraction grows a region field.
+- **Cold-start prewarming** — Fly Machines `auto_start=true` means workspaces wake from cold in ~5s. The dispatcher view must show "spinning up" state.
+- **Lifecycle hooks** — canopy.cloud needs a managed `scripts.archive` that cleans up the Fly Machine, not just the workspace dir.
+
+v0.1 design decisions that PRESERVE the canopy.cloud optionality:
+- Host abstraction is interface-shaped (`Host.Run(args...) error`), not SSH-specific. A future `FlyMachineHost` implementation slots in.
+- `~/.canopy/hosts.json` stores arbitrary `type: ssh | flymachine | k8s` fields.
+- Auth is per-host config, not global — tokens, keys, OIDC all fit.
+- The dispatcher and Inbox views are state-source-agnostic.
+
+v0.1 design decisions that would NEED to change if `canopy.cloud` happens:
+- The "host = one Linux box" mental model becomes "host = a pool that can host workspaces." Mostly a naming/conceptual shift.
+- Project-registration UX — `canopy.cloud` users don't manually clone the repo, they'd authorize canopy.cloud to clone on demand.
+- Cost surfacing — a new column in the Hosts tab.
+
+Posture: not on the roadmap. Document so future-you doesn't lose the thread. If demand surfaces (paying user says "set this up for me, I don't want to run a server"), this is the starting blueprint.
+
+---
+
+## 📋 OPEN — Notification click-handler (Path 2) (added 2026-05-11)
+
+v0.1 ships Path 1 (informational toast on `→ awaiting-input`). Path 2 = action buttons via `notify-send --action`. Mako on omarchy supports this; libnotify spec supports it broadly.
+
+When implemented:
+- Toast grows an "Attach" button. Click → fires a script that opens canopy + selects the row (or directly mosh-attaches if a transport hint is known).
+- ~80 LOC + callback registry: notify-send returns the action ID on stdout; a goroutine waits for it and dispatches.
+- Risk: mako/dunst version dependencies on action support; needs graceful degradation to Path 1 if `--action` flag isn't honored.
+
+Defer until Path 1 has lived for a week and you know whether the click is actually needed (or whether attaching via canopy keymap is fast enough).
+
+---
+
+## 📋 OPEN — Mobile notification transport (ntfy.sh / Pushover / signal-cli) (added 2026-05-11)
+
+v0.1 desktop notification bridge fires `notify-send` locally on the laptop. That's useless when laptop is asleep or you're away from desk.
+
+Next layer: when state transitions to `→ awaiting-input` on any host, ALSO POST to a configured push service. Options to evaluate:
+- **ntfy.sh** — self-hostable, no auth on free tier, push-by-URL, well-suited for "personal toast to my phone."
+- **Pushover** — paid, polished iOS/Android apps, rich notifications.
+- **signal-cli** — DM yourself on Signal. Personal, encrypted, but Signal API is a moving target.
+
+Config shape: `~/.canopy/notifications.json` with a list of transports; each transport plug fires alongside `notify-send`. Per-host override (don't ping for low-priority hosts).
+
+Defer until Path 1 reveals the actual pain pattern of "missed an awaiting agent because I was away from desk." If walking back to the laptop is fine, this is unnecessary.
+
+---
+
+## 📋 OPEN — Web/mobile attach (terminal-in-browser) (added 2026-05-11)
+
+Long-term: attach from any device. Phone buzzes (from mobile notification TODO above), you tap, you're in tmux on the workspace via browser.
+
+Tech directions:
+- **gotty / wetty / ttyd** — embed an HTTP server that proxies tmux into a browser xterm.js. Tested tech, runs as a remote canopy verb (`canopy serve --on tower --port 9000`).
+- **Tailscale Funnel** — exposes the gotty server publicly without port-forwarding. Works on iOS/Android browser.
+- **Authentication** — short-lived signed URL per session. Don't expose tmux to the world.
+
+Scope: big. Probably its own phase after BYO multi-host has lived for a month and the use-case is real. The hard parts are auth and mobile-keyboard ergonomics, not the tmux-in-browser transport.
+
+Defer post-v0.1.
+
+---
+
+## 📋 OPEN — `--forward-agent` opt-in flag for SSH transport (added 2026-05-11)
+
+v0.1 D9 decision: each host has its own git creds (no ssh-agent forwarding). This is the secure default.
+
+But: for users who want the magic UX (zero remote setup, laptop's agent transiently lends tower its github keys), an opt-in flag is the right escape hatch.
+
+Shape:
+- `canopy host add tower <ssh-target> --forward-agent` — persists the per-host preference in `~/.canopy/hosts.json`.
+- All `canopy ssh tower ...` invocations pass `-A` when this flag is set.
+- TUI Hosts tab shows a 🔐 indicator next to forward-enabled hosts (so the user sees the trust expansion).
+- Documentation: "Do not enable forward-agent on hosts you don't fully control."
+
+Defer until BYO is shipped and you (Avi) personally want to try forward-agent on tower to see if the convenience justifies the trust expansion.
+
+---
+
+## 📋 OPEN — Notification toast suppression when canopy TUI focused (added 2026-05-11)
+
+v0.17.0 fires `notify-send` on every `→ awaiting-input` transition regardless of whether canopy TUI is currently focused. Decision made during /plan-eng-review (D6): focus detection on Linux is genuinely hard, and the failure modes (missed notifications because the user has canopy running in a hidden pane) are worse than the duplication.
+
+When this becomes worth doing:
+- Multiple users report toast-duplication-while-actively-triaging is annoying.
+- A reliable cross-terminal focus-event mechanism becomes available.
+
+Path:
+- Bubbletea has hooks for terminal focus events (XTERM-style `\e[?1004h`) but not all terminals honor them. Ghostty + foot do; tmux passes them through if enabled.
+- TUI listens for focus-in/focus-out, writes/clears `~/.canopy/.ui-focused` (with pid + timestamp).
+- `internal/notify/watcher.go::Observe` checks the file (stale > 30s = stale, fire anyway) before firing.
+- Fallback to "always fire" if the focus flag is stale or missing.
+
+Defer until v0.17.x or v0.18.x when notification-noise complaints surface.
+
+---
+
+## 📋 OPEN — Refactor existing tabs (project, global) into subpackages (added 2026-05-11)
+
+v0.17 adds `internal/ui/inbox/` and `internal/ui/hosts/` as per-tab subpackages, following the existing `internal/ui/projectlist/` precedent. Decision made during /plan-eng-review (D3): for new tabs only, leave existing model.go intact to minimize PR risk.
+
+When this becomes worth doing:
+- model.go grows past ~1500 LOC (currently ~700).
+- A future feature wants to add a 5th tab and the central-dispatcher pattern feels unsustainable.
+
+Path:
+- Pull project-tab rendering into `internal/ui/projectview/` (mirroring projectlist/).
+- Pull global-tab rendering into `internal/ui/globalview/`.
+- `model.go` becomes a thin tab-router: `tabKind` enum + dispatch to subpackage Update/View.
+- Touches existing working code; risk of regression on existing tabs. Schedule for a low-feature window.
+
+Estimated effort: ~1-2 days human / ~2-4 hours CC. Should be its own PR, not bundled.
+
+---
+
+## 📋 OPEN — Tailscale-aware host auto-discovery (added 2026-05-11)
+
+Tailscale users have an enumerable peer list. `canopy host scan` could SSH-probe each peer and ask "do you have canopy installed? what version?" Surfaces a "discovered hosts" picker so adding a new box is one keystroke instead of typing the SSH target.
+
+Shape:
+- `canopy host scan` runs `tailscale status --json`, filters to online peers, parallel-probes each via `ssh <peer> canopy --version` (1s deadline each), shows results in the Hosts tab as a "Discovered" section.
+- Pressing `a` (add) on a discovered row registers it.
+
+Risk: tailscale-specific. Doesn't help users with hand-curated SSH configs. Probably an opt-in command, not core lifecycle.
+
+Defer post-v0.1; this is polish that depends on the BYO flow first feeling solid.
+
+---
+
 ## 📋 OPEN — v0.16.x — Extend `--prompt` / background workspaces to codex + opencode (added 2026-05-11)
 
 v0.16.1 shipped `canopy new --prompt`/`--prompt-file` + the agent-state badge column, but the prompt-delivery flow is claude-only. The agent registry in `internal/agent/launchers.go` already understands codex / opencode / aider as launcher types — the gap is in the kickoff path:

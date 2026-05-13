@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -9,7 +10,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/ui/hosts"
 )
 
 // Styles + helpers live in render.go (shared with the new GlobalModel and
@@ -39,6 +42,16 @@ func (m *Model) View() string {
 		return m.renderConfirmDelete()
 	case confirmKillMode:
 		return m.renderConfirmKill()
+	case confirmAttachMode:
+		return m.renderConfirmAttach()
+	case confirmHostRemoveMode:
+		return m.renderConfirmHostRemove()
+	case addHostFormMode:
+		return m.renderAddHostForm()
+	case hostDetailMode:
+		return m.renderHostDetail()
+	case confirmSSHCopyIDMode:
+		return m.renderConfirmSSHCopyID()
 	case drawerMode:
 		return m.renderDrawer()
 	case busyMode:
@@ -77,6 +90,16 @@ func (m *Model) View() string {
 	if m.err != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("error: %v", m.err)))
 		b.WriteString("\n\n")
+	}
+
+	// v0.17.0 Phase 1c: Hosts tab dispatches to its own subpackage
+	// renderer. Bypasses the projectlist + empty-tab handling below
+	// because hosts have their own row shape (and own empty state).
+	if m.tab == tabHosts {
+		b.WriteString(m.renderHostsTab())
+		b.WriteString("\n\n")
+		b.WriteString(m.renderHelpLine())
+		return b.String()
 	}
 
 	// Empty-tab onboarding text. projectlist's own emptyState() shows
@@ -146,12 +169,14 @@ func (m *Model) scopeLabel() string {
 	return "global"
 }
 
-// renderTabBar draws the Local/Global tab bar as styled pills. Active
-// tab uses the violet brand-color bg; inactive uses a darker grey-bg
-// pill so both read as buttons, not text.
+// renderTabBar draws the tab bar as styled pills. Active tab uses the
+// violet brand-color bg; inactive uses a darker grey-bg pill so both
+// read as buttons, not text.
 //
-// Empty tabs (no rows under the active filter) render dimmed so the
-// user doesn't feel pulled to switch to a tab with nothing there.
+// v0.17 Phase 1h: the project-scoped tab (tabLocal) only renders when
+// a current project context exists — launching canopy outside any
+// project drops it from the bar entirely. The Hosts tab dims when the
+// registry is empty.
 func (m *Model) renderTabBar() string {
 	hasLocal := false
 	hasGlobal := false
@@ -160,23 +185,6 @@ func (m *Model) renderTabBar() string {
 		if m.currentProject != "" && r.ProjectRoot == m.currentProject {
 			hasLocal = true
 		}
-	}
-
-	localLabel := "Local"
-	if m.currentProject != "" {
-		// Show the project name so the user knows what "Local" means
-		// in this invocation. Truncate aggressively for narrow popups.
-		proj := m.currentProject
-		for i := len(proj) - 1; i >= 0; i-- {
-			if proj[i] == '/' {
-				proj = proj[i+1:]
-				break
-			}
-		}
-		if len(proj) > 16 {
-			proj = proj[:16]
-		}
-		localLabel = "Local: " + proj
 	}
 
 	// Pill colors: active = bright white on violet (matches brand pill);
@@ -195,9 +203,48 @@ func (m *Model) renderTabBar() string {
 		}
 	}
 
-	local := tabPill(localLabel, m.tab == tabLocal, hasLocal)
-	global := tabPill("Global", m.tab == tabGlobal, hasGlobal)
-	return local + " " + global
+	arrow := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	pills := []string{arrow.Render("‹")}
+
+	if m.currentProject != "" {
+		// Use the project basename as the tab label so the user knows
+		// exactly which project they're scoped to.
+		proj := m.currentProject
+		for i := len(proj) - 1; i >= 0; i-- {
+			if proj[i] == '/' {
+				proj = proj[i+1:]
+				break
+			}
+		}
+		if len(proj) > 18 {
+			proj = proj[:18]
+		}
+		pills = append(pills, tabPill(proj, m.tab == tabLocal, hasLocal))
+	}
+	pills = append(pills, tabPill("Workspaces", m.tab == tabGlobal, hasGlobal))
+	// Hosts pill is always shown when the registry is non-empty OR when
+	// the user is currently on it (so an empty-state view is still
+	// reachable as a fallback). v0.17 Phase 1l rename: "Remote hosts"
+	// makes the tab's purpose obvious without scanning the body.
+	if m.hostsHasEntries() || m.tab == tabHosts {
+		pills = append(pills, tabPill("Remote hosts", m.tab == tabHosts, m.hostsHasEntries()))
+	}
+	pills = append(pills, arrow.Render("›"))
+	return joinWithSpaces(pills)
+}
+
+// joinWithSpaces joins pieces with a single ASCII space. Tiny helper
+// rather than strings.Join so it's obvious at the call site we're
+// padding tab pills, not building general text.
+func joinWithSpaces(pieces []string) string {
+	if len(pieces) == 0 {
+		return ""
+	}
+	out := pieces[0]
+	for _, p := range pieces[1:] {
+		out += " " + p
+	}
+	return out
 }
 
 // renderSearchLine returns the search input pill (when in search mode)
@@ -236,6 +283,147 @@ func (m *Model) renderSearchLine() string {
 // the field directly (decoupling internal storage from renderers).
 func (m *Model) allRowsOrFallback() []state.GlobalRow {
 	return m.allRows
+}
+
+// hostsHasEntries returns whether any hosts are registered. Used by
+// renderTabBar to dim/highlight the Hosts pill — empty registry =
+// dim, matching the "empty tabs render dim" convention. v0.17.0
+// Phase 1c.
+func (m *Model) hostsHasEntries() bool {
+	return len(m.hostList) > 0
+}
+
+// renderHostsTab is the Hosts tab body. Delegates to the
+// internal/ui/hosts subpackage's BuildRows + Render. Width-aware per
+// the D2 design decision (tiered column drop at narrow widths).
+func (m *Model) renderHostsTab() string {
+	rows := hosts.BuildRows(m.hostList, m.remoteSnaps)
+	w := m.width
+	if w <= 0 {
+		w = 100 // reasonable default before WindowSizeMsg lands
+	}
+	// Clamp the cursor to the rendered row count so a host that
+	// vanished between ticks doesn't leave the caret hanging past the
+	// end. v0.17 Phase 1l.
+	cursor := m.hostsCursor
+	if cursor >= len(rows) {
+		cursor = len(rows) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	return hosts.Render(rows, w, cursor)
+}
+
+// renderConfirmHostRemove is the y/N gate for `d` on the Hosts tab.
+// v0.17 Phase 1l. Mirrors renderConfirmKill's shape.
+func (m *Model) renderConfirmHostRemove() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("remove host"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  Remove host %q from the registry?\n\n", m.hostRemoveTarget))
+	b.WriteString(subtleStyle.Render("  Only the registry entry goes (~/.canopy/hosts.json). The remote\n"))
+	b.WriteString(subtleStyle.Render("  canopy install, its workspaces, and any cached state on the\n"))
+	b.WriteString(subtleStyle.Render("  laptop (~/.canopy/remotes-cache.json) are not touched.\n"))
+	b.WriteString("\n  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to remove  ·  any other key to cancel")
+	return b.String()
+}
+
+// renderAddHostForm draws the in-TUI add-host form. Two textinputs
+// stacked vertically — name first, ssh-target below. Tab/shift+tab
+// cycles focus; the focused input shows its caret while the other
+// renders dimmed. Enter submits when both fields are non-empty.
+// v0.17 Phase 1l polish.
+func (m *Model) renderAddHostForm() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("add remote host"))
+	b.WriteString("\n\n")
+	b.WriteString(subtleStyle.Render("  A remote host is an SSH-reachable machine with canopy installed.\n"))
+	b.WriteString(subtleStyle.Render("  After adding, canopy will probe the connection — if key auth\n"))
+	b.WriteString(subtleStyle.Render("  isn't set up, you'll be offered ssh-copy-id automatically.\n"))
+	b.WriteString("\n")
+	b.WriteString("  name:    " + m.nameInput.View() + "\n")
+	b.WriteString("  target:  " + m.targetInput.View() + "\n")
+	b.WriteString("\n")
+	b.WriteString(subtleStyle.Render("  tab to switch  ·  enter to confirm  ·  esc to cancel"))
+	return b.String()
+}
+
+// renderHostDetail is the read-only detail view for one host. Shows
+// everything the registry + remotes-cache knows about it. v0.17
+// Phase 1l polish. Esc dismisses back to the Hosts tab.
+func (m *Model) renderHostDetail() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("host: " + m.hostDetailTarget))
+	b.WriteString("\n\n")
+	var h host.Host
+	for _, hh := range m.hostList {
+		if hh.Name == m.hostDetailTarget {
+			h = hh
+			break
+		}
+	}
+	if h.Name == "" {
+		b.WriteString("  (host no longer in registry)\n")
+		b.WriteString("\n  " + subtleStyle.Render("esc to go back"))
+		return b.String()
+	}
+	b.WriteString(fmt.Sprintf("  ssh target:  %s\n", h.SSHTarget))
+	b.WriteString(fmt.Sprintf("  type:        %s\n", h.Type))
+	b.WriteString(fmt.Sprintf("  added:       %s\n", h.AddedAt.Format("2006-01-02 15:04")))
+	b.WriteString("\n")
+	if len(h.Projects) == 0 {
+		b.WriteString(subtleStyle.Render("  no projects registered\n"))
+		b.WriteString(subtleStyle.Render(fmt.Sprintf("  → canopy project add <name> <remote-path> --on %s\n", h.Name)))
+	} else {
+		b.WriteString("  projects:\n")
+		names := make([]string, 0, len(h.Projects))
+		for n := range h.Projects {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			b.WriteString(fmt.Sprintf("    %s  →  %s\n", n, h.Projects[n]))
+		}
+	}
+	if snap := m.remoteSnaps[h.Name]; snap != nil {
+		b.WriteString("\n")
+		if snap.CanopyVersion != "" {
+			b.WriteString(fmt.Sprintf("  canopy:      v%s\n", snap.CanopyVersion))
+		}
+		if !snap.LastSeen.IsZero() {
+			b.WriteString(fmt.Sprintf("  last seen:   %s\n", snap.LastSeen.Format("2006-01-02 15:04:05")))
+		}
+		b.WriteString(fmt.Sprintf("  workspaces:  %d\n", len(snap.Workspaces)))
+		if snap.LastError != "" {
+			b.WriteString("\n  ")
+			b.WriteString(brokenStyle.Render("last error: " + snap.LastError))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n  " + subtleStyle.Render("esc to go back"))
+	return b.String()
+}
+
+// renderConfirmSSHCopyID prompts the user to run ssh-copy-id after a
+// post-Add probe came back AuthFailed. y/Y kicks off the subprocess
+// (which prompts for the remote password); anything else dismisses
+// and the host stays registered without key auth. v0.17 Phase 1l.
+func (m *Model) renderConfirmSSHCopyID() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("set up passwordless ssh?"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  %s is registered, but ssh key auth isn't set up yet.\n", m.pendingProbeHost))
+	b.WriteString(fmt.Sprintf("  Without it, every canopy operation on %s would hang waiting\n", m.pendingProbeHost))
+	b.WriteString("  for a password (BatchMode in the refresher prevents that).\n\n")
+	b.WriteString(subtleStyle.Render(fmt.Sprintf("  Run: ssh-copy-id %s\n", m.pendingProbeTarget)))
+	b.WriteString(subtleStyle.Render("  (You'll be prompted for the remote password once.)\n"))
+	b.WriteString("\n  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to set it up now  ·  any other key to skip")
+	return b.String()
 }
 
 // renderConfirmRetry renders the y/N gate for `R` on a non-broken
@@ -368,7 +556,16 @@ func (m *Model) renderNewPicker() string {
 	b.WriteString("\n\n")
 	b.WriteString("  How do you want to start?\n\n")
 
-	for i, opt := range newPickerOptions {
+	options := newPickerOptions
+	if m.newTargetHost != "" {
+		// Remote target: only Fresh + Prompt are wired through
+		// remoteCreateCmd. PR/Issue/Branch need a local gh that knows
+		// the remote project's GitHub repo, which we don't have. Hide
+		// them rather than show options that error on submit. v0.17
+		// Phase 1k.
+		options = newPickerOptions[:2]
+	}
+	for i, opt := range options {
 		// Cursor caret matches the main workspace list's "❯ " — same
 		// glyph across every screen so the eye reads "here's what's
 		// selected" without learning a per-modal indicator. Non-
@@ -935,9 +1132,51 @@ func (m *Model) renderConfirmDelete() string {
 	b.WriteString(subtleStyle.Render("  git worktree, deletes the underlying branch, and drops the row\n"))
 	b.WriteString(subtleStyle.Render("  from state.json.\n"))
 	b.WriteString("\n")
+	// Remote rows can't run a local SafetyPreflight (no canopy.json on
+	// the laptop for a project that lives on tower). The remote canopy
+	// does its own check at confirm time and may refuse with "hanging
+	// work" — so always surface F as an alternative path here so the
+	// user can pre-decide "force regardless" instead of dispatching a
+	// `y` that fails. v0.17 Phase 1l polish.
+	if _, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
+		b.WriteString("  ")
+		b.WriteString(brokenStyle.Render("y"))
+		b.WriteString(" to remove (refuses on hanging work)  ·  ")
+		b.WriteString(brokenStyle.Render("F"))
+		b.WriteString(" to force-remove  ·  any other key to cancel")
+		return b.String()
+	}
 	b.WriteString("  ")
 	b.WriteString(brokenStyle.Render("y"))
 	b.WriteString(" to remove  ·  any other key to cancel")
+	return b.String()
+}
+
+// renderConfirmAttach is the y/N prompt before attaching to a tmux
+// session that already has another client connected. v0.17 Phase 1j.
+//
+// Tmux semantics: a second client on the same session sees the same
+// panes live — keystrokes and selections from both clients interleave.
+// For an active agent (Claude/aider) that's almost always a foot-gun:
+// two terminals pasting prompts is chaos. The prompt makes that
+// explicit so the user opts in deliberately.
+func (m *Model) renderConfirmAttach() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("workspace is already open"))
+	b.WriteString("\n\n")
+	row := m.attachTarget
+	label := row.Name
+	if row.Project != "" {
+		label = row.Project + "/" + row.Name
+	}
+	b.WriteString(fmt.Sprintf("  %q has an active tmux client already connected.\n\n", label))
+	b.WriteString(subtleStyle.Render("  Attaching here will share the session — keystrokes from both\n"))
+	b.WriteString(subtleStyle.Render("  terminals interleave, so any agent in this workspace will see\n"))
+	b.WriteString(subtleStyle.Render("  input from both windows. Usually that's not what you want.\n"))
+	b.WriteString("\n")
+	b.WriteString("  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to attach anyway  ·  any other key to cancel")
 	return b.String()
 }
 

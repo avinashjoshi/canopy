@@ -1,26 +1,16 @@
 package ui
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
-	"strconv"
+	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/avinashjoshi/canopy/internal/config"
-	"github.com/avinashjoshi/canopy/internal/ghx"
-	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
-	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
@@ -159,6 +149,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.upgradeCancel = nil
 		return m, nil
 
+	case remoteRowsLoadedMsg:
+		// v0.17.0 Phase 1b: result of the remote-host fan-out. Stash the
+		// rows in m.remoteRows; the next filteredRows() call combines
+		// them with local m.allRows. Errors are non-fatal — last-known
+		// remote rows stay visible.
+		//
+		// Phase 1c also stashes the host registry list + per-host
+		// snapshots so the Hosts tab can render fleet status without
+		// re-reading the registry on every frame.
+		m.remoteRefreshing = false
+		if msg.rows != nil {
+			m.remoteRows = msg.rows
+		}
+		if msg.hosts != nil {
+			m.hostList = msg.hosts
+		}
+		if msg.snaps != nil {
+			m.remoteSnaps = msg.snaps
+		}
+		m.list.SetRows(m.filteredRows())
+		return m, nil
+
 	case rowsLoadedMsg:
 		// Refresh result. Apply rows to allRows + push the filtered
 		// (tab + search) subset to projectlist for rendering.
@@ -291,6 +303,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.output != "" {
 			m.busyOutput += msg.output
 		}
+		// v0.17 Phase 1k: remote create doesn't return a tmuxSession
+		// (canopy new --on runs with --no-attach), and we can't
+		// local-attach to a session that lives on tower. Stay in
+		// busyMode so the user reads the streaming output; any key
+		// dismisses to the list (handleBusyModeKey triggers refresh)
+		// and they press Enter on the new row to mosh in.
+		if msg.remote {
+			if msg.err == nil {
+				m.busyTitle = "Remote workspace ready. Press any key, then Enter on the new row to attach."
+			}
+			return m, nil
+		}
 		if msg.err == nil && msg.tmuxSession != "" {
 			// "From a prompt" path: send the initial prompt to the
 			// agent pane BEFORE attaching. The send blocks while the
@@ -411,6 +435,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.drawerRow = Row{}
 		return m, m.attachOrSwitch(msg.session)
 
+	case refreshAllMsg:
+		// Trigger a full local+remote refresh. Emitted by tea.Cmds (e.g.
+		// post-remote-rm) that need to invalidate the cached remote rows
+		// too — refreshCmd alone only updates local. v0.17 Phase 1h.
+		return m, m.refresh()
+
+	case hostProbeResultMsg:
+		// Post-Add probe result. AuthFailed → open the ssh-copy-id
+		// offer modal. Other errors surface on m.err so the user
+		// knows the host is registered but unreachable. Success is
+		// silent — the refresh will surface the green online pill.
+		if msg.authFail {
+			m.pendingProbeHost = msg.hostName
+			m.pendingProbeTarget = msg.sshTarget
+			m.mode = confirmSSHCopyIDMode
+			return m, nil
+		}
+		if msg.err != nil {
+			m.err = fmt.Errorf("host %q registered, but probe failed: %w", msg.hostName, msg.err)
+		}
+		return m, nil
+
+	case errMsg:
+		// Deferred error from a tea.Cmd (e.g. openRemoteBrowser). Surface
+		// it in the status bar but don't kick off a refresh — the cmd has
+		// already failed and a refresh won't re-attempt it.
+		if msg.err != nil {
+			m.err = msg.err
+		}
+		return m, nil
+
 	case killDoneMsg:
 		// `K` kill finished. Invalidate the cache for the killed
 		// session so a later resurrect re-probes immediately rather
@@ -478,6 +533,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmDeleteKey(msg)
 	case confirmKillMode:
 		return m.handleConfirmKillKey(msg)
+	case confirmAttachMode:
+		return m.handleConfirmAttachKey(msg)
+	case confirmHostRemoveMode:
+		return m.handleConfirmHostRemoveKey(msg)
+	case addHostFormMode:
+		return m.handleAddHostFormKey(msg)
+	case hostDetailMode:
+		return m.handleHostDetailKey(msg)
+	case confirmSSHCopyIDMode:
+		return m.handleConfirmSSHCopyIDKey(msg)
 	case confirmRetryMode:
 		return m.handleConfirmRetryKey(msg)
 	case drawerMode:
@@ -553,43 +618,6 @@ func actionRefresh(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// actionTabSwitch flips Local ↔ Global. The new filtered set is pushed
-// to projectlist via SetRows; projectlist clamps its cursor automatically
-// so a long-list scroll position from the previous tab doesn't carry
-// over past the end of the new tab.
-//
-// Special case: Global → Local with no currentProject (canopy invoked
-// outside any project) routes through actionFocusProject so Tab acts
-// as "enter the project I'm looking at." Without this, Local would
-// either show every row (empty currentProject = no filter) or feel
-// broken — neither helps the user. The cursor row's ProjectRoot
-// becomes the new Local context.
-func actionTabSwitch(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.tab == tabLocal {
-		m.tab = tabGlobal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	}
-	if m.currentProject == "" {
-		row, ok := m.list.CursorRow()
-		if ok && row.ProjectRoot != "" {
-			return actionFocusProject(m, msg)
-		}
-	}
-	m.tab = tabLocal
-	m.list.SetRows(m.filteredRows())
-	return m, nil
-}
-
-// actionSearchEntry enters fuzzy-search mode. Subsequent keystrokes are
-// captured into searchQuery via handleSearchKey (which the search-mode
-// bypass at the top of handleKey routes to).
-func actionSearchEntry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.searchMode = true
-	m.searchQuery = ""
-	return m, nil
-}
-
 // actionNewWorkspace opens the new-workspace variant picker. Resolves
 // the TARGET project before the picker opens so every downstream
 // handler (loaders, submits, busy renderer) can read m.newTargetMgr
@@ -607,6 +635,27 @@ func actionSearchEntry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // construction error), surface via m.err and stay in listMode — the
 // picker doesn't open against a half-resolved target.
 func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// v0.17.0 Phase 1c: on Hosts tab, `n` opens the add-host wizard
+	// instead of the new-workspace picker. The wizard runs as a
+	// subprocess via tea.ExecProcess so it can take over the terminal
+	// for huh's form and the ssh-copy-id offer.
+	if m.tab == tabHosts {
+		return m, m.openAddHostForm()
+	}
+	// v0.17 Phase 1k: on a remote row, open the SAME TUI picker as
+	// local rows — Fresh + Prompt submit handlers branch on
+	// newTargetHost to dispatch `canopy new --on <host>` instead of
+	// the local createCmd. PR/Issue/Branch options are hidden in the
+	// picker for remote targets (they need remote gh integration).
+	if row, ok := m.list.CursorRow(); ok && row.Host != "" {
+		m.newTargetHost = row.Host
+		m.newTargetRemoteCwd = m.remoteCwdForRow(row.Host, row.Project)
+		m.newTargetName = row.Project
+		m.newTargetRoot = ""
+		m.newTargetMgr = nil
+		m.openNewPicker()
+		return m, nil
+	}
 	var (
 		mgr      *workspace.Manager
 		root     string
@@ -650,57 +699,9 @@ func (m *Model) clearNewTarget() {
 	m.newTargetMgr = nil
 	m.newTargetRoot = ""
 	m.newTargetName = ""
+	m.newTargetHost = ""
+	m.newTargetRemoteCwd = ""
 	m.pendingPrompt = ""
-}
-
-// actionFocusProject "loads into" the cursor row's project: sets it as
-// the current context, constructs its Manager (so `n` becomes available),
-// switches to Local tab. The unified TUI now behaves as if it were
-// launched from inside that project's source repo.
-//
-// Doesn't change the parent shell's cwd — that requires a shell wrapper
-// (lazygit-style env-var protocol) which canopy doesn't ship today
-// because the typical workflow uses `enter` on a project's main row to
-// switch tmux clients into that project's main session, which already
-// has shells in the project root.
-func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	row, ok := m.list.CursorRow()
-	if !ok || row.ProjectRoot == "" {
-		return m, nil
-	}
-	// Short-circuit when re-focusing the already-current project: just
-	// flip to Local tab and re-filter rows. Avoids a needless canopy.json
-	// reload (which would surface a spurious m.err if the file is
-	// transiently unreadable, even though the existing m.mgr is still
-	// valid). The visible side effect — landing on Local tab — happens
-	// either way.
-	if row.ProjectRoot == m.currentProject {
-		m.tab = tabLocal
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	}
-	cfg, err := config.LoadFrom(row.ProjectRoot)
-	if err != nil {
-		m.err = fmt.Errorf("focus %s: %w", row.Project, err)
-		return m, nil
-	}
-	mgr, err := workspace.New(cfg)
-	if err != nil {
-		// Don't fail loudly — focus still works for read + cross-project
-		// d/R via the transient-Manager path. Just `n` stays unavailable
-		// until the user fixes the underlying state issue.
-		m.err = fmt.Errorf("focus %s (read-only — Manager construction failed: %v)",
-			row.Project, err)
-		m.mgr = nil
-	} else {
-		m.mgr = mgr
-		m.err = nil
-	}
-	m.currentProject = row.ProjectRoot
-	m.projectName = cfg.Project
-	m.tab = tabLocal
-	m.list.SetRows(m.filteredRows())
-	return m, nil
 }
 
 // actionOpenPR opens the cursor row's pull request in the user's
@@ -741,6 +742,19 @@ func actionOpenBrowser(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok || row.Port <= 0 {
 		return m, nil
 	}
+	// v0.17.0: remote workspaces auto-open via ssh -L port forwarding.
+	// Backgrounds `ssh -fNL <port>:localhost:<port> <target>` (one-
+	// shot port-forward listener) then opens http://localhost:<port>.
+	// The tunnel persists in the background; killed when the user logs
+	// out or runs `pkill ssh` (not pretty but functional for v0.17).
+	if row.Host != "" {
+		target, err := m.resolveHostForExec(row.Host)
+		if err != nil {
+			m.err = fmt.Errorf("open browser on %s: %w", row.Host, err)
+			return m, nil
+		}
+		return m, m.openRemoteBrowser(target, row.Host, row.Port)
+	}
 	url := fmt.Sprintf("http://localhost:%d", row.Port)
 	cmd := exec.Command("xdg-open", url)
 	if err := cmd.Start(); err != nil {
@@ -751,285 +765,69 @@ func actionOpenBrowser(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// actionDelete opens the confirm-delete modal for the cursor row. Cross-
-// project rows construct a transient Manager via managerForRow; same
-// path as the same-project case so the confirm modal copy is uniform.
-func actionDelete(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	row, ok := m.list.CursorRow()
-	if !ok {
-		return m, nil
-	}
-	if row.IsMain {
-		m.err = fmt.Errorf("can't delete the main session via canopy rm — use `tmux kill-session -t %s` if you want it gone",
-			row.TmuxSession)
-		return m, nil
-	}
-	mgr, err := m.managerForRow(row)
-	if err != nil {
-		m.err = err
-		return m, nil
-	}
-	hangs, _ := mgr.SafetyPreflight(context.Background(), row.Name)
-	m.mode = confirmDeleteMode
-	m.deleteTarget = row.Name
-	m.deleteTargetRoot = row.ProjectRoot
-	m.deleteHangs = hangs
-	return m, nil
-}
-
-// actionAttach is the enter-key flow. Resurrects stopped workspaces
-// first; popup-mode uses switch-client + tea.Quit instead of attach.
-func actionAttach(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	return m.attachSelected()
-}
-
-// actionKill opens the confirm-kill modal for the cursor row. K kills
-// the tmux session only — state.json row (if any), worktree dir, and
-// branch all survive. Re-pressing Enter after kill resurrects: workspace
-// rows go through Manager.Resurrect, main rows go through
-// EnsureMainSession.
+// openRemoteBrowser establishes an SSH port forward to the remote host
+// (background, one-shot listener) then xdg-opens the localhost URL.
+// v0.17.0 Phase 1. The tunnel uses `ssh -fNL` which:
 //
-// Works on both workspace and main rows: K is a session-lifecycle
-// operation, not a workspace-identity operation. Killing main is no
-// more dangerous than killing a workspace session — both are
-// recoverable via Enter, and `claude --continue` keeps the AI
-// conversation history per-directory.
+//	-f  fork to background after auth
+//	-N  no remote command (port-forward only, no shell)
+//	-L  local-port:remote-host:remote-port
 //
-// Stopped/broken/orphaned rows (any row with Alive=false) are no-ops
-// — nothing to kill — surfaced as a status-line hint rather than
-// silently doing nothing.
-func actionKill(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	row, ok := m.list.CursorRow()
-	if !ok {
-		return m, nil
-	}
-	if !row.Alive {
-		label := row.Name
-		if row.IsMain {
-			label = "main session"
-		}
-		m.err = fmt.Errorf("%s has no live tmux session to kill", label)
-		return m, nil
-	}
-	m.mode = confirmKillMode
-	m.killTarget = row.Name
-	m.killTargetRoot = row.ProjectRoot
-	return m, nil
-}
-
-// handleConfirmKillKey is the keymap while the kill prompt is up.
-// y or Y kills the session; anything else cancels. Cancel-by-default
-// is the safe posture even though K is far less destructive than d.
-func (m *Model) handleConfirmKillKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "y" || msg.String() == "Y" {
-		// Resolve the target — same (Project, Name) match as confirm-delete.
-		var target Row
-		var found bool
-		for _, r := range m.filteredRows() {
-			if r.Name != m.killTarget {
-				continue
-			}
-			if m.killTargetRoot != "" && r.ProjectRoot != m.killTargetRoot {
-				continue
-			}
-			target = r
-			found = true
-			break
-		}
-		m.mode = listMode
-		m.killTarget = ""
-		m.killTargetRoot = ""
-		if !found {
-			// Row went away between modal open and confirm — treat as cancel.
-			return m, nil
-		}
-		return m, killCmd(m.tc, target.TmuxSession, target.Name)
-	}
-	// Anything else cancels.
-	m.mode = listMode
-	m.killTarget = ""
-	m.killTargetRoot = ""
-	return m, nil
-}
-
-// killDoneMsg carries the result of an async tmux kill back to Update.
-// session is plumbed through so the Update handler can invalidate the
-// load cache for the just-killed session — without that, a later
-// resurrect on the same row would serve up to TTL seconds of stale
-// RSS/CPU from the pre-kill snapshot.
-type killDoneMsg struct {
-	name    string
-	session string
-	err     error
-}
-
-// killCmd runs `tmux kill-session -t <session>` async via tea.Cmd. The
-// kill is fast (~5ms) but we still go through tea.Cmd so the UI stays
-// responsive and we can surface errors via the message channel rather
-// than blocking the Update goroutine.
+// The forwarded listener stays alive until ssh exits (e.g., user
+// logout, system reboot, pkill ssh). Not pretty for production —
+// proper tunnel management is post-v0.17 — but unblocks the daily
+// "press B on a remote row, see the dev server" loop.
 //
-// ErrSessionNotFound (the session was already dead) is treated as
-// success — the user's intent is "make this session gone," and gone
-// is gone whether we did the killing or someone else did.
-func killCmd(tc tmuxKiller, session, name string) tea.Cmd {
+// Idempotent: if a tunnel for this port already exists (laptop's port
+// is in use), ssh -L errors with "bind: Address already in use"; we
+// ignore that and proceed to xdg-open assuming the existing tunnel
+// is the one we want.
+func (m *Model) openRemoteBrowser(sshTarget, hostName string, port int) tea.Cmd {
 	return func() tea.Msg {
-		ctx := context.Background()
-		err := tc.Kill(ctx, session)
-		if err != nil && !isErrSessionNotFound(err) {
-			return killDoneMsg{name: name, session: session, err: fmt.Errorf("kill %s: %w", session, err)}
+		// Stand up the tunnel (background process; returns when forked).
+		tunnel := exec.Command("ssh",
+			"-o", "ControlMaster=auto",
+			"-o", "ControlPath="+filepath.Join(os.Getenv("HOME"), ".canopy", "ssh-%C.sock"),
+			"-o", "ControlPersist=300",
+			"-o", "BatchMode=yes",
+			"-o", "ExitOnForwardFailure=yes",
+			"-fNL", fmt.Sprintf("%d:localhost:%d", port, port),
+			sshTarget,
+		)
+		if out, err := tunnel.CombinedOutput(); err != nil {
+			outStr := string(out)
+			// "bind: Address already in use" means we already have a
+			// tunnel (probably from a previous B press). That's fine —
+			// just proceed to open the URL.
+			if !strings.Contains(outStr, "Address already in use") {
+				log.Warn("ui.open-remote-browser.tunnel-failed",
+					"host", hostName, "port", port, "err", err, "out", outStr)
+				return errMsg{err: fmt.Errorf("ssh -L tunnel to %s failed: %v (%s)", hostName, err, outStr)}
+			}
 		}
-		return killDoneMsg{name: name, session: session}
+		// Open the browser at the laptop-local port (now forwarded to
+		// the remote's port).
+		url := fmt.Sprintf("http://localhost:%d", port)
+		open := exec.Command("xdg-open", url)
+		if err := open.Start(); err != nil {
+			return errMsg{err: fmt.Errorf("xdg-open %s: %w", url, err)}
+		}
+		go func() { _ = open.Wait() }()
+		return nil
 	}
 }
 
-// tmuxKiller is the slice of *tmux.Client that killCmd needs. Decoupled
-// as an interface so tests can substitute a fake without spinning up a
-// real tmux server.
-type tmuxKiller interface {
-	Kill(ctx context.Context, name string) error
-}
+// errMsg lets a tea.Cmd report a deferred error back to the Update
+// handler, which surfaces it on m.err.
+type errMsg struct{ err error }
 
+// refreshAllMsg asks Update to dispatch a combined local+remote refresh.
+// Use this from inside tea.Cmd closures (e.g. post-remote-action
+// callbacks) when both row sources may have changed — local-only
+// refreshCmd would leave remote rows stale until the next 2s tick.
+type refreshAllMsg struct{}
 // Drawer (i / b) lives in drawer.go. actionInspect, handleDrawerKey,
 // drawerLoadCmd, drawerLoadedMsg, bareAttachCmd are defined there.
-
-// isErrSessionNotFound checks whether err's chain includes the tmux
-// "session not found" sentinel via errors.Is. The ui package already
-// imports internal/tmux for *tmux.Client, so there's no cycle risk —
-// the sentinel match is the right tool here, not string matching
-// (which would silently break if tmux ever rephrased the error or
-// internationalized it).
-func isErrSessionNotFound(err error) bool {
-	return errors.Is(err, tmux.ErrSessionNotFound)
-}
-
-// actionRetry handles `R`. v0.6: only ran on broken (no friction).
-// v0.8 (D3/CP1): non-broken triggers the y/N gate; broken still runs
-// setup directly. Cross-project goes through managerForRow.
-func actionRetry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
-	row, ok := m.list.CursorRow()
-	if !ok {
-		return m, nil
-	}
-	if row.IsMain {
-		return m, nil
-	}
-	if _, err := m.managerForRow(row); err != nil {
-		m.err = err
-		return m, nil
-	}
-	if row.Status != state.StatusBroken {
-		m.mode = confirmRetryMode
-		m.retryTarget = row.Name
-		return m, nil
-	}
-	mgr, _ := m.managerForRow(row) // already validated above
-	m.mode = busyMode
-	m.busyOp = busyOpRetry
-	m.busyTitle = fmt.Sprintf("Retrying setup for %q...", row.Name)
-	m.busyDone = false
-	m.busyOutput = ""
-	m.busyErr = nil
-	return m, retryCmdUI(mgr, row.Name)
-}
-
-// Cursor-nav actions forward to projectlist's Update so it can clamp
-// the cursor against its own row count. Bubbletea's Update returns
-// (Model, tea.Cmd); projectlist returns (Model value, tea.Cmd) so we
-// reassign m.list with the returned value.
-func actionCursorUp(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	next, cmd := m.list.Update(msg)
-	m.list = next
-	return m, cmd
-}
-
-func actionCursorDown(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	next, cmd := m.list.Update(msg)
-	m.list = next
-	return m, cmd
-}
-
-func actionCursorTop(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	next, cmd := m.list.Update(msg)
-	m.list = next
-	return m, cmd
-}
-
-func actionCursorBottom(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	next, cmd := m.list.Update(msg)
-	m.list = next
-	return m, cmd
-}
-
-// handleSearchKey handles keystrokes while m.searchMode is true.
-// Each query mutation pushes a fresh filtered set to projectlist so
-// the user sees results live as they type.
-func (m *Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
-		m.searchMode = false
-		m.searchQuery = ""
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	case tea.KeyEnter:
-		// Enter exits search mode keeping the query, so arrow nav
-		// works on the filtered list.
-		m.searchMode = false
-		return m, nil
-	case tea.KeyBackspace:
-		if len(m.searchQuery) > 0 {
-			runes := []rune(m.searchQuery)
-			m.searchQuery = string(runes[:len(runes)-1])
-			m.list.SetRows(m.filteredRows())
-		}
-		return m, nil
-	case tea.KeyRunes:
-		m.searchQuery += string(msg.Runes)
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	case tea.KeySpace:
-		m.searchQuery += " "
-		m.list.SetRows(m.filteredRows())
-		return m, nil
-	}
-	return m, nil
-}
-
-// handleConfirmRetryKey is the y/N gate for `R` on a non-broken workspace
-// (D3/CP1). Mirrors handleConfirmDeleteKey's shape.
-//
-// y → run scripts.setup with force=true (the CLI's --force semantics).
-// n / esc / any other key → cancel, back to listMode.
-func (m *Model) handleConfirmRetryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "y", "Y":
-		// User confirmed. Build the busy view and dispatch.
-		row, ok := m.list.CursorRow()
-		if !ok {
-			m.mode = listMode
-			m.retryTarget = ""
-			return m, nil
-		}
-		mgr, err := m.managerForRow(row)
-		if err != nil {
-			m.err = err
-			m.mode = listMode
-			m.retryTarget = ""
-			return m, nil
-		}
-		m.mode = busyMode
-		m.busyOp = busyOpRetry
-		m.busyTitle = fmt.Sprintf("Retrying setup for %q (forced)...", row.Name)
-		m.busyDone = false
-		m.busyOutput = ""
-		m.busyErr = nil
-		m.retryTarget = ""
-		return m, retryCmdUIForce(mgr, row.Name)
-	}
-	// Anything else cancels.
-	m.mode = listMode
-	m.retryTarget = ""
-	return m, nil
-}
 
 // filteredRows projects m.allRows into the rows currently rendered,
 // applying the active tab filter and search query. Returns a slice of
@@ -1040,11 +838,29 @@ func (m *Model) handleConfirmRetryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Search filter: fzf-style subsequence match against name + project +
 // branch. Empty query passes everything.
 func (m *Model) filteredRows() []state.GlobalRow {
-	out := make([]state.GlobalRow, 0, len(m.allRows))
-	for _, r := range m.allRows {
-		if m.tab == tabLocal && m.currentProject != "" &&
-			r.ProjectRoot != "" && r.ProjectRoot != m.currentProject {
-			continue
+	// Phase 1b: combine local m.allRows (Host="") and remote m.remoteRows
+	// (Host=<hostname>) into one slice for the projectlist renderer.
+	// Order: local first, then remote rows grouped by host (host names
+	// are sorted in refreshRemoteCmd's output already, but the
+	// projectlist render path relies on prevHost transitions so any
+	// row order works visually — local first is the principle).
+	combined := make([]state.GlobalRow, 0, len(m.allRows)+len(m.remoteRows))
+	combined = append(combined, m.allRows...)
+	combined = append(combined, m.remoteRows...)
+
+	out := make([]state.GlobalRow, 0, len(combined))
+	for _, r := range combined {
+		// Local tab filtering applies only to local rows. Remote rows
+		// never have a ProjectRoot that matches the current local
+		// project (different filesystems), so the Local tab simply
+		// excludes all remote rows. Global tab shows everything.
+		if m.tab == tabLocal {
+			if r.Host != "" {
+				continue
+			}
+			if m.currentProject != "" && r.ProjectRoot != "" && r.ProjectRoot != m.currentProject {
+				continue
+			}
 		}
 		if m.searchQuery != "" && !rowMatchesQuery(r, m.searchQuery) {
 			continue
@@ -1093,834 +909,6 @@ func max0(n int) int {
 	return n
 }
 
-// attachSelected wires the enter-key flow: figure out what to do based
-// on the selected row's status, build the right exec.Cmd, and hand it
-// to tea.ExecProcess. Returns the model + a tea.Cmd; the actual tmux
-// handoff happens after the Cmd fires. After detach the followup
-// refreshCmd reloads rows so the status the user sees matches reality.
-//
-// In popup mode (CANOPY_IN_POPUP=1), attach is replaced by switch-client
-// + tea.Quit so the user lands in the workspace from the parent tmux
-// client and the popup closes itself.
-//
-// Cross-project rows resolve their Manager via managerForRow — same
-// path as d/R. A stopped cross-project row resurrects via the transient
-// Manager.
-func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
-	row, ok := m.list.CursorRow()
-	if !ok {
-		return m, nil
-	}
-	ctx := context.Background()
-
-	if row.IsMain {
-		if row.Alive {
-			return m, m.attachOrSwitch(row.TmuxSession)
-		}
-		// Auto-start the main session and attach. Without this, enter on
-		// a dead main row sent the user back to a shell to run `canopy
-		// main` — which the popup user can't even reach without first
-		// closing the popup. EnsureMainSession is idempotent (no-op on a
-		// live session) so the dispatch is uniform.
-		mgr, err := m.managerForRow(row)
-		if err != nil {
-			m.err = err
-			return m, nil
-		}
-		session, err := mgr.EnsureMainSession(ctx)
-		if err != nil {
-			m.err = fmt.Errorf("start main session: %w", err)
-			return m, nil
-		}
-		return m, m.attachOrSwitch(session)
-	}
-
-	switch effectiveStatus(row) {
-	case "main", state.StatusReady:
-		return m, m.attachOrSwitch(row.TmuxSession)
-
-	case state.StatusStopped:
-		// Resurrect, then attach. Cross-project: managerForRow gives the
-		// right Manager; popup mode still uses tea.ExecProcess for the
-		// resurrect path (it spawns a workspace setup which doesn't fit
-		// switch-client semantics) and falls through to attach after.
-		//
-		// Reached via two paths: a row recorded as stopped, OR a row
-		// recorded as ready but whose tmux session is dead (effectiveStatus
-		// downgrades the latter so Enter on a stale-ready row resurrects
-		// instead of attempting an attach that would fail with
-		// ErrSessionNotFound).
-		mgr, err := m.managerForRow(row)
-		if err != nil {
-			m.err = err
-			return m, nil
-		}
-		return m, resurrectAndAttachCmd(mgr, row.Name)
-
-	case state.StatusBroken:
-		m.err = fmt.Errorf("workspace %q is broken — see ~/.canopy/log/canopy.log; press R to re-run setup, or `canopy rm %s` to drop it",
-			row.Name, row.Name)
-		return m, nil
-
-	case state.StatusOrphaned:
-		m.err = fmt.Errorf("workspace %q has no on-disk dir — run `canopy rm %s` to drop the row",
-			row.Name, row.Name)
-		return m, nil
-
-	case state.StatusSettingUp:
-		m.err = fmt.Errorf("workspace %q is still setting up — try refresh (r) in a moment",
-			row.Name)
-		return m, nil
-	}
-
-	log.Warn("ui.attach.unknown-status", "name", row.Name, "status", row.Status)
-	_ = ctx
-	return m, nil
-}
-
-// effectiveStatus returns the status the Enter dispatcher should act on.
-// For workspace rows recorded as ready, BuildGlobalRows already probes
-// the tmux session via HasSession and stamps the result on row.Alive —
-// when that probe says the session is gone, the recorded "ready" status
-// is stale (someone killed the session out-of-band) and the right action
-// is to resurrect, not attempt an attach that will fail with
-// ErrSessionNotFound.
-//
-// Main rows are excluded: attachSelected handles the IsMain branch
-// before reaching here, and main-row liveness drives a different path
-// (EnsureMainSession). Stopped/broken/orphaned rows pass through
-// unchanged — Alive is informational for them, not authoritative.
-func effectiveStatus(row Row) state.Status {
-	if !row.IsMain && row.Status == state.StatusReady && !row.Alive {
-		return state.StatusStopped
-	}
-	return row.Status
-}
-
-// attachOrSwitch dispatches the right tmux verb for the current context:
-// switch-client + tea.Quit when CANOPY_IN_POPUP=1 (popup mode), or
-// tea.ExecProcess attach for fullscreen mode. Single source of truth
-// replacing the GlobalModel.popupSwitchAndQuit / Model.attachCmd split.
-//
-// Uses m.tc directly (always non-nil) rather than reaching into m.mgr.Tmux,
-// which would panic when invoked from outside any project (mgr nil).
-// The post-attach refresh is dispatched via m.store + m.tc rather than
-// the project-only mgr.Reconcile path so it works in both contexts.
-func (m *Model) attachOrSwitch(session string) tea.Cmd {
-	// Backfill @canopy-role tags for v0.15-style sessions that never
-	// went through the v0.16+ buildSession (which tags at creation).
-	// Best-effort: errors logged, never block attach. Common path for
-	// both popup (switch-client) and fullscreen (tea.ExecProcess) modes.
-	// launcherType: pulls from this canopy invocation's project config
-	// when available; empty in Global tab cross-project flows where
-	// m.mgr is nil. Empty defaults to "agent:claude" via agent.RoleForType,
-	// which matches every v0.15 workspace's actual agent.
-	var launcherType string
-	if m.mgr != nil {
-		launcherType = m.mgr.Cfg.Agent.Type
-	}
-	workspace.BackfillRoles(context.Background(), m.tc, session, launcherType)
-
-	if m.inPopup {
-		return func() tea.Msg {
-			if err := m.tc.SwitchClient(context.Background(), session); err != nil {
-				log.Warn("ui.popup.switch_client_failed", "session", session, "err", err.Error())
-			}
-			return tea.QuitMsg{}
-		}
-	}
-	// Fullscreen mode: tea.ExecProcess attach. Build the tmux command
-	// directly via the embedded tmux.Client; refresh on detach.
-	cmd, err := m.tc.AttachCmd(context.Background(), session)
-	if err != nil {
-		return func() tea.Msg { return rowsLoadedMsg{err: err} }
-	}
-	mgr, store, tc := m.mgr, m.store, m.tc
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
-			log.Warn("ui.attach.exec-failed", "session", session, "err", err)
-			return rowsLoadedMsg{err: fmt.Errorf("attach %s: %w", session, err)}
-		}
-		return refreshCmd(mgr, tc, store)()
-	})
-}
-
-// deletingCurrentSession reports whether the about-to-be-deleted
-// workspace is the one this canopy invocation is sitting inside. True
-// in two cases:
-//
-//   - Popup mode: the popup was opened from inside workspace X
-//     (`-d "#{pane_current_path}"` carried the cwd) and the user is
-//     deleting X.
-//   - Fullscreen mode: canopy was launched from inside workspace X
-//     (cwd matched X's path at startup, so currentWorkspace was set)
-//     and the user is deleting X.
-//
-// Both shapes of "I'm deleting the workspace I'm in" need the same
-// escape: spawn the cleanup as a detached subprocess and detach the
-// tmux client, so canopy can exit cleanly before the session it's
-// hosted by dies.
-//
-// Returns false when there's no current workspace tracked, or when
-// the (root, name) pair doesn't match.
-func (m *Model) deletingCurrentSession(projectRoot, name string) bool {
-	if m.currentWorkspace == "" {
-		return false
-	}
-	return name == m.currentWorkspace && projectRoot == m.currentWorkspaceRoot
-}
-
-// detachAndRemoveCmd handles the "delete the workspace I'm currently
-// sitting in" case for both popup and fullscreen modes. Replaces the
-// busyMode flow + escapeIfDeletingCurrent's SwitchClient(canopy-main):
-// the older path auto-built the project main session (slow nvim+claude
-// spin-up), which the user perceived as "tmux loaded a random
-// session." It also doesn't help fullscreen mode — switching the tmux
-// *client* to main doesn't move the canopy *process* off the doomed
-// pane, so canopy would still die mid-cleanup. Instead:
-//
-//  1. Spawn a detached `canopy rm <name> --yes --force` subprocess.
-//     Setsid + Process.Release disowns it so it survives our exit and
-//     completes cleanup independently. Logs go to ~/.canopy/log/canopy.log
-//     via the standard logger; stdio is detached.
-//  2. Detach the calling tmux client. The popup overlay closes (popup
-//     mode) or the user's terminal returns from `tmux attach` to its
-//     parent shell (fullscreen mode). When canopy was launched from a
-//     non-tmux shell, $TMUX is unset and detach-client errors out
-//     harmlessly — the cleanup-then-quit sequence still works.
-//  3. tea.Quit. Belt-and-suspenders: detach-client SIGHUPs us anyway,
-//     but explicit Quit makes the path predictable for tests.
-//
-// Errors are logged, not surfaced — canopy is closing and there's no
-// UI left to show them in. The detached subprocess will retry-style
-// surface any cleanup failure as a `broken`/`orphaned` row next time
-// the user opens canopy.
-func (m *Model) detachAndRemoveCmd(projectRoot, name string) tea.Cmd {
-	tc := m.tc
-	return func() tea.Msg {
-		if exe, err := os.Executable(); err == nil {
-			cmd := exec.Command(exe, "rm", "--yes", "--force", name)
-			cmd.Dir = projectRoot
-			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-			if err := cmd.Start(); err != nil {
-				log.Warn("ui.popup-delete.spawn-failed", "name", name, "err", err.Error())
-			} else {
-				_ = cmd.Process.Release()
-			}
-		} else {
-			log.Warn("ui.popup-delete.executable-lookup-failed", "err", err.Error())
-		}
-		if err := tc.DetachClient(context.Background()); err != nil {
-			log.Warn("ui.popup-delete.detach-failed", "err", err.Error())
-		}
-		return tea.QuitMsg{}
-	}
-}
-
-// escapeIfDeletingCurrent moves the user's tmux client off the workspace
-// that's about to be removed. Without this, deleting the workspace whose
-// session hosts the popup (or whose tmux session the user is attached to)
-// strands the client when Manager.Remove kills the session.
-//
-// Triggered when (projectRoot, name) matches (currentWorkspaceRoot,
-// currentWorkspace). Match is on the full pair because workspace names
-// are unique per project, not globally — A/foo and B/foo coexist. We
-// bring up the project's main session if it isn't already (idempotent —
-// the `enter`-on-dead-main-row path uses the same EnsureMainSession),
-// then switch-client to it. Both calls are best-effort: failures don't
-// block the delete, just log so the user gets the diagnostic if their
-// client did get stranded.
-//
-// No-op when currentWorkspace is empty (popup launched from outside any
-// workspace) or doesn't match the (root, name) pair (user is deleting a
-// different workspace than the one they're sitting in).
-func (m *Model) escapeIfDeletingCurrent(mgr *workspace.Manager, projectRoot, name string) {
-	if mgr == nil || m.currentWorkspace == "" {
-		return
-	}
-	if name != m.currentWorkspace || projectRoot != m.currentWorkspaceRoot {
-		return
-	}
-	ctx := context.Background()
-	mainSession, err := mgr.EnsureMainSession(ctx)
-	if err != nil {
-		log.Warn("ui.delete.ensure-main-failed", "name", name, "err", err.Error())
-		return
-	}
-	if err := m.tc.SwitchClient(ctx, mainSession); err != nil {
-		log.Warn("ui.delete.switch-client-failed", "target", mainSession, "err", err.Error())
-	}
-}
-
-// resurrectAndAttachCmd handles the stopped-status flow. Runs Resurrect
-// (which rebuilds the tmux session with claude --continue || claude),
-// then attaches via the normal path.
-func resurrectAndAttachCmd(mgr *workspace.Manager, name string) tea.Cmd {
-	return func() tea.Msg {
-		ctx := context.Background()
-		ws, err := mgr.Resurrect(ctx, name)
-		if err != nil {
-			return rowsLoadedMsg{err: fmt.Errorf("resurrect %s: %w", name, err)}
-		}
-		// We can't return a tea.Cmd from a tea.Msg — instead we kick
-		// off the attach as a follow-on by returning an attachAfterMsg
-		// that Update routes through.
-		return attachAfterMsg{session: ws.TmuxSessionName()}
-	}
-}
-
-// attachAfterMsg is the bridge between resurrectAndAttachCmd's
-// async resurrection and the synchronous tea.ExecProcess attach. Update
-// catches it and dispatches attachCmd.
-type attachAfterMsg struct {
-	session string
-}
-
-// openNewPicker resets state and opens the variant picker. Called
-// from the listMode 'n' keypress and from sub-modal esc handlers
-// (back-one-step). Idempotent; safe to call from any mode.
-func (m *Model) openNewPicker() {
-	m.mode = newPickerMode
-	m.newPickerCursor = 0
-	m.nameInput.Reset()
-	m.nameInput.Blur()
-}
-
-// handleNewPickerKey is the keymap for the variant picker (step 1
-// of the new-workspace flow). Single-letter shortcuts launch each
-// sub-modal directly; arrow-then-enter is the keyboard-discoverable
-// alternative for users who scan before they type.
-//
-// Esc returns to listMode (one step back). q is suppressed here so
-// the user can't accidentally quit canopy from inside the picker;
-// they have to esc back first. ctrl+c is the global escape hatch.
-func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.mode = listMode
-		m.clearNewTarget()
-		return m, nil
-	case "ctrl+c":
-		return m, tea.Quit
-
-	// Single-key shortcuts — launch the corresponding sub-modal.
-	case "n", "f":
-		// 'n' = "new (fresh)" — same letter as the keymap, no surprise.
-		// 'f' is an alias if the user thinks "fresh".
-		return m.openNewFresh(), textinputBlink()
-	case "p":
-		return m, m.openNewPR()
-	case "i":
-		return m, m.openNewIssue()
-	case "b":
-		return m, m.openNewBranch()
-	case "t":
-		// 't' for "task" — see newPickerOptions for the letter-choice
-		// rationale (no good mnemonic for "prompt", and `p` is taken).
-		return m.openNewPrompt()
-
-	// Arrow nav for keyboard-discovery users.
-	case "up", "k":
-		if m.newPickerCursor > 0 {
-			m.newPickerCursor--
-		}
-		return m, nil
-	case "down", "j":
-		if m.newPickerCursor < newPickerOptionCount-1 {
-			m.newPickerCursor++
-		}
-		return m, nil
-	case "enter":
-		// Same dispatch as the letter shortcuts, just keyed off cursor.
-		// Indices follow newPickerOptions order: fresh, prompt, PR,
-		// issue, branch.
-		switch m.newPickerCursor {
-		case 0:
-			return m.openNewFresh(), textinputBlink()
-		case 1:
-			return m.openNewPrompt()
-		case 2:
-			return m, m.openNewPR()
-		case 3:
-			return m, m.openNewIssue()
-		case 4:
-			return m, m.openNewBranch()
-		}
-		return m, nil
-	}
-	return m, nil
-}
-
-// newPickerOptionCount is the number of options in the variant
-// picker. Used to bound cursor nav. Update if newPickerOption is
-// extended.
-const newPickerOptionCount = 5
-
-// openNewFresh prepares the fresh-workspace sub-modal (step 2a).
-// Reused by the picker's 'n'/'f'/enter-on-Fresh dispatch and any
-// future direct-entry shortcut. Returns the model so the caller can
-// chain the textinputBlink cmd.
-func (m *Model) openNewFresh() *Model {
-	m.mode = newFreshMode
-	m.nameInput.Reset()
-	m.nameInput.Focus()
-	return m
-}
-
-// handleNewFreshKey is the keymap for the fresh-workspace name input
-// (step 2a). Esc steps back to the picker. Enter submits with the
-// typed name (or empty → namegen). Anything else falls through to
-// the textinput.
-func (m *Model) handleNewFreshKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.openNewPicker()
-		return m, nil
-	case "enter":
-		name := m.nameInput.Value()
-		spec := workspace.SourceSpec{} // fresh = zero spec
-		m.busyOp = busyOpCreate
-		m.busyTitle = newBusyTitle(name, spec)
-		m.busyDone = false
-		m.busyOutput = ""
-		m.busyErr = nil
-		m.mode = busyMode
-		m.nameInput.Blur()
-		return m, createCmd(m.newTargetMgr, name, spec)
-	}
-	var cmd tea.Cmd
-	m.nameInput, cmd = m.nameInput.Update(msg)
-	return m, cmd
-}
-
-// openNewPrompt prepares the "fresh + prompt" sub-modal (the 5th
-// picker option). Mirrors openNewFresh but focuses the prompt
-// textarea. Workspace name = namegen (no name input in this mode —
-// the prompt is the user-facing primary; if they want an explicit
-// name they can use the CLI's `canopy new --name foo --prompt ...`).
-// Returns the cursor-blink cmd from textarea.Focus so the caret
-// blinks immediately on open.
-func (m *Model) openNewPrompt() (*Model, tea.Cmd) {
-	m.mode = newPromptMode
-	m.promptInput.Reset()
-	blink := m.promptInput.Focus()
-	return m, blink
-}
-
-// handleNewPromptKey is the keymap for the "fresh + prompt" sub-modal.
-//
-// Esc steps back to the picker. Ctrl+S submits when the prompt is
-// non-empty (an empty Ctrl+S is a no-op — the placeholder already
-// telegraphs the requirement, so an inline error would be noise).
-// Enter inserts a newline because the prompt is a textarea, not a
-// textinput — multi-line briefings are the whole point of the
-// upgrade from single-line input.
-//
-// Anything else falls through to the textarea so the user can type
-// normally.
-func (m *Model) handleNewPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.openNewPicker()
-		return m, nil
-	case "ctrl+s":
-		prompt := strings.TrimSpace(m.promptInput.Value())
-		if prompt == "" {
-			return m, nil
-		}
-		// Stash the prompt on the model so createDoneMsg can pick it
-		// up after Create succeeds. The actual send happens between
-		// Create-success and attach.
-		m.pendingPrompt = prompt
-		spec := workspace.SourceSpec{} // fresh = zero spec
-		m.busyOp = busyOpCreate
-		m.busyTitle = "Creating workspace + prompting agent..."
-		m.busyDone = false
-		m.busyOutput = ""
-		m.busyErr = nil
-		m.mode = busyMode
-		m.promptInput.Blur()
-		return m, createCmd(m.newTargetMgr, "", spec)
-	}
-	var cmd tea.Cmd
-	m.promptInput, cmd = m.promptInput.Update(msg)
-	return m, cmd
-}
-
-// openNewPR transitions to the PR picker sub-modal and kicks off the
-// async loader. The loader returns prListLoadedMsg; until it arrives,
-// the renderer shows a "Loading PRs..." state.
-func (m *Model) openNewPR() tea.Cmd {
-	m.mode = newPRMode
-	m.listInput.Reset()
-	m.listInput.Placeholder = "type a PR number, or arrow to a row below"
-	m.listInput.Focus()
-	m.listCursor = 0
-	m.newLoading = true
-	m.newLoadErr = nil
-	m.newPRs = nil
-	return tea.Batch(textinputBlink(), loadPRsCmd(m.newTargetRoot))
-}
-
-// prListLoadedMsg carries the result of an async ghx.ListPRs call.
-// Update on receipt: clear loading, populate newPRs, surface any
-// error inline.
-type prListLoadedMsg struct {
-	prs []ghx.PRSummary
-	err error
-}
-
-// loadPRsCmd dispatches ghx.ListPRs in a goroutine. Limit 20 keeps
-// the picker scannable; users with > 20 open PRs can still type the
-// number directly.
-func loadPRsCmd(projectRoot string) tea.Cmd {
-	return func() tea.Msg {
-		prs, err := ghx.ListPRs(context.Background(), projectRoot, 20)
-		return prListLoadedMsg{prs: prs, err: err}
-	}
-}
-
-// handleNewPRKey is the keymap for the PR picker sub-modal. Two
-// dispatch shapes:
-//
-//   - User types a number: enter creates a workspace from PR #<num>
-//     directly (works even when the list is empty / unloaded — covers
-//     the "I know the number, just go" power-user path).
-//   - User arrows into the loaded list: enter creates from the
-//     selected PR (recognition path — see the PR title before
-//     committing).
-//
-// Esc returns to the picker (back-one-step).
-func (m *Model) handleNewPRKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.openNewPicker()
-		return m, nil
-
-	case "up", "ctrl+k":
-		// Arrow nav on the list. Doesn't consume the textinput's
-		// own up-arrow (we don't bind that in textinput) so users
-		// can scan without losing typed-in number.
-		if m.listCursor > 0 {
-			m.listCursor--
-		}
-		return m, nil
-	case "down", "ctrl+j":
-		// Bound by FILTERED length so the cursor can't drift past
-		// what's visible in the picker.
-		if m.listCursor < len(filterPRs(m.newPRs, m.listInput.Value()))-1 {
-			m.listCursor++
-		}
-		return m, nil
-
-	case "enter":
-		// Two paths: typed-number wins if the input parses as an
-		// integer. Otherwise, fall back to the cursor's selection
-		// in the FILTERED list.
-		if num, ok := parsePositiveInt(m.listInput.Value()); ok {
-			return m.submitNewPR(num)
-		}
-		filtered := filterPRs(m.newPRs, m.listInput.Value())
-		if len(filtered) > 0 && m.listCursor < len(filtered) {
-			return m.submitNewPR(filtered[m.listCursor].Number)
-		}
-		// Nothing typed, no list — surface a hint.
-		m.newLoadErr = fmt.Errorf("type a PR number or wait for the list to load")
-		return m, nil
-	}
-
-	// Forward to textinput. Reset cursor when filter changes so
-	// the highlighted row doesn't drift past the visible list.
-	prevValue := m.listInput.Value()
-	var cmd tea.Cmd
-	m.listInput, cmd = m.listInput.Update(msg)
-	if m.listInput.Value() != prevValue {
-		m.listCursor = 0
-		m.newLoadErr = nil
-	}
-	return m, cmd
-}
-
-// submitNewPR is the shared "go fetch this PR and create the
-// workspace" path used by both enter-with-number and enter-on-row.
-// Flips to busyMode and dispatches the existing createCmd; the
-// resolver does the gh + git fetch in the goroutine.
-func (m *Model) submitNewPR(num int) (tea.Model, tea.Cmd) {
-	spec := workspace.SourceSpec{PR: num}
-	m.busyOp = busyOpCreate
-	m.busyTitle = newBusyTitle("", spec)
-	m.busyDone = false
-	m.busyOutput = ""
-	m.busyErr = nil
-	m.mode = busyMode
-	m.listInput.Blur()
-	return m, createCmd(m.newTargetMgr, "", spec)
-}
-
-// openNewIssue is the issue-picker analog of openNewPR. Same shape,
-// different data type: ghx.IssueSummary instead of PRSummary.
-func (m *Model) openNewIssue() tea.Cmd {
-	m.mode = newIssueMode
-	m.listInput.Reset()
-	m.listInput.Placeholder = "type an issue number, or arrow to a row below"
-	m.listInput.Focus()
-	m.listCursor = 0
-	m.newLoading = true
-	m.newLoadErr = nil
-	m.newIssues = nil
-	return tea.Batch(textinputBlink(), loadIssuesCmd(m.newTargetRoot))
-}
-
-// issueListLoadedMsg is the issue analog of prListLoadedMsg.
-type issueListLoadedMsg struct {
-	issues []ghx.IssueSummary
-	err    error
-}
-
-// loadIssuesCmd dispatches ghx.ListIssues in a goroutine.
-func loadIssuesCmd(projectRoot string) tea.Cmd {
-	return func() tea.Msg {
-		issues, err := ghx.ListIssues(context.Background(), projectRoot, 20)
-		return issueListLoadedMsg{issues: issues, err: err}
-	}
-}
-
-// handleNewIssueKey mirrors handleNewPRKey for issues. Two enter
-// dispatch shapes: typed-number → fetch by ID; arrow-then-enter →
-// use cursor's selection. Esc returns to picker.
-func (m *Model) handleNewIssueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.openNewPicker()
-		return m, nil
-
-	case "up", "ctrl+k":
-		if m.listCursor > 0 {
-			m.listCursor--
-		}
-		return m, nil
-	case "down", "ctrl+j":
-		if m.listCursor < len(filterIssues(m.newIssues, m.listInput.Value()))-1 {
-			m.listCursor++
-		}
-		return m, nil
-
-	case "enter":
-		if num, ok := parsePositiveInt(m.listInput.Value()); ok {
-			return m.submitNewIssue(num)
-		}
-		filtered := filterIssues(m.newIssues, m.listInput.Value())
-		if len(filtered) > 0 && m.listCursor < len(filtered) {
-			return m.submitNewIssue(filtered[m.listCursor].Number)
-		}
-		m.newLoadErr = fmt.Errorf("type an issue number or wait for the list to load")
-		return m, nil
-	}
-
-	prev := m.listInput.Value()
-	var cmd tea.Cmd
-	m.listInput, cmd = m.listInput.Update(msg)
-	if m.listInput.Value() != prev {
-		m.listCursor = 0
-		m.newLoadErr = nil
-	}
-	return m, cmd
-}
-
-// submitNewIssue is the shared "go fetch this issue and create the
-// workspace" path. Same shape as submitNewPR.
-func (m *Model) submitNewIssue(num int) (tea.Model, tea.Cmd) {
-	spec := workspace.SourceSpec{Issue: num}
-	m.busyOp = busyOpCreate
-	m.busyTitle = newBusyTitle("", spec)
-	m.busyDone = false
-	m.busyOutput = ""
-	m.busyErr = nil
-	m.mode = busyMode
-	m.listInput.Blur()
-	return m, createCmd(m.newTargetMgr, "", spec)
-}
-
-// openNewBranch is the branch-picker analog. Doesn't need gh —
-// `git for-each-ref` is fast enough that we can load synchronously
-// in the open path. Loading state is kept for parity with PR/issue
-// pickers and to handle the (rare) slow-disk case.
-func (m *Model) openNewBranch() tea.Cmd {
-	m.mode = newBranchMode
-	m.listInput.Reset()
-	m.listInput.Placeholder = "type to filter, e.g. `feat`"
-	m.listInput.Focus()
-	m.listCursor = 0
-	m.newLoading = true
-	m.newLoadErr = nil
-	m.newBranches = nil
-	return tea.Batch(textinputBlink(), loadBranchesCmd(m.newTargetRoot))
-}
-
-// branchListLoadedMsg carries the result of an async git
-// for-each-ref. Same shape as the PR/issue load messages.
-type branchListLoadedMsg struct {
-	branches []string
-	err      error
-}
-
-// loadBranchesCmd dispatches git.ListBranches in a goroutine. Even
-// though git is fast, putting it in a goroutine keeps the open
-// path consistent (bubbletea Cmd → Msg) and avoids blocking the
-// initial render.
-func loadBranchesCmd(projectRoot string) tea.Cmd {
-	return func() tea.Msg {
-		branches, err := git.ListBranches(context.Background(), projectRoot)
-		return branchListLoadedMsg{branches: branches, err: err}
-	}
-}
-
-// handleNewBranchKey is the keymap for the branch picker. Filter
-// behavior matches PR/issue pickers (case-insensitive substring),
-// but enter takes a STRING (the branch name) instead of a number.
-// No "type by name and submit" fast path because branch names can
-// contain slashes that conflict with the filter — the user is
-// expected to filter then pick.
-func (m *Model) handleNewBranchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.openNewPicker()
-		return m, nil
-
-	case "up", "ctrl+k":
-		if m.listCursor > 0 {
-			m.listCursor--
-		}
-		return m, nil
-	case "down", "ctrl+j":
-		// Bound by the filtered length, not the raw length, so the
-		// cursor doesn't drift past visible rows.
-		if m.listCursor < len(filterBranches(m.newBranches, m.listInput.Value()))-1 {
-			m.listCursor++
-		}
-		return m, nil
-
-	case "enter":
-		filtered := filterBranches(m.newBranches, m.listInput.Value())
-		if len(filtered) == 0 {
-			m.newLoadErr = fmt.Errorf("no branches match — adjust filter or check your remote")
-			return m, nil
-		}
-		idx := m.listCursor
-		if idx >= len(filtered) {
-			idx = len(filtered) - 1
-		}
-		// Strip the "origin/" prefix if present so the resolver's
-		// origin-vs-local logic sees a bare branch name. The branch
-		// resolver already handles both routes; passing the bare
-		// name is the unambiguous form.
-		ref := filtered[idx]
-		bare := strings.TrimPrefix(ref, "origin/")
-		// AllowLocal flips on when the picked entry is a local-only
-		// branch (no origin/<name> alongside it). Detect that by
-		// checking whether the matching origin/<bare> exists in the
-		// list.
-		spec := workspace.SourceSpec{Branch: bare}
-		if !strings.HasPrefix(ref, "origin/") {
-			// Local-only entry. The resolver requires --allow-local
-			// when the branch isn't on origin.
-			if !branchHasOrigin(m.newBranches, bare) {
-				spec.AllowLocal = true
-			}
-		}
-		return m.submitNewBranch(spec)
-	}
-
-	prev := m.listInput.Value()
-	var cmd tea.Cmd
-	m.listInput, cmd = m.listInput.Update(msg)
-	if m.listInput.Value() != prev {
-		m.listCursor = 0
-		m.newLoadErr = nil
-	}
-	return m, cmd
-}
-
-// submitNewBranch flips to busyMode with a SourceSpec for the
-// chosen branch. Allows the SourceSpec to carry AllowLocal for
-// local-only branches.
-func (m *Model) submitNewBranch(spec workspace.SourceSpec) (tea.Model, tea.Cmd) {
-	m.busyOp = busyOpCreate
-	m.busyTitle = newBusyTitle("", spec)
-	m.busyDone = false
-	m.busyOutput = ""
-	m.busyErr = nil
-	m.mode = busyMode
-	m.listInput.Blur()
-	return m, createCmd(m.newTargetMgr, "", spec)
-}
-
-// branchHasOrigin returns true when the ListBranches output contains
-// "origin/<bare>" alongside the local "<bare>". Used by the branch
-// picker to decide whether AllowLocal should be set on the spec.
-func branchHasOrigin(branches []string, bare string) bool {
-	target := "origin/" + bare
-	for _, b := range branches {
-		if b == target {
-			return true
-		}
-	}
-	return false
-}
-
-// filterBranches narrows the loaded branch list. Case-insensitive
-// substring match against the full ref (so "origin/feat" can match
-// "origin/feat/oauth" and a typed "feat" matches both local + remote).
-func filterBranches(branches []string, filter string) []string {
-	filter = strings.TrimSpace(strings.ToLower(filter))
-	if filter == "" {
-		return branches
-	}
-	out := make([]string, 0, len(branches))
-	for _, b := range branches {
-		if strings.Contains(strings.ToLower(b), filter) {
-			out = append(out, b)
-		}
-	}
-	return out
-}
-
-// parsePositiveInt is the shared "is this a PR/issue number" check
-// for the picker enter handlers. Returns (n, true) only for integers
-// > 0; "0" / "-1" / "abc" / "" all return (_, false).
-func parsePositiveInt(s string) (int, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, false
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil || n <= 0 {
-		return 0, false
-	}
-	return n, true
-}
-
-// newBusyTitle picks the busy-mode title shown while a Create
-// operation is in flight. Customized per source variant so the user
-// sees "Checking out PR #1234..." instead of a generic spinner —
-// useful because the gh + git fetch can take a few seconds before
-// scripts.setup even starts.
-func newBusyTitle(name string, spec workspace.SourceSpec) string {
-	switch {
-	case spec.PR > 0:
-		return fmt.Sprintf("Checking out PR #%d...", spec.PR)
-	case spec.Issue > 0:
-		return fmt.Sprintf("Setting up workspace for issue #%d...", spec.Issue)
-	case spec.Branch != "":
-		return fmt.Sprintf("Checking out branch %q...", spec.Branch)
-	}
-	if name != "" {
-		return fmt.Sprintf("Creating workspace %q...", name)
-	}
-	return "Creating workspace..."
-}
-
 // handleBusyModeKey: the busy view shows the in-progress or completed
 // workspace creation. While in progress, every key is ignored. Once
 // done (busyDone=true), any key dismisses the view and triggers a
@@ -1947,356 +935,3 @@ func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, m.refresh()
 }
 
-// handleConfirmDeleteKey is the keymap while the delete prompt is up.
-//
-// Two modes based on whether v0.6 SafetyPreflight detected hangs:
-//
-//   - Clean (no hangs): y or Y kicks off the removal. Lowercase y is
-//     an explicit choice for safety (no accidental keypress) but
-//     forgiving for the muscle-memory case (most users hit y).
-//   - Hanging work: ONLY capital F kicks off the (forced) removal.
-//     Lowercase y, n, N, esc, anything else cancels. Capital F mirrors
-//     the CLI's --force flag and makes the user's destructive intent
-//     explicit ("yes, lose the uncommitted work").
-//
-// Cancel-by-default is the safe posture for a destructive operation;
-// we only proceed on a deliberate keypress.
-func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	hasHangs := len(m.deleteHangs) > 0
-
-	// Resolve the target row's Manager (may be transient for cross-project
-	// rows on Global tab). Match against BOTH ProjectRoot AND Name —
-	// matching by Name alone would let two projects with same-named
-	// workspaces ("foo") confuse the modal: a refresh between modal-open
-	// and confirm could put project B's "foo" at the position project
-	// A's "foo" was at, leading to deleting the wrong workspace. Store
-	// + match the (Project, Name) pair to snapshot the user's intent at
-	// modal-open time and survive any reordering.
-	//
-	// Backward-compat: if deleteTargetRoot is empty (modal opened by an
-	// older code path before the field was added), fall through to the
-	// name-only match — losing exactness for legacy paths but avoiding
-	// a hard cancel mid-upgrade.
-	resolveTargetMgr := func() (*workspace.Manager, bool) {
-		rows := m.filteredRows()
-		for _, r := range rows {
-			if r.Name != m.deleteTarget {
-				continue
-			}
-			if m.deleteTargetRoot != "" && r.ProjectRoot != m.deleteTargetRoot {
-				continue
-			}
-			mgr, err := m.managerForRow(r)
-			if err != nil {
-				m.err = err
-				return nil, false
-			}
-			return mgr, true
-		}
-		// Row went away between modal open and confirm — treat as cancel.
-		return nil, false
-	}
-
-	// Force key (capital F): only valid path when hangs exist.
-	if msg.String() == "F" && hasHangs {
-		mgr, ok := resolveTargetMgr()
-		if !ok {
-			m.mode = listMode
-			m.deleteTarget = ""
-		m.deleteTargetRoot = ""
-			m.deleteHangs = nil
-			return m, nil
-		}
-		name := m.deleteTarget
-		root := m.deleteTargetRoot
-		m.deleteTarget = ""
-		m.deleteTargetRoot = ""
-		m.deleteHangs = nil
-		// Deleting-the-workspace-I'm-in (popup OR fullscreen): skip
-		// busyMode and run the cleanup as a detached subprocess. See
-		// detachAndRemoveCmd for rationale.
-		if m.deletingCurrentSession(root, name) {
-			return m, m.detachAndRemoveCmd(root, name)
-		}
-		m.escapeIfDeletingCurrent(mgr, root, name)
-		m.mode = busyMode
-		m.busyOp = busyOpRemove
-		m.busyTitle = fmt.Sprintf("Force-removing workspace %q...", name)
-		m.busyDone = false
-		m.busyOutput = ""
-		m.busyErr = nil
-		return m, removeCmd(mgr, name)
-	}
-
-	// Normal y/Y: only valid when no hangs.
-	if !hasHangs && (msg.String() == "y" || msg.String() == "Y") {
-		mgr, ok := resolveTargetMgr()
-		if !ok {
-			m.mode = listMode
-			m.deleteTarget = ""
-		m.deleteTargetRoot = ""
-			m.deleteHangs = nil
-			return m, nil
-		}
-		name := m.deleteTarget
-		root := m.deleteTargetRoot
-		m.deleteTarget = ""
-		m.deleteTargetRoot = ""
-		m.deleteHangs = nil
-		if m.deletingCurrentSession(root, name) {
-			return m, m.detachAndRemoveCmd(root, name)
-		}
-		m.escapeIfDeletingCurrent(mgr, root, name)
-		m.mode = busyMode
-		m.busyOp = busyOpRemove
-		m.busyTitle = fmt.Sprintf("Removing workspace %q...", name)
-		m.busyDone = false
-		m.busyOutput = ""
-		m.busyErr = nil
-		return m, removeCmd(mgr, name)
-	}
-
-	// Anything else cancels (n, N, esc, enter, stray keys, lowercase y
-	// when hangs are present).
-	m.mode = listMode
-	m.deleteTarget = ""
-		m.deleteTargetRoot = ""
-	m.deleteHangs = nil
-	return m, nil
-}
-
-// createDoneMsg carries the result of a Manager.Create call back to
-// Update. Output is whatever Create wrote to its stdout/stderr writers.
-// tmuxSession is the new workspace's session name on success — Update
-// uses it to dispatch an immediate attachCmd so the user lands in the
-// running session right after `n` instead of bouncing back to the list.
-type createDoneMsg struct {
-	output      string
-	tmuxSession string
-	err         error
-}
-
-// promptSentMsg fires after workspace.SendInitialPrompt finishes
-// (either successfully delivered the prompt, or failed with an
-// ErrPromptFailed). Carries the session name so the createDoneMsg
-// follow-up can dispatch the attach without re-deriving it. err
-// is non-nil only when the prompt didn't get delivered — the
-// workspace itself is alive either way.
-type promptSentMsg struct {
-	session string
-	err     error
-}
-
-// sendPromptCmd dispatches workspace.SendInitialPrompt in a
-// goroutine, then emits promptSentMsg with the result. mgr.Tmux
-// is the tmux client that knows about the freshly-created session.
-// io.Discard for the progress writer because the TUI doesn't render
-// that carriage-return progress line — the busyMode "Sending prompt..."
-// title is the equivalent feedback.
-func sendPromptCmd(mgr *workspace.Manager, session, prompt string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		err := workspace.SendInitialPrompt(ctx, mgr.Tmux, session, session, prompt, io.Discard)
-		return promptSentMsg{session: session, err: err}
-	}
-}
-
-// removeDoneMsg is the Remove counterpart to createDoneMsg. Same shape;
-// kept distinct so future Update logic can branch (e.g. don't try to
-// attach to a workspace that was just removed).
-type removeDoneMsg struct {
-	output string
-	err    error
-}
-
-// retryDoneMsg is the RetrySetup counterpart. Same shape as the others;
-// kept distinct so the success-message branch in renderBusyView (and
-// any future post-retry behavior, e.g. auto-attach on success) can
-// pivot on type rather than spelunking the busyOp field.
-type retryDoneMsg struct {
-	output string
-	err    error
-}
-
-// removeStartedMsg / retryStartedMsg are the lazy-spawn bridges for
-// the remove + retry flows, mirroring createStartedMsg. Update on
-// receipt: dispatch tea.Batch(progressTickCmd, waitXDoneCmd) so the
-// archive / setup output streams live just like Create.
-type removeStartedMsg struct {
-	buf  *safeBuffer
-	done <-chan removeDoneMsg
-}
-
-type retryStartedMsg struct {
-	buf  *safeBuffer
-	done <-chan retryDoneMsg
-}
-
-// retryCmdUI kicks off Manager.RetrySetup asynchronously and streams
-// its output via the same safeBuffer + progressTick pattern as
-// createCmd. The "UI" suffix disambiguates from cmd/canopy/retry.go's
-// cobra retryCmd.
-//
-// force=false matches the CLI's default — RetrySetup refuses to re-run
-// on a non-broken workspace. Use retryCmdUIForce when the user has
-// confirmed via the y/N modal (D3/CP1).
-func retryCmdUI(mgr *workspace.Manager, name string) tea.Cmd {
-	return retryCmdUIWithForce(mgr, name, false)
-}
-
-// retryCmdUIForce is the post-confirm-modal variant that passes
-// force=true to Manager.RetrySetup, mirroring the CLI's --force flag.
-// Triggered from confirmRetryMode after the user presses y on a
-// non-broken workspace.
-func retryCmdUIForce(mgr *workspace.Manager, name string) tea.Cmd {
-	return retryCmdUIWithForce(mgr, name, true)
-}
-
-func retryCmdUIWithForce(mgr *workspace.Manager, name string, force bool) tea.Cmd {
-	return func() tea.Msg {
-		buf := &safeBuffer{}
-		done := make(chan retryDoneMsg, 1)
-		go func() {
-			_, err := mgr.RetrySetup(context.Background(), name, force, buf, buf)
-			done <- retryDoneMsg{output: buf.Drain(), err: err}
-		}()
-		return retryStartedMsg{buf: buf, done: done}
-	}
-}
-
-// removeCmd kicks off Manager.Remove asynchronously and streams the
-// archive script's output via the same pattern as createCmd. Same
-// lazy-spawn shape so unit tests that inspect the cmd value don't
-// kick off real work.
-func removeCmd(mgr *workspace.Manager, name string) tea.Cmd {
-	return func() tea.Msg {
-		buf := &safeBuffer{}
-		done := make(chan removeDoneMsg, 1)
-		go func() {
-			err := mgr.Remove(context.Background(), name, buf, buf)
-			done <- removeDoneMsg{output: buf.Drain(), err: err}
-		}()
-		return removeStartedMsg{buf: buf, done: done}
-	}
-}
-
-// waitRemoveDoneCmd / waitRetryDoneCmd block on the respective done
-// chans and emit the corresponding done-msg. Per-channel-type
-// helpers because Go's chan types don't unify into a generic
-// waitDoneCmd without type parameters.
-func waitRemoveDoneCmd(done <-chan removeDoneMsg) tea.Cmd {
-	return func() tea.Msg { return <-done }
-}
-
-func waitRetryDoneCmd(done <-chan retryDoneMsg) tea.Cmd {
-	return func() tea.Msg { return <-done }
-}
-
-// createCmd kicks off Manager.Create asynchronously and streams its
-// stdout/stderr to the busy view as it runs. spec drives the source
-// variant (zero spec = fresh workspace; populated spec = pr/issue/
-// branch). The gh shellouts + git fetches happen inside ResolveSource,
-// then mgr.Create runs scripts.setup which is the slow, output-y
-// part — that's what the user wants to see scroll past in real time.
-//
-// Mechanism:
-//
-//   - A safeBuffer captures everything written to the
-//     stdout/stderr writers passed to mgr.Create.
-//   - Goroutine runs the actual work (resolve + create) and pushes
-//     the final result onto a `done` chan.
-//   - Returned tea.Batch has TWO cmds:
-//     1. progressTickCmd — re-fires every 150ms, drains the
-//     buffer, emits progressTickMsg with the new chunk. The
-//     tick re-schedules itself in Update until busyDone.
-//     2. waitDoneCmd — blocks reading from `done`, emits
-//     createDoneMsg when the goroutine finishes.
-//
-// Both cmds run concurrently under tea.Batch. Update appends ticks
-// to m.busyOutput live, then on createDoneMsg appends any final
-// bytes the last tick missed.
-func createCmd(mgr *workspace.Manager, name string, spec workspace.SourceSpec) tea.Cmd {
-	// Lazy spawn: the goroutine + buffer + chan are constructed
-	// inside the returned closure, NOT at createCmd's call site.
-	// That keeps the cmd value cheap to construct and lets unit
-	// tests inspect the returned cmd without accidentally kicking
-	// off real work against a nil-mgr fixture.
-	//
-	// Update sees createStartedMsg first and dispatches the
-	// streaming + done cmds via tea.Batch from there.
-	return func() tea.Msg {
-		buf := &safeBuffer{}
-		done := make(chan createDoneMsg, 1)
-		go func() {
-			ctx := context.Background()
-			opts, suggestedName, err := mgr.ResolveSource(ctx, spec)
-			if err != nil {
-				done <- createDoneMsg{output: buf.Drain(), err: err}
-				return
-			}
-			// Explicit name beats source-derived suggestion beats namegen.
-			if name == "" {
-				name = suggestedName
-			}
-			ws, err := mgr.Create(ctx, name, opts, buf, buf)
-			// Drain after Create returns so any trailing bytes
-			// (the last "Workspace ready" line, etc.) end up in
-			// the final createDoneMsg, not stranded in the buffer
-			// if the tick timing missed them.
-			msg := createDoneMsg{output: buf.Drain(), err: err}
-			if err == nil && ws != nil {
-				msg.tmuxSession = ws.TmuxSessionName()
-			}
-			done <- msg
-		}()
-		return createStartedMsg{buf: buf, done: done}
-	}
-}
-
-// createStartedMsg is the bridge between createCmd's lazy spawn and
-// the streaming machinery. Update receives it once and dispatches
-// the per-tick + wait-done cmds as a batch. Carries the buffer +
-// done-chan so the dispatched cmds have what they need.
-type createStartedMsg struct {
-	buf  *safeBuffer
-	done <-chan createDoneMsg
-}
-
-// progressTickInterval controls how often the busy view refreshes
-// during a long-running create. 150ms is invisible to the eye for
-// streaming text and far below any practical script output rate;
-// shorter intervals just burn redraw cycles for no gain.
-const progressTickInterval = 150 * time.Millisecond
-
-// progressTickMsg fires every progressTickInterval while a Create is
-// in flight. Carries the freshly-drained chunk and a back-reference
-// to the buffer so Update can keep ticking without holding state.
-type progressTickMsg struct {
-	chunk string
-	buf   *safeBuffer
-}
-
-// progressTickCmd builds the tick command. The drain happens at
-// schedule time (inside the closure) so each tick fetches whatever
-// the goroutine has written between this tick and the previous one.
-func progressTickCmd(buf *safeBuffer) tea.Cmd {
-	return tea.Tick(progressTickInterval, func(time.Time) tea.Msg {
-		return progressTickMsg{chunk: buf.Drain(), buf: buf}
-	})
-}
-
-// waitDoneCmd blocks on the done channel and emits the createDoneMsg
-// when the goroutine finishes. Single-shot — only fires once per
-// create flow.
-func waitDoneCmd(done <-chan createDoneMsg) tea.Cmd {
-	return func() tea.Msg {
-		return <-done
-	}
-}
-
-// textinputBlink dispatches the cursor blink command for the textinput.
-// Wrapper kept so the modal-open code reads cleanly.
-func textinputBlink() tea.Cmd {
-	return textinput.Blink
-}

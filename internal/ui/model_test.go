@@ -3,9 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,6 +13,7 @@ import (
 
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/ghx"
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/ui/projectlist"
@@ -35,6 +34,7 @@ func newTestModel(_ bool) *Model {
 		projectName:    "test-project",
 		nameInput:      textinput.New(),
 		listInput:      textinput.New(),
+		targetInput:    textinput.New(),
 		promptInput:    textarea.New(),
 		mode:           listMode,
 		currentProject: "/tmp/test-project",
@@ -129,60 +129,55 @@ func TestHandleKey_TabSwitch(t *testing.T) {
 	}
 }
 
-// TestHandleKey_TabSwitch_GlobalToLocalAutoFocus is the regression test
-// for the user-reported "tab from Global doesn't enter Local" bug:
-// when canopy is launched outside any project (currentProject == ""),
-// Local has no meaningful filter, so Tab → Local would either show
-// every row (no-op) or feel broken. The fix routes Global → Local
-// through actionFocusProject when there's a cursor row, so Tab
-// behaves as "enter the project I'm looking at."
-func TestHandleKey_TabSwitch_GlobalToLocalAutoFocus(t *testing.T) {
-	// Set up a temp project with canopy.json so actionFocusProject's
-	// LoadFrom + workspace.New succeeds. The test only cares about the
-	// post-Tab Model state, not Manager construction success — but we
-	// need the load to not fail loudly.
-	projectRoot := t.TempDir()
-	canopyJSON := []byte(`{"scripts": {"setup": "x", "run": "y", "archive": "z"}}`)
-	if err := os.WriteFile(filepath.Join(projectRoot, "canopy.json"), canopyJSON, 0o644); err != nil {
-		t.Fatalf("write canopy.json: %v", err)
-	}
-
+// TestHandleKey_TabSwitch_NoProjectSkipsLocal verifies the v0.17 Phase
+// 1h contract: when canopy is launched outside any project
+// (currentProject == ""), the project-scoped tab is NOT part of the
+// cycle. Tab from Projects with no hosts wraps back to Projects;
+// with hosts it cycles to Hosts. The user never lands on an empty
+// project-tab — replaces the old "auto-focus into Local" behavior.
+func TestHandleKey_TabSwitch_NoProjectSkipsLocal(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabGlobal
 	m.currentProject = ""
 	m.mgr = nil
-	m.setTestRows([]Row{
-		{Project: filepath.Base(projectRoot), ProjectRoot: projectRoot, IsMain: true, Name: "(main)", Status: "main"},
-	})
-
+	// No hosts registered AND no current project — cycle is just
+	// [Projects]. Tab from Projects wraps to itself.
 	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
 	got := model.(*Model)
-	if got.tab != tabLocal {
-		t.Errorf("after Tab from Global w/ empty currentProject: tab = %v; want tabLocal", got.tab)
+	if got.tab != tabGlobal {
+		t.Errorf("Tab w/ no project + no hosts: tab = %v; want tabGlobal (stays)", got.tab)
 	}
-	if got.currentProject != projectRoot {
-		t.Errorf("after Tab: currentProject = %q; want %q (auto-focus from cursor row)", got.currentProject, projectRoot)
+	if got.currentProject != "" {
+		t.Errorf("Tab should not auto-focus a project: currentProject = %q; want empty", got.currentProject)
 	}
 }
 
-// TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext covers the no-row
-// edge case: Tab from Global with no rows can't auto-focus (nothing to
-// focus on), so it falls through to the plain tab flip. currentProject
-// stays empty; user sees the "no projects" empty state.
-func TestHandleKey_TabSwitch_NoRowsLeavesEmptyContext(t *testing.T) {
+// TestHandleKey_TabSwitch_NoProjectWithHostsCyclesToHosts: when there's
+// no currentProject but at least one host is registered, the cycle
+// is [Projects, Hosts] and Tab from Projects lands on Hosts.
+func TestHandleKey_TabSwitch_NoProjectWithHostsCyclesToHosts(t *testing.T) {
 	m := newTestModel(false)
 	m.tab = tabGlobal
 	m.currentProject = ""
-	m.mgr = nil
-	m.setTestRows(nil)
-
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "user@tower", Type: "ssh"}}
 	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
 	got := model.(*Model)
-	if got.tab != tabLocal {
-		t.Errorf("after Tab w/ no rows: tab = %v; want tabLocal (plain flip)", got.tab)
+	if got.tab != tabHosts {
+		t.Errorf("Tab w/ no project + hosts: tab = %v; want tabHosts", got.tab)
 	}
-	if got.currentProject != "" {
-		t.Errorf("after Tab w/ no rows: currentProject = %q; want \"\" (nothing to focus)", got.currentProject)
+}
+
+// TestHandleKey_TabSwitch_WithProjectCyclesThroughLocal: when launched
+// inside a project, the cycle is [<project>, Projects, Hosts?]. Tab
+// from the project tab lands on Projects.
+func TestHandleKey_TabSwitch_WithProjectCyclesThroughLocal(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabLocal
+	m.currentProject = "/p/cravd"
+	model, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	got := model.(*Model)
+	if got.tab != tabGlobal {
+		t.Errorf("Tab from project tab: tab = %v; want tabGlobal", got.tab)
 	}
 }
 
@@ -307,40 +302,6 @@ func TestAvailableNewWorkspace(t *testing.T) {
 	}
 }
 
-// TestAvailableFocusProject covers the `o` predicate. Available on
-// Global tab whenever the cursor row has a non-empty ProjectRoot —
-// the same-project case is allowed (re-focus is a harmless no-op
-// switch instead of muscle-memory-killing friction).
-func TestAvailableFocusProject(t *testing.T) {
-	cases := []struct {
-		name        string
-		tab         tabKind
-		rowRoot     string
-		currentProj string
-		want        bool
-	}{
-		{"Local tab → never", tabLocal, "/tmp/p", "/tmp/p", false},
-		{"Global, row root empty → no", tabGlobal, "", "", false},
-		{"Global, row root != current → yes", tabGlobal, "/tmp/p", "/tmp/q", true},
-		{"Global, row root == current → yes (re-focus is fine)", tabGlobal, "/tmp/p", "/tmp/p", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := newTestModel(false)
-			m.tab = tc.tab
-			m.currentProject = tc.currentProj
-			if tc.rowRoot != "" {
-				m.setTestRows([]Row{{Project: "p", ProjectRoot: tc.rowRoot, Name: "ws", Status: state.StatusReady}})
-			} else if tc.tab == tabGlobal {
-				m.setTestRows([]Row{{Project: "p", Name: "ws", Status: state.StatusReady}})
-			}
-			if got := availableFocusProject(m); got != tc.want {
-				t.Errorf("availableFocusProject = %v; want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestAvailableOpenBrowser covers the `B` predicate: live session
 // AND a non-zero port. Both fields must be present — a stopped
 // session 404s; a row with Port=0 either lost its allocation or was
@@ -417,6 +378,92 @@ func TestListModeBinding_OpenPR_IsCapital(t *testing.T) {
 	}
 	if !hasCapital {
 		t.Errorf("openPR binding missing capital \"P\"; keys=%v", prBinding.K.Keys())
+	}
+}
+
+// TestAvailableNewWorkspace_RemoteRow: v0.17 Phase 1i — remote rows
+// have no ProjectRoot but `n` should still be available (the dispatch
+// hands off to `canopy new --on <host>` instead of going through the
+// local Manager).
+func TestAvailableNewWorkspace_RemoteRow(t *testing.T) {
+	m := newTestModel(false)
+	m.mgr = nil
+	m.tab = tabGlobal
+	m.setTestRows([]Row{
+		{Project: "cravd", Name: "foo", Status: state.StatusReady, Host: "tower"},
+	})
+	if !availableNewWorkspace(m) {
+		t.Errorf("availableNewWorkspace on remote row = false; want true (dispatch via canopy new --on)")
+	}
+}
+
+// TestAvailableNewWorkspace_HostsTab: on the Hosts tab, `n` opens the
+// add-host wizard — so it's always available regardless of cursor.
+func TestAvailableNewWorkspace_HostsTab(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	if !availableNewWorkspace(m) {
+		t.Errorf("availableNewWorkspace on Hosts tab = false; want true (add-host wizard)")
+	}
+}
+
+// TestActionNewWorkspace_RemoteRowOpensPicker: v0.17 Phase 1k —
+// pressing n on a remote row opens the SAME TUI picker as a local
+// row, with newTargetHost set so submit handlers dispatch through
+// `canopy new --on <host>` instead of the local Manager. Prior
+// Phase 1i implementation handed off to a CLI subprocess; the user
+// asked for the rich TUI experience.
+func TestActionNewWorkspace_RemoteRowOpensPicker(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh",
+			Projects: map[string]string{"cravd": "/home/cassy/Work/cravd"}},
+	}
+	m.setTestRows([]Row{
+		{Project: "cravd", Name: "foo", Status: state.StatusReady, Host: "tower"},
+	})
+	_, _ = actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.mode != newPickerMode {
+		t.Fatalf("remote n: mode = %v; want newPickerMode", m.mode)
+	}
+	if m.newTargetHost != "tower" {
+		t.Errorf("newTargetHost = %q; want tower", m.newTargetHost)
+	}
+	if m.newTargetRemoteCwd != "/home/cassy/Work/cravd" {
+		t.Errorf("newTargetRemoteCwd = %q; want /home/cassy/Work/cravd", m.newTargetRemoteCwd)
+	}
+	if m.newTargetMgr != nil {
+		t.Errorf("newTargetMgr should be nil for remote target; got %+v", m.newTargetMgr)
+	}
+}
+
+// TestNewPicker_RemoteSkipsPRIssueBranchShortcuts: when the picker is
+// open against a remote target, the p/i/b shortcut keys (PR / Issue /
+// Branch) are no-ops because those variants need a local gh against
+// the remote project's repo. Hidden options shouldn't be reachable.
+func TestNewPicker_RemoteSkipsPRIssueBranchShortcuts(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPickerMode
+	m.newTargetHost = "tower"
+
+	// p, i, b should NOT change mode (would otherwise open the PR /
+	// Issue / Branch sub-modal).
+	for _, k := range []string{"p", "i", "b"} {
+		m.mode = newPickerMode
+		_, _ = m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+		if m.mode != newPickerMode {
+			t.Errorf("remote picker: key %q changed mode to %v; want stays newPickerMode", k, m.mode)
+		}
+	}
+
+	// Down arrow should NOT advance past index 1 (Fresh + Prompt only).
+	m.newPickerCursor = 0
+	for i := 0; i < 5; i++ {
+		_, _ = m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.newPickerCursor > 1 {
+		t.Errorf("remote picker: cursor = %d after 5 down presses; want bounded to 1", m.newPickerCursor)
 	}
 }
 
@@ -2499,5 +2546,557 @@ func TestUpgradeRefreshCmd_swallowsError(t *testing.T) {
 	got := msg.(upgradeCheckedMsg)
 	if got.latest != "" {
 		t.Errorf("latest on error = %q, want empty", got.latest)
+	}
+}
+
+// TestActionDelete_RemoteRowSkipsManagerForRow verifies the v0.17.0
+// branch: when the cursor row has a Host (remote workspace), actionDelete
+// opens the confirm modal WITHOUT going through managerForRow +
+// SafetyPreflight. Prior to the fix, pressing `d` on a remote row failed
+// with "no projectroot — can't resolve" because the local canopy has no
+// canopy.json for a project that lives on tower. Remote-side safety
+// preflight runs at confirm time via `canopy rm --on <host> --yes`.
+func TestActionDelete_RemoteRowSkipsManagerForRow(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.setTestRows([]Row{
+		{
+			Project: "cravd", ProjectRoot: "", // remote rows have no local ProjectRoot
+			Name: "remote-foo", Status: state.StatusReady,
+			Host: "tower",
+			Path: "/home/cassy/.canopy/workspaces/cravd/remote-foo",
+		},
+	})
+
+	_, _ = actionDelete(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+
+	if m.mode != confirmDeleteMode {
+		t.Fatalf("remote-row d did not open confirm modal; mode=%v err=%v", m.mode, m.err)
+	}
+	if m.deleteTarget != "remote-foo" {
+		t.Errorf("deleteTarget = %q; want remote-foo", m.deleteTarget)
+	}
+	if m.deleteTargetRoot != "" {
+		t.Errorf("deleteTargetRoot = %q; want empty for remote row", m.deleteTargetRoot)
+	}
+	if len(m.deleteHangs) != 0 {
+		t.Errorf("deleteHangs = %v; want empty (remote preflight runs on confirm)", m.deleteHangs)
+	}
+}
+
+// TestActionOpenBrowser_RemoteRowReturnsCmd verifies the v0.17.0 branch:
+// pressing B on a remote row returns a non-nil tea.Cmd (the SSH tunnel +
+// xdg-open closure) and does NOT set m.err synchronously. Prior to the
+// fix, B on a remote row showed an instructional error string instead
+// of actually port-forwarding.
+//
+// We don't run the returned Cmd (it would shell out to ssh); we just
+// check the wiring: remote row → resolveHostForExec succeeds → returns
+// the deferred tunnel command, not an immediate error.
+func TestActionOpenBrowser_RemoteRowReturnsCmd(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "cassy@tower.invalid", Type: "ssh"},
+	}
+	m.setTestRows([]Row{
+		{
+			Project: "cravd", Name: "remote-foo", Status: state.StatusReady,
+			Host: "tower",
+			Port: 3001,
+		},
+	})
+
+	_, cmd := actionOpenBrowser(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
+	if m.err != nil {
+		t.Fatalf("remote-row B set m.err synchronously: %v (want deferred cmd)", m.err)
+	}
+	if cmd == nil {
+		t.Fatalf("remote-row B returned nil cmd; want openRemoteBrowser closure")
+	}
+}
+
+// TestActionOpenBrowser_NoPortNoOp: pressing B on a row without a port
+// (e.g. setting_up workspace) returns no cmd and no error. Same shape
+// for local and remote so the new remote branch can't change behavior.
+func TestActionOpenBrowser_NoPortNoOp(t *testing.T) {
+	m := newTestModel(false)
+	m.setTestRows([]Row{
+		{Project: "x", Name: "w", Status: state.StatusSettingUp, Port: 0},
+	})
+	_, cmd := actionOpenBrowser(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("B")})
+	if cmd != nil {
+		t.Errorf("port=0 returned non-nil cmd; want nil")
+	}
+	if m.err != nil {
+		t.Errorf("port=0 set m.err = %v; want nil", m.err)
+	}
+}
+
+// TestCursorNav_HostsTabUsesHostsCursor: v0.17 Phase 1l — when on
+// the Hosts tab, up/down navigate hostsCursor, not the workspace
+// list. Verifies the two cursors are independent.
+func TestCursorNav_HostsTabUsesHostsCursor(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "alpha"}, {Name: "bravo"}, {Name: "charlie"},
+	}
+	m.hostsCursor = 0
+	_, _ = actionCursorDown(m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.hostsCursor != 1 {
+		t.Errorf("after down: hostsCursor = %d; want 1", m.hostsCursor)
+	}
+	_, _ = actionCursorDown(m, tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = actionCursorDown(m, tea.KeyMsg{Type: tea.KeyDown}) // try to go past end
+	if m.hostsCursor != 2 {
+		t.Errorf("after 3 downs (bounded): hostsCursor = %d; want 2", m.hostsCursor)
+	}
+	_, _ = actionCursorUp(m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.hostsCursor != 1 {
+		t.Errorf("after up: hostsCursor = %d; want 1", m.hostsCursor)
+	}
+}
+
+// TestAvailableWorkspaceVerbs_HiddenOnHostsTab: regression for the
+// user-reported "Hosts tab still shows workspace verb shortcuts"
+// bug. d / K / i / R / B / P / enter (workspace attach) must NOT
+// be available on the Hosts tab. v0.17 Phase 1l.
+func TestAvailableWorkspaceVerbs_HiddenOnHostsTab(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	if availableInWorkspaceContext(m) {
+		t.Errorf("availableInWorkspaceContext true on Hosts tab; want false")
+	}
+	// Sanity: returns true on the workspace tabs.
+	m.tab = tabGlobal
+	if !availableInWorkspaceContext(m) {
+		t.Errorf("availableInWorkspaceContext false on Global tab; want true")
+	}
+}
+
+// TestAvailableOnHostsTab_GatesHostVerbs: complement — host-specific
+// verbs (d→remove, enter→detail) must ONLY fire on the Hosts tab.
+func TestAvailableOnHostsTab_GatesHostVerbs(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	if availableOnHostsTab(m) {
+		t.Errorf("availableOnHostsTab true on Global tab; want false")
+	}
+	m.tab = tabHosts
+	if availableOnHostsTab(m) {
+		t.Errorf("availableOnHostsTab true on empty Hosts tab; want false (no host to act on)")
+	}
+	m.hostList = []host.Host{{Name: "tower"}}
+	if !availableOnHostsTab(m) {
+		t.Errorf("availableOnHostsTab false on populated Hosts tab; want true")
+	}
+}
+
+// TestActionHostRemove_OpensConfirmModal: pressing d on a host opens
+// the confirm-remove modal with the selected host pre-loaded.
+func TestActionHostRemove_OpensConfirmModal(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "alpha"}, {Name: "bravo"},
+	}
+	m.hostsCursor = 1 // bravo
+	_, _ = actionHostRemove(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if m.mode != confirmHostRemoveMode {
+		t.Errorf("mode = %v; want confirmHostRemoveMode", m.mode)
+	}
+	if m.hostRemoveTarget != "bravo" {
+		t.Errorf("hostRemoveTarget = %q; want bravo", m.hostRemoveTarget)
+	}
+}
+
+// TestActionNewWorkspace_HostsTabOpensInTUIForm: v0.17 Phase 1l —
+// pressing n on the Hosts tab opens the in-TUI add-host name input,
+// NOT the legacy huh subprocess wizard.
+func TestActionNewWorkspace_HostsTabOpensInTUIForm(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	_, _ = actionNewWorkspace(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.mode != addHostFormMode {
+		t.Errorf("mode = %v; want addHostFormMode", m.mode)
+	}
+}
+
+// TestHandleAddHostFormKey_TabCyclesFocus: regression for the user-
+// reported "I can't Tab between host name and ssh-target" bug.
+// v0.17 Phase 1l polish — the form is now a single mode with two
+// inputs that Tab cycles between (and Enter submits both).
+func TestHandleAddHostFormKey_TabCyclesFocus(t *testing.T) {
+	m := newTestModel(false)
+	_ = m.openAddHostForm() // sets mode + focuses name
+	if m.hostAddFocus != 0 || !m.nameInput.Focused() {
+		t.Fatalf("openAddHostForm did not focus name input")
+	}
+	_, _ = m.handleAddHostFormKey(tea.KeyMsg{Type: tea.KeyTab})
+	if m.hostAddFocus != 1 || !m.targetInput.Focused() || m.nameInput.Focused() {
+		t.Errorf("after Tab: focus didn't switch to target; name.Focused=%v target.Focused=%v",
+			m.nameInput.Focused(), m.targetInput.Focused())
+	}
+	_, _ = m.handleAddHostFormKey(tea.KeyMsg{Type: tea.KeyTab})
+	if m.hostAddFocus != 0 || !m.nameInput.Focused() {
+		t.Errorf("after second Tab: focus didn't cycle back to name")
+	}
+}
+
+// TestHandleAddHostFormKey_EnterRequiresBothFields: pressing Enter
+// with an empty field should re-focus that field instead of submitting
+// (and instead of doing nothing — that confuses users).
+func TestHandleAddHostFormKey_EnterRequiresBothFields(t *testing.T) {
+	m := newTestModel(false)
+	_ = m.openAddHostForm()
+	// Empty name + empty target → re-focus name.
+	_, _ = m.handleAddHostFormKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.mode != addHostFormMode {
+		t.Errorf("Enter with empty fields exited the form; want stay")
+	}
+	if m.hostAddFocus != 0 {
+		t.Errorf("Enter on empty name: focus = %d; want 0 (name)", m.hostAddFocus)
+	}
+	// Fill name, leave target empty → focus moves to target.
+	m.nameInput.SetValue("tower")
+	_, _ = m.handleAddHostFormKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.hostAddFocus != 1 {
+		t.Errorf("Enter with name+no-target: focus = %d; want 1 (target)", m.hostAddFocus)
+	}
+}
+
+// TestActionHostEnter_OpensDetail: regression for the user-reported
+// "enter on host shows an error message" bug. Now opens hostDetailMode
+// instead of stashing an info string in m.err.
+func TestActionHostEnter_OpensDetail(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh"},
+	}
+	m.hostsCursor = 0
+	_, _ = actionHostEnter(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.mode != hostDetailMode {
+		t.Errorf("mode = %v; want hostDetailMode", m.mode)
+	}
+	if m.err != nil {
+		t.Errorf("actionHostEnter set m.err = %v; want nil (no error)", m.err)
+	}
+	if m.hostDetailTarget != "tower" {
+		t.Errorf("hostDetailTarget = %q; want tower", m.hostDetailTarget)
+	}
+}
+
+// TestHandleHostDetailKey_EscDismisses: any "dismissive" key returns
+// to listMode.
+func TestHandleHostDetailKey_EscDismisses(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = hostDetailMode
+	m.hostDetailTarget = "tower"
+	_, _ = m.handleHostDetailKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.mode != listMode {
+		t.Errorf("esc: mode = %v; want listMode", m.mode)
+	}
+	if m.hostDetailTarget != "" {
+		t.Errorf("esc: hostDetailTarget = %q; want cleared", m.hostDetailTarget)
+	}
+}
+
+// TestHostProbeResultMsg_AuthFailOpensSSHCopyID: AuthFailed routes to
+// the confirm-ssh-copy-id modal with the probe target pre-loaded.
+func TestHostProbeResultMsg_AuthFailOpensSSHCopyID(t *testing.T) {
+	m := newTestModel(false)
+	_, _ = m.Update(hostProbeResultMsg{hostName: "pi", sshTarget: "pi@p", authFail: true})
+	mm := m
+	if mm.mode != confirmSSHCopyIDMode {
+		t.Errorf("authFail: mode = %v; want confirmSSHCopyIDMode", mm.mode)
+	}
+	if mm.pendingProbeHost != "pi" || mm.pendingProbeTarget != "pi@p" {
+		t.Errorf("probe target not loaded: host=%q target=%q", mm.pendingProbeHost, mm.pendingProbeTarget)
+	}
+}
+
+// TestHandleConfirmDeleteKey_RemoteForceWithoutLocalHangs: regression
+// for the user-reported flow where remote rm rejected on hanging
+// work and the TUI gave no way to escalate. Pre-fix: F was only
+// accepted when local hangs were detected (impossible for remote).
+// Now: F always works for remote rows; dispatches with --force.
+// v0.17 Phase 1l polish.
+func TestHandleConfirmDeleteKey_RemoteForceWithoutLocalHangs(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.remoteRows = []Row{
+		{Project: "canopy", Name: "testing-123", Status: state.StatusReady, Host: "tower"},
+	}
+	m.list.SetRows(m.filteredRows())
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+	m.mode = confirmDeleteMode
+	m.deleteTarget = "testing-123"
+	m.deleteHangs = nil // remote → no local hangs
+
+	_, cmd := m.handleConfirmDeleteKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("F")})
+	if cmd == nil {
+		t.Fatalf("F on remote with no local hangs: got nil cmd; want execRemoteVerb")
+	}
+	if m.mode != listMode {
+		t.Errorf("F on remote: mode = %v; want listMode (dispatched + closed modal)", m.mode)
+	}
+}
+
+// TestHandleConfirmDeleteKey_RemoteYDispatchesWithoutForce: same
+// modal, lowercase y dispatches without --force. The remote will
+// run its own safety check and refuse on hanging work; that's
+// surfaced as an error and the user can retry with F.
+func TestHandleConfirmDeleteKey_RemoteYDispatchesWithoutForce(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.remoteRows = []Row{
+		{Project: "canopy", Name: "foo", Status: state.StatusReady, Host: "tower"},
+	}
+	m.list.SetRows(m.filteredRows())
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+	m.mode = confirmDeleteMode
+	m.deleteTarget = "foo"
+
+	_, cmd := m.handleConfirmDeleteKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatalf("y on remote: got nil cmd; want execRemoteVerb")
+	}
+}
+
+// TestActionHostSetupAuth_OpensSSHCopyIDModal: pressing `a` on a host
+// pre-loads the probe target and opens the ssh-copy-id confirm flow.
+// Lets the user retry auth without deleting and re-adding.
+func TestActionHostSetupAuth_OpensSSHCopyIDModal(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "pi", SSHTarget: "jarvis@pi.tail.ts.net", Type: "ssh"},
+	}
+	m.hostsCursor = 0
+	_, _ = actionHostSetupAuth(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if m.mode != confirmSSHCopyIDMode {
+		t.Errorf("mode = %v; want confirmSSHCopyIDMode", m.mode)
+	}
+	if m.pendingProbeHost != "pi" {
+		t.Errorf("pendingProbeHost = %q; want pi", m.pendingProbeHost)
+	}
+	if m.pendingProbeTarget != "jarvis@pi.tail.ts.net" {
+		t.Errorf("pendingProbeTarget = %q; want jarvis@pi.tail.ts.net", m.pendingProbeTarget)
+	}
+}
+
+// TestAvailableHostAuth_GatesOnAuthFailedStatus: `a` is hidden when
+// the host's last refresh succeeded (auth is already working). Shown
+// when status=AuthFailed OR unknown (never refreshed; user can
+// pre-emptively set up auth).
+func TestAvailableHostAuth_GatesOnAuthFailedStatus(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{{Name: "pi"}}
+	m.hostsCursor = 0
+
+	// No snapshot yet → unknown → allow.
+	if !availableHostAuth(m) {
+		t.Errorf("unknown status: `a` should be available")
+	}
+	// Snapshot with Permission-denied → allow.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: "Permission denied (publickey)"},
+	}
+	if !availableHostAuth(m) {
+		t.Errorf("AuthFailed: `a` should be available")
+	}
+	// Snapshot with success → hide.
+	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
+		"pi": {LastError: ""},
+	}
+	if availableHostAuth(m) {
+		t.Errorf("Online: `a` should NOT be available")
+	}
+}
+
+// TestVisibleTabs_DropsLocalWhenNoProject: visibleTabs is the source
+// of truth for the tab cycle. It drops tabLocal when there's no
+// currentProject and tabHosts when no hosts are registered. v0.17
+// Phase 1h.
+func TestVisibleTabs_DropsLocalWhenNoProject(t *testing.T) {
+	cases := []struct {
+		name      string
+		project   string
+		withHosts bool
+		want      []tabKind
+	}{
+		{"no project, no hosts", "", false, []tabKind{tabGlobal}},
+		{"no project, with hosts", "", true, []tabKind{tabGlobal, tabHosts}},
+		{"with project, no hosts", "/p/x", false, []tabKind{tabLocal, tabGlobal}},
+		{"with project, with hosts", "/p/x", true, []tabKind{tabLocal, tabGlobal, tabHosts}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(false)
+			m.currentProject = tc.project
+			if tc.withHosts {
+				m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+			}
+			got := m.visibleTabs()
+			if len(got) != len(tc.want) {
+				t.Fatalf("visibleTabs = %v; want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("visibleTabs[%d] = %v; want %v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestNextInCycle_WrapsBothWays: nextInCycle is the helper that does
+// the actual stepping. It must wrap forward (last → first) and
+// backward (first → last).
+func TestNextInCycle_WrapsBothWays(t *testing.T) {
+	tabs := []tabKind{tabLocal, tabGlobal, tabHosts}
+	if got := nextInCycle(tabs, tabHosts, +1); got != tabLocal {
+		t.Errorf("forward wrap: got %v; want tabLocal", got)
+	}
+	if got := nextInCycle(tabs, tabLocal, -1); got != tabHosts {
+		t.Errorf("backward wrap: got %v; want tabHosts", got)
+	}
+	// Current tab not in cycle (defensive case): land on first.
+	if got := nextInCycle([]tabKind{tabGlobal}, tabLocal, +1); got != tabGlobal {
+		t.Errorf("current not in cycle: got %v; want tabGlobal", got)
+	}
+}
+
+// TestAttachSelected_WarnsWhenAnotherClientAttached: v0.17 Phase 1j —
+// pressing Enter on a row whose session already has a tmux client
+// connected pops the confirm modal instead of attaching immediately.
+// Tmux's default is to share the session (both clients see the same
+// panes), which is usually wrong for an active agent workspace.
+func TestAttachSelected_WarnsWhenAnotherClientAttached(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal // newTestModel defaults to Local with /tmp/test-project filter
+	m.setTestRows([]Row{
+		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "foo",
+			Status: state.StatusReady, Alive: true, Attached: true},
+	})
+	_, _ = m.attachSelected()
+	if m.mode != confirmAttachMode {
+		t.Fatalf("expected confirmAttachMode; got %v", m.mode)
+	}
+	if m.attachTarget.Name != "foo" {
+		t.Errorf("attachTarget.Name = %q; want foo", m.attachTarget.Name)
+	}
+}
+
+// TestAttachSelected_SkipsWarnForCurrentWorkspace: re-attaching to
+// the workspace canopy was launched from is the expected flow (the
+// popup user pressing Enter on their own row to "go back"). The
+// "already attached" client IS the one we just launched from — no
+// warning needed.
+func TestAttachSelected_SkipsWarnForCurrentWorkspace(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.currentWorkspace = "foo"
+	m.currentWorkspaceRoot = "/p/cravd"
+	m.setTestRows([]Row{
+		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "foo",
+			Status: state.StatusReady, Alive: true, Attached: true},
+	})
+	_, _ = m.attachSelected()
+	if m.mode == confirmAttachMode {
+		t.Errorf("expected attach to proceed for current workspace; got confirmAttachMode")
+	}
+}
+
+// TestAttachSelected_NoWarnWhenNotAttached: the common case — sole
+// client — attaches straight through, no modal.
+func TestAttachSelected_NoWarnWhenNotAttached(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.setTestRows([]Row{
+		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "foo",
+			Status: state.StatusReady, Alive: true, Attached: false},
+	})
+	_, _ = m.attachSelected()
+	if m.mode == confirmAttachMode {
+		t.Errorf("unattached row triggered confirmAttachMode; want straight attach")
+	}
+}
+
+// TestRemoteCwdForRow_ResolvesFromRegistry: regression for the user-
+// reported "n on remote rows fails when not inside a project" bug.
+// execRemoteNew was passing only --on; canopy new then tried to walk
+// cwd for canopy.json and errored out with "needs a project but
+// you're not inside any". The fix: TUI pre-resolves the remote path
+// from the in-memory host registry snapshot and passes --remote-cwd
+// explicitly so the remote dispatch never needs cwd. v0.17 Phase 1i.
+func TestRemoteCwdForRow_ResolvesFromRegistry(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh",
+			Projects: map[string]string{"cravd": "/home/cassy/Work/cravd"}},
+	}
+	if got := m.remoteCwdForRow("tower", "cravd"); got != "/home/cassy/Work/cravd" {
+		t.Errorf("remoteCwdForRow(tower, cravd) = %q; want /home/cassy/Work/cravd", got)
+	}
+	if got := m.remoteCwdForRow("tower", "missing"); got != "" {
+		t.Errorf("remoteCwdForRow(tower, missing) = %q; want empty (let caller fall back)", got)
+	}
+	if got := m.remoteCwdForRow("unknown-host", "cravd"); got != "" {
+		t.Errorf("remoteCwdForRow(unknown-host, cravd) = %q; want empty", got)
+	}
+}
+
+// TestHandleConfirmAttachKey_NCancels: cancel-by-default — anything
+// other than y/Y/Enter returns to listMode without attaching.
+func TestHandleConfirmAttachKey_NCancels(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = confirmAttachMode
+	m.attachTarget = Row{Name: "foo"}
+	_, _ = m.handleConfirmAttachKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m.mode != listMode {
+		t.Errorf("n keypress: mode = %v; want listMode", m.mode)
+	}
+	if m.attachTarget.Name != "" {
+		t.Errorf("attachTarget not cleared: %+v", m.attachTarget)
+	}
+}
+
+// TestRefreshAllMsg_TriggersBothLocalAndRemote: regression for the
+// user-reported "I have to manually refresh after rm/K on a remote
+// row." Post-remote-action callbacks emit refreshAllMsg, which must
+// kick off m.refresh() — that's what fans out the remote tick.
+// refreshCmd alone (the prior implementation) only updated local rows,
+// so the deleted remote row stayed visible until the next 2s tick.
+func TestRefreshAllMsg_TriggersBothLocalAndRemote(t *testing.T) {
+	m := newTestModel(false)
+	m.remoteRefreshing = false // free to dispatch a remote tick
+
+	_, cmd := m.Update(refreshAllMsg{})
+	if cmd == nil {
+		t.Fatalf("refreshAllMsg returned nil cmd; want a refresh batch")
+	}
+	// m.refresh() flips remoteRefreshing to true to latch the in-flight
+	// remote fan-out. If that didn't happen, the dispatched cmd was the
+	// local-only path — which is the bug we're guarding against.
+	if !m.remoteRefreshing {
+		t.Errorf("refreshAllMsg did not latch remoteRefreshing; remote tick was not dispatched")
+	}
+}
+
+// TestErrMsg_SetsErrAndStaysIdle: an errMsg delivered to Update sets
+// m.err and returns no follow-up cmd (no refresh, no retry).
+func TestErrMsg_SetsErrAndStaysIdle(t *testing.T) {
+	m := newTestModel(false)
+	_, cmd := m.Update(errMsg{err: fmt.Errorf("boom")})
+	mm := m
+	if mm.err == nil || mm.err.Error() != "boom" {
+		t.Errorf("m.err = %v; want 'boom'", mm.err)
+	}
+	if cmd != nil {
+		t.Errorf("errMsg returned cmd %v; want nil (no refresh)", cmd)
 	}
 }

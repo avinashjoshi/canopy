@@ -1300,3 +1300,74 @@ func TestRender_StuckStateBadge_LeftmostOfRename(t *testing.T) {
 			stuckIdx, renameIdx, out)
 	}
 }
+
+// TestAgentBadge_RemoteRowSkipsNoAIFallback: regression for the
+// user-reported "remote workspace has agent pane but TUI doesn't
+// show it." The laptop's agent poll only probes local tmux sessions,
+// so remote sessions are absent from the agentStates map. Pre-fix,
+// agentBadge fell through to the No-AI fallback `·` which falsely
+// signaled "this workspace has no agent." Now: blank slot for
+// remote rows until Phase 1d.2 propagates remote agent state.
+func TestAgentBadge_RemoteRowSkipsNoAIFallback(t *testing.T) {
+	r := state.GlobalRow{
+		Name: "remote-foo", Status: state.StatusReady,
+		Alive: true, TmuxSession: "cravd/remote-foo",
+		Host: "tower",
+	}
+	got := agentBadge(r, nil, true /* poll has landed */)
+	if got != "  " {
+		t.Errorf("agentBadge(remote row) = %q; want two-space blank", got)
+	}
+}
+
+// TestAgentBadge_LocalRowStillShowsNoAIAfterPoll: belt-and-suspenders
+// for the host-row short-circuit — local rows must keep the No-AI
+// fallback so local workspaces without an agent pane (e.g. an aider
+// session that quit) still surface the gray dot.
+func TestAgentBadge_LocalRowStillShowsNoAIAfterPoll(t *testing.T) {
+	r := state.GlobalRow{
+		Name: "local-foo", Status: state.StatusReady,
+		Alive: true, TmuxSession: "p/local-foo",
+		// Host empty → local row.
+	}
+	got := agentBadge(r, nil, true)
+	if got == "  " {
+		t.Errorf("agentBadge(local row, post-poll, no state) = blank; want No-AI dot")
+	}
+}
+
+// TestAgentBadge_RemoteRowReadsAgentStateField: v0.17 Phase 1d.2 —
+// remote rows carry their agent state on r.AgentState (wired from
+// the canopy ls --json `agent_state` field). agentBadge must read
+// from that field, not from the local agentStates map.
+func TestAgentBadge_RemoteRowReadsAgentStateField(t *testing.T) {
+	cases := []struct {
+		state    string
+		wantBare string // visible glyph (after ansi stripping)
+	}{
+		{"awaiting_input", "✋"},
+		{"thinking", "⚡"},
+		{"idle", "💤"},
+		{"", ""}, // unknown → blank
+	}
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			r := state.GlobalRow{
+				Name: "remote-foo", Status: state.StatusReady,
+				Alive: true, TmuxSession: "cravd/remote-foo",
+				Host:       "tower",
+				AgentState: tc.state,
+			}
+			got := agentBadge(r, nil, true)
+			if tc.wantBare == "" {
+				if got != "  " {
+					t.Errorf("AgentState=%q: got %q; want blank", tc.state, got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.wantBare) {
+				t.Errorf("AgentState=%q: got %q; want to contain %q", tc.state, got, tc.wantBare)
+			}
+		})
+	}
+}

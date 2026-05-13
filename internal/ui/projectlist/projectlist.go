@@ -358,13 +358,47 @@ func (m Model) renderTable() string {
 	}
 
 	var b strings.Builder
+	prevHost := "" // tracked separately so host changes also reset the project header
 	prevProject := ""
 
+	// Detect whether we have ANY non-local rows. If yes, render a
+	// "local" host section header above the laptop's own rows for
+	// clarity. If everything is local (status quo before v0.17.0),
+	// skip the header entirely — it would just be noise.
+	hasRemote := false
+	for _, r := range m.rows {
+		if r.Host != "" {
+			hasRemote = true
+			break
+		}
+	}
+
 	for i, r := range m.rows {
-		// New project group: blank separator + flush-left header. Header
-		// sits at column 0 so it visually outdents from the rows below
-		// (which start at column 2 = caret + space) — gives the eye a
-		// clear "section / contents" hierarchy.
+		// New HOST section: blank separator + bolder flush-left header.
+		// Renders the host name only when we have at least one remote
+		// row in the listing (otherwise the listing looks like it
+		// always did pre-v0.17.0).
+		if r.Host != prevHost {
+			if prevHost != "" || (hasRemote && i > 0) {
+				b.WriteString("\n")
+			}
+			if hasRemote {
+				label := r.Host
+				if label == "" {
+					label = "local"
+				}
+				b.WriteString(hostHeaderStyle().Render(label))
+				b.WriteString("\n")
+			}
+			prevHost = r.Host
+			prevProject = "" // reset so the first project under this host gets a header
+		}
+
+		// New project group within the current host: blank separator
+		// + flush-left header. Header sits at column 0 so it visually
+		// outdents from the rows below (which start at column 2 =
+		// caret + space) — gives the eye a clear "section / contents"
+		// hierarchy.
 		if r.Project != prevProject {
 			if prevProject != "" {
 				b.WriteString("\n")
@@ -830,6 +864,19 @@ func projectHeaderStyle() lipgloss.Style {
 		Bold(true)
 }
 
+// hostHeaderStyle is the host-section banner above local and each remote
+// host's rows in v0.17.0+. Underline so it visually outdents from the
+// (already-bold) project headers below it — host > project > workspace
+// is the three-level hierarchy when remote hosts are present. Pale
+// violet matches the brand pill so the eye groups it with title chrome,
+// not with row content.
+func hostHeaderStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("99")).
+		Bold(true).
+		Underline(true)
+}
+
 // hintRenameStyle: amber/orange — "your attention is wanted but it's
 // not destructive."
 func hintRenameStyle() lipgloss.Style {
@@ -980,6 +1027,26 @@ func displayGlyph(r state.GlobalRow) string {
 //   - 240 (subtle)  No-AI         — "this workspace has no agent"
 func agentBadge(r state.GlobalRow, states map[string]agent.State, polled bool) string {
 	if !r.Alive || r.IsMain || r.TmuxSession == "" {
+		return "  "
+	}
+	// v0.17 Phase 1d.2: remote rows carry their agent state as a
+	// string on r.AgentState (populated by host.Refresher from the
+	// canopy ls --json wire field). The remote canopy classified via
+	// single-shot pattern match so "thinking" is never set from this
+	// path — only idle / awaiting_input / "" (unknown). We still get
+	// the load-bearing ✋ awaiting-input badge, which is the
+	// "blocked on me" signal users care about most. Blank when the
+	// remote couldn't classify, matches the local "polled, no state"
+	// fallback's quietness.
+	if r.Host != "" {
+		switch r.AgentState {
+		case "awaiting_input":
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("✋")
+		case "thinking":
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("51")).Render("⚡")
+		case "idle":
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("💤")
+		}
 		return "  "
 	}
 	s, ok := states[r.TmuxSession]

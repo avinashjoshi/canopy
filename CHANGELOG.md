@@ -5,6 +5,56 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0.0] - 2026-05-13 — Remote workspaces
+
+Canopy workspaces can now live on SSH-reachable machines. The laptop becomes a thin client; the heavy work (scripts.setup, scripts.run, agent panes) happens on the host. One unified TUI views and acts on every workspace across every host.
+
+### Added
+
+- **Host registry** (`~/.canopy/hosts.json`). Register SSH-reachable boxes once with `canopy host add tower cassy@tower.tail.ts.net`, then refer to them by name everywhere (`--on tower`). Multi-project per host: one tower can hold canopy + cravd + dotfiles independently. Run `canopy host show tower` to see what's where.
+- **Project registry under `canopy project`.** Top-level namespace replaces the awkward `canopy host project add`. `canopy project add cravd /home/cassy/Work/cravd --on tower` binds a project name to a remote path. `canopy project ls` shows local + remote in one view.
+- **Remote dispatch flag `--on`** on `canopy new`, `canopy switch`, `canopy rm`, `canopy retry`. Use it from anywhere; canopy resolves the host + remote cwd from the registry. `--remote-cwd <path>` overrides when you need a one-off.
+- **`canopy new --on tower --prompt "..."`** for fire-and-forget remote agent dispatch. The prompt travels over SSH via base64 + heredoc + umask-077 temp file; never appears in `ps aux` on either machine.
+- **`canopy switch --on tower foo`** attaches via mosh+tmux. UDP transport, state-sync resilience, laptop-suspend tolerance.
+- **`canopy switch --share`** allows multi-attach instead of stealing the existing client. Propagates over SSH via `CANOPY_NO_DETACH=1`.
+- **Refresher** fans out `canopy ls --json` to every registered host on the TUI's 2s tick. Per-host goroutines with 3s deadlines so one slow host can't block the others. SSH ControlMaster reuse keeps subsequent fetches near-zero latency. `BatchMode=yes` prevents password-prompt hangs that would corrupt the Bubbletea render.
+- **`canopy ls --json` schema v3** carries `mem_rss`, `cpu`, `hints`, `last_error_hint`, `agent_state` per workspace row. Backwards-compatible: older laptop parsers ignore unknown fields.
+- **`agent.ClassifyOneShot`** — single-shot agent-pane classifier (idle / awaiting_input / unknown) for the remote-side `canopy ls --json`. The 💤 / ✋ badges now render for remote rows in the laptop TUI (no more blind columns).
+- **TUI tabs:** `<project> · Workspaces · Remote hosts` (project tab dropped when launched outside any project). Left/right/h/l/Tab/Shift+Tab cycle.
+- **Remote hosts tab** (renamed from "Hosts"): independent cursor, full-row selection highlight matching the Workspaces tab. Verbs gated to host-specific actions: `enter` opens a detail drawer, `d` removes a host, `a` runs ssh-copy-id on a host that lost key auth, `n` opens an in-TUI add-host form (Tab-nav between name + ssh-target). Post-add probe offers ssh-copy-id automatically when auth fails.
+- **`n` on a remote row** opens the full new-workspace picker (Fresh + Prompt; PR/Issue/Branch hidden for remote since they need remote `gh`). Streams setup output to the busy view via subprocess capture, same UX as local.
+- **Workspace-list verbs work on remote rows:** `d` (with `F` to force-remove on hanging work), `K` (kill remote tmux session via SSH), `B` (auto-creates `ssh -L` port forward to laptop, then xdg-open), `i` (drawer), `R` (retry), `enter` (attach via mosh).
+- **Attach-share warning:** pressing Enter on a session another client is already on now pops a y/N confirm before stealing/sharing. Skips the prompt when re-attaching to your own launching workspace (the expected flow).
+
+### Changed
+
+- `canopy host project add/ls/rm` renamed to top-level `canopy project add/ls/rm`. The `host project` subcommands are removed (no aliasing — clean v0.17 cut).
+- Remote action callbacks (rm/retry/kill/wizard/attach) now fire a combined local+remote refresh via `refreshAllMsg` instead of local-only `refreshCmd`. Previously you had to manually press `r` to see a deleted remote row disappear.
+- Workspace verb keybindings (d/K/B/P/R/i/enter) are gated to the Workspaces tab — pressing them on the Remote hosts tab no longer fires against stale cursor rows.
+- The `f` keybind (focus project) is gone. With contextual tabs the "load this project into Local" action has no remaining purpose.
+- `internal/ui/update.go` carved from 3,202 lines into 8 focused sibling files (`update_attach.go`, `update_delete.go`, `update_host.go`, `update_kill.go`, `update_new.go`, `update_remote.go`, `update_retry.go`, `update_tabs.go`). No behavior change.
+
+### Fixed
+
+- Refresher used `bash -lc "<script>"` argv form which SSH word-split on the remote — only the first word ran. Now pipes the script via stdin to `bash -l`.
+- Refresher's first call did flock I/O on the UI thread before returning the tea.Cmd, freezing the TUI on open against an unreachable host. All I/O is now inside the returned closure.
+- Refresher caused password-prompt hangs against hosts without key auth. Now uses `BatchMode=yes` so auth failures fast-fail.
+- `canopy host add --interactive` probe used `canopy --version` (not a flag). Switched to `canopy version` subcommand.
+- `canopy new --prompt` over SSH leaked the temp prompt file on success because the script used `exec canopy`, replacing bash before the trap could fire. Removed the `exec` so trap runs on shell exit.
+- Remote `(main)` rows showed status "main" (literal) instead of "running" / "not started", and branch "↗ —" instead of the actual default branch. Both caused by missing `IsMain=true` on the wire-format → GlobalRow conversion and a laptop-only `fillMainBranches` pass. Now both happen on the remote side of `canopy ls --json`.
+- Remote workspace rows showed a misleading `·` "no agent pane" badge even when Claude was running. Single-shot agent classification on the remote populates the correct 💤 / ✋ instead.
+- The TUI's confirm-attach modal promised "share the session" but the attach path still passed `-d` / called `detachOtherClients`, kicking the other client off. `tmux.AttachOptions{Shared: true}` now skips both; `canopy switch --share` propagates over SSH so the remote canopy switch does too.
+- The Remote hosts tab `Enter` on a host rendered an error-colored info string instead of a real detail view. Replaced with `hostDetailMode` showing ssh-target, registered projects, version, last-seen, last-error.
+- Remote `canopy rm` rejected on hanging work and the confirm modal gave no escape to `F`. The modal now offers both `y` and `F` for remote rows since the laptop can't run the safety preflight.
+- After dismissing the post-add ssh-copy-id offer there was no way to retry. New `a` keybind on the Remote hosts tab opens the same modal for an existing host.
+- `n` on a remote row from `$HOME` (outside any project) failed with "needs a project but you're not inside any". TUI now passes `--remote-cwd` resolved from the host registry.
+
+### Removed
+
+- `canopy host project` subcommand namespace (use top-level `canopy project` instead).
+- The `f` keybind and `actionFocusProject` function.
+- The huh-based subprocess wizard for `canopy host add --interactive` is still available from the CLI, but the TUI's `n` on Remote hosts opens the in-TUI form instead.
+
 ## [0.16.2.1] - 2026-05-11 — Pane-role contract hardening (defense-in-depth)
 
 Quiet cleanup release. No user-facing behavior change in the happy path — these

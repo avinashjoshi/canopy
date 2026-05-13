@@ -27,6 +27,8 @@
 package ui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -94,22 +96,42 @@ var listModeBindings = []Binding{
 		Action: actionTabSwitch,
 	},
 	{
+		// v0.17.0 Phase 1c polish: left/h prev-tab, right/l next-tab.
+		// Mirrors j/k for up/down so the keymap stays vim-ergonomic.
+		// Single help entry covers both bindings; rendering is in the
+		// tab bar (← Local | Global | Hosts →) so the directionality
+		// is visible at a glance.
+		K:      key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "next tab")),
+		Action: actionTabNext,
+	},
+	{
+		// shift+tab is the standard "reverse tab" idiom across nearly
+		// every TUI / form library. Aliased onto actionTabPrev so it
+		// composes with ← / h as one consistent prev-tab affordance.
+		K:      key.NewBinding(key.WithKeys("left", "h", "shift+tab"), key.WithHelp("←/h/⇧⇥", "prev tab")),
+		Action: actionTabPrev,
+	},
+	{
 		K:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 		Action: actionSearchEntry,
 	},
 	{
-		K:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "attach")),
-		Action: actionAttach,
+		K:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "attach")),
+		Available: availableInWorkspaceContext, // Hosts tab enter handled separately
+		Action:    actionAttach,
+	},
+	{
+		// Hosts tab: enter on a selected host runs `canopy host show
+		// <name>` semantics in-TUI — for v0.17 Phase 1l just opens the
+		// detail drawer-ish surface (a follow-up).
+		K:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "host detail")),
+		Available: availableOnHostsTab,
+		Action:    actionHostEnter,
 	},
 	{
 		K:         key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
 		Available: availableNewWorkspace,
 		Action:    actionNewWorkspace,
-	},
-	{
-		K:         key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "focus project")),
-		Available: availableFocusProject,
-		Action:    actionFocusProject,
 	},
 	{
 		// P (capital) opens the cursor row's PR in the browser. Lower-
@@ -133,8 +155,26 @@ var listModeBindings = []Binding{
 		Action:    actionOpenBrowser,
 	},
 	{
-		K:      key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
-		Action: actionDelete,
+		// d on Hosts tab deletes the cursor's host from the registry;
+		// elsewhere it deletes a workspace. Single key, tab-aware
+		// dispatch via actionDeleteRouter — both bindings exist so the
+		// help line surfaces the right verb on the right tab.
+		K:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		Available: availableInWorkspaceContext,
+		Action:    actionDelete,
+	},
+	{
+		K:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove host")),
+		Available: availableOnHostsTab,
+		Action:    actionHostRemove,
+	},
+	{
+		// `a` on a host with status=auth-failed offers ssh-copy-id.
+		// Lets the user recover from an earlier "skip" without
+		// re-adding the host. v0.17 Phase 1l polish.
+		K:         key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "set up auth")),
+		Available: availableHostAuth,
+		Action:    actionHostSetupAuth,
 	},
 	{
 		// K (capital) kills the workspace's tmux session without
@@ -142,20 +182,23 @@ var listModeBindings = []Binding{
 		// the muscle-memory case is nav, the deliberate-keypress
 		// case is destructive. Same shift-key friction as F (force-
 		// remove). Re-pressing Enter after kill resurrects.
-		K:      key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "kill tmux")),
-		Action: actionKill,
+		K:         key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "kill tmux")),
+		Available: availableInWorkspaceContext,
+		Action:    actionKill,
 	},
 	{
 		// `i` opens the diagnostic detail drawer for the selected
 		// workspace. Read-only; scope-capped to "what's the state
 		// of this one workspace right now?". See drawerMode docstring
 		// in model.go for the load-bearing scope cap rationale.
-		K:      key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inspect")),
-		Action: actionInspect,
+		K:         key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inspect")),
+		Available: availableInWorkspaceContext,
+		Action:    actionInspect,
 	},
 	{
-		K:      key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "retry")),
-		Action: actionRetry,
+		K:         key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "retry")),
+		Available: availableInWorkspaceContext,
+		Action:    actionRetry,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
@@ -208,12 +251,17 @@ func availableNewWorkspace(m *Model) bool {
 	if m.tab == tabLocal {
 		return m.mgr != nil
 	}
-	// tabGlobal: need a cursor row with a project to point at.
+	if m.tab == tabHosts {
+		// Hosts tab: `n` opens the add-host wizard.
+		return true
+	}
 	row, ok := m.list.CursorRow()
 	if !ok {
 		return false
 	}
-	return row.ProjectRoot != ""
+	// Remote row: `n` dispatches to `canopy new --on <host>`. Local row:
+	// need a non-empty ProjectRoot so managerForRow can resolve.
+	return row.Host != "" || row.ProjectRoot != ""
 }
 
 // availableOpenPR is the Available predicate for `P`. Hidden when the
@@ -247,22 +295,46 @@ func availableOpenBrowser(m *Model) bool {
 	return row.Alive && row.Port > 0
 }
 
-// availableFocusProject is the Available predicate for `o`. Only
-// meaningful on the Global tab (Local already IS the current project's
-// scope; pressing o there would be a no-op). The same-project case is
-// allowed — pressing o on the already-focused project is a harmless
-// re-focus + tab switch, and disabling it just creates muscle-memory
-// friction.
-func availableFocusProject(m *Model) bool {
-	if m.tab != tabGlobal {
+// availableInWorkspaceContext is the predicate for verbs that act on
+// the workspace list (d/K/i/R/B/P/enter). Hidden on the Hosts tab so
+// pressing them there doesn't accidentally fire against whatever
+// workspace cursor row is stale. v0.17 Phase 1l.
+func availableInWorkspaceContext(m *Model) bool {
+	return m.tab != tabHosts
+}
+
+// availableOnHostsTab is the inverse — gates host-specific verbs to
+// only fire while the Hosts tab is active.
+func availableOnHostsTab(m *Model) bool {
+	return m.tab == tabHosts && len(m.hostList) > 0
+}
+
+// availableHostAuth gates the `a` key (set up auth) to Hosts-tab rows
+// whose most recent refresh failed with Permission-denied. Other
+// auth-related statuses (Online, Offline due to network) don't need
+// ssh-copy-id. v0.17 Phase 1l polish.
+func availableHostAuth(m *Model) bool {
+	if !availableOnHostsTab(m) {
 		return false
 	}
-	row, ok := m.list.CursorRow()
+	h, ok := m.selectedHost()
 	if !ok {
 		return false
 	}
-	return row.ProjectRoot != ""
+	snap := m.remoteSnaps[h.Name]
+	if snap == nil {
+		// Unknown status — allow `a` so the user can pre-emptively
+		// set up auth without first triggering a refresh failure.
+		return true
+	}
+	return strings.Contains(snap.LastError, "Permission denied") ||
+		strings.Contains(snap.LastError, "publickey")
 }
+
+// availableOpenPR and availableOpenBrowser already short-circuit when
+// the cursor row has no Path or no Port; both implicitly disqualify
+// the Hosts tab (no cursor row). The explicit gate above is for the
+// other verbs whose predicates would otherwise pass through.
 
 // availableShortHelp returns the bindings that pass IsAvailable, in
 // declared order. This is what bubbles/help.Bubble's ShortHelp consumes

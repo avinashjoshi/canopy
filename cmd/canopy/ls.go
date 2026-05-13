@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,16 +10,21 @@ import (
 	"path/filepath"
 	"sort"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/git"
+	"github.com/avinashjoshi/canopy/internal/lifecycle"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 )
 
 var lsFlags struct {
-	all bool
+	all    bool
+	asJSON bool
 }
 
 // lsCmd returns the `canopy ls` cobra subcommand.
@@ -64,6 +70,17 @@ func lsCmd() *cobra.Command {
 			// gracefully falls back to global.
 			global := lsFlags.all || cfg == nil
 			out := cmd.OutOrStdout()
+
+			// --json forces global mode (all workspaces) and emits a
+			// stable JSON document instead of the tab-aligned table.
+			// Used by v0.17.0 host.Refresher to fetch a remote host's
+			// workspace listing without parsing free-form text. Always
+			// global so the remote caller sees the full picture, not
+			// just whatever project tower happens to be cwd'd into.
+			if lsFlags.asJSON {
+				return lsGlobalJSON(cmd.Context(), out)
+			}
+
 			var lsErr error
 			if global {
 				lsErr = lsGlobal(cmd.Context(), out)
@@ -83,6 +100,8 @@ func lsCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&lsFlags.all, "all", false,
 		"list workspaces across all projects (implicit when no canopy.json is found)")
+	cmd.Flags().BoolVar(&lsFlags.asJSON, "json", false,
+		"emit a stable JSON document instead of the tabular view (used by v0.17 host.Refresher to read remote workspace state)")
 	return cmd
 }
 
@@ -246,6 +265,222 @@ func lsGlobal(ctx context.Context, out io.Writer) error {
 			badge, r.Project, r.Name, r.Branch, r.Status, port, r.TmuxSession)
 	}
 	return tw.Flush()
+}
+
+// LsJSONOutput is the wire format emitted by `canopy ls --json`. v0.17
+// host.Refresher on the LAPTOP parses this struct from each remote
+// host's response, so this is effectively a stable cross-version API.
+// Schema_version bumps on any backwards-incompatible field change so
+// the refresher can detect drift and degrade gracefully.
+type LsJSONOutput struct {
+	SchemaVersion int                `json:"schema_version"`
+	CanopyVersion string             `json:"canopy_version"`
+	Hostname      string             `json:"hostname,omitempty"`
+	GeneratedAt   string             `json:"generated_at"`
+	Workspaces    []LsJSONWorkspace  `json:"workspaces"`
+}
+
+// LsJSONWorkspace is the per-row shape. Mirrors state.GlobalRow with
+// the fields the refresher actually needs to render a workspace row in
+// the laptop TUI. v0.17 Phase 1g added MemRSS, CPU, Hints, and
+// LastErrorHint so remote rows reach feature parity with local rows
+// (CPU/mem column, PR-status badge, broken-row hint line).
+//
+// Schema is additive: older laptop clients ignore unknown fields, so
+// rolling out a new column doesn't require coordinated upgrades.
+type LsJSONWorkspace struct {
+	Name        string `json:"name"`
+	Project     string `json:"project"`
+	Branch      string `json:"branch"`
+	Status      string `json:"status"`
+	Port        int    `json:"port,omitempty"`
+	TmuxSession string `json:"tmux_session"`
+	Alive       bool   `json:"alive"`
+
+	// MemRSS is the summed resident set size (bytes) across every pane
+	// in this row's tmux session. Zero for non-alive rows. Phase 1g.
+	MemRSS int64 `json:"mem_rss,omitempty"`
+
+	// CPU is the summed pcpu (single-core normalized). Zero for
+	// non-alive rows. Phase 1g.
+	CPU float64 `json:"cpu,omitempty"`
+
+	// Hints are lifecycle detector results (rename_suggested, shipped,
+	// pr_status, etc). Empty for rows the remote couldn't run detectors
+	// against. Phase 1g.
+	Hints []state.Hint `json:"hints,omitempty"`
+
+	// LastErrorHint is the auto-detected diagnosis for broken
+	// workspaces. Surfaced under the table when the cursor is on a
+	// broken row. Empty for healthy rows. Phase 1g.
+	LastErrorHint string `json:"last_error_hint,omitempty"`
+
+	// AgentState is the workspace agent pane's classification at
+	// emit time: "idle", "thinking", "awaiting_input", or "" (unknown
+	// / no agent pane). Single-shot pattern match via
+	// agent.ClassifyOneShot — so "thinking" is never set from this
+	// path (it requires motion across observations the laptop tracks).
+	// The laptop Refresher reads this onto GlobalRow.AgentState which
+	// the row renderer uses to populate the badge for remote rows.
+	// v0.17 Phase 1d.2.
+	AgentState string `json:"agent_state,omitempty"`
+}
+
+// canopyVersionInfo is populated at link time by versionCmd.go; for the
+// JSON output we fall back to "(unknown)" if not set. The refresher
+// uses this to detect version drift between laptop and remote canopy.
+var canopyVersionInfo = "(unknown)"
+
+const lsJSONSchemaVersion = 3 // v0.17 Phase 1d.2: + agent_state
+
+func lsGlobalJSON(ctx context.Context, out io.Writer) error {
+	store, err := openStateReadOnly()
+	if err != nil {
+		return err
+	}
+	st, err := store.Load()
+	if err != nil {
+		return err
+	}
+	tc := tmux.New()
+	// v0.17 Phase 1g: build rows with CPU/mem populated. Hints run
+	// after — they need each row's Path+ProjectRoot, which the cheaper
+	// BuildGlobalRowsWithLoad path already attaches.
+	memCache := state.NewMemCache(state.DefaultMemCacheTTL)
+	rows := st.BuildGlobalRowsWithLoad(ctx, tc, lsLoadAdapter{c: tc}, memCache)
+
+	doc := LsJSONOutput{
+		SchemaVersion: lsJSONSchemaVersion,
+		CanopyVersion: canopyVersionInfo,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		Workspaces:    make([]LsJSONWorkspace, 0, len(rows)),
+	}
+	if host, herr := os.Hostname(); herr == nil {
+		doc.Hostname = host
+	}
+	// Look up per-workspace LastErrorHint from state.json (only set for
+	// broken workspaces; healthy rows leave it empty).
+	hintByKey := make(map[string]string, len(st.Workspaces))
+	for _, w := range st.Workspaces {
+		hintByKey[w.ProjectRoot+"|"+w.Name] = w.LastErrorHint
+	}
+	// v0.17 Phase 1k follow-up: resolve each project's default branch
+	// ONCE per project and substitute it for the "—" placeholder on
+	// main rows. The laptop's fillMainBranches only fires for local
+	// rows; without doing this on the remote too, the laptop renders
+	// "(main) ↗ —" for remote projects. DetectDefaultBranch is one
+	// git rev-parse — cheap to amortize.
+	mainBranchByRoot := make(map[string]string)
+	for _, r := range rows {
+		if !r.IsMain || r.ProjectRoot == "" {
+			continue
+		}
+		if _, ok := mainBranchByRoot[r.ProjectRoot]; ok {
+			continue
+		}
+		b, err := git.DetectDefaultBranch(ctx, r.ProjectRoot)
+		if err != nil || b == "" {
+			b = "main" // fallback matches fillMainBranches'
+		}
+		mainBranchByRoot[r.ProjectRoot] = b
+	}
+	// v0.17 Phase 1d.2: classify each workspace's agent pane via
+	// single-shot pattern matching so the laptop can render the
+	// awaiting-input / idle badge on remote rows. One ListAgentPanes
+	// call up front; per-pane CapturePane bounded by a tight timeout
+	// so a wedged pane can't stall ls --json. Errors fail-open: the
+	// row's agent_state stays empty and the laptop renders blank.
+	agentStateBySession := classifyAgentPanes(ctx, tc)
+	for _, r := range rows {
+		var hints []state.Hint
+		// Main rows have no Path / no detector input — skip them.
+		if !r.IsMain && r.Path != "" {
+			ws := state.Workspace{
+				Name:        r.Name,
+				Branch:      r.Branch,
+				Path:        r.Path,
+				ProjectRoot: r.ProjectRoot,
+				Status:      r.Status,
+			}
+			hints = lifecycle.RunFast(ctx, ws)
+		}
+		branch := r.Branch
+		if r.IsMain {
+			if resolved, ok := mainBranchByRoot[r.ProjectRoot]; ok {
+				branch = resolved
+			}
+		}
+		var agentState string
+		if s, ok := agentStateBySession[r.TmuxSession]; ok && s != agent.StateUnknown {
+			agentState = s.String()
+		}
+		doc.Workspaces = append(doc.Workspaces, LsJSONWorkspace{
+			Name:          r.Name,
+			Project:       r.Project,
+			Branch:        branch,
+			Status:        string(r.Status),
+			Port:          r.Port,
+			TmuxSession:   r.TmuxSession,
+			Alive:         r.Alive,
+			MemRSS:        r.MemRSS,
+			CPU:           r.CPU,
+			Hints:         hints,
+			LastErrorHint: hintByKey[r.ProjectRoot+"|"+r.Name],
+			AgentState:    agentState,
+		})
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(doc)
+}
+
+// lsLoadAdapter wraps *tmux.Client to satisfy state.LoadProbe.
+// Mirrors the ui.tmuxLoadAdapter — copied here to avoid importing
+// internal/ui from cmd/canopy.
+type lsLoadAdapter struct{ c *tmux.Client }
+
+func (a lsLoadAdapter) SessionLoad(ctx context.Context, session string) (state.LoadValue, error) {
+	if a.c == nil {
+		return state.LoadValue{}, nil
+	}
+	got, err := a.c.SessionLoad(ctx, session)
+	if err != nil {
+		return state.LoadValue{}, err
+	}
+	return state.LoadValue{RSS: got.RSS, CPU: got.CPU}, nil
+}
+
+// classifyAgentPanes runs ListAgentPanes + per-pane CapturePane,
+// classifies each pane via agent.ClassifyOneShot, and returns a map
+// keyed by tmux session name. Used by lsGlobalJSON to stamp each row's
+// agent_state. v0.17 Phase 1d.2.
+//
+// Failure modes are all fail-open — the map just doesn't carry an
+// entry for the missing/timed-out pane, and the row's agent_state in
+// the JSON output stays empty. Per-pane CapturePane wrapped in a
+// 500ms timeout so one wedged pane can't stall the whole emit.
+func classifyAgentPanes(ctx context.Context, tc *tmux.Client) map[string]agent.State {
+	out := make(map[string]agent.State)
+	listCtx, listCancel := context.WithTimeout(ctx, 1*time.Second)
+	defer listCancel()
+	panes, err := tc.ListAgentPanes(listCtx)
+	if err != nil || len(panes) == 0 {
+		return out
+	}
+	for _, p := range panes {
+		launcher := agent.LauncherFromRole(p.Role)
+		if launcher == "" {
+			continue
+		}
+		capCtx, capCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		content, err := tc.CapturePane(capCtx, p.ID)
+		capCancel()
+		if err != nil {
+			continue
+		}
+		out[p.Session] = agent.ClassifyOneShot(launcher, content)
+	}
+	return out
 }
 
 // openStateReadOnly returns a state.Store rooted at ~/.canopy. Used for

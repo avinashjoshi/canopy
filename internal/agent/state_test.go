@@ -430,3 +430,37 @@ func TestIsTrustDialog(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyOneShot covers the v0.17 Phase 1d.2 single-shot
+// classifier used by `canopy ls --json` to stamp each workspace's
+// agent_state without diff/history. AwaitingInput pattern matches
+// take precedence over Idle markers (matches Observe's order).
+func TestClassifyOneShot(t *testing.T) {
+	cases := []struct {
+		name     string
+		launcher string
+		content  string
+		want     State
+	}{
+		{"empty content", "claude", "", StateUnknown},
+		{"empty launcher", "", "anything", StateUnknown},
+		{"non-claude launcher", "aider", "Welcome back to aider", StateUnknown},
+		{"claude idle marker", "claude", "Welcome back\n❯ Try \"...\"", StateIdle},
+		{"claude awaiting (y/N)", "claude", "Allow tool use? (y/N)", StateAwaitingInput},
+		{"claude awaiting selector", "claude", "Enter to confirm · Esc to cancel", StateAwaitingInput},
+		{"claude no markers", "claude", "just some text", StateUnknown},
+		{
+			"awaiting beats idle when both match",
+			"claude",
+			"Welcome back\nAllow tool use? (y/N)",
+			StateAwaitingInput,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyOneShot(tc.launcher, tc.content); got != tc.want {
+				t.Errorf("ClassifyOneShot(%q, %q) = %v; want %v", tc.launcher, tc.content, got, tc.want)
+			}
+		})
+	}
+}

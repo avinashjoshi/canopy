@@ -42,6 +42,16 @@ func actionInspect(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	// v0.17.0: inspect probes the LOCAL tmux server for process tree,
+	// logs, etc. Remote workspaces would need a parallel "remote
+	// inspect" path that SSHes the probes. Not yet implemented.
+	// Surface the limitation rather than show empty drawer panes.
+	if row.Host != "" {
+		m.err = fmt.Errorf(
+			"remote inspect isn't supported yet — workspace lives on %s. SSH there and run `canopy inspect %s`, or attach (enter) and look around in tmux.",
+			row.Host, row.Name)
+		return m, nil
+	}
 	if row.TmuxSession == "" {
 		// Defensive: every row should have a session name, but if a
 		// future row type lacks one (e.g. a placeholder row) the

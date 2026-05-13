@@ -100,12 +100,21 @@ func (c *Client) DetachClient(ctx context.Context) error {
 // tmux can't find a session by that name. The mapping: tmux exit code 1
 // with "can't find session" stderr → ErrSessionNotFound.
 func (c *Client) SwitchClient(ctx context.Context, target string) error {
-	log.Info("tmux.switch-client", "target", target)
+	return c.SwitchClientWithOptions(ctx, target, AttachOptions{})
+}
 
-	// Detach any existing clients on the target session before our
-	// client switches in. Solo-dev default — see detachOtherClients
-	// in session.go for full rationale + opt-out env var.
-	c.detachOtherClients(ctx, target, "switch-client")
+// SwitchClientWithOptions is SwitchClient with explicit share-vs-steal
+// control. Mirrors AttachCmdWithOptions on the attach-session side.
+// v0.17 Phase 1j.
+func (c *Client) SwitchClientWithOptions(ctx context.Context, target string, opts AttachOptions) error {
+	log.Info("tmux.switch-client", "target", target, "shared", opts.Shared)
+
+	if !opts.Shared {
+		// Detach any existing clients on the target session before our
+		// client switches in. Solo-dev default — see detachOtherClients
+		// in session.go for full rationale + opt-out env var.
+		c.detachOtherClients(ctx, target, "switch-client")
+	}
 
 	args := c.args("switch-client", "-t", target)
 	cmd := exec.CommandContext(ctx, "tmux", args...)
