@@ -614,6 +614,12 @@ func actionTabSwitch(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // context. Without that, Local would either show every row (no
 // filter) or feel broken.
 func actionTabNext(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Tab cycling clears any host-focus (set by `f` on a remote row).
+	// Keeps focus a Global-tab-only modifier — landing on Local with a
+	// stale focus would just be invisible (Local filters out remote
+	// rows anyway) but landing back on Global without an obvious way
+	// to clear it would confuse users.
+	m.focusHost = ""
 	switch m.tab {
 	case tabLocal:
 		m.tab = tabGlobal
@@ -651,6 +657,7 @@ func actionTabNext(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // actionTabPrev cycles backward: Local ← Global ← Hosts. Bound to
 // `left`/`h`. Same Hosts-skip-when-empty logic as actionTabNext.
 func actionTabPrev(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.focusHost = ""
 	switch m.tab {
 	case tabLocal:
 		// Wrap to Hosts if any registered, else Global.
@@ -764,15 +771,24 @@ func (m *Model) clearNewTarget() {
 // has shells in the project root.
 func actionFocusProject(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
-	if !ok || row.ProjectRoot == "" {
+	if !ok {
 		return m, nil
 	}
-	// v0.17.0: remote rows don't have a local ProjectRoot. Focus is a
-	// laptop-side filter ("show only this project's local workspaces"),
-	// which has no meaning for a project that lives on tower. Inform
-	// the user instead of silently failing.
+	// v0.17 Phase 1g: remote rows can't load a local Manager (no
+	// canopy.json on the laptop for a project that lives on tower),
+	// but `f` still has a useful job — narrow the Global tab to the
+	// one host the cursor is on. Checked BEFORE the ProjectRoot==""
+	// gate because remote rows always have an empty ProjectRoot.
+	// Press `f` on any local row, `esc`, or tab-cycle to clear.
 	if row.Host != "" {
-		m.err = fmt.Errorf("can't focus a remote project — %s/%s lives on %s; cd into your local copy and run `canopy` there", row.Host, row.Project, row.Host)
+		m.focusHost = row.Host
+		m.tab = tabGlobal
+		m.list.SetRows(m.filteredRows())
+		return m, nil
+	}
+	// Local row: any prior remote-host focus is no longer applicable.
+	m.focusHost = ""
+	if row.ProjectRoot == "" {
 		return m, nil
 	}
 	// Short-circuit when re-focusing the already-current project: just
@@ -1276,6 +1292,13 @@ func (m *Model) filteredRows() []state.GlobalRow {
 			if m.currentProject != "" && r.ProjectRoot != "" && r.ProjectRoot != m.currentProject {
 				continue
 			}
+		}
+		// v0.17 Phase 1g: when the user pressed `f` on a remote row,
+		// narrow the Global tab to just that host. Doesn't affect
+		// Local tab (handled above) — Local tab already excludes all
+		// remote rows.
+		if m.focusHost != "" && m.tab == tabGlobal && r.Host != m.focusHost {
+			continue
 		}
 		if m.searchQuery != "" && !rowMatchesQuery(r, m.searchQuery) {
 			continue

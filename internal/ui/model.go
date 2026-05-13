@@ -283,6 +283,13 @@ type Model struct {
 	// or outside any workspace — fall back to row 0).
 	currentWorkspace string
 
+	// focusHost is the active Global-tab host filter. Set by `f` on a
+	// remote row to narrow the list to one host's rows; cleared by `f`
+	// on a local row, by `esc`, by starting a search, or by tab cycling.
+	// v0.17 Phase 1g — gives `f` a meaningful job on remote rows where
+	// the "load a local Manager" semantics don't apply.
+	focusHost string
+
 	// currentWorkspaceRoot is the ProjectRoot of currentWorkspace.
 	// Tracked alongside the name so escape/preselect logic disambiguates
 	// across projects with same-named workspaces — e.g. project A and

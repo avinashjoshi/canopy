@@ -2587,6 +2587,105 @@ func TestActionOpenBrowser_NoPortNoOp(t *testing.T) {
 	}
 }
 
+// TestActionFocusProject_RemoteRowSetsHostFilter: pressing `f` on a
+// remote row narrows the Global tab to just that host's rows. Replaces
+// the prior "can't focus a remote project" error which gave the
+// keypress no useful behavior. v0.17 Phase 1g.
+func TestActionFocusProject_RemoteRowSetsHostFilter(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	// All-remote rows so cursor=0 lands on tower-foo (SetCursorTo
+	// requires a non-empty ProjectRoot which remote rows don't have).
+	m.remoteRows = []Row{
+		{Project: "cravd", Name: "tower-foo", Status: state.StatusReady, Host: "tower"},
+		{Project: "cravd", Name: "pi-foo", Status: state.StatusReady, Host: "pi"},
+	}
+	m.list.SetRows(m.filteredRows())
+
+	_, _ = actionFocusProject(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+
+	if m.focusHost != "tower" {
+		t.Errorf("focusHost = %q; want tower", m.focusHost)
+	}
+	if m.tab != tabGlobal {
+		t.Errorf("tab = %v; want tabGlobal", m.tab)
+	}
+	// filteredRows should now exclude the pi row.
+	visible := m.filteredRows()
+	for _, r := range visible {
+		if r.Host != "tower" {
+			t.Errorf("focus filter leaked row Host=%q Name=%q", r.Host, r.Name)
+		}
+	}
+	if len(visible) != 1 {
+		t.Errorf("visible rows = %d; want 1 (tower-foo)", len(visible))
+	}
+}
+
+// TestActionFocusProject_LocalRowClearsHostFilter: pressing `f` on a
+// local row after a remote focus reverts to the normal local-focus
+// behavior AND clears the host filter so the user isn't stuck inside
+// a stale narrow.
+func TestActionFocusProject_LocalRowClearsHostFilter(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.focusHost = "tower" // simulate prior remote focus
+	m.allRows = []Row{
+		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "local-foo", Status: state.StatusReady},
+	}
+	m.list.SetRows([]Row{m.allRows[0]})
+
+	// Cursor on the local row. actionFocusProject will try to build a
+	// Manager; we don't care if it succeeds (no canopy.json at /p/cravd
+	// in the test). The invariant under test is focusHost clearing.
+	_, _ = actionFocusProject(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+
+	if m.focusHost != "" {
+		t.Errorf("focusHost = %q after f on local row; want cleared", m.focusHost)
+	}
+}
+
+// TestActionTabNext_ClearsFocusHost: cycling tabs clears the host
+// focus so a stale focus doesn't survive a navigation round-trip.
+func TestActionTabNext_ClearsFocusHost(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.focusHost = "tower"
+	_, _ = actionTabNext(m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.focusHost != "" {
+		t.Errorf("focusHost = %q after tab next; want cleared", m.focusHost)
+	}
+}
+
+// TestFilteredRows_FocusHostScopesGlobalTab: filteredRows applies
+// focusHost only on tabGlobal; tabLocal already excludes remote rows
+// so the filter is a no-op there.
+func TestFilteredRows_FocusHostScopesGlobalTab(t *testing.T) {
+	m := newTestModel(false)
+	m.allRows = []Row{
+		{Project: "cravd", ProjectRoot: "/p/cravd", Name: "local-foo", Status: state.StatusReady},
+	}
+	m.remoteRows = []Row{
+		{Project: "cravd", Name: "tower-foo", Status: state.StatusReady, Host: "tower"},
+		{Project: "cravd", Name: "pi-foo", Status: state.StatusReady, Host: "pi"},
+	}
+	m.focusHost = "pi"
+
+	m.tab = tabGlobal
+	got := m.filteredRows()
+	if len(got) != 1 || got[0].Name != "pi-foo" {
+		t.Errorf("Global+focusHost=pi: got %d rows %+v; want only pi-foo", len(got), got)
+	}
+
+	// Local tab: focus has no effect (local tab excludes all remote anyway).
+	m.tab = tabLocal
+	m.currentProject = "/p/cravd"
+	got = m.filteredRows()
+	if len(got) != 1 || got[0].Name != "local-foo" {
+		t.Errorf("Local tab with focusHost: got %+v; want only local-foo", got)
+	}
+}
+
 // TestErrMsg_SetsErrAndStaysIdle: an errMsg delivered to Update sets
 // m.err and returns no follow-up cmd (no refresh, no retry).
 func TestErrMsg_SetsErrAndStaysIdle(t *testing.T) {
