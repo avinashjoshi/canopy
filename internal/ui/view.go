@@ -453,25 +453,157 @@ func (m *Model) renderConfirmRetry() string {
 // text. Lazyworktree-flavored. Driven by listModeBindings + Available
 // predicates so e.g. `n` and `o` appear/disappear contextually.
 //
-// Up/down/g/G fold into one nav entry; rendering each individually
-// would overflow narrow popups with little signal.
-func (m *Model) renderHelpLine() string {
-	var parts []string
-	parts = append(parts, keyPillStyle.Render("↑/↓")+" "+subtleStyle.Render("nav"))
+// Up/down/g/G fold into one synthesized "↑/↓ nav" chip in the nav
+// group — rendering each individually would overflow narrow popups
+// with little signal.
+//
+// Wrapping: chips are grouped (nav / tabs / open / act / meta) and each
+// group renders on its own line. One group per line trades a little
+// vertical space for a predictable layout — the eye learns where each
+// verb category lives. If a single group is wider than the screen
+// (rare — only at very small widths), the group itself wraps chip-by-
+// chip across multiple lines. m.width == 0 (pre-first-WindowSizeMsg)
+// falls back to single-line render so the very first paint and the
+// existing tab-switch tests keep working.
+//
+// Short-viewport mode: when m.height is below compactHelpHeight, the
+// per-group layout would push the top chrome (brand pill, tab bar) off-
+// screen. Collapse to a single line of essentials (nav / enter / n / ?
+// more / q) so chrome stays visible. `?` opens the full help legend.
+const compactHelpHeight = 20
 
-	skip := map[string]bool{"up": true, "down": true, "g": true, "G": true}
+func (m *Model) renderHelpLine() string {
+	if m.height > 0 && m.height < compactHelpHeight {
+		return m.renderHelpLineCompact()
+	}
+	// Walk listModeBindings once, bucketing available chips by group.
+	// Group order is fixed by groupOrder; bindings within a group keep
+	// their listModeBindings order. The synthesized "↑/↓ nav" chip
+	// replaces the four cursor-nav bindings so users see one badge
+	// instead of four redundant ones.
+	skipNavKeys := map[string]bool{"up": true, "down": true, "g": true, "G": true}
+	buckets := map[string][]string{}
 	for _, b := range listModeBindings {
 		if !b.IsAvailable(m) {
 			continue
 		}
 		keys := b.K.Keys()
-		if len(keys) == 0 || skip[keys[0]] {
+		if len(keys) == 0 || skipNavKeys[keys[0]] {
 			continue
 		}
 		h := b.K.Help()
-		parts = append(parts, keyPillStyle.Render(h.Key)+" "+subtleStyle.Render(h.Desc))
+		chip := keyPillStyle.Render(h.Key) + " " + subtleStyle.Render(h.Desc)
+		g := b.Group
+		if g == "" {
+			g = "act"
+		}
+		buckets[g] = append(buckets[g], chip)
 	}
-	return strings.Join(parts, "  ")
+	// Prepend the synthesized nav chip so it always leads. listModeBindings
+	// doesn't carry it as its own entry — the four cursor bindings collapse
+	// into one chip for visual density.
+	navChip := keyPillStyle.Render("↑/↓") + " " + subtleStyle.Render("nav")
+	buckets["nav"] = append([]string{navChip}, buckets["nav"]...)
+
+	groupOrder := []string{"nav", "tabs", "open", "act", "meta"}
+
+	// Pre-v0.17 behavior + tests: single joined line. Fall back to that
+	// when we don't yet know the terminal width (m.width == 0, the state
+	// before the first WindowSizeMsg arrives).
+	if m.width <= 0 {
+		var flat []string
+		for _, g := range groupOrder {
+			flat = append(flat, buckets[g]...)
+		}
+		return strings.Join(flat, "  ")
+	}
+
+	const (
+		chipSep     = "  " // between chips inside a group
+		widthMargin = 4    // padding budget so we don't hug the right edge
+	)
+	avail := m.width - widthMargin
+	if avail < 12 {
+		avail = 12 // degenerate; let lines overflow rather than emit garbage
+	}
+	chipSepW := lipgloss.Width(chipSep)
+
+	// One group per line. If a group's chips don't fit on a single line,
+	// wrap chip-by-chip within the group across as many lines as needed.
+	var lines []string
+	for _, g := range groupOrder {
+		chips := buckets[g]
+		if len(chips) == 0 {
+			continue
+		}
+		var cur strings.Builder
+		curW := 0
+		for _, chip := range chips {
+			chipW := lipgloss.Width(chip)
+			if curW == 0 {
+				cur.WriteString(chip)
+				curW = chipW
+				continue
+			}
+			if curW+chipSepW+chipW <= avail {
+				cur.WriteString(chipSep)
+				cur.WriteString(chip)
+				curW += chipSepW + chipW
+				continue
+			}
+			lines = append(lines, cur.String())
+			cur.Reset()
+			cur.WriteString(chip)
+			curW = chipW
+		}
+		if cur.Len() > 0 {
+			lines = append(lines, cur.String())
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderHelpLineCompact is the short-viewport fallback. One line, just
+// the verbs you need to do anything plus the affordance for the full
+// legend. Order: nav, enter (tab-aware label), n (when available), ?
+// more, q. Other chips (search, kill, retry, browser, etc.) live behind
+// `?` so the top chrome stays on-screen at small heights.
+//
+// `?` always shows because it's the escape hatch — the user must always
+// be able to discover the rest of the keymap. `q` always shows so the
+// user always has a documented exit.
+func (m *Model) renderHelpLineCompact() string {
+	chips := []string{
+		keyPillStyle.Render("↑/↓") + " " + subtleStyle.Render("nav"),
+	}
+	// enter: tab-aware label, only if some `enter` binding is currently
+	// available (e.g. empty Hosts tab + empty Workspaces tab => no enter).
+	for _, b := range listModeBindings {
+		if !b.IsAvailable(m) {
+			continue
+		}
+		if keys := b.K.Keys(); len(keys) > 0 && keys[0] == "enter" {
+			h := b.K.Help()
+			chips = append(chips, keyPillStyle.Render(h.Key)+" "+subtleStyle.Render(h.Desc))
+			break
+		}
+	}
+	// n: only when actually available (Global tab w/o rows hides it).
+	for _, b := range listModeBindings {
+		if !b.IsAvailable(m) {
+			continue
+		}
+		if keys := b.K.Keys(); len(keys) > 0 && keys[0] == "n" {
+			h := b.K.Help()
+			chips = append(chips, keyPillStyle.Render(h.Key)+" "+subtleStyle.Render(h.Desc))
+			break
+		}
+	}
+	chips = append(chips,
+		keyPillStyle.Render("?")+" "+subtleStyle.Render("more"),
+		keyPillStyle.Render("q")+" "+subtleStyle.Render("quit"),
+	)
+	return strings.Join(chips, "  ")
 }
 
 // renderTargetBanner is the unmissable "creating in: <project>" header

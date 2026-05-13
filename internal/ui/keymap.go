@@ -43,7 +43,13 @@ import (
 // uniform single-return signature would force every handler through
 // an awkward closure dance for what's already idiomatic Bubbletea.
 type Binding struct {
-	K         key.Binding
+	K key.Binding
+	// Group is the logical bucket renderHelpLine uses for wrap decisions.
+	// One of: "nav", "tabs", "open", "act", "meta". Empty groups land in
+	// "act" by default. The renderer keeps a group's chips together on
+	// one line when they fit; if a group is wider than the screen, it
+	// falls back to wrapping chips inside the group.
+	Group     string
 	Available func(*Model) bool
 	Action    func(*Model, tea.KeyMsg) (tea.Model, tea.Cmd)
 }
@@ -77,22 +83,27 @@ func (b Binding) IsAvailable(m *Model) bool {
 var listModeBindings = []Binding{
 	{
 		K:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Group:  "nav",
 		Action: actionCursorUp,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		Group:  "nav",
 		Action: actionCursorDown,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "first")),
+		Group:  "nav",
 		Action: actionCursorTop,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "last")),
+		Group:  "nav",
 		Action: actionCursorBottom,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch-tab")),
+		Group:  "tabs",
 		Action: actionTabSwitch,
 	},
 	{
@@ -102,6 +113,7 @@ var listModeBindings = []Binding{
 		// tab bar (← Local | Global | Hosts →) so the directionality
 		// is visible at a glance.
 		K:      key.NewBinding(key.WithKeys("right", "l"), key.WithHelp("→/l", "next tab")),
+		Group:  "tabs",
 		Action: actionTabNext,
 	},
 	{
@@ -109,14 +121,17 @@ var listModeBindings = []Binding{
 		// every TUI / form library. Aliased onto actionTabPrev so it
 		// composes with ← / h as one consistent prev-tab affordance.
 		K:      key.NewBinding(key.WithKeys("left", "h", "shift+tab"), key.WithHelp("←/h/⇧⇥", "prev tab")),
+		Group:  "tabs",
 		Action: actionTabPrev,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+		Group:  "tabs",
 		Action: actionSearchEntry,
 	},
 	{
 		K:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "attach")),
+		Group:     "open",
 		Available: availableInWorkspaceContext, // Hosts tab enter handled separately
 		Action:    actionAttach,
 	},
@@ -125,11 +140,13 @@ var listModeBindings = []Binding{
 		// <name>` semantics in-TUI — for v0.17 Phase 1l just opens the
 		// detail drawer-ish surface (a follow-up).
 		K:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "host detail")),
+		Group:     "open",
 		Available: availableOnHostsTab,
 		Action:    actionHostEnter,
 	},
 	{
 		K:         key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
+		Group:     "act",
 		Available: availableNewWorkspace,
 		Action:    actionNewWorkspace,
 	},
@@ -141,6 +158,7 @@ var listModeBindings = []Binding{
 		// friction matches K (kill) and B (browser) — destructive or
 		// side-effecting verbs require a deliberate keypress.
 		K:         key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "open PR")),
+		Group:     "act",
 		Available: availableOpenPR,
 		Action:    actionOpenPR,
 	},
@@ -151,6 +169,7 @@ var listModeBindings = []Binding{
 		// portless row would either 404 or open a port that some other
 		// process now owns, both worse than silently hiding the binding.
 		K:         key.NewBinding(key.WithKeys("B"), key.WithHelp("B", "open browser")),
+		Group:     "act",
 		Available: availableOpenBrowser,
 		Action:    actionOpenBrowser,
 	},
@@ -160,11 +179,13 @@ var listModeBindings = []Binding{
 		// dispatch via actionDeleteRouter — both bindings exist so the
 		// help line surfaces the right verb on the right tab.
 		K:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+		Group:     "act",
 		Available: availableInWorkspaceContext,
 		Action:    actionDelete,
 	},
 	{
 		K:         key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "remove host")),
+		Group:     "act",
 		Available: availableOnHostsTab,
 		Action:    actionHostRemove,
 	},
@@ -173,6 +194,7 @@ var listModeBindings = []Binding{
 		// Lets the user recover from an earlier "skip" without
 		// re-adding the host. v0.17 Phase 1l polish.
 		K:         key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "set up auth")),
+		Group:     "act",
 		Available: availableHostAuth,
 		Action:    actionHostSetupAuth,
 	},
@@ -183,6 +205,7 @@ var listModeBindings = []Binding{
 		// case is destructive. Same shift-key friction as F (force-
 		// remove). Re-pressing Enter after kill resurrects.
 		K:         key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "kill tmux")),
+		Group:     "act",
 		Available: availableInWorkspaceContext,
 		Action:    actionKill,
 	},
@@ -192,16 +215,19 @@ var listModeBindings = []Binding{
 		// of this one workspace right now?". See drawerMode docstring
 		// in model.go for the load-bearing scope cap rationale.
 		K:         key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "inspect")),
+		Group:     "act",
 		Available: availableInWorkspaceContext,
 		Action:    actionInspect,
 	},
 	{
 		K:         key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "retry")),
+		Group:     "act",
 		Available: availableInWorkspaceContext,
 		Action:    actionRetry,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Group:  "meta",
 		Action: actionRefresh,
 	},
 	{
@@ -212,6 +238,7 @@ var listModeBindings = []Binding{
 		// Tab-gated to non-Hosts contexts so it doesn't collide with
 		// the per-host upgrade dispatch below.
 		K:         key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "upgrade")),
+		Group:     "meta",
 		Available: availableLocalUpgrade,
 		Action:    actionUpgrade,
 	},
@@ -222,6 +249,7 @@ var listModeBindings = []Binding{
 		// the selected host reported a non-dev version on its most
 		// recent successful refresh — see availableHostUpgrade.
 		K:         key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "upgrade host")),
+		Group:     "meta",
 		Available: availableHostUpgrade,
 		Action:    actionHostUpgrade,
 	},
@@ -233,6 +261,7 @@ var listModeBindings = []Binding{
 		// command + labels. Hidden on release-binary hosts (where
 		// the call would be a no-op).
 		K:         key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "switch to release")),
+		Group:     "meta",
 		Available: availableHostSwitchRelease,
 		Action:    actionHostSwitchRelease,
 	},
@@ -243,15 +272,18 @@ var listModeBindings = []Binding{
 		// already taken by delete; capital D matches the convention
 		// of K-for-kill being the "deliberate keypress" case.
 		K:         key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "dismiss upgrade")),
+		Group:     "meta",
 		Available: availableDismissUpgrade,
 		Action:    actionDismissUpgrade,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Group:  "meta",
 		Action: actionHelpToggle,
 	},
 	{
 		K:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Group:  "meta",
 		Action: actionQuit,
 	},
 }
