@@ -5,6 +5,28 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.4.0] - 2026-05-14 — Remote workspace attach/kill fixes + SSH from Hosts tab
+
+A handful of dogfooding-found rough edges in the v0.17 remote-workspaces flow. Three were reported back-to-back: couldn't attach to a remote project's main session, kill on a remote main row hit the wrong workspace, and the Open Browser key was active on the Hosts tab where it had no port to point at. Plus an auto-attach win on remote create.
+
+### Added
+
+- **Auto-attach after `canopy new --on host`.** Press `n` on a remote row, fill in the picker, hit submit — the laptop mosh-attaches to the freshly-created workspace as soon as the remote canopy reports `Workspace ready: <name>`. No more "press any key, then Enter on the new row" follow-up. Exit code 2 from the remote (workspace OK but prompt delivery failed) still auto-attaches — the workspace is alive, only the initial agent message needs re-sending.
+- **`s` on the Hosts tab — interactive SSH into the host.** Drops you into a shell on the remote until you `exit` / Ctrl-D; canopy refreshes when you return. Light y/N confirmation gate first so a stray `s` doesn't bounce you out of the TUI by accident.
+- **`canopy switch --on <host> --main`** — new flag. Routes to the remote's `canopy main` for project-main session attach. Keyed off an explicit flag rather than the literal string `"(main)"` so a workspace happening to be named `(main)` still attaches via `canopy switch` instead of being silently redirected.
+
+### Fixed
+
+- **Attach to a remote project's main session.** Enter on a remote `(main)` row used to dispatch `canopy switch (main)` on the remote, which tried to look up a workspace literally named `(main)` and failed. The TUI now passes `--main` and the remote runs `canopy main` instead. Project context flows through via `--remote-cwd` from the host registry; if the project isn't registered for that host, the attach refuses with a clear "run `canopy project add --host <host> <path>`" hint rather than silently attaching to the wrong project.
+- **Kill on a remote main row hit the wrong workspace.** Local rows come first in the unified list, so `(main)` row resolution matched the local main before the remote one — `K` on the remote main row killed the local main session instead. The confirm-kill resolver now disambiguates by `Host` + `Project` so the right tmux session goes down.
+- **Open Browser (`B`) hidden on the Hosts tab.** The key used to be active everywhere; on the Hosts tab there's no port to point a browser at, so the action was either a no-op or worse.
+
+### Changed
+
+- SSH dispatched via the new `s` keybinding uses `ssh -- <target>` so a registry SSHTarget with a leading `-` can't be interpreted as an ssh flag. Defense in depth against a corrupted `~/.canopy/hosts.json`.
+- `parseRemoteWorkspaceName` now takes the LAST `Workspace ready: <name>` line in the streamed output rather than the first. Prevents output earlier in the stream (a setup hook echoing the marker, a `--prompt` body containing the literal text) from redirecting the auto-attach.
+- `canopy new --on host` now preserves the remote's exit-code-2 distinction ("workspace created, prompt failed") locally instead of collapsing every non-zero remote exit to exit 1.
+
 ## [0.17.3.0] - 2026-05-13 — Remote canopy install
 
 The third Hosts-tab follow-up surfaced by dogfooding: adding a host that didn't have canopy yet meant dropping out to a separate SSH session to run the curl|sh installer. install.sh itself only detected missing OS deps (git / tmux 3.2+ / Go 1.22+ / make) and printed the right `apt-get`/`pacman`/`brew` line for the user to copy. Now both halves close: the installer can install its own prereqs, and the laptop can drive the install over SSH from three different surfaces.
