@@ -183,6 +183,28 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 		return err
 	}
 
+	// Pre-probe the remote project path via SSH before exec'ing mosh.
+	// dispatchSwitchToRemote does a syscall.Exec into mosh, which can't
+	// surface errors back to the TUI — any cd failure inside the mosh
+	// child shell tears down with no visible message. A 1-roundtrip SSH
+	// check (reuses the ControlMaster socket) keeps the error in the
+	// terminal the TUI is still drawing in. Skip when RemoteCwd is empty
+	// (raw ssh-target with no path; remote canopy walks cwd from $HOME).
+	if resolved.RemoteCwd != "" {
+		if probeErr := probeRemoteCwd(ctx, target, resolved.RemoteCwd); probeErr != nil {
+			spec := resolved.HostName
+			if spec == "" {
+				spec = target
+			}
+			// We deliberately don't unwrap probeErr — distinguishing
+			// "host offline" from "path missing" requires re-running the
+			// probe with a different command, and the user can tell from
+			// context (the TUI shows host status separately). Wrap the
+			// most likely cause: a path-registration mismatch.
+			return remotePathMissingErr(spec, resolved.RemoteCwd, resolved.HostName)
+		}
+	}
+
 	fmt.Fprintf(os.Stderr, "Attaching to %s (%s) via mosh+tmux...\n", target, resolved.Source)
 
 	// Resolve mosh's absolute path for exec (syscall.Exec needs absolute path).
