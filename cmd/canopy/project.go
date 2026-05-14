@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -57,15 +60,44 @@ func projectAddCmd() *cobra.Command {
 			if onHost == "" {
 				return fmt.Errorf("--on <host> is required (which host should this project be registered on?)")
 			}
+			projectName, remotePath := args[0], args[1]
 			reg, err := loadHostRegistry()
 			if err != nil {
 				return err
 			}
-			if err := reg.AddProject(onHost, args[0], args[1]); err != nil {
+			// Pre-flight: probe the remote path so an obvious mismatch
+			// (e.g. local user "avi" path registered for a host whose
+			// user is "jarvis") surfaces at register-time, not three
+			// commands later inside a busy popup. Best-effort: if the
+			// probe fails for transport reasons (host asleep, key not
+			// set up yet) we still register — the user might be
+			// pre-configuring. Only the path-missing path warns.
+			h, hostErr := reg.Resolve(onHost)
+			if hostErr == nil && h.SSHTarget != "" {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+				if probeErr := probeRemoteCwd(ctx, h.SSHTarget, remotePath); probeErr != nil {
+					if ee, ok := probeErr.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+						// `test -d` exit 1 = path doesn't exist (vs. ssh
+						// transport errors which give different codes).
+						// Warn loudly but register anyway — the user
+						// might be registering ahead of a `git clone` on
+						// the remote, and refusing here would break that
+						// workflow.
+						fmt.Fprintf(cmd.ErrOrStderr(),
+							"warning: path %q does not exist on host %q.\n"+
+								"  The path is still being registered, but `canopy new --on %s` and\n"+
+								"  `canopy switch --on %s` will fail with `cd: No such file or directory`\n"+
+								"  until the path exists on the remote (clone the repo or fix the path).\n",
+							remotePath, onHost, onHost, onHost)
+					}
+				}
+				cancel()
+			}
+			if err := reg.AddProject(onHost, projectName, remotePath); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(),
-				"Registered project %q on host %q → %s\n", args[0], onHost, args[1])
+				"Registered project %q on host %q → %s\n", projectName, onHost, remotePath)
 			return nil
 		},
 	}

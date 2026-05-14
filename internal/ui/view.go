@@ -664,25 +664,51 @@ func (m *Model) renderHelpLineCompact() string {
 // signal that prevents creating a workspace in the wrong project.
 // Hiding or dimming this defeats the whole point of cross-project `n`.
 //
-// Layout:
+// Layout (local):
 //
 //	  creating in   cravd   ~/Work/cravd
 //
-// The chip uses roundedPill (brand violet bg + bright white fg) so it
-// reads as a primary identifier on the same vocabulary as the brand
-// pill and active tab — not chrome to be skimmed past.
+// Layout (remote, m.newTargetHost set):
+//
+//	  creating on   pi   in   brain   /home/avi/Work/brain
+//
+// The host pill (cyan) reads distinctly from the project pill (violet)
+// so the user can't miss that the action lands on a remote machine.
+// Without this, "creating in brain" looked identical for local and
+// remote brain projects — easy to fire `n` thinking it'd create
+// locally and end up with a remote workspace.
 func (m *Model) renderTargetBanner() string {
 	if m.newTargetName == "" {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("  ")
-	b.WriteString(subtleStyle.Render("creating in"))
-	b.WriteString("  ")
-	b.WriteString(roundedPill(m.newTargetName, "231", "99"))
-	if m.newTargetRoot != "" {
+	if m.newTargetHost != "" {
+		b.WriteString(subtleStyle.Render("creating on"))
 		b.WriteString("  ")
-		b.WriteString(subtleStyle.Render(m.newTargetRoot))
+		// Cyan bg (37) sets the host pill apart from the violet project
+		// pill (99) so the eye reads "host then project" not "two
+		// project chips."
+		b.WriteString(roundedPill(m.newTargetHost, "231", "37"))
+		b.WriteString("  ")
+		b.WriteString(subtleStyle.Render("in"))
+		b.WriteString("  ")
+	} else {
+		b.WriteString(subtleStyle.Render("creating in"))
+		b.WriteString("  ")
+	}
+	b.WriteString(roundedPill(m.newTargetName, "231", "99"))
+	// For remote rows the cwd is the REMOTE path; surface it next to the
+	// host pill so the user sees exactly which directory the dispatch
+	// will cd into before running canopy. For local rows it's still the
+	// local project root (newTargetRoot).
+	subRight := m.newTargetRoot
+	if m.newTargetHost != "" && m.newTargetRemoteCwd != "" {
+		subRight = m.newTargetRemoteCwd
+	}
+	if subRight != "" {
+		b.WriteString("  ")
+		b.WriteString(subtleStyle.Render(subRight))
 	}
 	b.WriteString("\n\n")
 	return b.String()
