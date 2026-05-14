@@ -32,10 +32,12 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/ui"
 )
 
 var useLog = clog.Pkg("use")
@@ -86,8 +88,29 @@ Examples:
 		RunE:        runUse,
 	}
 	cmd.Flags().Bool("build", false, "build <workspace>'s ./canopy before switching (workspace targets only)")
+	cmd.Flags().Bool("list", false, "force tabular listing even on an interactive terminal (default: picker on a TTY)")
 	return cmd
 }
+
+// useIsTerminal reports whether stdin is a real tty. Var-typed so
+// integration tests can stub the "TTY? yes/no" decision without
+// setting up real ptys.
+//
+// Uses term.IsTerminal (ioctl(TCGETS) under the hood) instead of the
+// mode-bit check hostInstallIsTerminal uses — the mode-bit version
+// returns true for /dev/null (also a character device), which would
+// route `canopy use < /dev/null` into the altscreen path and fail
+// with "could not open a new TTY". The ioctl check distinguishes
+// real ttys from other character devices.
+var useIsTerminal = func(f *os.File) bool {
+	return term.IsTerminal(f.Fd())
+}
+
+// runUsePickerFn is the picker launcher, indirected through a var so
+// CLI tests can stub the picker's return value without spawning a
+// real Bubbletea program. Production wiring points at the real
+// ui.RunUsePicker.
+var runUsePickerFn = ui.RunUsePicker
 
 func runUse(cmd *cobra.Command, args []string) error {
 	build, _ := cmd.Flags().GetBool("build")
@@ -103,6 +126,14 @@ func runUse(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		if build {
 			return errors.New("canopy use --build requires a workspace target")
+		}
+		list, _ := cmd.Flags().GetBool("list")
+		// TUI picker on an interactive terminal, tabular list when
+		// piped / scripted / asked for explicitly with --list. The
+		// TTY check lets `canopy use | grep …` and CI invocations
+		// keep working with no changes.
+		if !list && useIsTerminal(os.Stdin) {
+			return runUsePickerDispatch(cmd.Context(), symlinkPath, releaseTargetPath, out)
 		}
 		return printUseList(cmd.Context(), out, symlinkPath, releaseTargetPath)
 	}
@@ -203,71 +234,168 @@ func switchToWorkspace(ctx context.Context, name string, build bool, symlinkPath
 	return nil
 }
 
-// printUseList renders the no-args output: the active symlink target
-// followed by a tab-aligned list of every workspace canopy knows about.
-// Always exits 0 — a missing state file or unreadable worktree is shown
-// as "(not built)" rather than failing the whole listing.
-func printUseList(ctx context.Context, out io.Writer, symlinkPath, releaseTargetPath string) error {
-	// Header: where the symlink points right now.
-	if currentTarget, err := os.Readlink(symlinkPath); err == nil {
-		fmt.Fprintf(out, "Active: %s -> %s\n\n", symlinkPath, currentTarget)
-	} else if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(out, "Active: %s (not installed; run install.sh or `make install` first)\n\n", symlinkPath)
-	} else {
-		// File exists but isn't a symlink — uncommon, surface plainly.
-		fmt.Fprintf(out, "Active: %s (not a symlink; canopy expects %s -> canopy.bin)\n\n", symlinkPath, symlinkPath)
+// runUsePickerDispatch builds the rows, launches the TUI picker, and
+// dispatches to the existing switch funcs based on what the user
+// picked. The boundary: the picker chooses, this function acts —
+// keeping the picker pure of cobra/exec dependencies and the switch
+// flow free of altscreen concerns. Mirrors how RunInitSplash hands
+// control back to runInit in cmd/canopy/route.go.
+func runUsePickerDispatch(ctx context.Context, symlinkPath, releaseTargetPath string, out io.Writer) error {
+	rows := useRows(ctx, symlinkPath, releaseTargetPath)
+	target, withBuild, err := runUsePickerFn(rows, formatActiveLine(symlinkPath))
+	if err != nil {
+		return fmt.Errorf("canopy use: picker: %w", err)
 	}
+	if target == "" {
+		// User cancelled (esc/q/ctrl+c). Silent exit 0, matching
+		// every other "press q to dismiss" surface in canopy.
+		return nil
+	}
+	if target == useReleaseAlias || target == useReleaseAliasMain {
+		// withBuild is never true on release rows (the picker
+		// refuses 'b' there), but defense in depth — switchToRelease
+		// has no concept of building.
+		return switchToRelease(symlinkPath, releaseTargetPath, out)
+	}
+	return switchToWorkspace(ctx, target, withBuild, symlinkPath, out)
+}
+
+// useRows builds the per-target row slice consumed by both the CLI
+// tabwriter list (printUseList) and the TUI picker (ui.RunUsePicker).
+// Sharing one builder keeps the two surfaces visually aligned — a
+// column edit can't ship to one without the other.
+//
+// Always returns a slice with the release row first; workspace rows
+// follow alphabetically, filtered to canopy source worktrees only.
+// Errors loading state.json are swallowed — an empty workspace list
+// is a valid view (fresh install, no `canopy new` runs yet).
+func useRows(ctx context.Context, symlinkPath, releaseTargetPath string) []ui.UseRow {
+	linkTarget := resolveSymlinkAbs(symlinkPath)
+
+	rows := []ui.UseRow{{
+		Target:     useReleaseAlias,
+		Branch:     "—",
+		Version:    releaseVersionLabel(ctx, releaseTargetPath),
+		Built:      builtAgo(releaseTargetPath),
+		BinaryPath: releaseTargetPath,
+		IsRelease:  true,
+		HasBinary:  fileExists(releaseTargetPath),
+		Active:     linkTarget != "" && linkTarget == releaseTargetPath,
+	}}
 
 	st, _ := loadStateForUse() // ignore err; empty list is a valid view
+	if st == nil {
+		return rows
+	}
+
+	// Sort workspaces alphabetically for stable output. Without sort
+	// the order depends on JSON load order, which is itself unstable.
+	// Only include canopy source worktrees — rows from other projects
+	// (Rails, Python, etc.) registered in the same canopy state.json
+	// can't have ./canopy and would just be noise.
+	names := make([]string, 0, len(st.Workspaces))
+	for _, ws := range st.Workspaces {
+		if isCanopyWorktree(ws.Path) {
+			names = append(names, ws.Name)
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		ws := findWorkspaceByName(st, n)
+		devBin := filepath.Join(ws.Path, canopyBinName)
+		rows = append(rows, ui.UseRow{
+			Target:     ws.Name,
+			Branch:     branchLabelForUse(ws),
+			Version:    devVersionLabel(devBin),
+			Built:      builtAgo(devBin),
+			BinaryPath: devBin,
+			IsRelease:  false,
+			HasBinary:  fileExists(devBin),
+			Active:     linkTarget != "" && linkTarget == devBin,
+		})
+	}
+	return rows
+}
+
+// resolveSymlinkAbs reads the symlink at symlinkPath and returns its
+// absolute target, or "" if the symlink is missing or unreadable.
+// Relative targets (the release case: symlink -> "canopy.bin") are
+// joined against the symlink's directory so callers can do a flat
+// string compare against absolute BinaryPath values.
+func resolveSymlinkAbs(symlinkPath string) string {
+	t, err := os.Readlink(symlinkPath)
+	if err != nil {
+		return ""
+	}
+	if filepath.IsAbs(t) {
+		return t
+	}
+	return filepath.Join(filepath.Dir(symlinkPath), t)
+}
+
+// fileExists returns true if path stats cleanly. Tiny helper — Go
+// makes the common case verbose enough that inlining hurts readability.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// printUseList renders the no-args tabular output: the active symlink
+// target followed by a tab-aligned list of every canopy source
+// workspace canopy knows about. Always exits 0 — a missing state file
+// or unreadable worktree is shown as "(not built)" rather than failing
+// the whole listing.
+//
+// Rows come from useRows() so the picker and CLI surfaces share one
+// source of truth.
+func printUseList(ctx context.Context, out io.Writer, symlinkPath, releaseTargetPath string) error {
+	fmt.Fprintln(out, formatActiveLine(symlinkPath))
+	fmt.Fprintln(out)
+
+	rows := useRows(ctx, symlinkPath, releaseTargetPath)
 
 	fmt.Fprintln(out, "Available targets:")
 	tw := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "  TARGET\tBRANCH\tVERSION\tBUILT")
-	fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
-		useReleaseAlias,
-		"—",
-		releaseVersionLabel(ctx, releaseTargetPath),
-		builtAgo(releaseTargetPath))
-
-	canopyOnly := 0
-	skipped := 0
-	if st != nil {
-		// Sort workspaces alphabetically for stable output. Without sort
-		// the order depends on JSON load order, which is itself unstable.
-		// Only include canopy source worktrees — rows from other projects
-		// (Rails, Python, etc. registered in the same canopy state.json)
-		// can't have ./canopy and would just be noise in the listing.
-		names := make([]string, 0, len(st.Workspaces))
-		for _, ws := range st.Workspaces {
-			if isCanopyWorktree(ws.Path) {
-				names = append(names, ws.Name)
-			} else {
-				skipped++
-			}
-		}
-		sort.Strings(names)
-		for _, n := range names {
-			ws := findWorkspaceByName(st, n)
-			devBin := filepath.Join(ws.Path, canopyBinName)
-			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n",
-				ws.Name, branchLabelForUse(ws), devVersionLabel(devBin), builtAgo(devBin))
-			canopyOnly++
-		}
+	for _, r := range rows {
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", r.Target, r.Branch, r.Version, r.Built)
 	}
 	tw.Flush()
 	fmt.Fprintln(out, "\n  Tip: `canopy use <target>` accepts the workspace name OR its branch.")
 
-	// One-line footer when we filtered anything out, so the user knows
-	// the listing is canopy-only on purpose. Without this, someone with
-	// a workspace named "feature-X" in a non-canopy project might think
-	// `canopy use` lost it.
-	if skipped > 0 {
-		fmt.Fprintf(out, "\n  (%d workspace(s) from other projects skipped — canopy use only works with canopy source worktrees)\n", skipped)
-	}
-	if canopyOnly == 0 && st != nil && len(st.Workspaces) > 0 {
-		fmt.Fprintln(out, "  (no canopy source worktrees registered)")
+	// Skipped/empty footer: separate state pass because useRows
+	// drops non-canopy rows silently. Users with workspaces in other
+	// projects need to see that the list is canopy-only on purpose.
+	canopyOnly := len(rows) - 1 // -1 for the release row
+	skipped := 0
+	if st, _ := loadStateForUse(); st != nil {
+		for _, ws := range st.Workspaces {
+			if !isCanopyWorktree(ws.Path) {
+				skipped++
+			}
+		}
+		if skipped > 0 {
+			fmt.Fprintf(out, "\n  (%d workspace(s) from other projects skipped — canopy use only works with canopy source worktrees)\n", skipped)
+		}
+		if canopyOnly == 0 && len(st.Workspaces) > 0 {
+			fmt.Fprintln(out, "  (no canopy source worktrees registered)")
+		}
 	}
 	return nil
+}
+
+// formatActiveLine produces the "Active: …" header line shared by
+// the CLI list and the TUI picker. Three states:
+//   - symlink points somewhere   → "Active: <path> -> <target>"
+//   - symlink missing            → install hint
+//   - path exists but isn't link → expectation reminder
+func formatActiveLine(symlinkPath string) string {
+	if currentTarget, err := os.Readlink(symlinkPath); err == nil {
+		return fmt.Sprintf("Active: %s -> %s", symlinkPath, currentTarget)
+	} else if errors.Is(err, os.ErrNotExist) {
+		return fmt.Sprintf("Active: %s (not installed; run install.sh or `make install` first)", symlinkPath)
+	}
+	return fmt.Sprintf("Active: %s (not a symlink; canopy expects %s -> canopy.bin)", symlinkPath, symlinkPath)
 }
 
 // releaseVersionLabel runs `<binPath> version` and parses the version
