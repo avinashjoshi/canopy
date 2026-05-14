@@ -5,6 +5,25 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0.0] - 2026-05-14 — TUI picker for `canopy use`
+
+Typing `canopy use` always meant "see a list, then run the command again with the name you saw." Two steps. This release collapses it to one: on an interactive terminal, `canopy use` (no args) opens a single-screen picker that shows every workspace canopy knows about — release row first, marked with `▶` for whichever is active — and lets you arrow to one and press Enter. The symlink swap, the build flow, the error messages all use the same code paths as the CLI; the picker is just a faster front door. Piped invocations (`canopy use | grep …`, CI scripts, anything with stdin redirected) still get the tabular list, byte-identical to before. `--list` forces tabular even on a TTY, for screen recordings or scripts that want it.
+
+### Added
+
+- **Interactive picker on bare `canopy use`.** ↑/↓ (or `j`/`k`) to move, Enter to switch, `b` to build-then-switch on a workspace row, `q`/Esc/Ctrl-C to cancel without changes. `▶` marks the currently-active target so you don't accidentally switch to where you already are. Rows whose binary doesn't exist on disk render dim; pressing Enter on them shows a one-line nudge ("press b to build it now") instead of crashing out post-altscreen with a stat error. Narrow terminals (<40 cols) get a hint pointing at `--list` instead of letting lipgloss wrap the rows into something unreadable.
+- **`canopy use --list` flag.** Forces the tabular output even when stdin is a TTY. Documented escape hatch for screen recordings, debugging, and personal preference.
+- **`internal/ui.UseRow` + `internal/ui.UsePickerModel`.** The picker follows the existing `InitSplashModel` precedent — single-screen Bubbletea model that sets state, exits cleanly, and hands control back to `cmd/canopy/use.go` for the actual symlink swap. The boundary keeps build output ("Building canopy in …") on a normal terminal post-altscreen and lets `switchToRelease` / `switchToWorkspace` errors flow through cobra's `RunE` chain unchanged.
+
+### Changed
+
+- **`printUseList` and the new picker now share `useRows()`.** Both surfaces build rows the same way (release first, canopy worktrees alphabetically, non-canopy projects filtered out), so a column edit can't ship to one without the other. Tabular output is byte-compatible with v0.17.5.0 — locked in by the existing `TestPrintUseList` substring assertions plus a new `TestRunUse_NotTTY_FallsBackToList`.
+- **TTY detection uses `term.IsTerminal` (ioctl) instead of the mode-bit check** the rest of canopy's prompts use. The mode-bit pattern returns true for `/dev/null` (also a character device), which would route `canopy use < /dev/null` into the altscreen path and fail. The ioctl check distinguishes real ptys from other character devices, so piped and `</dev/null` invocations correctly fall back to tabular.
+
+### Fixed
+
+- **`canopy use < /dev/null` no longer errors with "could not open a new TTY".** Was a latent bug in the copy-pasted `hostInstallIsTerminal` pattern — surfaced as soon as the picker became the default path on a TTY. The new `term.IsTerminal` check is the standard Go answer and matches what bubbletea itself uses internally.
+
 ## [0.17.5.0] - 2026-05-14 — Remote version-drift indicator on the Hosts tab
 
 A new release on canopy lit up the local upgrade pill but said nothing about the fleet — the laptop knew it was upgrading and what to, the Hosts tab knew each remote's installed version, but the two never met. So a host on v0.17.3 sat next to a host on v0.17.4 with no way to tell which one needed `U` without comparing the strings by eye. This release closes that gap: every row carries a yellow `⇑` next to its version when it's behind the laptop, a `⇓` when it's ahead, and silence when matched. The host detail drawer spells the same out longhand with a `press U` nudge.
