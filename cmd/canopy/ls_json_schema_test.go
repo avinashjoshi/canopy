@@ -90,6 +90,56 @@ func TestCanopyVersionInfo_TracksPackageVersion(t *testing.T) {
 	}
 }
 
+// TestLsJSONOutput_ClipboardBridgeField asserts the v0.18 Lane C.3
+// schema bump (clipboard_bridge) round-trips through the wire format.
+// Drift between LsJSONOutput and host.remoteLsResponse would silently
+// lose the field on the laptop side, leaving the Hosts-tab pill
+// permanently neutral even on bridged hosts.
+func TestLsJSONOutput_ClipboardBridgeField(t *testing.T) {
+	in := LsJSONOutput{
+		SchemaVersion:   lsJSONSchemaVersion,
+		CanopyVersion:   "0.18.0+test",
+		GeneratedAt:     time.Unix(1700000000, 0).UTC().Format(time.RFC3339),
+		ClipboardBridge: "bridged",
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"clipboard_bridge":"bridged"`) {
+		t.Errorf("emitted JSON missing clipboard_bridge: %s", data)
+	}
+	var out LsJSONOutput
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.ClipboardBridge != "bridged" {
+		t.Errorf("clipboard_bridge round-trip failed: got %q", out.ClipboardBridge)
+	}
+}
+
+func TestLsJSONOutput_ClipboardBridgeOmitWhenEmpty(t *testing.T) {
+	// An old canopy (pre-v0.18) reports an empty string; we must omit
+	// the field from JSON so older laptops don't get confused.
+	in := LsJSONOutput{
+		SchemaVersion: lsJSONSchemaVersion,
+		CanopyVersion: "0.17.5",
+	}
+	data, _ := json.Marshal(in)
+	if strings.Contains(string(data), "clipboard_bridge") {
+		t.Errorf("empty ClipboardBridge leaked into JSON: %s", data)
+	}
+}
+
+func TestLsJSONSchemaVersion_BumpedForClipboardBridge(t *testing.T) {
+	// Schema version must bump when the wire format changes. Lane C.3
+	// brings it to 4. If someone reverts the field without reverting
+	// the schema bump (or vice versa), this test catches the drift.
+	if lsJSONSchemaVersion != 4 {
+		t.Errorf("lsJSONSchemaVersion = %d, want 4 (v0.18 Lane C.3: + clipboard_bridge)", lsJSONSchemaVersion)
+	}
+}
+
 // TestLsJSONWorkspace_OmitEmptyKeepsPayloadLean: a fully-empty workspace
 // (no port, no load, no hints, no diagnosis) should not emit those keys
 // at all. Keeps the payload from ballooning across 50-workspace hosts.

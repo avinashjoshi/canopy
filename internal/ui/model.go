@@ -1079,6 +1079,7 @@ func refreshRemoteCmd() tea.Cmd {
 		for _, r := range results {
 			snap := &state.RemoteHostSnapshot{
 				CanopyVersion:      r.CanopyVersion,
+				ClipboardBridge:    r.ClipboardBridge,
 				LastSeen:           r.LastSeen,
 				LastRefreshAttempt: time.Now(),
 			}

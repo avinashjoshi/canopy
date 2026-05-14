@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/avinashjoshi/canopy/internal/agent"
+	"github.com/avinashjoshi/canopy/internal/clipboard"
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/git"
 	"github.com/avinashjoshi/canopy/internal/lifecycle"
@@ -274,11 +275,19 @@ func lsGlobal(ctx context.Context, out io.Writer) error {
 // Schema_version bumps on any backwards-incompatible field change so
 // the refresher can detect drift and degrade gracefully.
 type LsJSONOutput struct {
-	SchemaVersion int                `json:"schema_version"`
-	CanopyVersion string             `json:"canopy_version"`
-	Hostname      string             `json:"hostname,omitempty"`
-	GeneratedAt   string             `json:"generated_at"`
-	Workspaces    []LsJSONWorkspace  `json:"workspaces"`
+	SchemaVersion int               `json:"schema_version"`
+	CanopyVersion string            `json:"canopy_version"`
+	Hostname      string            `json:"hostname,omitempty"`
+	GeneratedAt   string            `json:"generated_at"`
+	Workspaces    []LsJSONWorkspace `json:"workspaces"`
+
+	// ClipboardBridge is the v0.18 bridge status reported by this
+	// host's `canopy ls --json`. One of "off", "bridged", "broken",
+	// or "" when the field is absent (canopy on the remote is older
+	// than v0.18). Folded into the existing JSON envelope per D2 in
+	// /plan-eng-review — saves an extra SSH round-trip per refresh
+	// tick on the laptop side.
+	ClipboardBridge string `json:"clipboard_bridge,omitempty"`
 }
 
 // LsJSONWorkspace is the per-row shape. Mirrors state.GlobalRow with
@@ -347,7 +356,7 @@ func init() {
 	}
 }
 
-const lsJSONSchemaVersion = 3 // v0.17 Phase 1d.2: + agent_state
+const lsJSONSchemaVersion = 4 // v0.18 Lane C.3: + clipboard_bridge
 
 func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 	store, err := openStateReadOnly()
@@ -366,10 +375,11 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 	rows := st.BuildGlobalRowsWithLoad(ctx, tc, lsLoadAdapter{c: tc}, memCache)
 
 	doc := LsJSONOutput{
-		SchemaVersion: lsJSONSchemaVersion,
-		CanopyVersion: canopyVersionInfo,
-		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
-		Workspaces:    make([]LsJSONWorkspace, 0, len(rows)),
+		SchemaVersion:   lsJSONSchemaVersion,
+		CanopyVersion:   canopyVersionInfo,
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		Workspaces:      make([]LsJSONWorkspace, 0, len(rows)),
+		ClipboardBridge: string(clipboard.DefaultProbeBridgeStatus()),
 	}
 	if host, herr := os.Hostname(); herr == nil {
 		doc.Hostname = host

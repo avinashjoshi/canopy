@@ -76,3 +76,42 @@ func TestRemoteWorkspace_LegacyParseStillWorks(t *testing.T) {
 	// shape.
 	_ = state.Hint{}
 }
+
+// TestRemoteLsResponse_ClipboardBridgeParse verifies the v0.18 Lane C.3
+// schema bump (top-level clipboard_bridge field) parses correctly on
+// the laptop side. Drift between the emitter (cmd/canopy/ls.go) and
+// this parser would leave the Hosts-tab pill neutral on every refresh
+// even for bridged hosts.
+func TestRemoteLsResponse_ClipboardBridgeParse(t *testing.T) {
+	wire := []byte(`{
+	  "schema_version": 4,
+	  "canopy_version": "0.18.0+test",
+	  "clipboard_bridge": "bridged",
+	  "workspaces": []
+	}`)
+	var got remoteLsResponse
+	if err := json.Unmarshal(wire, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ClipboardBridge != "bridged" {
+		t.Errorf("ClipboardBridge = %q, want %q", got.ClipboardBridge, "bridged")
+	}
+}
+
+// TestRemoteLsResponse_ClipboardBridgeAbsentIsEmpty: pre-v0.18 remotes
+// omit the field. Laptop must read it as empty rather than failing the
+// whole parse — otherwise mixed-version fleets would lose data.
+func TestRemoteLsResponse_ClipboardBridgeAbsentIsEmpty(t *testing.T) {
+	wire := []byte(`{
+	  "schema_version": 3,
+	  "canopy_version": "0.17.5",
+	  "workspaces": []
+	}`)
+	var got remoteLsResponse
+	if err := json.Unmarshal(wire, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ClipboardBridge != "" {
+		t.Errorf("ClipboardBridge from pre-v0.18 response should be empty, got %q", got.ClipboardBridge)
+	}
+}
