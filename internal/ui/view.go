@@ -301,7 +301,7 @@ func (m *Model) hostsHasEntries() bool {
 // internal/ui/hosts subpackage's BuildRows + Render. Width-aware per
 // the D2 design decision (tiered column drop at narrow widths).
 func (m *Model) renderHostsTab() string {
-	rows := hosts.BuildRows(m.hostList, m.remoteSnaps)
+	rows := hosts.BuildRows(m.hostList, m.remoteSnaps, m.hostReferenceVersion())
 	w := m.width
 	if w <= 0 {
 		w = 100 // reasonable default before WindowSizeMsg lands
@@ -395,7 +395,8 @@ func (m *Model) renderHostDetail() string {
 	if snap := m.remoteSnaps[h.Name]; snap != nil {
 		b.WriteString("\n")
 		if snap.CanopyVersion != "" {
-			b.WriteString(fmt.Sprintf("  canopy:      v%s\n", snap.CanopyVersion))
+			b.WriteString(fmt.Sprintf("  canopy:      v%s%s\n",
+				snap.CanopyVersion, driftAnnotation(snap.CanopyVersion, m.hostReferenceVersion())))
 		}
 		if !snap.LastSeen.IsZero() {
 			b.WriteString(fmt.Sprintf("  last seen:   %s\n", snap.LastSeen.Format("2006-01-02 15:04:05")))
@@ -409,6 +410,33 @@ func (m *Model) renderHostDetail() string {
 	}
 	b.WriteString("\n  " + subtleStyle.Render("esc to go back"))
 	return b.String()
+}
+
+// driftAnnotation is the trailing string appended to the host
+// detail's "canopy: v…" line so the drawer surfaces the same mismatch
+// signal as the Hosts-tab badge — but spelled out so the user knows
+// exactly which version each side is on. Returns "" (no annotation)
+// for DriftSame / DriftUnknown: no signal is the signal.
+//
+// Yellow color chosen to match the Hosts-tab row badge + the top-bar
+// upgrade pill; one palette, one meaning everywhere.
+func driftAnnotation(remoteRaw, reference string) string {
+	d := hosts.ComputeDrift(remoteRaw, reference)
+	ref := hosts.ExtractBareSemver(reference)
+	switch d {
+	case hosts.DriftBehind:
+		return "  " + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("220")).
+			Bold(true).
+			Render(fmt.Sprintf("⇑ upgrade available (your local: v%s) — press U", ref))
+	case hosts.DriftAhead:
+		return "  " + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("220")).
+			Bold(true).
+			Render(fmt.Sprintf("⇓ host is ahead of your local (v%s)", ref))
+	default:
+		return ""
+	}
 }
 
 // renderConfirmSSHCopyID prompts the user to run ssh-copy-id after a
