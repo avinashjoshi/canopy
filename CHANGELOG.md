@@ -5,6 +5,20 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.5.0] - 2026-05-14 — Remote version-drift indicator on the Hosts tab
+
+A new release on canopy lit up the local upgrade pill but said nothing about the fleet — the laptop knew it was upgrading and what to, the Hosts tab knew each remote's installed version, but the two never met. So a host on v0.17.3 sat next to a host on v0.17.4 with no way to tell which one needed `U` without comparing the strings by eye. This release closes that gap: every row carries a yellow `⇑` next to its version when it's behind the laptop, a `⇓` when it's ahead, and silence when matched. The host detail drawer spells the same out longhand with a `press U` nudge.
+
+### Added
+
+- **Drift badge on Hosts-tab rows.** Every host with a reported `canopy_version` now compares against a reference (your laptop's running version on release builds; the cached upstream-latest on dev builds). Older than reference renders `v0.17.3.0 ⇑` in yellow; newer renders `v0.17.4.0 ⇓`. Same vocabulary as the top-bar version pill's upgrade arrow — one palette, one meaning everywhere. Suppressed silently when either side is `dev` / `(unknown)` / unreachable so the badge never lies about a comparison we couldn't actually make.
+- **Spelled-out drift annotation in the host detail drawer.** Press Enter on a host row to open the detail view and the `canopy: v0.17.3.0` line now grows a yellow trailing `⇑ upgrade available (your local: v0.17.4.0) — press U` (or `⇓ host is ahead of your local (v0.17.4.0)` in the inverted case). The badge tells you *that* there's drift; the drawer tells you *what to press*. Silent when matched.
+- **`Model.hostReferenceVersion()`** picks the bare semver each remote is compared against, on a priority ladder: release laptop wins (use its own version, the dogfood case), dev laptop falls back to the cached upstream-latest (the contributor case), dev with no cache returns empty so badges suppress entirely instead of mis-firing.
+
+### Changed
+
+- **`hosts.BuildRows` signature** grew a `referenceVersion string` parameter so the renderer can compute drift per row. Single internal caller in `view.go renderHostsTab`; no external API breakage. Pass `""` to suppress drift detection globally (the dev-with-no-cache fallback path).
+
 ## [0.17.4.0] - 2026-05-14 — Remote workspace attach/kill fixes + SSH from Hosts tab
 
 A handful of dogfooding-found rough edges in the v0.17 remote-workspaces flow. Three were reported back-to-back: couldn't attach to a remote project's main session, kill on a remote main row hit the wrong workspace, and the Open Browser key was active on the Hosts tab where it had no port to point at. Plus an auto-attach win on remote create.
