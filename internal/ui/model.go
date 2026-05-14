@@ -599,6 +599,32 @@ func (m *Model) SetUpgradeAvailable(latest string) {
 	m.upgradeAvailable = latest
 }
 
+// hostReferenceVersion picks the bare semver each remote host's
+// canopy_version is compared against on the Hosts tab. Returns "" when
+// no meaningful comparison is possible (the renderer falls back to
+// DriftUnknown / no badge).
+//
+// Priority:
+//
+//  1. Laptop is a release build — use the laptop's own version. The
+//     intent is "show me hosts that don't match my local," which is
+//     the most common dogfood workflow (you just upgraded local, now
+//     visit the Hosts tab to find which hosts to U-key).
+//
+//  2. Laptop is a dev build with a known upstream-latest — fall back
+//     to that. The dev case is exactly when canopy contributors are
+//     reaching out to dev fleets, and "compared to the public release"
+//     is the only number that's meaningful to compare against.
+//
+//  3. Otherwise (dev with no cache, e.g. offline first-run) — return
+//     "" to suppress the badge entirely.
+func (m *Model) hostReferenceVersion() string {
+	if m.devWorkspace == "" && m.versionLabel != "" && m.versionLabel != "dev" {
+		return m.versionLabel
+	}
+	return m.upgradeAvailable
+}
+
 // SetUpgradeRefreshFn wires the async refresh closure that fires
 // from Init() when the auto-check cache was missing or stale at
 // startup. Pass nil to skip refresh entirely (tests, popup mode
