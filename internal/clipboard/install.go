@@ -31,13 +31,25 @@ const (
 // expansion for the user's home dir; resolved by systemd at unit-run
 // time, not at file-write time.
 //
-// Restart=on-failure recovers from a wedged wl-paste / wl-copy without
-// user intervention. 5-second RestartSec spaces failed restarts so a
-// persistent error doesn't pin a CPU.
+// Ordering: After= AND PartOf= graphical-session.target so the daemon
+// starts only once the Wayland compositor (Hyprland/sway/etc.) has
+// activated the user's graphical session — and gets stopped if the
+// session goes away. Without this, systemd would launch the service
+// at default.target activation, before the compositor has imported
+// WAYLAND_DISPLAY into the systemd user manager environment, and
+// Detect() would fail with ErrNoProvider.
+//
+// Restart=on-failure + a bounded StartLimit prevents a permanently
+// missing WAYLAND_DISPLAY (headless install, broken compositor) from
+// pinning the CPU in an infinite restart loop. 5 attempts in 5 minutes
+// is plenty for any reasonable session-startup race.
 const systemdUnitBody = `[Unit]
 Description=Canopy clipboard bridge daemon
 Documentation=https://github.com/avinashjoshi/canopy/blob/main/docs/design/v0.18-clipboard-bridge.md
-After=default.target
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 ExecStart=%h/.local/bin/canopy clipboard-server
@@ -45,8 +57,21 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 `
+
+// importedSessionEnvVars are the variables Install() copies from the
+// user's calling shell into the systemd --user manager environment.
+// systemctl --user import-environment makes them visible to every
+// subsequent service start, which is how we get WAYLAND_DISPLAY into
+// the daemon's process env without depending on the compositor having
+// run dbus-update-activation-environment already.
+var importedSessionEnvVars = []string{
+	"WAYLAND_DISPLAY",  // load-bearing: Detect() keys on this
+	"DISPLAY",          // X11 fallback (Phase 2 readiness)
+	"XDG_RUNTIME_DIR",  // socket dir resolution
+	"XDG_CURRENT_DESKTOP",
+}
 
 // sshIncludeBlock is the marker-delimited block added to ~/.ssh/config.
 // One leading newline so the block sits in its own paragraph even when
@@ -102,7 +127,7 @@ func NewLocalInstaller() (*LocalInstaller, error) {
 	}, nil
 }
 
-// Install runs all four steps. Returns the first error and aborts —
+// Install runs all five steps. Returns the first error and aborts —
 // each step is a precondition for the next (no point loading the
 // systemd unit if the unit file write failed).
 //
@@ -119,12 +144,52 @@ func (l *LocalInstaller) Install(out io.Writer) error {
 	if err := l.EnsureSSHInclude(out); err != nil {
 		return err
 	}
+	// ImportSessionEnv must run BEFORE EnableSystemdUnit's enable --now,
+	// otherwise the daemon's first start picks up an empty
+	// WAYLAND_DISPLAY and exits 1 (Detect → ErrNoProvider). Running it
+	// here also no-ops cleanly when the calling shell doesn't have
+	// WAYLAND_DISPLAY (logs a warning, doesn't fail the install).
+	if err := l.ImportSessionEnv(out); err != nil {
+		return err
+	}
 	if err := l.EnableSystemdUnit(out); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Done. Next: register a remote host with `canopy host add`, then")
 	fmt.Fprintln(out, "press `c` on the Hosts tab to bridge clipboard to that host.")
+	return nil
+}
+
+// ImportSessionEnv copies WAYLAND_DISPLAY (and friends) from the
+// calling shell's environment into the systemd --user manager, so
+// subsequent service starts inherit them. Without this, a user who
+// runs `canopy install clipboard-bridge` from their normal terminal
+// would see the daemon exit-1 on every start because the systemd user
+// manager's environment block is empty (compositor hasn't imported
+// the vars yet, or hasn't imported the ones we care about).
+//
+// No-op when WAYLAND_DISPLAY isn't set in the calling shell — prints
+// a warning and continues. This covers two cases:
+//
+//   - Running the installer over plain SSH (no session env at all).
+//   - First-boot install before the compositor exists.
+//
+// The boot-time path is covered separately by the unit's
+// PartOf=graphical-session.target + the compositor's own
+// dbus-update-activation-environment (Hyprland / omarchy default).
+func (l *LocalInstaller) ImportSessionEnv(out io.Writer) error {
+	if os.Getenv("WAYLAND_DISPLAY") == "" {
+		fmt.Fprintln(out, "  WAYLAND_DISPLAY not set in this shell — skipping systemctl import-environment")
+		fmt.Fprintln(out, "    (the daemon will start automatically the next time your compositor activates")
+		fmt.Fprintln(out, "    graphical-session.target, assuming your Wayland setup imports the env)")
+		return nil
+	}
+	args := append([]string{"--user", "import-environment"}, importedSessionEnvVars...)
+	if err := l.SystemdRun(args...); err != nil {
+		return fmt.Errorf("ImportSessionEnv: %w", err)
+	}
+	fmt.Fprintf(out, "  imported %v into the systemd --user manager environment\n", importedSessionEnvVars)
 	return nil
 }
 
@@ -221,12 +286,15 @@ func (l *LocalInstaller) EnsureSSHInclude(out io.Writer) error {
 	return nil
 }
 
-// EnableSystemdUnit reloads the user systemd manager (pickup the new
-// unit file) and enables-+-starts the canopy-clipboard service.
-//
-// `enable --now` is idempotent: already-enabled units stay enabled,
-// already-running services don't restart. Safe to call on every
-// re-install.
+// EnableSystemdUnit reloads the user systemd manager (pickup any new
+// unit file content), enables + starts the canopy-clipboard service,
+// then explicitly restarts it. The restart is the load-bearing step
+// for re-installs: `enable --now` is a no-op when the service is
+// already enabled (including the failed-startup-restart-loop state),
+// so without the explicit restart a reinstall wouldn't propagate
+// either (a) a new unit body or (b) the env vars imported by
+// ImportSessionEnv. Restart is idempotent on a fresh install (the
+// just-started process gets restarted once, milliseconds of churn).
 func (l *LocalInstaller) EnableSystemdUnit(out io.Writer) error {
 	if err := l.SystemdRun("--user", "daemon-reload"); err != nil {
 		return fmt.Errorf("EnableSystemdUnit: daemon-reload: %w", err)
@@ -234,6 +302,9 @@ func (l *LocalInstaller) EnableSystemdUnit(out io.Writer) error {
 	if err := l.SystemdRun("--user", "enable", "--now", SystemdUnitName); err != nil {
 		return fmt.Errorf("EnableSystemdUnit: enable --now %s: %w", SystemdUnitName, err)
 	}
-	fmt.Fprintf(out, "  enabled and started %s\n", SystemdUnitName)
+	if err := l.SystemdRun("--user", "restart", SystemdUnitName); err != nil {
+		return fmt.Errorf("EnableSystemdUnit: restart %s: %w", SystemdUnitName, err)
+	}
+	fmt.Fprintf(out, "  enabled and restarted %s\n", SystemdUnitName)
 	return nil
 }

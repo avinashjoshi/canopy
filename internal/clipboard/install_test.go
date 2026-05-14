@@ -101,6 +101,33 @@ func TestEnsureSystemdUnit_ExecStartUsesSymlinkPath(t *testing.T) {
 	}
 }
 
+func TestEnsureSystemdUnit_OrdersAfterGraphicalSession(t *testing.T) {
+	// Wayland gotcha: systemd user services that need WAYLAND_DISPLAY
+	// must start AFTER the compositor activates graphical-session.target
+	// (so the env vars have been imported into the user manager). Without
+	// this ordering, the daemon's first start happens before WAYLAND_DISPLAY
+	// is in the env and Detect() bails with ErrNoProvider.
+	for _, must := range []string{
+		"After=graphical-session.target",
+		"PartOf=graphical-session.target",
+		"WantedBy=graphical-session.target",
+	} {
+		if !strings.Contains(systemdUnitBody, must) {
+			t.Errorf("systemdUnitBody missing %q\nbody:\n%s", must, systemdUnitBody)
+		}
+	}
+}
+
+func TestEnsureSystemdUnit_BoundsRestartAttempts(t *testing.T) {
+	// Headless / broken-compositor case: daemon should give up after a
+	// reasonable burst instead of pinning CPU forever.
+	for _, must := range []string{"StartLimitBurst=", "StartLimitIntervalSec="} {
+		if !strings.Contains(systemdUnitBody, must) {
+			t.Errorf("systemdUnitBody missing %q so a broken setup would restart-loop forever", must)
+		}
+	}
+}
+
 func TestEnsureCanopySSHDir_CreatesMode0700(t *testing.T) {
 	inst, _ := newTestInstaller(t)
 	var out bytes.Buffer
@@ -220,22 +247,66 @@ func TestEnsureSSHInclude_IdempotentWhenMarkerPresent(t *testing.T) {
 	}
 }
 
-func TestEnableSystemdUnit_CallsDaemonReloadAndEnableNow(t *testing.T) {
+func TestEnableSystemdUnit_CallsDaemonReloadEnableNowAndRestart(t *testing.T) {
 	inst, sc := newTestInstaller(t)
 	var out bytes.Buffer
 	if err := inst.EnableSystemdUnit(&out); err != nil {
 		t.Fatalf("EnableSystemdUnit: %v", err)
 	}
-	if len(sc.calls) != 2 {
-		t.Fatalf("expected 2 systemctl calls, got %d: %v", len(sc.calls), sc.calls)
+	if len(sc.calls) != 3 {
+		t.Fatalf("expected 3 systemctl calls (daemon-reload, enable --now, restart), got %d: %v", len(sc.calls), sc.calls)
 	}
-	want0 := []string{"--user", "daemon-reload"}
-	want1 := []string{"--user", "enable", "--now", SystemdUnitName}
-	if !stringSliceEq(sc.calls[0], want0) {
-		t.Errorf("call[0] = %v, want %v", sc.calls[0], want0)
+	want := [][]string{
+		{"--user", "daemon-reload"},
+		{"--user", "enable", "--now", SystemdUnitName},
+		{"--user", "restart", SystemdUnitName},
 	}
-	if !stringSliceEq(sc.calls[1], want1) {
-		t.Errorf("call[1] = %v, want %v", sc.calls[1], want1)
+	for i, w := range want {
+		if !stringSliceEq(sc.calls[i], w) {
+			t.Errorf("call[%d] = %v, want %v", i, sc.calls[i], w)
+		}
+	}
+}
+
+func TestImportSessionEnv_RunsImportWhenWaylandSet(t *testing.T) {
+	inst, sc := newTestInstaller(t)
+	t.Setenv("WAYLAND_DISPLAY", "wayland-0")
+	var out bytes.Buffer
+	if err := inst.ImportSessionEnv(&out); err != nil {
+		t.Fatalf("ImportSessionEnv: %v", err)
+	}
+	if len(sc.calls) != 1 {
+		t.Fatalf("expected one systemctl call, got %d: %v", len(sc.calls), sc.calls)
+	}
+	args := sc.calls[0]
+	if len(args) < 2 || args[0] != "--user" || args[1] != "import-environment" {
+		t.Fatalf("expected `systemctl --user import-environment ...`, got %v", args)
+	}
+	// Verify WAYLAND_DISPLAY is in the imported vars (the load-bearing one).
+	found := false
+	for _, v := range args[2:] {
+		if v == "WAYLAND_DISPLAY" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("import-environment did not include WAYLAND_DISPLAY; args=%v", args)
+	}
+}
+
+func TestImportSessionEnv_SkipsWhenWaylandUnset(t *testing.T) {
+	inst, sc := newTestInstaller(t)
+	t.Setenv("WAYLAND_DISPLAY", "")
+	var out bytes.Buffer
+	if err := inst.ImportSessionEnv(&out); err != nil {
+		t.Fatalf("ImportSessionEnv should not error when WAYLAND_DISPLAY unset, got: %v", err)
+	}
+	if len(sc.calls) != 0 {
+		t.Errorf("expected no systemctl call when WAYLAND_DISPLAY unset, got %v", sc.calls)
+	}
+	if !strings.Contains(out.String(), "skipping systemctl import-environment") {
+		t.Errorf("expected skip message in output, got %q", out.String())
 	}
 }
 
@@ -252,13 +323,15 @@ func TestEnableSystemdUnit_PropagatesError(t *testing.T) {
 	}
 }
 
-func TestInstall_RunsAllStepsInOrder(t *testing.T) {
+func TestInstall_RunsAllStepsInOrder_NoWayland(t *testing.T) {
+	// Path: WAYLAND_DISPLAY unset → import-environment is skipped.
+	// Expected systemctl calls: daemon-reload, enable --now, restart.
+	t.Setenv("WAYLAND_DISPLAY", "")
 	inst, sc := newTestInstaller(t)
 	var out bytes.Buffer
 	if err := inst.Install(&out); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	// All four artifacts produced:
 	if _, err := os.Stat(filepath.Join(inst.HomeDir, ".config", "systemd", "user", SystemdUnitName)); err != nil {
 		t.Errorf("systemd unit not written: %v", err)
 	}
@@ -268,8 +341,25 @@ func TestInstall_RunsAllStepsInOrder(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(inst.HomeDir, ".ssh", "config")); err != nil {
 		t.Errorf("ssh config not created: %v", err)
 	}
-	if len(sc.calls) != 2 {
-		t.Errorf("systemctl not invoked twice: %v", sc.calls)
+	if len(sc.calls) != 3 {
+		t.Errorf("expected 3 systemctl calls (daemon-reload + enable --now + restart), got %d: %v", len(sc.calls), sc.calls)
+	}
+}
+
+func TestInstall_RunsAllStepsInOrder_WithWayland(t *testing.T) {
+	// Path: WAYLAND_DISPLAY set → import-environment runs once before
+	// the systemctl daemon-reload / enable / restart trio.
+	t.Setenv("WAYLAND_DISPLAY", "wayland-0")
+	inst, sc := newTestInstaller(t)
+	var out bytes.Buffer
+	if err := inst.Install(&out); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if len(sc.calls) != 4 {
+		t.Errorf("expected 4 systemctl calls (import-env + daemon-reload + enable --now + restart), got %d: %v", len(sc.calls), sc.calls)
+	}
+	if len(sc.calls) > 0 && (len(sc.calls[0]) < 2 || sc.calls[0][1] != "import-environment") {
+		t.Errorf("expected first call to be import-environment, got %v", sc.calls[0])
 	}
 }
 

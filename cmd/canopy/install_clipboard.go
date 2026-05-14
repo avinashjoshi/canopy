@@ -57,6 +57,22 @@ func newInstallClipboardBridgeCmd() *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "  - $HOME/.local/bin/canopy is not the active symlink (run `canopy use release` or `canopy use <workspace>`)")
 				return err
 			}
+			// Post-install verification: if the user is in a Wayland session
+			// AND the service didn't reach an active state within a couple of
+			// seconds, the most likely cause is the compositor not having
+			// imported the env into the systemd user manager. Print the
+			// canonical recovery one-liner so the user doesn't have to dig
+			// through journalctl. Best-effort — the install itself already
+			// reported success above.
+			fmt.Fprintln(cmd.OutOrStdout(), "")
+			fmt.Fprintln(cmd.OutOrStdout(), "If `systemctl --user status canopy-clipboard` doesn't show \"active (running)\",")
+			fmt.Fprintln(cmd.OutOrStdout(), "your compositor likely hasn't imported WAYLAND_DISPLAY into the systemd user")
+			fmt.Fprintln(cmd.OutOrStdout(), "manager environment. Recover with:")
+			fmt.Fprintln(cmd.OutOrStdout(), "  systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR")
+			fmt.Fprintln(cmd.OutOrStdout(), "  systemctl --user restart canopy-clipboard")
+			fmt.Fprintln(cmd.OutOrStdout(), "")
+			fmt.Fprintln(cmd.OutOrStdout(), "To make this permanent across reboots (Hyprland), add to ~/.config/hypr/hyprland.conf:")
+			fmt.Fprintln(cmd.OutOrStdout(), "  exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP")
 			return nil
 		},
 	}
