@@ -2698,3 +2698,57 @@ After both, it's a one-PR feature with high marketing leverage.
 
 **Depends on / blocked by:** v0.5 agent-lifecycle wrapper +
 launcher map. See `docs/design/v0.6-agent-lifecycle.md`.
+
+---
+
+## 📋 OPEN (P3) — `canopy init --branch <name>` flag for cloning a specific branch (deferred from v0.18)
+
+**What:** Add `--branch <name>` flag to `canopy init <url>` so users can clone and check out a non-default branch in one step.
+
+**Why:** Some workflows are branch-first (e.g. cloning a colleague's feature branch). Today users have to clone, cd in, `git checkout`. Three commands; should be one.
+
+**Pros:** Better UX for branch-first workflows. ~10 LOC + 3 tests in `git.Clone` and `runAddProject`.
+
+**Cons:** Most users start from main/master; flag is rarely used. Scope creep on v0.18.
+
+**Context:** Deferred from v0.18 (Add Project from Anywhere). v0.18 ships clone-without-branch. `git clone --branch <name>` is what canopy's exec would pass through. The flag would also need to thread to the TUI form (a 2nd textinput? or a dedicated key?). Defer until v0.18 ships and we see real demand.
+
+**Depends on / blocked by:** v0.18 land.
+
+---
+
+## 📋 OPEN (P3) — Cleanup partial-clone directory on ctrl+c (deferred from v0.18)
+
+**What:** When the user cancels a clone in progress (ctrl+c in TUI or CLI), remove the partially-cloned directory so they don't have a stranded dir to clean up.
+
+**Why:** Today (post-v0.18), cancel leaves git's partial clone behind. Users have to `rm -rf` themselves and may not remember where the partial landed. Friction.
+
+**Pros:** Cleaner UX, no lingering state after cancellation.
+
+**Cons:** `os.RemoveAll` with a path derived from user input is destructive. Bugs in dest-path resolution become destructive bugs. Needs strict safety bounds: dest MUST be inside the resolved source-root, dest MUST NOT exist before clone started (so we know it's ours). Lots of testing for an edge case.
+
+**Context:** Deferred from v0.18. The path-safety check (`validateDestNotInsideWorkspace`) is already there; adding cleanup means also: only remove if dest was empty/missing pre-clone (don't delete a pre-existing dir we cloned into), only remove if dest is inside the resolved source-root, log the removal for forensics.
+
+**Depends on / blocked by:** v0.18 land.
+
+---
+
+## 📋 OPEN (P3) — `canopy rm-project <name>` command (deferred from v0.18 design review)
+
+**What:** Add `canopy rm-project <name>` subcommand that removes a Projects entry from `~/.canopy/state.json` without touching the project's workspaces or source dir on disk.
+
+**Why:** After v0.18 ships, the basename-collision error on `canopy init` directs users to either pick a different destination or hand-edit state.json. Hand-editing JSON state is brittle. A dedicated command:
+1. Validates the project name exists
+2. Warns if workspaces still reference the project root
+3. Refuses (or asks for `--force`) if workspaces exist
+4. Drops only the Projects map entry
+
+**Pros:** Cleaner UX for the basename-collision recovery path. The v0.18 error message can then read `Project 'bar' is already registered at /old/path. To proceed:\n  - Use a different destination, OR\n  - Run \`canopy rm-project bar\` to drop the stale entry.`
+
+**Cons:** Small expansion of CLI surface. Need to think about edge cases (workspaces still referencing the project root — these would become orphaned).
+
+**Context:** Deferred from v0.18 (Add Project from Anywhere) design review. The v0.18 plan ships the basename-collision error pointing at hand-edit; this TODO replaces the manual step with a proper command. Implementation: ~30 LOC + 3 tests + help text.
+
+**Depends on / blocked by:** v0.18 land.
+
+---
