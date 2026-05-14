@@ -151,9 +151,10 @@ func configGetCmd() *cobra.Command {
 // users can see at a glance which keys are set vs default.
 func configListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List all known config keys with their effective values and sources",
-		Args:  cobra.NoArgs,
+		Use:     "list",
+		Aliases: []string{"ls"}, // `canopy ls` / `canopy host ls` / etc. — canopy uses `ls` everywhere.
+		Short:   "List all known config keys with their effective values and sources",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "KEY\tVALUE\tSOURCE")

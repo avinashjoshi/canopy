@@ -236,6 +236,18 @@ func TestConfigList(t *testing.T) {
 	}
 }
 
+// TestConfigLs_Alias: `canopy config ls` works as an alias for `list`,
+// matching canopy's convention (canopy ls / host ls / project ls).
+func TestConfigLs_Alias(t *testing.T) {
+	stdout, _, err := runConfigCmd(t, "ls")
+	if err != nil {
+		t.Fatalf("ls: %v", err)
+	}
+	if !strings.Contains(stdout, "source-root") {
+		t.Errorf("ls (alias) output missing source-root row; got %q", stdout)
+	}
+}
+
 // TestConfigSet_OverwritesExisting: a second set replaces the first
 // without prompting. Same semantics as `git config`.
 func TestConfigSet_OverwritesExisting(t *testing.T) {
