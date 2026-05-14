@@ -131,6 +131,7 @@ Verbs while on the tab:
 |---|---|
 | `enter` | Open host detail drawer (ssh-target, projects, last-error) |
 | `n` | Open the in-TUI add-workspace picker (Fresh + Prompt; PR/Issue/Branch hidden because they need remote `gh`) |
+| `s` | Open an interactive `ssh` shell on the host (y/N confirm first; canopy refreshes when you `exit`) |
 | `U` | Run `canopy upgrade --yes` on the host; output streams into the TUI |
 | `S` | Run `canopy use release` on the host (recovery if it's running a DEV binary that refuses `upgrade`) |
 | `a` | Re-offer ssh-copy-id (useful if the host lost key auth) |
