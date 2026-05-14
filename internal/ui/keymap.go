@@ -208,6 +208,16 @@ var listModeBindings = []Binding{
 		Action:    actionHostSSH,
 	},
 	{
+		// `c` on the Hosts tab installs (or repairs) the v0.18 clipboard
+		// bridge on the cursor's host. Runs `canopy host clipboard <name>`
+		// via tea.ExecProcess so the user sees the install transcript
+		// inline. Confirm modal first to match the `s` key's friction.
+		K:         key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "clipboard bridge")),
+		Group:     "act",
+		Available: availableHostClipboard,
+		Action:    actionHostClipboard,
+	},
+	{
 		// K (capital) kills the workspace's tmux session without
 		// removing state. Lower-case k is cursor-up, intentional —
 		// the muscle-memory case is nav, the deliberate-keypress

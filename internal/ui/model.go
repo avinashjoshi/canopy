@@ -130,6 +130,11 @@ const (
 	// and we want a deliberate keypress so a stray `s` doesn't bounce
 	// them out of the TUI unexpectedly.
 	confirmHostSSHMode
+	// confirmHostClipboardMode is the y/N gate before `c` runs
+	// `canopy host clipboard <name>` against the cursor's host. The
+	// command exec's interactively (the user sees the install
+	// transcript). v0.18 Lane C.4.
+	confirmHostClipboardMode
 	// drawerMode is the diagnostic detail drawer (opened with `i`).
 	// Read-only view of one workspace's process tree, recent logs, env,
 	// status history, and last setup log. The drawer is opt-in (no
@@ -419,6 +424,12 @@ type Model struct {
 	// (e.g. a remote-refresh tick between modal-open and confirm).
 	hostSSHName   string
 	hostSSHTarget string
+
+	// hostClipboardName / hostClipboardTarget stash the cursor host's
+	// identity across confirmHostClipboardMode. Same pattern as the
+	// SSH modal pair above. v0.18 Lane C.4.
+	hostClipboardName   string
+	hostClipboardTarget string
 
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
