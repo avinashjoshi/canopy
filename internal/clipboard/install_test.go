@@ -26,7 +26,14 @@ func newTestInstaller(t *testing.T) (*LocalInstaller, *fakeSystemctl) {
 	t.Helper()
 	home := t.TempDir()
 	sc := &fakeSystemctl{}
-	return &LocalInstaller{HomeDir: home, SystemdRun: sc.run}, sc
+	return &LocalInstaller{
+		HomeDir:    home,
+		SystemdRun: sc.run,
+		// Default to a passing verifier so existing tests focus on what
+		// they're actually testing (unit body, SSH config, etc.). Tests
+		// that need to assert the guard explicitly override this field.
+		VerifyBinary: func(_ string) error { return nil },
+	}, sc
 }
 
 func TestEnsureSystemdUnit_WritesFile(t *testing.T) {
@@ -292,6 +299,63 @@ func TestImportSessionEnv_RunsImportWhenWaylandSet(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("import-environment did not include WAYLAND_DISPLAY; args=%v", args)
+	}
+}
+
+func TestVerifyDaemonBinary_PassesWhenSubcommandSupported(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	// Default verifier in newTestInstaller returns nil → success path.
+	var out bytes.Buffer
+	if err := inst.VerifyDaemonBinary(&out); err != nil {
+		t.Fatalf("VerifyDaemonBinary should pass when verifier returns nil, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "verified") || !strings.Contains(out.String(), "clipboard-server") {
+		t.Errorf("expected success message mentioning verified + clipboard-server, got %q", out.String())
+	}
+}
+
+func TestVerifyDaemonBinary_RefusesAndHintsWhenSubcommandMissing(t *testing.T) {
+	inst, _ := newTestInstaller(t)
+	inst.VerifyBinary = func(_ string) error {
+		return errors.New("unknown command \"clipboard-server\" for \"canopy\"")
+	}
+	var out bytes.Buffer
+	err := inst.VerifyDaemonBinary(&out)
+	if err == nil {
+		t.Fatal("VerifyDaemonBinary should refuse when verifier errors")
+	}
+	body := out.String()
+	for _, must := range []string{"Refusing to install", "make dev", "canopy use"} {
+		if !strings.Contains(body, must) {
+			t.Errorf("error output missing %q\nfull output:\n%s", must, body)
+		}
+	}
+}
+
+func TestInstall_RefusesWhenBinaryGuardFails(t *testing.T) {
+	// The whole point of the guard: NO filesystem state is written when
+	// the binary doesn't support clipboard-server. Otherwise the user
+	// hits the start-limit-hit dance.
+	inst, sc := newTestInstaller(t)
+	inst.VerifyBinary = func(_ string) error {
+		return errors.New("unknown command")
+	}
+	var out bytes.Buffer
+	if err := inst.Install(&out); err == nil {
+		t.Fatal("Install should refuse when guard errors")
+	}
+	// No artifacts produced:
+	for _, path := range []string{
+		filepath.Join(inst.HomeDir, ".config", "systemd", "user", SystemdUnitName),
+		filepath.Join(inst.HomeDir, ".ssh", "config.d", "canopy"),
+		filepath.Join(inst.HomeDir, ".ssh", "config"),
+	} {
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("guard failed BUT %s was written; install should be atomic", path)
+		}
+	}
+	if len(sc.calls) != 0 {
+		t.Errorf("guard failed BUT systemctl was invoked %d times: %v", len(sc.calls), sc.calls)
 	}
 }
 

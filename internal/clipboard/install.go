@@ -95,6 +95,21 @@ func defaultSystemctlRunner(args ...string) error {
 	return nil
 }
 
+// binaryVerifier returns nil if the canopy binary at `path` supports
+// the clipboard-server subcommand. Same swap-for-tests pattern as
+// systemctlRunner — production runs `<path> clipboard-server --help`
+// and checks for a clean exit; tests substitute a fake to assert the
+// guard fires correctly without needing a real binary on disk.
+type binaryVerifier func(path string) error
+
+func defaultBinaryVerifier(path string) error {
+	cmd := exec.Command(path, "clipboard-server", "--help")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s clipboard-server --help: %w", path, err)
+	}
+	return nil
+}
+
 // LocalInstaller bootstraps the laptop side of the clipboard bridge —
 // the bits that are per-machine, not per-host:
 //
@@ -108,8 +123,9 @@ func defaultSystemctlRunner(args ...string) error {
 // → no rewrite; SSH config already has the marker block → no append;
 // systemctl daemon-reload + enable --now is itself idempotent.
 type LocalInstaller struct {
-	HomeDir    string
-	SystemdRun systemctlRunner
+	HomeDir      string
+	SystemdRun   systemctlRunner
+	VerifyBinary binaryVerifier
 }
 
 // NewLocalInstaller returns an installer rooted at the user's home dir.
@@ -122,19 +138,40 @@ func NewLocalInstaller() (*LocalInstaller, error) {
 		return nil, fmt.Errorf("clipboard.NewLocalInstaller: %w", err)
 	}
 	return &LocalInstaller{
-		HomeDir:    home,
-		SystemdRun: defaultSystemctlRunner,
+		HomeDir:      home,
+		SystemdRun:   defaultSystemctlRunner,
+		VerifyBinary: defaultBinaryVerifier,
 	}, nil
 }
 
-// Install runs all five steps. Returns the first error and aborts —
+// canopyBinaryPath returns the canopy symlink path the systemd unit's
+// ExecStart resolves at run time. We verify against this path so a
+// match between "install-time verification" and "runtime resolution"
+// is guaranteed — checking against `os.Executable()` would let a stale
+// symlink slip past.
+func (l *LocalInstaller) canopyBinaryPath() string {
+	return filepath.Join(l.HomeDir, ".local", "bin", "canopy")
+}
+
+// Install runs all six steps. Returns the first error and aborts —
 // each step is a precondition for the next (no point loading the
 // systemd unit if the unit file write failed).
+//
+// The first step is the binary-verification guard: we refuse to write
+// any state if ~/.local/bin/canopy doesn't support clipboard-server.
+// Without this, an install on a stale symlink succeeds at the
+// filesystem level but produces a start-limit-hit restart loop the
+// moment systemd tries to launch the daemon. The recovery dance
+// (reset-failed + restart) is unpleasant; failing the install up
+// front with a one-line `make dev` hint is much better.
 //
 // out receives progress lines so the CLI/TUI surface streams them to
 // the user.
 func (l *LocalInstaller) Install(out io.Writer) error {
 	fmt.Fprintln(out, "Installing canopy clipboard bridge (laptop-side):")
+	if err := l.VerifyDaemonBinary(out); err != nil {
+		return err
+	}
 	if err := l.EnsureSystemdUnit(out); err != nil {
 		return err
 	}
@@ -190,6 +227,38 @@ func (l *LocalInstaller) ImportSessionEnv(out io.Writer) error {
 		return fmt.Errorf("ImportSessionEnv: %w", err)
 	}
 	fmt.Fprintf(out, "  imported %v into the systemd --user manager environment\n", importedSessionEnvVars)
+	return nil
+}
+
+// VerifyDaemonBinary confirms that ~/.local/bin/canopy supports the
+// clipboard-server subcommand BEFORE the install writes any state.
+// Failing here means the systemd unit we're about to write would
+// ExecStart a binary that immediately exit-1s on every restart —
+// burning through StartLimitBurst in ~30 seconds and leaving the
+// user with a start-limit-hit failed unit they have to reset-failed
+// to recover.
+//
+// Most common cause of a failed verify: ~/.local/bin/canopy is the
+// active symlink from a `canopy use release` or a sibling workspace
+// without the v0.18 changes. The hint message tells the user the two
+// commands that can fix it: `make dev` from the v0.18 workspace, or
+// `canopy use <ws>` if the workspace already has a dev binary built.
+func (l *LocalInstaller) VerifyDaemonBinary(out io.Writer) error {
+	path := l.canopyBinaryPath()
+	if err := l.VerifyBinary(path); err != nil {
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Refusing to install: the canopy binary at")
+		fmt.Fprintf(out, "  %s\n", path)
+		fmt.Fprintln(out, "does not support the `clipboard-server` subcommand.")
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Likely cause: ~/.local/bin/canopy is symlinked at a release")
+		fmt.Fprintln(out, "binary or a workspace build older than v0.18. Run one of:")
+		fmt.Fprintln(out, "  make dev          # from the v0.18 workspace (builds + activates)")
+		fmt.Fprintln(out, "  canopy use <ws>   # if the v0.18 workspace already has ./canopy built")
+		fmt.Fprintln(out, "Then re-run `canopy install clipboard-bridge`.")
+		return fmt.Errorf("VerifyDaemonBinary: %w", err)
+	}
+	fmt.Fprintf(out, "  verified %s supports clipboard-server\n", path)
 	return nil
 }
 
