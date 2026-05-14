@@ -56,6 +56,58 @@ func actionHostSetupAuth(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// actionHostSSH stages a confirm prompt before exec'ing `ssh <target>`
+// for the cursor's host. We don't fire the subprocess directly because
+// `s` is a low-friction key (single press, no modifier) and the action
+// is high-disruption: it tears the user out of the TUI and into a
+// remote shell. The y/N gate makes the intent deliberate.
+//
+// The actual exec happens in handleConfirmHostSSHKey on y/Y; everything
+// else cancels and returns to listMode.
+func actionHostSSH(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	h, ok := m.selectedHost()
+	if !ok || h.SSHTarget == "" {
+		return m, nil
+	}
+	m.hostSSHName = h.Name
+	m.hostSSHTarget = h.SSHTarget
+	m.mode = confirmHostSSHMode
+	return m, nil
+}
+
+// handleConfirmHostSSHKey is the y/N gate for the SSH-into-host
+// confirmation. y/Y execs ssh and hands the terminal off via
+// tea.ExecProcess; anything else cancels. State is cleared either way.
+// On detach we kick a refreshAllMsg so any side effects of the shell
+// session (workspaces started/killed, canopy upgraded) repaint
+// immediately.
+func (m *Model) handleConfirmHostSSHKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	name := m.hostSSHName
+	target := m.hostSSHTarget
+	m.mode = listMode
+	m.hostSSHName = ""
+	m.hostSSHTarget = ""
+	if msg.String() != "y" && msg.String() != "Y" {
+		return m, nil
+	}
+	if target == "" {
+		return m, nil
+	}
+	// `--` defends against a registry SSHTarget that starts with `-`
+	// being interpreted as an ssh flag (e.g. `-oProxyCommand=...`).
+	// Registry entries are user-typed today, but the file lives at
+	// ~/.canopy/hosts.json and any process that can write it owns the
+	// next SSH dispatch — defense in depth, not redundant.
+	cmd := exec.Command("ssh", "--", target)
+	cmd.Env = os.Environ()
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			log.Warn("ui.host-ssh.failed", "host", name, "err", err)
+		}
+		return refreshAllMsg{}
+	})
+}
+
 // actionHostRemove opens the confirm modal for removing the cursor's
 // host from the registry. v0.17 Phase 1l.
 func actionHostRemove(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {

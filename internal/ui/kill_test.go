@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/tmux"
 )
@@ -173,4 +174,96 @@ type fakeTmuxKiller struct {
 func (f *fakeTmuxKiller) Kill(ctx context.Context, name string) error {
 	f.called = true
 	return f.err
+}
+
+// TestActionKill_RemoteMainCapturesHost: K on a remote main row records
+// the row's Host in killTargetHost so the confirm handler can
+// disambiguate against the local "(main)" row that shares the synthetic
+// name. Without this, the confirm-resolve loop matched the FIRST
+// "(main)" row in filteredRows() — local rows come first, so killing a
+// remote main always tried to kill the local one instead.
+func TestActionKill_RemoteMainCapturesHost(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.remoteRows = []Row{
+		{IsMain: true, Project: "test-project", Name: "(main)", TmuxSession: "test-project-main", Alive: true, Host: "tower"},
+	}
+	m.list.SetRows(m.filteredRows())
+
+	_, _ = actionKill(m, tea.KeyMsg{})
+	if m.killTargetHost != "tower" {
+		t.Errorf("killTargetHost = %q; want %q (Host must be captured to disambiguate (main) rows)", m.killTargetHost, "tower")
+	}
+	if m.killTargetProject != "test-project" {
+		t.Errorf("killTargetProject = %q; want %q (Project disambiguates two-project same-host main rows)", m.killTargetProject, "test-project")
+	}
+	if m.killTarget != "(main)" {
+		t.Errorf("killTarget = %q; want %q", m.killTarget, "(main)")
+	}
+}
+
+// TestHandleConfirmKillKey_RemoteMainTwoProjectsOnSameHost: when a
+// remote host has TWO projects, each emitting its own "(main)" row
+// (same Host, same Name, empty ProjectRoot), Host alone cannot
+// disambiguate. The Project field must also filter the resolve loop
+// so the right tmux session gets killed.
+func TestHandleConfirmKillKey_RemoteMainTwoProjectsOnSameHost(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.remoteRows = []Row{
+		{IsMain: true, Project: "alpha", Name: "(main)", TmuxSession: "alpha-main", Alive: true, Host: "tower"},
+		{IsMain: true, Project: "beta", Name: "(main)", TmuxSession: "beta-main", Alive: true, Host: "tower"},
+	}
+	m.list.SetRows(m.filteredRows())
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+
+	// Modal opened on the "beta" main row.
+	m.mode = confirmKillMode
+	m.killTarget = "(main)"
+	m.killTargetRoot = ""
+	m.killTargetHost = "tower"
+	m.killTargetProject = "beta"
+
+	_, cmd := m.handleConfirmKillKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatalf("y on remote (main) with project disambiguator: got nil cmd; want execRemoteKill against beta-main")
+	}
+	if m.killTargetProject != "" {
+		t.Errorf("killTargetProject = %q after confirm; want empty (state should clear)", m.killTargetProject)
+	}
+}
+
+// TestHandleConfirmKillKey_RemoteMainDispatchesToCorrectHost: when the
+// kill modal was opened on a remote (main) row, confirming with y must
+// resolve against the REMOTE row (Host matches) and dispatch the SSH
+// kill — not the local row that shares the same name. Verifies the
+// Host filter on the resolve loop. v0.17 regression.
+func TestHandleConfirmKillKey_RemoteMainDispatchesToCorrectHost(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.allRows = []Row{
+		{IsMain: true, Project: "test-project", ProjectRoot: "/tmp/test-project", Name: "(main)", TmuxSession: "test-project-main", Alive: true},
+	}
+	m.remoteRows = []Row{
+		{IsMain: true, Project: "test-project", Name: "(main)", TmuxSession: "test-project-main", Alive: true, Host: "tower"},
+	}
+	m.list.SetRows(m.filteredRows())
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+
+	// Open the modal as if K was pressed on the remote row.
+	m.mode = confirmKillMode
+	m.killTarget = "(main)"
+	m.killTargetRoot = ""
+	m.killTargetHost = "tower"
+
+	_, cmd := m.handleConfirmKillKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatalf("y on remote main: got nil cmd; want execRemoteKill")
+	}
+	if m.mode != listMode {
+		t.Errorf("mode after confirm = %v; want listMode", m.mode)
+	}
+	if m.killTargetHost != "" {
+		t.Errorf("killTargetHost = %q after confirm; want empty (state should clear)", m.killTargetHost)
+	}
 }

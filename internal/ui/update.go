@@ -351,14 +351,40 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.output != "" {
 			m.busyOutput += msg.output
 		}
-		// v0.17 Phase 1k: remote create doesn't return a tmuxSession
-		// (canopy new --on runs with --no-attach), and we can't
-		// local-attach to a session that lives on tower. Stay in
-		// busyMode so the user reads the streaming output; any key
-		// dismisses to the list (handleBusyModeKey triggers refresh)
-		// and they press Enter on the new row to mosh in.
+		// Remote create: parse the workspace name from the streamed
+		// output and mosh-attach directly. canopy new --on always runs
+		// with --no-attach on the remote (we can't local-attach to a
+		// session that lives on tower), but we can immediately follow
+		// up with `canopy switch --on host <name>` which handles the
+		// mosh handoff. Falls back to "press Enter on the new row" if
+		// the name can't be parsed (e.g., partial output on error).
+		//
+		// Exit code 2 from the remote canopy = "workspace OK, prompt
+		// delivery failed" (workspace.IsPromptFailed). Treat as success
+		// for auto-attach: the workspace is alive on disk, only the
+		// initial agent prompt didn't land. Better to drop the user into
+		// the live workspace than to strand them in busyMode over a
+		// prompt issue they can re-issue manually.
 		if msg.remote {
-			if msg.err == nil {
+			workspaceOK := msg.err == nil
+			if !workspaceOK {
+				if ee, ok := msg.err.(*exec.ExitError); ok && ee.ExitCode() == 2 {
+					workspaceOK = true
+				}
+			}
+			if workspaceOK {
+				if name := parseRemoteWorkspaceName(m.busyOutput); name != "" && m.newTargetHost != "" {
+					host := m.newTargetHost
+					project := m.newTargetName
+					row := Row{Host: host, Name: name, Project: project}
+					m.mode = listMode
+					m.busyOp = busyOpNone
+					m.busyTitle = ""
+					m.busyOutput = ""
+					m.busyDone = false
+					m.clearNewTarget()
+					return m, m.attachRemoteRow(row, false)
+				}
 				m.busyTitle = "Remote workspace ready. Press any key, then Enter on the new row to attach."
 			}
 			return m, nil
@@ -591,6 +617,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleHostDetailKey(msg)
 	case confirmSSHCopyIDMode:
 		return m.handleConfirmSSHCopyIDKey(msg)
+	case confirmHostSSHMode:
+		return m.handleConfirmHostSSHKey(msg)
 	case confirmRetryMode:
 		return m.handleConfirmRetryKey(msg)
 	case drawerMode:

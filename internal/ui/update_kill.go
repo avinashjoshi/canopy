@@ -39,6 +39,8 @@ func actionKill(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.mode = confirmKillMode
 	m.killTarget = row.Name
 	m.killTargetRoot = row.ProjectRoot
+	m.killTargetHost = row.Host
+	m.killTargetProject = row.Project
 	return m, nil
 }
 
@@ -47,14 +49,26 @@ func actionKill(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // is the safe posture even though K is far less destructive than d.
 func (m *Model) handleConfirmKillKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "y" || msg.String() == "Y" {
-		// Resolve the target — same (Project, Name) match as confirm-delete.
+		// Resolve the target — same (Project, Name) match as confirm-delete,
+		// plus a Host check so a local "(main)" row doesn't shadow a
+		// remote one (both have the synthetic name "(main)" and remote
+		// rows have empty ProjectRoot).
 		var target Row
 		var found bool
 		for _, r := range m.filteredRows() {
 			if r.Name != m.killTarget {
 				continue
 			}
+			if r.Host != m.killTargetHost {
+				continue
+			}
 			if m.killTargetRoot != "" && r.ProjectRoot != m.killTargetRoot {
+				continue
+			}
+			// Project disambiguates same-host two-project (main) collisions
+			// where ProjectRoot is empty (remote rows). Only enforce when
+			// captured (non-empty) so legacy code paths still match.
+			if m.killTargetProject != "" && r.Project != m.killTargetProject {
 				continue
 			}
 			target = r
@@ -64,6 +78,8 @@ func (m *Model) handleConfirmKillKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = listMode
 		m.killTarget = ""
 		m.killTargetRoot = ""
+		m.killTargetHost = ""
+		m.killTargetProject = ""
 		if !found {
 			// Row went away between modal open and confirm — treat as cancel.
 			return m, nil
@@ -81,6 +97,8 @@ func (m *Model) handleConfirmKillKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.mode = listMode
 	m.killTarget = ""
 	m.killTargetRoot = ""
+	m.killTargetHost = ""
+	m.killTargetProject = ""
 	return m, nil
 }
 

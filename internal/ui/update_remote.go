@@ -11,9 +11,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// parseRemoteWorkspaceName scrapes the workspace name from a streamed
+// `canopy new` log. The canonical success line — emitted by the remote
+// canopy at cmd/canopy/new.go — is `Workspace ready: <name>` followed
+// by a newline. Returns "" when the line isn't present (e.g., partial
+// output on failure), which the caller treats as "fall back to manual
+// attach hint."
+//
+// Picks the LAST occurrence: a setup hook that echoes the marker line,
+// or a prompt containing it, shouldn't be able to redirect the
+// auto-attach. The remote canopy emits this line once at the very end
+// of a successful create — taking the last match makes the parser
+// robust against injection-shaped output earlier in the stream.
+func parseRemoteWorkspaceName(output string) string {
+	const prefix = "Workspace ready: "
+	var got string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			got = strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return got
+}
 
 // execRemoteVerb runs `<canopy-bin> <verb> --on <host> <args...>` as a
 // subprocess via tea.ExecProcess. Used for rm and retry. v0.17.0 Phase 1.

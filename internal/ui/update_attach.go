@@ -198,7 +198,30 @@ func (m *Model) attachRemoteRow(row Row, shared bool) tea.Cmd {
 		// binary after launch — rare enough to not engineer around.
 		canopyBin = os.Args[0]
 	}
-	args := []string{"switch", "--on", row.Host, row.Name}
+	args := []string{"switch", "--on", row.Host}
+	cwd := m.remoteCwdForRow(row.Host, row.Project)
+	// For IsMain rows, --remote-cwd is load-bearing: the remote canopy
+	// needs to be cd'd into the right project before `canopy main`
+	// walks up looking for canopy.json. Without it, resolveOnForSwitch
+	// falls back to the local cwd basename or first registered project
+	// — silently attaching to a different project's main session.
+	// Refuse rather than silently mis-attach.
+	if row.IsMain && cwd == "" {
+		return func() tea.Msg {
+			return errMsg{err: fmt.Errorf("can't attach to %s on %s: project not registered for that host (run `canopy project add --host %s <path>`)", row.Project, row.Host, row.Host)}
+		}
+	}
+	if cwd != "" {
+		args = append(args, "--remote-cwd", cwd)
+	}
+	if row.IsMain {
+		// Use the explicit flag rather than passing "(main)" as a name —
+		// the dispatch keys off the flag so a real workspace named
+		// "(main)" wouldn't be silently redirected to the main session.
+		args = append(args, "--main")
+	} else {
+		args = append(args, row.Name)
+	}
 	if shared {
 		// v0.17 Phase 1j: propagates the laptop-side "user confirmed
 		// share" decision through to the remote canopy switch so it

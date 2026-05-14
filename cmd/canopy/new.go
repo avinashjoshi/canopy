@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -263,6 +264,17 @@ func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []s
 	c.Stderr = stderr
 	c.Stdin = strings.NewReader(script)
 	if err := c.Run(); err != nil {
+		// Exit code 2 from the remote = "workspace OK, prompt failed"
+		// (cmd/canopy/main.go maps workspace.IsPromptFailed → exit 2).
+		// Preserve that distinction by returning ErrPromptFailed locally
+		// so main.go propagates it as exit 2, not exit 1. Without this,
+		// callers that branch on "workspace created" vs "create failed"
+		// — including the TUI's createDoneMsg auto-attach path — can't
+		// tell the difference.
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 2 {
+			fmt.Fprintf(stdout, "\nRemote workspace created (initial prompt failed). Re-send the prompt manually after attaching.\n")
+			return &workspace.ErrPromptFailed{Reason: "remote prompt delivery failed (exit 2)"}
+		}
 		return fmt.Errorf("remote canopy new failed: %w", err)
 	}
 

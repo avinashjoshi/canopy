@@ -52,6 +52,8 @@ func (m *Model) View() string {
 		return m.renderHostDetail()
 	case confirmSSHCopyIDMode:
 		return m.renderConfirmSSHCopyID()
+	case confirmHostSSHMode:
+		return m.renderConfirmHostSSH()
 	case drawerMode:
 		return m.renderDrawer()
 	case busyMode:
@@ -425,6 +427,24 @@ func (m *Model) renderConfirmSSHCopyID() string {
 	b.WriteString("\n  ")
 	b.WriteString(brokenStyle.Render("y"))
 	b.WriteString(" to set it up now  ·  any other key to skip")
+	return b.String()
+}
+
+// renderConfirmHostSSH is the y/N gate before `s` exec's into an
+// interactive SSH session. The friction here is "you're about to leave
+// the TUI" — the action is non-destructive but high-disruption, so a
+// deliberate keypress beats letting a stray `s` punt the user to a
+// remote shell.
+func (m *Model) renderConfirmHostSSH() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("ssh into host"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  Open an interactive shell on %s (%s)?\n\n", m.hostSSHName, m.hostSSHTarget))
+	b.WriteString(subtleStyle.Render("  The TUI will hand the terminal to ssh until the remote shell\n"))
+	b.WriteString(subtleStyle.Render("  exits (Ctrl-D or `exit`). On return, canopy refreshes.\n"))
+	b.WriteString("\n  ")
+	b.WriteString(brokenStyle.Render("y"))
+	b.WriteString(" to ssh  ·  any other key to cancel")
 	return b.String()
 }
 
