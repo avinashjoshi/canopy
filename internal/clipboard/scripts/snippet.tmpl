@@ -1,0 +1,23 @@
+# Canopy clipboard-bridge SSH snippet for host "{{.HostName}}".
+# Managed by canopy {{.Version}}. Do not edit; reinstall via
+#   canopy host clipboard {{.HostName}} --reinstall
+#
+# The three RemoteForwards make the laptop's clipboard daemon sockets
+# reachable on the remote host. The remote-side wl-paste / wl-copy
+# wrappers in ~/.local/bin/ connect to these paths via socat.
+#
+# Socket paths use the literal UIDs detected at install time
+# (laptop UID {{.LocalUID}}, remote UID {{.RemoteUID}}) because $XDG_RUNTIME_DIR
+# isn't reliably set in sshd's environment when establishing the
+# RemoteForward — sshd resolves these socket paths before user shell
+# init runs.
+#
+# StreamLocalBindUnlink yes is load-bearing: without it, a leftover
+# socket from a prior session blocks the next reconnect with
+# "remote port forwarding failed for ..." and the bridge silently
+# breaks. With it, sshd removes stale sockets on each connect.
+Host {{.HostName}}
+  RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-text.sock  /run/user/{{.LocalUID}}/canopy/clip-text.sock
+  RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-image.sock /run/user/{{.LocalUID}}/canopy/clip-image.sock
+  RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-copy.sock  /run/user/{{.LocalUID}}/canopy/clip-copy.sock
+  StreamLocalBindUnlink yes
