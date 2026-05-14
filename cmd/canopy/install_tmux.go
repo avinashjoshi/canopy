@@ -47,16 +47,19 @@ const (
 
 var installTmuxLog = clog.Pkg("install-tmux")
 
-// newInstallCmd is the parent group for `canopy install <target>`. v0.7
-// ships one target (tmux); future targets (hypr-sidebar, etc.) plug in
-// via AddCommand.
+// newInstallCmd is the parent group for `canopy install <target>`.
+// Ships two targets today (tmux, clipboard-bridge); future targets
+// (hypr-sidebar, etc.) plug in via AddCommand.
 func newInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install canopy integrations into your environment.",
-		Long:  `Run "canopy install tmux" to wire canopy popup + statusline into your tmux config.`,
+		Long: `Targets:
+  canopy install tmux               Wires canopy popup + statusline into ~/.tmux.conf
+  canopy install clipboard-bridge   Sets up the v0.18 clipboard daemon + SSH config Include`,
 	}
 	cmd.AddCommand(newInstallTmuxCmd())
+	cmd.AddCommand(newInstallClipboardBridgeCmd())
 	return cmd
 }
 
