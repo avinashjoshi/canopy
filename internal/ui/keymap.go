@@ -199,6 +199,15 @@ var listModeBindings = []Binding{
 		Action:    actionHostSetupAuth,
 	},
 	{
+		// `s` on the Hosts tab opens an interactive SSH session to the
+		// cursor's host. Drops the user into a shell on the remote;
+		// closing the shell returns to the TUI.
+		K:         key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "ssh")),
+		Group:     "act",
+		Available: availableHostSSH,
+		Action:    actionHostSSH,
+	},
+	{
 		// K (capital) kills the workspace's tmux session without
 		// removing state. Lower-case k is cursor-up, intentional —
 		// the muscle-memory case is nav, the deliberate-keypress
@@ -358,8 +367,12 @@ func availableOpenPR(m *Model) bool {
 // live session (Alive) and a non-zero Port. Both main and workspace
 // rows qualify — `scripts.run` exposes a server on CANOPY_PORT in
 // either context, and the user's intent ("show me my running app") is
-// the same regardless of row kind.
+// the same regardless of row kind. Gated off the Hosts tab — there's
+// no port to forward for a host row.
 func availableOpenBrowser(m *Model) bool {
+	if m.tab == tabHosts {
+		return false
+	}
 	row, ok := m.list.CursorRow()
 	if !ok {
 		return false
@@ -401,6 +414,20 @@ func availableHostAuth(m *Model) bool {
 	}
 	return strings.Contains(snap.LastError, "Permission denied") ||
 		strings.Contains(snap.LastError, "publickey")
+}
+
+// availableHostSSH gates the `s` key on the Hosts tab. Surfaces
+// whenever the cursored host has a known SSH target — the action
+// itself just execs `ssh <target>` and hands the terminal off.
+func availableHostSSH(m *Model) bool {
+	if !availableOnHostsTab(m) {
+		return false
+	}
+	h, ok := m.selectedHost()
+	if !ok {
+		return false
+	}
+	return h.SSHTarget != ""
 }
 
 // availableLocalUpgrade is the gate for the in-TUI upgrade flow (U on

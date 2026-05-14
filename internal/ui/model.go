@@ -124,6 +124,12 @@ const (
 	// y/Y → tea.ExecProcess into ssh-copy-id (which prompts for the
 	// remote password); anything else → keep the host registered as-is.
 	confirmSSHCopyIDMode
+	// confirmHostSSHMode is the y/N gate before `s` execs an interactive
+	// ssh into the cursor's host. Light-friction confirmation: SSH is
+	// not destructive but does drop the user into a different shell,
+	// and we want a deliberate keypress so a stray `s` doesn't bounce
+	// them out of the TUI unexpectedly.
+	confirmHostSSHMode
 	// drawerMode is the diagnostic detail drawer (opened with `i`).
 	// Read-only view of one workspace's process tree, recent logs, env,
 	// status history, and last setup log. The drawer is opt-in (no
@@ -407,6 +413,13 @@ type Model struct {
 	pendingProbeHost   string
 	pendingProbeTarget string
 
+	// hostSSHName / hostSSHTarget stash the cursor host's identity
+	// across the confirmHostSSHMode modal so the y/N handler can exec
+	// ssh against the right target even if the cursor moves underneath
+	// (e.g. a remote-refresh tick between modal-open and confirm).
+	hostSSHName   string
+	hostSSHTarget string
+
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
 	// instead of forwarding to the listMode keymap.
@@ -453,8 +466,17 @@ type Model struct {
 	// workspace's tmux session; the y/N gate prevents accidental
 	// keypress. killTargetRoot scopes by ProjectRoot for the same
 	// reason deleteTargetRoot does — see comment on deleteTargetRoot.
-	killTarget     string
-	killTargetRoot string
+	// killTargetHost disambiguates synthetic-name rows (notably
+	// "(main)") across local + remote: a local-tab project and a remote
+	// host can both have a "(main)" row, and ProjectRoot alone isn't
+	// enough (remote rows leave it empty). killTargetProject
+	// disambiguates further when the SAME host has two registered
+	// projects — both emit "(main)" rows with the same Host, so we
+	// also key on Project to pick the right one.
+	killTarget        string
+	killTargetRoot    string
+	killTargetHost    string
+	killTargetProject string
 
 	// Drawer state (mode == drawerMode). The drawer snapshots the row
 	// it was opened against and the loaded diagnostic data so re-renders
