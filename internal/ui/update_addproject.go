@@ -311,9 +311,11 @@ func (m *Model) submitAddProjectRemote(rawURL, hostName string) (tea.Model, tea.
 	}
 
 	// Shell-quote the URL so metacharacters can't be reinterpreted on
-	// the remote shell. shellQuoteUI mirrors cmd/canopy.shellQuote so
-	// ui can use it without a cross-package import.
-	cmd := host.SSHCmd(context.Background(), h.SSHTarget, "canopy", "init", shellQuoteUI(rawURL))
+	// the remote shell. SSHRunUser wraps in `bash -lc` so the user's
+	// PATH (incl. ~/.local/bin where canopy typically lives) is set,
+	// and allocates a pty so git auth prompts can read /dev/tty.
+	remote := "canopy init " + shellQuoteUI(rawURL)
+	cmd := host.SSHRunUser(context.Background(), h.SSHTarget, remote)
 	cmd.Env = os.Environ()
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return addProjectRemoteDoneMsg{hostName: hostName, rawURL: rawURL, err: err}

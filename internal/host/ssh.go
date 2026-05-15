@@ -86,6 +86,52 @@ func SSHCmdBatch(ctx context.Context, target string, args ...string) *exec.Cmd {
 	return sshCmdInternal(ctx, target, true /* batch */, args...)
 }
 
+// SSHRunUser builds an ssh invocation for ad-hoc commands that need
+// to run as if the user typed them in a real terminal on the remote.
+// Two things differ from SSHCmd:
+//
+//  1. The remote command is wrapped in `bash -lc` (login shell). SSH's
+//     default non-interactive command does NOT source the user's
+//     profile (.bashrc / .zshrc / .profile etc.), so $PATH is the bare
+//     /usr/bin:/bin shape. Tools installed under ~/.local/bin or
+//     ~/.cargo/bin etc. aren't visible without -l. Login shell sources
+//     the user's full profile and produces the same $PATH they see in
+//     a regular terminal.
+//
+//  2. -t forces remote pty allocation so the remote process can read
+//     from /dev/tty. Required for any command that prompts the user —
+//     git asking for an SSH passphrase or HTTPS credentials, an
+//     editor opening, etc. Without -t the prompt would silently hang.
+//
+// remoteCmd is passed verbatim to `bash -lc`. The caller is responsible
+// for shell-quoting any user-provided values inside it.
+//
+//	cmd := host.SSHRunUser(ctx, "avi@tower", "canopy init 'https://x'")
+//	cmd.Stdin = os.Stdin
+//	cmd.Stdout = os.Stdout
+//	cmd.Stderr = os.Stderr
+//	err := cmd.Run()
+//
+// Uses the same ControlMaster + ConnectTimeout config as SSHCmd so a
+// previously-established master socket gets reused (no extra
+// handshake cost on the second + Nth call).
+func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd {
+	socketPath := filepath.Join(canopyHome(), "ssh-%C.sock")
+	sshArgs := []string{
+		"-t", // allocate remote pty for interactive auth prompts
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + socketPath,
+		"-o", "ControlPersist=300",
+		"-o", "ConnectTimeout=5",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=3",
+		target,
+		"bash", "-lc", remoteCmd,
+	}
+	log.Debug("ssh.run-user", "target", target, "remote_cmd", remoteCmd)
+	return exec.CommandContext(ctx, "ssh", sshArgs...)
+}
+
 // sshCmdInternal is the shared implementation. Splits on the batch
 // flag, otherwise identical options.
 func sshCmdInternal(ctx context.Context, target string, batch bool, args ...string) *exec.Cmd {

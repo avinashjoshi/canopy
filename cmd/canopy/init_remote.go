@@ -77,25 +77,27 @@ func runAddProjectRemote(ctx context.Context, hostName, arg string, opts addProj
 			hostName, err, hostName)
 	}
 
-	// Build the remote command. Shell-quote each user-provided value
-	// so URLs containing shell metacharacters (`;`, `&`, `$`, etc.)
-	// don't get reinterpreted on the remote side. SSH joins these
-	// strings with spaces and passes them to the remote shell, so
-	// each value must arrive as one shell word.
-	remoteArgs := []string{"canopy", "init", shellQuote(arg)}
+	// Build the remote command as a single string for `bash -lc`.
+	// Shell-quote each user-provided value so URLs containing
+	// metacharacters (`;`, `&`, `$`, etc.) don't get reinterpreted on
+	// the remote side. The remote shell sees: `bash -lc 'canopy init
+	// <quoted-url>'` — login shell sources the user's profile (so
+	// canopy on PATH works) and pty is allocated by SSHRunUser (so
+	// git auth prompts can read from /dev/tty).
+	remote := "canopy init " + shellQuote(arg)
 	if opts.DestOverride != "" {
-		remoteArgs = append(remoteArgs, shellQuote(opts.DestOverride))
+		remote += " " + shellQuote(opts.DestOverride)
 	}
 	if opts.Force {
-		remoteArgs = append(remoteArgs, "--force")
+		remote += " --force"
 	}
 	if opts.WithScripts {
-		remoteArgs = append(remoteArgs, "--with-scripts")
+		remote += " --with-scripts"
 	}
 
 	fmt.Fprintf(stdout, "Dispatching to %s (%s)...\n", h.Name, h.SSHTarget)
 
-	cmd := host.SSHCmd(ctx, h.SSHTarget, remoteArgs...)
+	cmd := host.SSHRunUser(ctx, h.SSHTarget, remote)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = os.Stderr

@@ -146,6 +146,41 @@ func TestCheckMoshAvailable_Errors(t *testing.T) {
 	}
 }
 
+// TestSSHRunUser_LoginShellAndPTY verifies the v0.20 ad-hoc dispatch
+// helper builds an ssh invocation that:
+//   - allocates a remote pty (-t) so git auth prompts read from /dev/tty
+//   - wraps the remote command in `bash -lc` so the user's login
+//     profile sources PATH (fixing the exit-127 "canopy not found"
+//     case the Add Project --on flow hit pre-fix)
+func TestSSHRunUser_LoginShellAndPTY(t *testing.T) {
+	cmd := SSHRunUser(context.Background(), "avi@tower", "canopy init 'https://x.git'")
+	args := cmd.Args
+	if args[0] != "ssh" {
+		t.Fatalf("args[0] = %q, want ssh", args[0])
+	}
+	if indexOf(args, "-t") < 0 {
+		t.Errorf("SSHRunUser missing -t (pty allocation): %v", args)
+	}
+	// bash -lc <cmd> must appear in order, AFTER the target.
+	targetIdx := indexOf(args, "avi@tower")
+	if targetIdx < 0 {
+		t.Fatalf("target not in args: %v", args)
+	}
+	bashIdx := indexOf(args, "bash")
+	if bashIdx < targetIdx {
+		t.Errorf("bash must come after target; bashIdx=%d targetIdx=%d", bashIdx, targetIdx)
+	}
+	if args[bashIdx+1] != "-lc" {
+		t.Errorf("expected -lc after bash, got %q", args[bashIdx+1])
+	}
+	if args[bashIdx+2] != "canopy init 'https://x.git'" {
+		t.Errorf("remote cmd = %q; want literal passthrough", args[bashIdx+2])
+	}
+	// ControlMaster reuse must still apply so a previously-opened
+	// socket is shared (no re-handshake on the second dispatch).
+	mustContainPair(t, args, "-o", "ControlMaster=auto")
+}
+
 // TestCanopyHome_NonEmpty ensures the helper never returns an empty
 // string (which would produce an invalid ControlPath like `ssh-%C.sock`
 // in the cwd).
