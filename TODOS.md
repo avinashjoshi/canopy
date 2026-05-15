@@ -25,6 +25,22 @@ Phase 1c's huh wizard for `canopy host add` is the natural home for this — the
 
 ---
 
+## 📋 OPEN (P3) — Recognize "this is my own remote attach" to skip confirm-attach modal (added 2026-05-14)
+
+**What:** When canopy is launched from inside a mosh tmux that's attached to a remote workspace (e.g., `tower:foo`), pressing Enter on the `tower:foo` row currently fires the confirm-attach modal because `Attached=true` and `isCurrentRow()` only recognizes the laptop's own workspace. Re-attach to your own remote session should be silent, matching local behavior.
+
+**Why:** Once the remote-workspace-observability implementation lands (Attached propagated for remote rows + confirm-attach modal newly fires for them per the 2026-05-14 eng-review plan), every reattach to a remote-attached session asks "share or cancel?" The user already shares with themselves; it's an unnecessary y-press.
+
+**Pros:** Symmetry with local UX. Removes friction on a common workflow once Phase 1j is fully wired for remote.
+
+**Cons:** Requires a cross-machine "this terminal session corresponds to host X workspace Y" concept. Two design options: (a) `canopy switch` writes a hint file like `~/.canopy/host-attach.json` recording the current remote attach; local TUI reads it on Enter. (b) Remote canopy ls --json compares attached client identity against a marker the local canopy stamps. Both have edge cases (stale hint after crash, multi-laptop ambiguity) that make over-warning safer as a default.
+
+**Context:** Surfaced in /plan-eng-review for remote-workspace-observability (2026-05-14, D8). The "always warn for remote" behavior is the correct *initial* design — safer to over-warn than under-warn when the failure mode of mis-recognition is silently sharing with a stranger. Revisit if users complain about the friction in practice.
+
+**Depends on:** v0.17 Phase 1j (`AttachOptions.Shared`) — already shipped. The remote-status implementation (separate PR, pending) wires Attached through for remote rows, which is what makes this friction first appear.
+
+---
+
 ## 📋 OPEN (P2) — Surface refresh errors in TUI Global tab section header (added 2026-05-12)
 
 Right now hosts whose refresh failed (auth, network, etc.) don't appear in the TUI Global tab at all — their cache entry has empty `workspaces` and `last_error` set, but the projectlist render path skips them entirely. Better UX: render a section header for failed hosts too, with the error condition shown:
