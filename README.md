@@ -16,7 +16,7 @@
 
 **TUI for managing git worktrees with paired tmux sessions, per-project setup hooks, and remote-host dispatch.**
 
-> Status: v0.17, daily-driven by the author. APIs and on-disk state may still shift before v1.
+> Status: v0.20, daily-driven by the author. APIs and on-disk state may still shift before v1.
 
 ![canopy TUI: Workspaces tab listing workspaces across multiple projects + one remote host, each with port, memory, agent badge, and PR status](docs/images/tui-workspaces.png)
 
@@ -26,12 +26,16 @@
 
 AI-paired development means many parallel branches in flight at once: one agent refactoring auth, another fixing the timezone bug, plus the feature you're driving by hand. Raw `git worktree` + ad-hoc `tmux new-session` doesn't scale past three. Canopy is the missing orchestrator: per-workspace ports, per-workspace databases via `scripts.setup`, per-workspace tmux sessions with the same layout every time, agent-state badges so you can see which agent needs you, and one TUI that views every workspace across every host. See [`docs/landscape.md`](docs/landscape.md) for where canopy sits next to Conductor, tmuxinator, raw `git worktree`, and the agent CLIs it hosts.
 
-## What's new in v0.17
+## What's new in v0.20
 
-- **Remote workspaces.** Register an SSH-reachable host once with `canopy host add tower cassy@tower.tail.ts.net`, then run `canopy new --on tower` from your laptop. The heavy work runs on the host; one TUI views every workspace across every machine. See [`docs/remote-workspaces.md`](docs/remote-workspaces.md).
-- **Fire-and-forget agents.** `canopy new --prompt "..." --no-attach` spawns a workspace, hands claude its marching orders, and detaches. Come back when the agent-state badge flips to `✋` (awaiting input) or `💤` (done).
-- **In-TUI canopy upgrade.** Press `U` to upgrade the laptop itself; press `U` on a remote host row to upgrade the host. Streaming output, no SSH context switch.
-- **Workspace identity follows the branch.** Rename a branch with `git branch -m` and canopy's tmux session, statusline, terminal-tab title, and TUI rows all pick up the new name within 15 seconds.
+- **Add a project from anywhere.** `canopy init` now accepts a folder path or a git URL, so you can register a project without `cd`-ing into it: `canopy init ~/code/foo` or `canopy init https://github.com/foo/bar.git`. URL form clones into your configured source-root (default `~/.canopy/sources`, override via `canopy config set source-root ~/Work`) and registers in one shot. A new TUI **Add Project** form lives on the splash and on the Global tab (`a` keybind), with `Tab` to cycle between local and registered hosts. See [`docs/getting-started.md`](docs/getting-started.md).
+- **Remote-host init.** `canopy init <git-url> --on tower` dispatches the clone+init to the remote canopy via SSH (reusing v0.17's ControlMaster plumbing) and auto-registers the new project in the laptop's `hosts.json` so the next `canopy new --on tower` resolves cleanly — no more manual `canopy project add` after init.
+- **`canopy config` subcommand.** Persistent user-level settings at `~/.canopy/config.json`. First key is `source-root`. Precedence: per-call dest > `$CANOPY_SOURCE_ROOT` env > config file > built-in default. Get/set/list/unset, with `(env)` / `(config)` / `(default)` source labels so you can debug why a value isn't taking effect. Press `,` from any TUI tab to open the settings modal.
+
+## Previous releases
+
+- **v0.17** — Remote workspaces. Register an SSH-reachable host once with `canopy host add tower cassy@tower.tail.ts.net`, then run `canopy new --on tower` from your laptop. The heavy work runs on the host; one TUI views every workspace across every machine. See [`docs/remote-workspaces.md`](docs/remote-workspaces.md). Plus fire-and-forget agents (`canopy new --prompt "..." --no-attach`), in-TUI `canopy upgrade`, and workspace identity that follows the branch (rename via `git branch -m` and canopy's tmux session, statusline, terminal-tab title, and TUI rows pick up the new name within 15 seconds).
+- **v0.18 / v0.19** — TUI picker for `canopy use`; remote workspace observability (live ⚡ claude badge across SSH, ⊙ attached-client indicator, confirm-attach modal for remote rows, "⚠ stale Ns" pill when refresh data goes cold).
 
 ## Features
 
@@ -45,6 +49,8 @@ canopy new --pr 1214                    # check out a GitHub PR into a workspace
 canopy new --issue 42                   # fresh branch, briefing seeded from issue body
 canopy new --branch existing-feature    # check out an existing remote branch
 canopy new --on tower                   # dispatch to a remote host
+canopy init <url>                       # clone a git URL + init in one shot (v0.20)
+canopy init <url> --on tower            # same, dispatched to a remote host (v0.20)
 canopy main                             # tmux session anchored at the project root
 canopy ls                               # workspaces in the current project
 canopy ls --all                         # everything across every project + remote host
@@ -64,9 +70,10 @@ Workspaces live at `~/.canopy/workspaces/<project>/<name>` — canopy owns the s
 
 Plus operational glue:
 
-- `canopy init` — onboard a project (creates `canopy.json` + stub `bin/canopy-*` scripts; detects `conductor.json` and adopts its schema)
+- `canopy init [path-or-url] [dest]` — onboard a project. Three shapes: `canopy init` inits the cwd (creates `canopy.json` + stub `bin/canopy-*` scripts; detects `conductor.json` and adopts its schema); `canopy init ~/code/foo` inits a folder without `cd`-ing in; `canopy init <git-url>` clones + inits in one shot. Add `--on <host>` to dispatch the whole flow to a registered remote canopy. (v0.20)
+- `canopy config set|get|list|unset` — user-level prefs at `~/.canopy/config.json`. First key is `source-root` (where `canopy init <url>` clones). Env override: `CANOPY_SOURCE_ROOT`. (v0.20)
 - `canopy host add <name> <ssh-target>` — register a remote canopy host (with `--interactive` for a guided form)
-- `canopy project add <name> <path> --on <host>` — bind a project name to a path on a remote
+- `canopy project add <name> <path> --on <host>` — bind a project name to a path on a remote (auto-populated by `canopy init <url> --on <host>` in v0.20+)
 - `canopy install tmux` — write managed keybinds + statusline into `~/.tmux.conf` (idempotent, backed up)
 - `canopy upgrade` — fetch + build the latest release; `--check` for a dry run, `--dismiss` to silence pills until next release
 - `canopy use [target]` — flip the active canopy binary between `release` and any in-flight workspace's `./canopy`

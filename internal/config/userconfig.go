@@ -45,6 +45,14 @@ const UserConfigSchemaVersion = 1
 // ~/.canopy/config.json. New settings get a JSON tag here; the matching
 // CLI key in cmd/canopy/config.go uses the JSON tag verbatim (e.g.
 // `canopy config set source-root <path>` writes to SourceRoot).
+//
+// Coexistence with internal/settings (port plan): both packages read
+// the same ~/.canopy/config.json file but with different known
+// schemas. UserConfig preserves any unknown top-level JSON fields via
+// the Extra map so Save round-trips data the current binary doesn't
+// understand — a user who hand-edited `ports.base = 50000` keeps that
+// setting after `canopy config set source-root ~/Work`. Without this
+// round-trip, the Save would drop the ports block silently.
 type UserConfig struct {
 	// Version is the schema version. Set on Save if zero. Load surfaces
 	// a warning (not an error) if it reads a value > UserConfigSchemaVersion
@@ -55,6 +63,23 @@ type UserConfig struct {
 	// repos by default. Empty means "use the default" (~/.canopy/sources).
 	// Set via `canopy config set source-root <path>`.
 	SourceRoot string `json:"source-root,omitempty"`
+
+	// Extra holds top-level JSON keys the current binary doesn't have
+	// typed fields for. Round-tripped verbatim through Load and Save so
+	// settings owned by other packages (today: internal/settings's
+	// `ports` block) or by future canopy versions survive a Save from
+	// this binary. Never accessed by canopy config CLI directly — it's
+	// invisible plumbing for forward and backward compat.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// knownUserConfigFields enumerates the JSON keys this binary owns.
+// Used by Load to split unknown fields into UserConfig.Extra, and by
+// Save to overwrite known keys with current struct values while
+// preserving everything else.
+var knownUserConfigFields = map[string]bool{
+	"version":     true,
+	"source-root": true,
 }
 
 // UserStore is the read/write handle for ~/.canopy/config.json. Mirrors
@@ -97,9 +122,27 @@ func (s *UserStore) Load() (*UserConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config.Load: read %s: %w", s.path, err)
 	}
+	// Two-pass decode so unknown keys (e.g. internal/settings's `ports`
+	// block) round-trip through Save instead of getting dropped. First
+	// pass into a raw map captures everything; second pass extracts
+	// the typed fields.
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("config.Load: parse %s: %w", s.path, err)
+	}
 	var c UserConfig
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("config.Load: parse %s: %w", s.path, err)
+	}
+	// Stash unknown keys for round-trip on Save.
+	for k, v := range raw {
+		if knownUserConfigFields[k] {
+			continue
+		}
+		if c.Extra == nil {
+			c.Extra = map[string]json.RawMessage{}
+		}
+		c.Extra[k] = v
 	}
 	if c.Version > UserConfigSchemaVersion {
 		log.Warn("config.user.load.version_ahead",
@@ -122,7 +165,34 @@ func (s *UserStore) Save(c *UserConfig) error {
 	if c.Version == 0 {
 		c.Version = UserConfigSchemaVersion
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	// Build the on-disk shape: known fields from the typed struct,
+	// plus any unknown keys preserved in Extra. This is what stops a
+	// `canopy config set source-root` from clobbering an existing
+	// `ports` block written by internal/settings or hand-edited by
+	// the user.
+	doc := map[string]json.RawMessage{}
+	for k, v := range c.Extra {
+		// Never let Extra shadow a known key — that would let an
+		// older binary's Extra resurrect a stale value after this
+		// binary updated it. Known fields always win.
+		if knownUserConfigFields[k] {
+			continue
+		}
+		doc[k] = v
+	}
+	versionRaw, err := json.Marshal(c.Version)
+	if err != nil {
+		return fmt.Errorf("config.Save: marshal version: %w", err)
+	}
+	doc["version"] = versionRaw
+	if c.SourceRoot != "" {
+		srRaw, err := json.Marshal(c.SourceRoot)
+		if err != nil {
+			return fmt.Errorf("config.Save: marshal source-root: %w", err)
+		}
+		doc["source-root"] = srRaw
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("config.Save: marshal: %w", err)
 	}
