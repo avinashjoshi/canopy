@@ -40,8 +40,17 @@ Script semantics:
 
 ```
 cmd/canopy/main.go      Entry point; routes between TUI and subcommands.
-internal/config/        canopy.json walk-up discovery + load. Read-only at startup.
+internal/config/        Two parts: (1) canopy.json walk-up discovery + load
+                        (project config, read-only at startup); (2) UserStore
+                        for ~/.canopy/config.json — flock-protected user prefs
+                        (source-root and friends), schema v1 (v0.20+).
+internal/canopyinit/    Pure-input helpers shared between CLI and TUI for the
+                        Add Project flow: URL detect, basename derive, clone-dest
+                        resolution, lazy mkdir, workspace path safety. Lives in
+                        internal/ so internal/ui can import without violating
+                        the leaf-up rule (v0.20+).
 internal/git/           Worktree add/remove/sanitize via os/exec wrapping git.
+                        Plus Clone() for `canopy init <url>` (v0.20+).
 internal/tmux/          Session create/attach/kill/has via os/exec wrapping tmux.
                         Role-addressing layer (roles.go) tags panes with
                         @canopy-role and looks them up by role name; replaces
