@@ -600,6 +600,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleAddHostFormKey(msg)
 	case addProjectFormMode:
 		return m.handleAddProjectFormKey(msg)
+	case settingsFormMode:
+		return m.handleSettingsFormKey(msg)
 	case hostDetailMode:
 		return m.handleHostDetailKey(msg)
 	case confirmSSHCopyIDMode:

@@ -26,6 +26,7 @@ type initOptions struct {
 var initFlags struct {
 	force       bool
 	withScripts bool
+	onHost      string
 }
 
 // initCmd returns the `canopy init` cobra subcommand.
@@ -86,22 +87,34 @@ func initCmd() *cobra.Command {
 			if len(args) > 1 {
 				dest = args[1]
 			}
+			opts := addProjectOptions{
+				Force:        initFlags.force,
+				WithScripts:  initFlags.withScripts,
+				DestOverride: dest,
+			}
+
+			// --on <host>: dispatch the whole flow to a remote canopy
+			// installation via SSH. Per-host source-root applies on
+			// the remote side; nothing happens locally except the
+			// SSH passthrough.
+			if initFlags.onHost != "" {
+				return runAddProjectRemote(cmd.Context(), initFlags.onHost, arg, opts, cmd.OutOrStdout())
+			}
+
 			home, err := os.UserHomeDir()
 			if err != nil {
 				return fmt.Errorf("init: home dir: %w", err)
 			}
 			canopyHome := filepath.Join(home, ".canopy")
-			_, err = runAddProject(cmd.Context(), arg, addProjectOptions{
-				Force:        initFlags.force,
-				WithScripts:  initFlags.withScripts,
-				DestOverride: dest,
-			}, cmd.OutOrStdout(), canopyHome)
+			_, err = runAddProject(cmd.Context(), arg, opts, cmd.OutOrStdout(), canopyHome)
 			return err
 		},
 	}
 	cmd.Flags().BoolVar(&initFlags.force, "force", false, "overwrite an existing canopy.json")
 	cmd.Flags().BoolVar(&initFlags.withScripts, "with-scripts", false,
 		"also write stub bin/canopy-{setup,run,archive} scripts (ignored when a conductor.json is detected)")
+	cmd.Flags().StringVar(&initFlags.onHost, "on", "",
+		"dispatch to a registered remote canopy host (e.g. --on tower). Requires the host to be registered via 'canopy host add'. Source-root on the remote applies; local config is ignored.")
 	return cmd
 }
 

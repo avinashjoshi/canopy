@@ -209,6 +209,15 @@ var listModeBindings = []Binding{
 		Action:    actionAddProject,
 	},
 	{
+		// `,` opens the settings modal (v0.18 Phase D1). Top-level
+		// entry point for editing source-root without going through
+		// Add Project + ctrl+s. Comma is unused elsewhere in canopy's
+		// keymap; ergonomic on most layouts. Tab-agnostic.
+		K:      key.NewBinding(key.WithKeys(","), key.WithHelp(",", "settings")),
+		Group:  "meta",
+		Action: actionOpenSettings,
+	},
+	{
 		// K (capital) kills the workspace's tmux session without
 		// removing state. Lower-case k is cursor-up, intentional —
 		// the muscle-memory case is nav, the deliberate-keypress

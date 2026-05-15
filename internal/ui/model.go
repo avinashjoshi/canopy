@@ -147,6 +147,12 @@ const (
 	// captured buffer (no tty pass-through; no flicker). See
 	// internal/ui/update_host_upgrade.go for the state machine.
 	hostUpgradeMode
+	// settingsFormMode is the standalone settings modal reachable from
+	// any tab via `,` (v0.18). Currently exposes a single key:
+	// source-root. Reuses the same inline-edit textinput + WithLock
+	// save flow as Add Project's ctrl+s shortcut, just without the
+	// surrounding form chrome. Esc returns to listMode without saving.
+	settingsFormMode
 	// addProjectFormMode is the in-TUI "Add Project" form (v0.18).
 	// Single textinput; Enter classifies the value as path or URL
 	// and dispatches:
