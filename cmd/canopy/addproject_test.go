@@ -235,7 +235,7 @@ func TestRunAddProject_PathArg_WithDestRejected(t *testing.T) {
 }
 
 // TestRunInit_BugFix_RegistersOnEarlyReturn is the regression test
-// for the v0.18 bug fix. Pre-fix: runInit early-returned when
+// for the v0.20 bug fix. Pre-fix: runInit early-returned when
 // canopy.json existed AND didn't register the project. Post-fix:
 // it registers, so `canopy ls` sees the project.
 //

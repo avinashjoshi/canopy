@@ -1,4 +1,4 @@
-// view_addproject.go — render the v0.18 Add Project form.
+// view_addproject.go — render the v0.20 Add Project form.
 //
 // Modal-style layout: title, prompt, textinput, status (source-root
 // or inline editor hint), and a footer that flips between three
@@ -14,7 +14,7 @@
 //
 // Truncation: when the source-root path is too long for the terminal
 // width, left-truncate with `…` so the dir basename remains visible
-// (decision #6A in v0.18-add-project.md).
+// (decision #6A in v0.20-add-project.md).
 
 package ui
 

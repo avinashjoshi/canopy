@@ -1,4 +1,4 @@
-// update_settings.go — top-level settings modal (v0.18 Phase D1).
+// update_settings.go — top-level settings modal (v0.20 Phase D1).
 //
 // Reachable from any tab via the `,` keybind. Tiny modal: title, one
 // textinput for source-root, status hint, help legend. Enter saves to

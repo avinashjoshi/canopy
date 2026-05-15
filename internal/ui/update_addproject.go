@@ -1,11 +1,11 @@
-// update_addproject.go — Bubbletea state machine for the v0.18
+// update_addproject.go — Bubbletea state machine for the v0.20
 // Add Project form. Mirrors the addHostFormMode pattern in
 // update_host.go: single mode, single textinput, Enter dispatches.
 //
 // The form is reachable from two surfaces:
 //
 //   - Global tab: `a` keybind on listMode opens the form (decision #11
-//     in v0.18-add-project.md).
+//     in v0.20-add-project.md).
 //   - Splash screen: openAddProjectForm fires on startup when no
 //     projects are registered (the user's first canopy run; the splash
 //     model re-uses the same Bubbletea Update + View flow).

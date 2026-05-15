@@ -1,5 +1,5 @@
 // model_splash.go — Add Project splash for first-run / fresh-repo
-// onboarding (v0.18 rewrite of the pre-v0.18 "press i" prompt).
+// onboarding (v0.20 rewrite of the pre-v0.20 "press i" prompt).
 //
 // Reachable when canopy launches with no projects registered AND cwd
 // is a git repo. The splash shows a textinput pre-loaded with the
@@ -41,7 +41,7 @@ const (
 	SplashSubmit
 )
 
-// SplashResult is the splash's return shape. Replaces the pre-v0.18
+// SplashResult is the splash's return shape. Replaces the pre-v0.20
 // `(didInit bool, err error)` signature so the caller can distinguish
 // "init cwd" from "init <other path>" from "clone <url>".
 type SplashResult struct {
@@ -66,7 +66,7 @@ type InitSplashModel struct {
 
 // NewInitSplash constructs an InitSplashModel for the given cwd. The
 // cwd is pre-loaded into the input so an Enter-on-default replicates
-// pre-v0.18's one-key "init this dir" flow.
+// pre-v0.20's one-key "init this dir" flow.
 func NewInitSplash(cwd string) *InitSplashModel {
 	ti := textinput.New()
 	ti.Placeholder = "https://github.com/foo/bar.git or ~/code/foo"

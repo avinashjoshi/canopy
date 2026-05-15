@@ -154,12 +154,12 @@ const (
 	// internal/ui/update_host_upgrade.go for the state machine.
 	hostUpgradeMode
 	// settingsFormMode is the standalone settings modal reachable from
-	// any tab via `,` (v0.18). Currently exposes a single key:
+	// any tab via `,` (v0.20). Currently exposes a single key:
 	// source-root. Reuses the same inline-edit textinput + WithLock
 	// save flow as Add Project's ctrl+s shortcut, just without the
 	// surrounding form chrome. Esc returns to listMode without saving.
 	settingsFormMode
-	// addProjectFormMode is the in-TUI "Add Project" form (v0.18).
+	// addProjectFormMode is the in-TUI "Add Project" form (v0.20).
 	// Single textinput; Enter classifies the value as path or URL
 	// and dispatches:
 	//   - path → sync runInit via the m.RunInitFunc callback
@@ -167,7 +167,7 @@ const (
 	//            passphrase / HTTPS credential helpers work natively),
 	//            then runInit on the cloned dir
 	// Esc cancels back to listMode. ctrl+s opens inline source-root
-	// edit (decision #18 in v0.18-add-project.md). Reachable from
+	// edit (decision #18 in v0.20-add-project.md). Reachable from
 	// the Global tab via `a`; same flow drives the splash screen.
 	addProjectFormMode
 )
@@ -437,7 +437,7 @@ type Model struct {
 	hostSSHName   string
 	hostSSHTarget string
 
-	// Add Project (v0.18) form fields.
+	// Add Project (v0.20) form fields.
 	//
 	// addProjectInput captures the URL/path the user types. Reset on
 	// open via openAddProjectForm. Kept separate from nameInput so the
@@ -849,7 +849,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	tgti.Width = 40
 
 	// addProjectInput backs the Add Project form's URL/path field
-	// (v0.18). CharLimit large enough for a long GitHub Enterprise URL.
+	// (v0.20). CharLimit large enough for a long GitHub Enterprise URL.
 	api := textinput.New()
 	api.Placeholder = "https://github.com/foo/bar.git or ~/code/foo"
 	api.CharLimit = 1024
@@ -983,7 +983,7 @@ type RunUnifiedOptions struct {
 	// for the D key. Nil disables D.
 	DismissFn UpgradeDismissFn
 
-	// RunInitFunc is the v0.18 Add Project callback. Wires the TUI's
+	// RunInitFunc is the v0.20 Add Project callback. Wires the TUI's
 	// addProjectFormMode to cmd/canopy/runInit so the form can finish
 	// the init half of the add-project flow without internal/ui
 	// importing cmd/canopy. Nil disables the `a` keybind cleanly

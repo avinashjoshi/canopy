@@ -31,7 +31,7 @@ var initFlags struct {
 
 // initCmd returns the `canopy init` cobra subcommand.
 //
-// Three call shapes (v0.18+):
+// Three call shapes (v0.20+):
 //
 //   - `canopy init`                          init the cwd (backwards-compat)
 //   - `canopy init <path>`                   init <path> (no cd-ing in)
@@ -151,8 +151,8 @@ func runInit(cwd string, opts initOptions, stdout io.Writer) error {
 	if _, err := os.Stat(canopyJSON); err == nil && !opts.Force {
 		// Already initialized — friendly path, exit 0.
 		//
-		// v0.18 fix: also register the project in state.json if it
-		// isn't already. The pre-v0.18 early-return skipped registration
+		// v0.20 fix: also register the project in state.json if it
+		// isn't already. The pre-v0.20 early-return skipped registration
 		// entirely, so cloning a repo that shipped canopy.json (e.g.
 		// canopy itself) would leave the project invisible to
 		// `canopy ls`. The registerProject helper is idempotent — a

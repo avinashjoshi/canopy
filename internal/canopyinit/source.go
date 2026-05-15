@@ -1,5 +1,5 @@
 // Package canopyinit hosts the shared logic for the "add a project to
-// canopy" feature (v0.18). Two consumers import this package:
+// canopy" feature (v0.20). Two consumers import this package:
 //
 //   - cmd/canopy (the CLI: `canopy init [PATH_OR_URL] [DEST]`)
 //   - internal/ui (the TUI: addProjectFormMode on splash and Global tab)

@@ -1,4 +1,4 @@
-// init_remote.go — `canopy init <url> --on <host>` dispatch (v0.18 Phase D2).
+// init_remote.go — `canopy init <url> --on <host>` dispatch (v0.20 Phase D2).
 //
 // Re-uses the v0.17 SSH plumbing from internal/host to execute the
 // add-project flow on a registered remote canopy. Single command from
@@ -23,7 +23,7 @@
 //   - Host registered via `canopy host add <name> <ssh-target>` (v0.17).
 //   - SSH key auth working (otherwise the user sees a Permission-denied;
 //     `canopy host show <name>` shows the same).
-//   - Remote canopy is v0.18+. Older versions don't accept a URL arg.
+//   - Remote canopy is v0.20+. Older versions don't accept a URL arg.
 //
 // Per-host source-root: the REMOTE canopy uses its own
 // ~/.canopy/config.json + $CANOPY_SOURCE_ROOT. Configure source-root

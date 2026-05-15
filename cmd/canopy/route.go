@@ -244,7 +244,7 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 		ChangelogFn:    changelogFn,
 		ShellFn:        shellFn,
 		DismissFn:      dismissFn,
-		// v0.18 Add Project: closure binds the TUI's form to
+		// v0.20 Add Project: closure binds the TUI's form to
 		// runInit. The TUI handles git clone via tea.ExecProcess
 		// (so auth prompts work natively), then calls back here to
 		// finish the init half.
@@ -289,7 +289,7 @@ func resolveProjectContext(cwd string, st *state.State) (string, *config.Config,
 	return cfg.ProjectRoot, cfg, nil
 }
 
-// runInitSplashFlow shows the v0.18 Add Project splash. The splash
+// runInitSplashFlow shows the v0.20 Add Project splash. The splash
 // returns either Dismiss (user pressed esc) or Submit + an arg (path
 // or URL). On Submit, we drop out of altscreen (splash's tea.Program
 // already exited) and invoke runAddProject — the same orchestrator
