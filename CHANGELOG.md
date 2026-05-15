@@ -5,6 +5,28 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0.0] - 2026-05-14 — Remote workspace observability: live claude status, attach indicator, attach warning, stale UX
+
+Three things broke the remote-workspace experience: claude always looked like it was sleeping (the ⚡ thinking badge never fired across SSH), there was no way to tell if someone was already attached to a remote tmux session before you stomped on it, and when wifi flickered the TUI kept showing last-known data with no visual cue. This release closes all three. Remote rows now do everything local rows do: ⚡ when claude is mid-response, ⊙ when someone has a client attached, the confirm-attach modal fires before Enter steals/shares an active session, and stale data dims itself with a "⚠ stale Ns" pill on the host header so you know to retry.
+
+### Added
+
+- **Live claude activity on remote workspaces (⚡ Thinking badge).** `canopy ls --json` on a remote host now captures each agent pane twice (100ms apart, all panes in parallel) and runs the same motion-aware classifier (`ClassifyTwoShot`) that local rows use. Before this, the remote path used single-shot classification and could never return "thinking" by construction — the badge stayed on 💤 even while claude was streaming a response. Per-pane work runs in goroutines so wall-clock stays under ~700ms regardless of how many agent panes a host has.
+- **Attached-client indicator (⊙) on remote workspaces.** `LsJSONWorkspace.attached` joins the wire format; `RemoteWorkspace.Attached` and `RemoteWorkspaceRow.Attached` pick it up on the laptop side and stamp `GlobalRow.Attached`. The existing ⊙ glyph renderer and confirm-attach modal start working for remote rows automatically — they were already wired, just never had a signal.
+- **Confirm-attach modal fires for remote-attached sessions.** Press Enter on a remote workspace where someone (you, in another mosh session, or a teammate) already has a tmux client attached and you get the share/cancel modal. Y/Enter proceeds with shared attach via `canopy switch --share`; N/Esc cancels. Same flow you already know from local rows, now uniform across the fleet.
+- **"⚠ stale Ns" host-section banner + per-row dim when SSH refresh stops landing.** When a host's most-recent successful refresh is older than 10s (≈5 missed TUI ticks), the host header in the Workspaces tab gets an amber "⚠ stale 14s" pill and every remote row from that host renders dimmed via lipgloss's `Faint` (~50% opacity). Gives you a visual "this is last-known, retry with `r`" cue instead of silently showing stale data.
+
+### Changed
+
+- **Wire format: `lsJSONSchemaVersion` bumped from 3 → 4** (added `attached`, `agent_state` now motion-aware). Additive — older laptop clients ignore the new field and older remotes leave it false, so partial rollouts work in both directions.
+- **`internal/agent`: new `ClassifyTwoShot(launcher, prev, cur)` helper.** Stateless companion to `ClassifyOneShot` — pure function, no shared state, easy to test. Lives next to `ClassifyOneShot` in `state.go` and reuses the same `normalize()` motion definition so local and remote produce identical badges for identical pane content.
+- **`state.GlobalRow` gains `LastSeen time.Time`.** Zero for local rows; the host's most-recent successful refresh timestamp for remote rows. Render-layer only — not persisted; recomputed every refresh tick.
+- **`classifyAgentPanes` in `cmd/canopy/ls.go` now does parallel double-capture.** Each agent pane gets its own goroutine; per-pane captures bounded by the existing 500ms timeout each, with a 100ms gap between captures. If the second capture fails after the first succeeded, falls back to `ClassifyOneShot` on the first — lose motion detection that tick but keep awaiting/idle pattern matches.
+
+### Fixed
+
+- **Older remotes (v0.18.x and earlier) without the new fields still render correctly.** Additive JSON: missing `attached` defaults to false, missing thinking-state defaults to the existing single-shot behavior. Verified by `TestRemoteWorkspace_LegacyParseStillWorks`.
+
 ## [0.18.0.0] - 2026-05-14 — TUI picker for `canopy use`
 
 Typing `canopy use` always meant "see a list, then run the command again with the name you saw." Two steps. This release collapses it to one: on an interactive terminal, `canopy use` (no args) opens a single-screen picker that shows every workspace canopy knows about — release row first, marked with `▶` for whichever is active — and lets you arrow to one and press Enter. The symlink swap, the build flow, the error messages all use the same code paths as the CLI; the picker is just a faster front door. Piped invocations (`canopy use | grep …`, CI scripts, anything with stdin redirected) still get the tabular list, byte-identical to before. `--list` forces tabular even on a TTY, for screen recordings or scripts that want it.
