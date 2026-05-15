@@ -114,6 +114,99 @@ func initialsForBranch(s string) string {
 	return b.String()
 }
 
+// renderWorkspaceSegment returns " / <wsName> / <branch>" with proportional
+// truncation when both differ, or " / <name>" via renderBranchSegment when
+// they match (wsName == branch is the common case — auto-slugged workspaces
+// where the folder name and branch are the same string).
+//
+// Per /plan-design-review C2-revised: under width pressure, wsName and
+// branch share the truncation budget proportionally so the user keeps
+// seeing both pieces of context across all widths — honoring the "I
+// renamed my branch and want to see what folder I'm in" intent that
+// motivated the feature. Project survives last; when the combined budget
+// dips below dropThreshold, the whole segment drops and project + glyph
+// + port still render.
+//
+// Algorithm:
+//  1. Empty input → "".
+//  2. wsName == branch (or one empty) → delegate to renderBranchSegment.
+//     The single-identifier tiers (full / truncate / initials / drop)
+//     handle everything we'd want here.
+//  3. Both present and distinct: try the full " / wsName / branch". If
+//     it fits, render it. Otherwise split the budget between them
+//     proportionally, weighted by each string's display width.
+//  4. If the combined budget is too tight for both to render at all,
+//     drop the whole segment.
+func renderWorkspaceSegment(wsName, branch string, availCols int) string {
+	if wsName == "" && branch == "" {
+		return ""
+	}
+	if wsName == "" {
+		return renderBranchSegment(branch, availCols)
+	}
+	if branch == "" || wsName == branch {
+		return renderBranchSegment(wsName, availCols)
+	}
+
+	const sep = " / "
+	sepW := runewidth.StringWidth(sep)
+	wsW := runewidth.StringWidth(wsName)
+	brW := runewidth.StringWidth(branch)
+
+	// Full render: " / wsName / branch" fits exactly within budget.
+	fullW := sepW + wsW + sepW + brW
+	if availCols >= fullThreshold && fullW <= availCols {
+		return sep + wsName + sep + branch
+	}
+
+	// Doesn't fit at the wide tier. Try proportional truncation while we
+	// have enough room for two readable pieces.
+	if availCols >= initialsThreshold {
+		// Budget for the two name strings combined, after subtracting the
+		// two " / " separators.
+		nameBudget := availCols - sepW - sepW
+		if nameBudget < 4 {
+			// Less than 2 chars each + ellipsis budget — fall through to
+			// the initials tier below.
+		} else {
+			totalW := wsW + brW
+			if totalW <= 0 {
+				totalW = 1 // defensive; shouldn't happen given the early returns
+			}
+			// Floor each share at 2 (one rune + ellipsis) so neither
+			// piece disappears under uneven length pressure.
+			wsShare := (nameBudget * wsW) / totalW
+			if wsShare < 2 {
+				wsShare = 2
+			}
+			brShare := nameBudget - wsShare
+			if brShare < 2 {
+				brShare = 2
+				wsShare = nameBudget - brShare
+			}
+			return sep + truncateForWidth(wsName, wsShare) + sep + truncateForWidth(branch, brShare)
+		}
+	}
+
+	// initialsThreshold..dropThreshold: both collapse to initials,
+	// preserving the "two-piece" structure (e.g., " / ro / tsr").
+	if availCols >= dropThreshold {
+		wsIni := initialsForBranch(wsName)
+		brIni := initialsForBranch(branch)
+		segW := sepW + runewidth.StringWidth(wsIni) + sepW + runewidth.StringWidth(brIni)
+		if segW <= availCols {
+			return sep + wsIni + sep + brIni
+		}
+		// Initials still don't fit (very long hyphenated names). Fall
+		// back to single-segment initials of the branch — branch is the
+		// more informative piece when forced to pick.
+		return renderBranchSegment(branch, availCols)
+	}
+
+	// < dropThreshold: drop entirely.
+	return ""
+}
+
 // renderBranchSegment returns the formatted "/ <branch>" segment for
 // the available cols, or "" when even initials don't fit.
 //

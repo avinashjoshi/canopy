@@ -160,7 +160,7 @@ set -g set-titles on
 - **`canopy popup`** — `<prefix>g` opens the global TUI in a tmux floating popup. Tabs: **<project>** (current project's workspaces, default if launched from inside a project), **Global** (everything), **Remote hosts** (registered SSH boxes). `Tab` cycles tabs, `/` enters fuzzy search, `Enter` switches to the selected workspace. Requires tmux 3.2+.
 - **`Ctrl+Alt+c`** — no-prefix global chord that launches the same popup. One keystroke from anywhere in your terminal.
 - **`canopy run`** — `<prefix>r` execs `scripts.run` (e.g. `bin/dev`) from the nearest `canopy.json` in a tmux popup. Inherits `CANOPY_PORT` and friends from the workspace tmux session.
-- **`canopy statusline --format=current`** — appended to `status-right`, shows `canopy: <name> <glyph> :<port>` when you're attached to a canopy workspace's tmux session, and empty otherwise. Errors never propagate to stdout — your status bar stays clean even if state.json is corrupt or canopy crashes.
+- **`canopy statusline --format=current`** — appended to `status-right`, shows `<project> / <branch> <glyph> :<port>` when you're attached to a canopy workspace's tmux session, and empty otherwise. When the workspace folder name and branch have diverged (after `git branch -m`), both are shown: `<project> / <wsName> / <branch>`. When you're attached to a remote canopy via `canopy switch --on <host>`, a yellow `@<host>` pill prefixes the line so you can tell at a glance you're working on a remote machine. Errors never propagate to stdout — your status bar stays clean even if state.json is corrupt or canopy crashes.
 
 **Manual install:** paste the block above into `~/.tmux.conf` and `source-file` it.
 

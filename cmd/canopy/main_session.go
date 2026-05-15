@@ -64,8 +64,10 @@ func mainCmd() *cobra.Command {
 				return err
 			}
 
+			t := tmux.New()
+			propagateRemoteHostEnv(ctx, t, session)
 			fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", session)
-			return tmux.New().Attach(ctx, session)
+			return t.Attach(ctx, session)
 		},
 	}
 }

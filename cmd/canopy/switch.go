@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
+	"github.com/avinashjoshi/canopy/internal/clog"
 	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/tmux"
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
@@ -114,6 +117,7 @@ func switchCmd() *cobra.Command {
 				// never went through the v0.16+ buildSession (which tags at
 				// creation). Best-effort: errors logged, never block attach.
 				workspace.BackfillRoles(ctx, mgr.Tmux, ws.TmuxSessionName(), mgr.Cfg.Agent.Type)
+				propagateRemoteHostEnv(ctx, mgr.Tmux, ws.TmuxSessionName())
 				fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", ws.TmuxSessionName())
 				return mgr.Tmux.Attach(ctx, ws.TmuxSessionName())
 
@@ -123,6 +127,7 @@ func switchCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				propagateRemoteHostEnv(ctx, mgr.Tmux, revived.TmuxSessionName())
 				fmt.Fprintf(cmd.OutOrStdout(), "Attaching tmux session %s...\n", revived.TmuxSessionName())
 				return mgr.Tmux.Attach(ctx, revived.TmuxSessionName())
 
@@ -225,7 +230,7 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	// canopy switch on the remote walks up cwd looking for canopy.json,
 	// and the global-workspace lookup finds the workspace by name across
 	// projects — so ANY registered project works as the cd target.
-	remoteCmd := buildRemoteSwitchCmd(resolved.RemoteCwd, wsName, share, main)
+	remoteCmd := buildRemoteSwitchCmd(resolved.RemoteCwd, resolved.HostName, wsName, share, main)
 	argv := []string{"mosh", target, "--", "bash", "-lc", remoteCmd}
 	// syscall.Exec replaces this process with mosh. On success, this
 	// call does not return; on failure we fall through to the error.
@@ -234,6 +239,53 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	}
 	// Unreachable.
 	return nil
+}
+
+// propagateRemoteHostEnv synchronizes the CANOPY_REMOTE_HOST tag on the
+// named tmux session with this canopy process's env, so statusline
+// subprocesses spawned by the tmux server render the correct pill state
+// across re-attaches.
+//
+// Two paths:
+//
+//   - Remote attach: this process inherits CANOPY_REMOTE_HOST=tower from
+//     the mosh remote one-liner (see buildRemoteSwitchCmd). Set the
+//     session env to the same nickname.
+//
+//   - Local attach to a session that was PREVIOUSLY remote-attached: the
+//     prior remote attach left CANOPY_REMOTE_HOST=tower in the session
+//     env. This process has no CANOPY_REMOTE_HOST set. Without explicit
+//     cleanup, the stale tag persists and the yellow pill keeps
+//     rendering — falsely signaling "you are still attached to tower"
+//     when the user is now physically on the box. Unset it.
+//
+// Why this is needed on top of the bash export in buildRemoteSwitchCmd:
+// the export reaches `canopy switch` itself, but an already-running tmux
+// server has its env frozen at startup time. Statusline ticks fork off
+// the server, not the bash that ran canopy switch — so without
+// per-session set-environment, the pill state would drift from reality.
+//
+// Per-session scope (not -g) is deliberate: a remote host where the
+// user also has local-only sessions shouldn't mark those with the
+// laptop's nickname. Local sessions on the remote stay unmarked.
+//
+// Best-effort: tmux errors are logged and swallowed; the pill state
+// just doesn't update that tick.
+func propagateRemoteHostEnv(ctx context.Context, t *tmux.Client, session string) {
+	if session == "" {
+		return
+	}
+	host := strings.TrimSpace(os.Getenv("CANOPY_REMOTE_HOST"))
+	if host == "" {
+		// Local-attach path: clear any stale tag from a prior remote attach.
+		if err := t.UnsetSessionEnv(ctx, session, "CANOPY_REMOTE_HOST"); err != nil {
+			clog.Pkg("switch").Warn("switch.unset_remote_host", "session", session, "err", err.Error())
+		}
+		return
+	}
+	if err := t.SetSessionEnv(ctx, session, "CANOPY_REMOTE_HOST", host); err != nil {
+		clog.Pkg("switch").Warn("switch.propagate_remote_host", "session", session, "err", err.Error())
+	}
 }
 
 // buildRemoteSwitchCmd assembles the bash one-liner that mosh runs on
@@ -252,7 +304,7 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 // a real workspace happening to be named "(main)" — git accepts the
 // branch name — still attaches via `canopy switch` instead of being
 // silently redirected to the project main session.
-func buildRemoteSwitchCmd(remoteCwd, wsName string, share, main bool) string {
+func buildRemoteSwitchCmd(remoteCwd, hostName, wsName string, share, main bool) string {
 	out := `export PATH="$HOME/.local/bin:$PATH"; `
 	if share {
 		// Propagate --share over the mosh dispatch as a remote env var
@@ -260,6 +312,19 @@ func buildRemoteSwitchCmd(remoteCwd, wsName string, share, main bool) string {
 		// doesn't forward arbitrary env vars across the SSH-style
 		// boundary; setting it explicitly in the remote shell does.
 		out += `export CANOPY_NO_DETACH=1; `
+	}
+	if hostName != "" {
+		// Tag the remote shell with the host's registered nickname so the
+		// remote canopy's statusline can render a yellow pill identifying
+		// "you are attached to <hostName>, not local." The remote-side
+		// canopy switch propagates this to the tmux session env (via
+		// propagateRemoteHostEnv → tmux set-environment -t <session>) so
+		// statusline subprocesses inherit it across re-attaches. Without
+		// hostName (raw target spec), no pill renders — the statusline
+		// pill is a precise "canopy drove this attach" signal, not a
+		// general "this is an ssh session" indicator (the user's own
+		// tmux status-right hostname segment handles that).
+		out += "export CANOPY_REMOTE_HOST=" + shellQuote(hostName) + "; "
 	}
 	if remoteCwd != "" {
 		out += "cd " + shellQuote(remoteCwd) + "; "
