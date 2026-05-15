@@ -119,6 +119,7 @@ func TestSnippetContent_RendersWithUIDsAndHostName(t *testing.T) {
 	content, err := SnippetContent(SnippetData{
 		HostName:    "tower",
 		SSHHostname: "tower.example.com",
+		SSHUser:     "avi",
 		Version:     "v0.18.0+test",
 		LocalUID:    1000,
 		RemoteUID:   1001,
@@ -127,12 +128,16 @@ func TestSnippetContent_RendersWithUIDsAndHostName(t *testing.T) {
 		t.Fatalf("SnippetContent: %v", err)
 	}
 	for _, must := range []string{
-		"Host tower.example.com",
+		"Host canopy-tunnel-tower",      // dedicated alias
+		"HostName tower.example.com",    // resolved by the alias
+		"User avi",                      // resolved by the alias
 		"/run/user/1000/canopy/clip-text.sock",
 		"/run/user/1001/canopy/clip-text.sock",
 		"/run/user/1000/canopy/clip-image.sock",
 		"/run/user/1000/canopy/clip-copy.sock",
 		"StreamLocalBindUnlink yes",
+		"ServerAliveInterval 30",
+		"ExitOnForwardFailure yes",
 		"v0.18.0+test",
 	} {
 		if !strings.Contains(content, must) {
@@ -141,31 +146,49 @@ func TestSnippetContent_RendersWithUIDsAndHostName(t *testing.T) {
 	}
 }
 
-func TestSnippetContent_HostDirectiveUsesSSHHostnameNotCanopyAlias(t *testing.T) {
-	// The bug this catches: snippet's Host pattern must match what SSH
-	// sees on the command line. SSH keys off the hostname portion of
-	// the target string, not against any user-defined alias. Using
-	// canopy's internal alias for the directive (a v0.18 Phase-1 bug)
-	// silently dropped the RemoteForwards whenever canopy did
-	// `ssh user@hostname` instead of `ssh canopy-alias`.
+func TestSnippetContent_OmitsUserAndPortWhenAbsent(t *testing.T) {
+	// SSH target without a user@ prefix or :port suffix → snippet
+	// should NOT emit the User/Port directives (let SSH fall back to
+	// the current local user / default port 22).
+	content, err := SnippetContent(SnippetData{
+		HostName:    "tower",
+		SSHHostname: "tower.lan",
+		Version:     "v0",
+		LocalUID:    1000,
+		RemoteUID:   1000,
+	})
+	if err != nil {
+		t.Fatalf("SnippetContent: %v", err)
+	}
+	for _, mustNot := range []string{
+		"\n  User ",
+		"\n  Port ",
+	} {
+		if strings.Contains(content, mustNot) {
+			t.Errorf("snippet emitted %q when user/port were absent in target\nbody:\n%s", mustNot, content)
+		}
+	}
+}
+
+func TestSnippetContent_HostDirectiveUsesDedicatedAlias(t *testing.T) {
+	// Critical regression guard: snippet's Host pattern must be the
+	// dedicated `canopy-tunnel-<name>` alias, NOT the real hostname.
+	// Otherwise every ssh/mosh to the host inherits the RemoteForwards
+	// and conflicts with the persistent tunnel that owns the binds.
 	content, _ := SnippetContent(SnippetData{
 		HostName:    "tower",
 		SSHHostname: "a10i-tower.geep-carat.ts.net",
 		LocalUID:    1000,
 		RemoteUID:   1000,
 	})
-	// Must have `Host <ssh-hostname>` exactly. Must NOT have a bare
-	// `Host tower\n` line (that line existed in the v0.18 Phase-1 bug
-	// and silently mismatched real SSH targets).
-	if !strings.Contains(content, "Host a10i-tower.geep-carat.ts.net\n") {
-		t.Errorf("snippet missing Host directive with SSH hostname; body:\n%s", content)
+	if !strings.Contains(content, "Host canopy-tunnel-tower\n") {
+		t.Errorf("snippet missing `Host canopy-tunnel-tower` directive; body:\n%s", content)
 	}
+	// Must NOT match the real hostname — that's the old shape that
+	// caused "remote port forwarding failed" on every regular ssh.
 	for _, line := range strings.Split(content, "\n") {
-		// "Host tower" alone (with no other patterns on the same line)
-		// is the bug shape. The comment header mentioning the canopy
-		// alias is fine; we're checking actual directive lines.
-		if strings.HasPrefix(line, "Host tower") && !strings.Contains(line, "tower.example.com") && !strings.Contains(line, "a10i-tower") {
-			t.Errorf("snippet has bare `Host tower` line — SSH won't match this against real ssh targets; line: %q", line)
+		if strings.HasPrefix(line, "Host a10i-tower") {
+			t.Errorf("snippet matches real hostname directly; would conflict with normal ssh/mosh: %q", line)
 		}
 	}
 }

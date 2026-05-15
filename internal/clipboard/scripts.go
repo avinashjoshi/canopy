@@ -74,20 +74,24 @@ func WrapperContent(w WrapperScript, canopyVersion string) (content string, hash
 // type (not map[string]any) so a missing field becomes a compile-time
 // error instead of an empty-string template hole at runtime.
 //
-// HostName is canopy's internal name for the host (e.g., "tower") —
-// used in the snippet's comment header and the --reinstall hint.
+// HostName is canopy's internal name for the host (e.g., "tower"),
+// used in the snippet's comment header AND the dedicated alias
+// `Host canopy-tunnel-<HostName>` that the persistent SSH tunnel
+// matches. Only one process (the systemd tunnel unit) ever ssh's
+// to that alias, so the RemoteForward directives don't conflict
+// with everyday ssh/mosh connections to the same machine.
 //
-// SSHHostname is the hostname portion of the SSH target string
-// (e.g., "tower.lan" extracted from "avi@tower.lan:22"). This is
-// what goes in the snippet's `Host` directive: SSH matches Host
-// patterns against the hostname portion of the target the user types
-// on the command line, NOT against canopy's internal alias. Using
-// HostName for the directive (a v0.18 Phase-1 bug) silently dropped
-// the RemoteForwards whenever canopy or the user did
-// `ssh user@hostname` instead of `ssh canopy-alias`.
+// SSHHostname/SSHUser/SSHPort are the resolved pieces of the SSH
+// target string (e.g., "tower.lan", "avi", "" from "avi@tower.lan").
+// They land inside the `Host canopy-tunnel-...` block as
+// HostName / User / Port directives so `ssh canopy-tunnel-tower`
+// resolves to the real target without the tunnel command line
+// needing to spell it out.
 type SnippetData struct {
 	HostName    string
 	SSHHostname string
+	SSHUser     string // optional — omitted if SSH target has no user@ prefix
+	SSHPort     string // optional — omitted if SSH target has no :port suffix
 	Version     string
 	LocalUID    int
 	RemoteUID   int

@@ -110,9 +110,15 @@ func newTestHostInstaller(t *testing.T) (*HostInstaller, *fakeSSH) {
 		// to thread it through. Tests that specifically assert master
 		// teardown reach in and override this field.
 		CloseMaster: func(string) {},
-		HomeDir:     home,
-		Version:     "v0.18.0+test",
-		LocalUID:    1000,
+		// Default SystemdRun is a no-op success — tests that need to
+		// assert systemctl call shape override this. The is-active
+		// check in verifyBridge is what most tests care about; default
+		// success means "tunnel unit appears healthy."
+		SystemdRun: func(args ...string) error { return nil },
+		HomeDir:    home,
+		Version:    "v0.18.0+test",
+		LocalUID:   1000,
+		SSHPath:    "/usr/bin/ssh",
 	}, f
 }
 
@@ -151,7 +157,9 @@ func TestInstallOnHost_HappyPath(t *testing.T) {
 	}
 	body := string(data)
 	for _, must := range []string{
-		"Host tower.lan", // hostname parsed from "avi@tower.lan" — NOT "Host tower" (canopy alias)
+		"Host canopy-tunnel-tower", // dedicated alias, NOT the real hostname or canopy name alone
+		"HostName tower.lan",       // parsed from "avi@tower.lan"
+		"User avi",                 // parsed from "avi@tower.lan"
 		"/run/user/1000/canopy/clip-text.sock",
 		"/run/user/1001/canopy/clip-text.sock",
 		"v0.18.0+test",
