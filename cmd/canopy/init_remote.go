@@ -38,6 +38,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/avinashjoshi/canopy/internal/host"
 )
@@ -84,7 +85,15 @@ func runAddProjectRemote(ctx context.Context, hostName, arg string, opts addProj
 	// <quoted-url>'` — login shell sources the user's profile (so
 	// canopy on PATH works) and pty is allocated by SSHRunUser (so
 	// git auth prompts can read from /dev/tty).
-	remote := "canopy init " + shellQuote(arg)
+	//
+	// Pre-pend CANOPY_INIT_RESULT_FILE=<remote-temp> so the remote
+	// canopy writes its canonical project root to a file we can fetch
+	// after the SSH dispatch. We then call reg.AddProject locally
+	// with that path — without it, `canopy new --on tower` fails
+	// because the laptop's hosts.json doesn't know cravd's path on
+	// tower (resolveOnForNew can't auto-resolve --remote-cwd).
+	resultFile := fmt.Sprintf("/tmp/canopy-init-result-%d.txt", os.Getpid())
+	remote := fmt.Sprintf("%s=%s canopy init %s", initResultEnvVar, shellQuote(resultFile), shellQuote(arg))
 	if opts.DestOverride != "" {
 		remote += " " + shellQuote(opts.DestOverride)
 	}
@@ -105,6 +114,58 @@ func runAddProjectRemote(ctx context.Context, hostName, arg string, opts addProj
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("canopy init --on %s: %w", hostName, err)
 	}
+
+	// Init succeeded on the remote. Fetch the result file (canonical
+	// project root path) so we can register the project locally in
+	// hosts.json. Uses the same ControlMaster socket the first
+	// dispatch opened — handshake is instant.
+	if err := registerRemoteProjectLocally(ctx, hostName, h.SSHTarget, resultFile, stdout); err != nil {
+		// Don't fail the init — the project IS initialized on the
+		// remote. Surface the warning so the user knows they may
+		// need to register manually before `canopy new --on <host>`.
+		fmt.Fprintf(stdout, "warning: %v\n", err)
+		fmt.Fprintf(stdout, "  Workaround: canopy project add <name> <remote-path> --on %s\n", hostName)
+	}
+	return nil
+}
+
+// registerRemoteProjectLocally fetches the result file from the
+// remote and writes the (project-name, project-path) pair into the
+// laptop's hosts.json Projects map for hostName. Idempotent — if the
+// project is already registered, AddProject returns an error we
+// downgrade to a no-op.
+func registerRemoteProjectLocally(ctx context.Context, hostName, sshTarget, resultFile string, stdout io.Writer) error {
+	// Read + clean up the result file in one ssh round-trip. Use
+	// SSHCmdBatch (no -t) since we just want the cat output.
+	fetch := host.SSHCmdBatch(ctx, sshTarget, "bash", "-c",
+		fmt.Sprintf("cat %s 2>/dev/null && rm -f %s", shellQuote(resultFile), shellQuote(resultFile)))
+	out, err := fetch.Output()
+	if err != nil {
+		return fmt.Errorf("fetch remote init result: %w", err)
+	}
+	canonicalRoot := strings.TrimSpace(string(out))
+	if canonicalRoot == "" {
+		return fmt.Errorf("remote init result is empty (remote canopy may be pre-v0.20 — won't auto-register)")
+	}
+
+	projectName := filepath.Base(canonicalRoot)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	reg, err := host.NewRegistry(filepath.Join(home, ".canopy"))
+	if err != nil {
+		return fmt.Errorf("open host registry: %w", err)
+	}
+	if err := reg.AddProject(hostName, projectName, canonicalRoot); err != nil {
+		// ErrProjectExists is fine — idempotent re-run.
+		if errors.Is(err, host.ErrProjectExists) {
+			fmt.Fprintf(stdout, "Project %q on %s already registered locally.\n", projectName, hostName)
+			return nil
+		}
+		return fmt.Errorf("register %q on %s in laptop's hosts.json: %w", projectName, hostName, err)
+	}
+	fmt.Fprintf(stdout, "Registered %q on %s → %s\n", projectName, hostName, canonicalRoot)
 	return nil
 }
 
@@ -112,3 +173,39 @@ func runAddProjectRemote(ctx context.Context, hostName, arg string, opts addProj
 // strings in single quotes for safe shell interpolation. Used here
 // to harden the URL/dest values against shell metacharacters when
 // joined into the remote command line.
+
+// initResultEnvVar names the env var canopy init checks for. When
+// non-empty, runInit writes one line to that path on successful
+// init: `<canonical-project-root>\n`.
+//
+// Used by `canopy init --on <host>` to round-trip the remote's
+// canonical project path back to the laptop, so the laptop can
+// register cravd in its hosts.json (Projects map). Without that
+// registration, follow-up `canopy new --on tower` fails with
+// "host has no projects registered" (resolveOnForNew can't find a
+// remote-cwd for the project).
+//
+// File path is owned by the caller (the SSH-dispatch side picks a
+// temp path on the remote and cats it back after init returns).
+const initResultEnvVar = "CANOPY_INIT_RESULT_FILE"
+
+// writeInitResultFile writes canonicalRoot to the path named in the
+// CANOPY_INIT_RESULT_FILE env var, when set. No-op when unset (the
+// common local-CLI case).
+//
+// Failures are logged but not fatal — init's main outcome already
+// succeeded, and a missing result file just means the laptop's
+// hosts.json doesn't get auto-registered. The user can register
+// manually via `canopy project add <name> <path> --on <host>`.
+func writeInitResultFile(canonicalRoot string) {
+	path := os.Getenv(initResultEnvVar)
+	if path == "" {
+		return
+	}
+	if err := os.WriteFile(path, []byte(canonicalRoot+"\n"), 0o600); err != nil {
+		// Surface to debug log via slog (init.go's logger), but
+		// don't fail the init or scream at the user — this is a
+		// remote-dispatch helper, not core init behavior.
+		fmt.Fprintf(os.Stderr, "warning: write %s: %v\n", initResultEnvVar, err)
+	}
+}

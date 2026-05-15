@@ -30,6 +30,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -314,7 +315,16 @@ func (m *Model) submitAddProjectRemote(rawURL, hostName string) (tea.Model, tea.
 	// the remote shell. SSHRunUser wraps in `bash -lc` so the user's
 	// PATH (incl. ~/.local/bin where canopy typically lives) is set,
 	// and allocates a pty so git auth prompts can read /dev/tty.
-	remote := "canopy init " + shellQuoteUI(rawURL)
+	//
+	// Prepend CANOPY_INIT_RESULT_FILE=<remote-temp> so the remote
+	// canopy writes its canonical project root to a known path. After
+	// the SSH dispatch returns, we fetch + parse + auto-register the
+	// project in the laptop's hosts.json. Without this step the next
+	// `canopy new` on the just-added project errors with "host has
+	// no projects registered" (resolveOnForNew can't find the path).
+	resultFile := fmt.Sprintf("/tmp/canopy-init-result-%d.txt", os.Getpid())
+	remote := fmt.Sprintf("CANOPY_INIT_RESULT_FILE=%s canopy init %s",
+		shellQuoteUI(resultFile), shellQuoteUI(rawURL))
 	ctx := context.Background()
 	sshCmd := host.SSHRunUser(ctx, h.SSHTarget, remote)
 
@@ -335,25 +345,41 @@ func (m *Model) submitAddProjectRemote(rawURL, hostName string) (tea.Model, tea.
 	wrapArgs := append([]string{"-c", `echo "$1"; shift; exec "$@"`, "--", preamble}, sshCmd.Args...)
 	cmd := exec.CommandContext(ctx, "sh", wrapArgs...)
 	cmd.Env = os.Environ()
+	// Capture sshTarget + resultFile for the post-exec callback so
+	// the laptop can SSH-fetch the path the remote canopy wrote.
+	sshTarget := h.SSHTarget
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return addProjectRemoteDoneMsg{hostName: hostName, rawURL: rawURL, err: err}
+		return addProjectRemoteDoneMsg{
+			hostName:   hostName,
+			sshTarget:  sshTarget,
+			rawURL:     rawURL,
+			resultFile: resultFile,
+			err:        err,
+		}
 	})
 }
 
 // addProjectRemoteDoneMsg is the result of an SSH dispatch via
 // tea.ExecProcess. Distinct from the local addProjectCloneDoneMsg
 // because the post-success action is different: no RunInitFunc to
-// run (remote canopy already did it), but we DO want to refresh the
-// remote-rows cache so the new project appears in the Global tab.
+// run (remote canopy already did it), but we DO want to (a) fetch
+// the canonical project root from the remote-side result file so we
+// can auto-register the project in the laptop's hosts.json, and (b)
+// refresh the remote-rows cache so the new project appears in the
+// Global tab.
 type addProjectRemoteDoneMsg struct {
-	hostName string
-	rawURL   string
-	err      error
+	hostName   string
+	sshTarget  string
+	rawURL     string
+	resultFile string // remote-side path written by `canopy init`
+	err        error
 }
 
 // handleAddProjectRemoteDone surfaces success/failure of an SSH
 // dispatch into the form. Mirrors handleAddProjectCloneDone but
-// triggers a remote refresh instead of a local runInit.
+// triggers a remote refresh instead of a local runInit. Also
+// auto-registers the new project in the laptop's hosts.json so
+// follow-up `canopy new` against this row can resolve --remote-cwd.
 func (m *Model) handleAddProjectRemoteDone(msg addProjectRemoteDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.mode = addProjectFormMode
@@ -361,6 +387,12 @@ func (m *Model) handleAddProjectRemoteDone(msg addProjectRemoteDoneMsg) (tea.Mod
 		m.addProjectInput.Focus()
 		return m, textinputBlink()
 	}
+	// Fetch the remote-side result file and AddProject locally. If
+	// this step fails we still toast success — the project IS
+	// initialized on the remote — but we warn the user via a logged
+	// message so they know to register manually before `canopy new`.
+	registerRemoteAddProject(msg.hostName, msg.sshTarget, msg.resultFile)
+
 	// Derive a friendly name for the toast. Best-effort: the URL
 	// basename is what the remote canopy clones into.
 	name := msg.hostName
@@ -368,6 +400,59 @@ func (m *Model) handleAddProjectRemoteDone(msg addProjectRemoteDoneMsg) (tea.Mod
 		name = base + " on " + msg.hostName
 	}
 	return m, m.showAddProjectToast(name, msg.hostName)
+}
+
+// registerRemoteAddProject fetches the canonical project root from
+// the remote-side result file (written by canopy init when
+// CANOPY_INIT_RESULT_FILE was set) and registers it in the laptop's
+// hosts.json. Best-effort — failures are logged but don't bubble up.
+// The project is still successfully initialized on the remote;
+// missing auto-registration just means the user has to run
+// `canopy project add <name> <path> --on <host>` manually before
+// `canopy new --on <host>` works.
+func registerRemoteAddProject(hostName, sshTarget, resultFile string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Use the batch (non-interactive) variant — no pty needed, we
+	// just want cat output. ControlMaster socket from the previous
+	// dispatch is reused → handshake is instant.
+	fetch := host.SSHCmdBatch(ctx, sshTarget, "bash", "-c",
+		fmt.Sprintf("cat %s 2>/dev/null && rm -f %s", shellQuoteUI(resultFile), shellQuoteUI(resultFile)))
+	out, err := fetch.Output()
+	if err != nil {
+		log.Warn("ui.addproject.fetch-result-failed", "host", hostName, "err", err)
+		return
+	}
+	canonicalRoot := strings.TrimSpace(string(out))
+	if canonicalRoot == "" {
+		log.Warn("ui.addproject.remote-result-empty",
+			"host", hostName,
+			"hint", "remote canopy may be pre-v0.20 — upgrade with `canopy host upgrade`")
+		return
+	}
+
+	projectName := filepath.Base(canonicalRoot)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Warn("ui.addproject.home-failed", "err", err)
+		return
+	}
+	reg, err := host.NewRegistry(filepath.Join(home, ".canopy"))
+	if err != nil {
+		log.Warn("ui.addproject.registry-failed", "err", err)
+		return
+	}
+	if err := reg.AddProject(hostName, projectName, canonicalRoot); err != nil {
+		// ErrProjectExists is fine — idempotent re-run.
+		if !errors.Is(err, host.ErrProjectExists) {
+			log.Warn("ui.addproject.local-register-failed",
+				"host", hostName,
+				"project", projectName,
+				"path", canonicalRoot,
+				"err", err)
+		}
+	}
 }
 
 // shellQuoteUI is the ui-package twin of cmd/canopy.shellQuote in

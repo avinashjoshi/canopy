@@ -167,6 +167,8 @@ func runInit(cwd string, opts initOptions, stdout io.Writer) error {
 				fmt.Fprintf(stdout,
 					"warning: project not in state.json and couldn't register it: %v\n", rerr)
 			}
+			// v0.20 remote-dispatch result file: see writeInitResultFile.
+			writeInitResultFile(canonicalRoot)
 		}
 		fmt.Fprintln(stdout, "")
 		fmt.Fprintln(stdout, "  - Run `canopy new` to create a workspace.")
@@ -240,6 +242,12 @@ func runInit(cwd string, opts initOptions, stdout io.Writer) error {
 			"warning: registered canopy.json but couldn't update state.json: %v\n", err)
 		fmt.Fprintln(stdout, "  Project will be registered automatically on first `canopy new`.")
 	}
+	// v0.20 remote-dispatch result file: when the laptop's
+	// `canopy init --on <host>` runs us via SSH, it sets
+	// CANOPY_INIT_RESULT_FILE so it can fetch our canonical root
+	// path and register the project in its hosts.json. No-op when
+	// env unset (the common local-CLI case).
+	writeInitResultFile(canonicalRoot)
 
 	fmt.Fprintln(stdout, "")
 	fmt.Fprintln(stdout, "Next steps:")

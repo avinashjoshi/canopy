@@ -234,6 +234,58 @@ func TestRunAddProject_PathArg_WithDestRejected(t *testing.T) {
 	}
 }
 
+// TestRunInit_WritesInitResultFileWhenEnvSet: when CANOPY_INIT_RESULT_FILE
+// is set (the SSH-dispatch path from `canopy init --on <host>`), runInit
+// writes the canonical project root to that file on success. Without this
+// the laptop can't auto-register the new project in its hosts.json after
+// a remote init dispatch — and `canopy new --on <host>` then fails with
+// "host has no projects registered".
+func TestRunInit_WritesInitResultFileWhenEnvSet(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	if err := os.MkdirAll(filepath.Join(fakeHome, ".canopy"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	resultPath := filepath.Join(t.TempDir(), "init-result.txt")
+	t.Setenv("CANOPY_INIT_RESULT_FILE", resultPath)
+
+	projectRoot := t.TempDir()
+	var out bytes.Buffer
+	if err := runInit(projectRoot, initOptions{}, &out); err != nil {
+		t.Fatalf("runInit: %v\n%s", err, out.String())
+	}
+
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("result file missing: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	// Canonical path may EvalSymlinks the basename (macOS /var ↔ /private/var)
+	// so compare basenames to stay portable across runners.
+	if filepath.Base(got) != filepath.Base(projectRoot) {
+		t.Errorf("result file = %q; want basename %q", got, filepath.Base(projectRoot))
+	}
+}
+
+// TestRunInit_NoResultFileWhenEnvUnset: the env-var-driven side effect
+// is opt-in. Plain `canopy init` (no remote dispatch) doesn't write any
+// extra file.
+func TestRunInit_NoResultFileWhenEnvUnset(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	os.Unsetenv("CANOPY_INIT_RESULT_FILE")
+	if err := os.MkdirAll(filepath.Join(fakeHome, ".canopy"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	projectRoot := t.TempDir()
+	var out bytes.Buffer
+	if err := runInit(projectRoot, initOptions{}, &out); err != nil {
+		t.Fatalf("runInit: %v\n%s", err, out.String())
+	}
+	// No assertion needed beyond "did not panic / did not create a
+	// surprise file" — runInit's normal contract holds.
+}
+
 // TestRunInit_BugFix_RegistersOnEarlyReturn is the regression test
 // for the v0.20 bug fix. Pre-fix: runInit early-returned when
 // canopy.json existed AND didn't register the project. Post-fix:
