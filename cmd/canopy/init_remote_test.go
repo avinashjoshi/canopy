@@ -79,6 +79,64 @@ func TestShellQuote_Idempotent(t *testing.T) {
 	}
 }
 
+// TestValidateCanonicalRootFromRemote covers the safety contract on
+// the path the remote canopy writes via the result-file mechanism.
+// Adversarial review caught this as a real risk: a compromised remote
+// or a temp-file race could otherwise poison the laptop's hosts.json.
+func TestValidateCanonicalRootFromRemote(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		in        string
+		wantError bool
+	}{
+		{"good absolute path", "/home/cassy/Work/cravd", false},
+		{"good with spaces", "/home/avi/My Projects/foo", false},
+		{"empty", "", true},
+		{"relative", "Work/cravd", true},
+		{"too long", "/" + strings.Repeat("a", 1024), true},
+		{"non-utf8", "/foo/\xff\xfe", true},
+		{"newline injection", "/foo\nbar", true},
+		{"NUL byte", "/foo\x00bar", true},
+		{"tab", "/foo\tbar", true},
+		{"high ascii control", "/foo\x7fbar", true},
+		// Defensive: a remote can't sneak relative paths through us.
+		{"current dir", ".", true},
+		{"parent dir traversal — but technically relative", "../etc/passwd", true},
+	}
+	for _, tc := range cases {
+		err := validateCanonicalRootFromRemote(tc.in)
+		if tc.wantError && err == nil {
+			t.Errorf("%s: input %q got nil error; want refused", tc.name, tc.in)
+		}
+		if !tc.wantError && err != nil {
+			t.Errorf("%s: input %q got %v; want accepted", tc.name, tc.in, err)
+		}
+	}
+}
+
+// TestUnpredictableResultPath returns distinct /tmp/canopy-init-*.txt
+// paths on each call (with 128 bits of entropy collisions are not a
+// real risk; this test only catches a regression where the path went
+// back to a deterministic-pid scheme).
+func TestUnpredictableResultPath(t *testing.T) {
+	t.Parallel()
+	seen := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		p, err := unpredictableResultPath()
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if !strings.HasPrefix(p, "/tmp/canopy-init-") || !strings.HasSuffix(p, ".txt") {
+			t.Errorf("unexpected shape: %q", p)
+		}
+		if seen[p] {
+			t.Errorf("path collision: %q appeared twice — entropy missing?", p)
+		}
+		seen[p] = true
+	}
+}
+
 // TestRunAddProjectRemote_RegisteredHostFailsCleanly: when the host
 // IS registered but SSH itself fails (because we can't actually
 // connect from this test environment), the wrapper surfaces the

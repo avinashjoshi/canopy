@@ -33,12 +33,15 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/avinashjoshi/canopy/internal/host"
 )
@@ -92,7 +95,10 @@ func runAddProjectRemote(ctx context.Context, hostName, arg string, opts addProj
 	// with that path — without it, `canopy new --on tower` fails
 	// because the laptop's hosts.json doesn't know cravd's path on
 	// tower (resolveOnForNew can't auto-resolve --remote-cwd).
-	resultFile := fmt.Sprintf("/tmp/canopy-init-result-%d.txt", os.Getpid())
+	resultFile, err := unpredictableResultPath()
+	if err != nil {
+		return fmt.Errorf("canopy init --on: generate result path: %w", err)
+	}
 	remote := fmt.Sprintf("%s=%s canopy init %s", initResultEnvVar, shellQuote(resultFile), shellQuote(arg))
 	if opts.DestOverride != "" {
 		remote += " " + shellQuote(opts.DestOverride)
@@ -147,6 +153,12 @@ func registerRemoteProjectLocally(ctx context.Context, hostName, sshTarget, resu
 	if canonicalRoot == "" {
 		return fmt.Errorf("remote init result is empty (remote canopy may be pre-v0.20 — won't auto-register)")
 	}
+	// The remote could be compromised, on an older canopy that writes
+	// garbage, or the temp file could have been raced. Validate before
+	// touching the laptop's hosts.json.
+	if err := validateCanonicalRootFromRemote(canonicalRoot); err != nil {
+		return fmt.Errorf("remote init result rejected: %w", err)
+	}
 
 	projectName := filepath.Base(canonicalRoot)
 	home, err := os.UserHomeDir()
@@ -193,6 +205,13 @@ const initResultEnvVar = "CANOPY_INIT_RESULT_FILE"
 // CANOPY_INIT_RESULT_FILE env var, when set. No-op when unset (the
 // common local-CLI case).
 //
+// Uses O_CREATE|O_EXCL so a pre-existing path (whether a regular file
+// OR a symlink) causes the open to fail. Combined with the random
+// suffix in the laptop-generated path, this defeats the symlink-attack
+// where a hostile user on the remote pre-creates the result path as a
+// symlink into a sensitive location and tricks our write into clobbering
+// it.
+//
 // Failures are logged but not fatal — init's main outcome already
 // succeeded, and a missing result file just means the laptop's
 // hosts.json doesn't get auto-registered. The user can register
@@ -202,10 +221,73 @@ func writeInitResultFile(canonicalRoot string) {
 	if path == "" {
 		return
 	}
-	if err := os.WriteFile(path, []byte(canonicalRoot+"\n"), 0o600); err != nil {
-		// Surface to debug log via slog (init.go's logger), but
-		// don't fail the init or scream at the user — this is a
-		// remote-dispatch helper, not core init behavior.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		// Pre-existing path (including symlinks): O_EXCL refuses.
+		// Don't try to "fix" by removing — that would chase symlinks
+		// and reintroduce the vulnerability.
+		fmt.Fprintf(os.Stderr, "warning: write %s: %v (refusing to follow existing path)\n", initResultEnvVar, err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(canonicalRoot + "\n"); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: write %s: %v\n", initResultEnvVar, err)
 	}
+}
+
+// unpredictableResultPath returns a /tmp path with 128 bits of entropy
+// in the suffix. Random naming (rather than `/tmp/canopy-init-<pid>`)
+// stops an attacker on the remote host from pre-creating the file as
+// a symlink before the remote canopy writes to it.
+//
+// Combined with writeInitResultFile's O_EXCL open, the result-file
+// channel resists both the pre-create-as-symlink attack and the
+// race-replace-contents attack. Adversarial review caught these as
+// real risks since the laptop blindly trusts the result file's
+// contents when calling reg.AddProject locally.
+func unpredictableResultPath() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("crypto/rand: %w", err)
+	}
+	return "/tmp/canopy-init-" + hex.EncodeToString(buf) + ".txt", nil
+}
+
+// validateCanonicalRootFromRemote enforces a safety contract on the
+// path the remote canopy wrote to the result file. The laptop then
+// uses this path to register the project in its hosts.json — without
+// validation, a compromised or pre-v0.20 remote (or a temp-file
+// race) could poison the laptop's registry with garbage.
+//
+// Refuses:
+//   - relative paths (project paths must be absolute on the remote)
+//   - paths over 1 KiB (sanity ceiling; realistic project roots are
+//     under 256 bytes even on macOS)
+//   - non-UTF-8 input (rules out binary noise from a corrupted file)
+//   - paths containing control characters (newlines, NULs, etc.) —
+//     these would break tabwriter rendering and could enable terminal
+//     escape injection in the canopy ls output downstream
+//
+// Whitespace inside the path is allowed (some users genuinely use
+// "My Projects" style dirs). The user-facing project basename is
+// further constrained by host.validateProjectName.
+func validateCanonicalRootFromRemote(p string) error {
+	if p == "" {
+		return errors.New("empty path")
+	}
+	if len(p) > 1024 {
+		return fmt.Errorf("path too long (%d > 1024 bytes)", len(p))
+	}
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("path is not absolute: %q", p)
+	}
+	if !utf8.ValidString(p) {
+		return errors.New("path is not valid UTF-8")
+	}
+	for i, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("path contains control character (rune U+%04X at byte %d)", r, i)
+		}
+	}
+	return nil
 }

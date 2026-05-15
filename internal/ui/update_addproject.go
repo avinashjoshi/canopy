@@ -30,6 +30,8 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -38,6 +40,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -322,7 +325,11 @@ func (m *Model) submitAddProjectRemote(rawURL, hostName string) (tea.Model, tea.
 	// project in the laptop's hosts.json. Without this step the next
 	// `canopy new` on the just-added project errors with "host has
 	// no projects registered" (resolveOnForNew can't find the path).
-	resultFile := fmt.Sprintf("/tmp/canopy-init-result-%d.txt", os.Getpid())
+	resultFile, err := unpredictableRemoteResultPath()
+	if err != nil {
+		m.addProjectError = "✗ generate result path: " + err.Error()
+		return m, nil
+	}
 	remote := fmt.Sprintf("CANOPY_INIT_RESULT_FILE=%s canopy init %s",
 		shellQuoteUI(resultFile), shellQuoteUI(rawURL))
 	ctx := context.Background()
@@ -431,6 +438,16 @@ func registerRemoteAddProject(hostName, sshTarget, resultFile string) {
 			"hint", "remote canopy may be pre-v0.20 — upgrade with `canopy host upgrade`")
 		return
 	}
+	// The remote could be compromised, on an older canopy, or the
+	// temp file could have been raced. Validate before writing into
+	// the laptop's hosts.json.
+	if err := validateRemoteResultPath(canonicalRoot); err != nil {
+		log.Warn("ui.addproject.remote-result-invalid",
+			"host", hostName,
+			"err", err,
+			"hint", "remote returned path that failed safety checks; not auto-registering")
+		return
+	}
 
 	projectName := filepath.Base(canonicalRoot)
 	home, err := os.UserHomeDir()
@@ -463,6 +480,43 @@ func registerRemoteAddProject(hostName, sshTarget, resultFile string) {
 // close-escape-reopen dance.
 func shellQuoteUI(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// unpredictableRemoteResultPath returns a /tmp path with 128 bits of
+// entropy in the suffix. Random naming stops an attacker on the
+// remote host from pre-creating the file as a symlink before the
+// remote canopy writes to it. Same mechanism as cmd/canopy's
+// unpredictableResultPath — duplicated to keep ui leaf-up.
+func unpredictableRemoteResultPath() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return "/tmp/canopy-init-" + hex.EncodeToString(buf) + ".txt", nil
+}
+
+// validateRemoteResultPath enforces the same safety contract on the
+// remote-supplied project root as cmd/canopy/init_remote.go does for
+// the CLI flow. Duplicated for the leaf-up rule.
+func validateRemoteResultPath(p string) error {
+	if p == "" {
+		return errors.New("empty path")
+	}
+	if len(p) > 1024 {
+		return fmt.Errorf("path too long (%d > 1024)", len(p))
+	}
+	if !filepath.IsAbs(p) {
+		return fmt.Errorf("path is not absolute: %q", p)
+	}
+	if !utf8.ValidString(p) {
+		return errors.New("path is not valid UTF-8")
+	}
+	for i, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("path contains control character at byte %d", i)
+		}
+	}
+	return nil
 }
 
 // submitAddProjectPath handles the local-path branch. Validates the
