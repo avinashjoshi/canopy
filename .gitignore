@@ -21,3 +21,7 @@
 # test scratch
 /tmp-canopy-test/
 .claude/
+
+# gstack per-developer artifacts (deploy reports, scratch notes, etc.)
+# Mirrors the .claude/ pattern: personal tooling output, not team policy.
+.gstack/

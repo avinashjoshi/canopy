@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -168,6 +169,22 @@ func resolveOnForSwitch(spec, preferredProject, explicitRemoteCwd string) (resol
 	}, nil
 }
 
+// probeRemoteCwd is a fast `test -d` check over SSH. Used before
+// exec'ing mosh in dispatchSwitchToRemote so a missing remote project
+// path surfaces in the laptop's terminal — not silently inside the
+// mosh child shell, where it tears down without leaving anything on
+// screen for the TUI to relay. Reuses the ControlMaster socket, so on
+// a warmed-up canopy session this is sub-100ms.
+//
+// Returns nil when the path exists, non-nil on any failure (missing
+// path, ssh transport error, timeout). The caller distinguishes "path
+// missing" from "host offline" by checking the exit code via
+// *exec.ExitError; non-zero = test failed = path missing.
+func probeRemoteCwd(ctx context.Context, sshTarget, remotePath string) error {
+	cmd := host.SSHCmd(ctx, sshTarget, "test", "-d", remotePath)
+	return cmd.Run()
+}
+
 // dispatchVerbToRemote runs an arbitrary canopy verb on a remote host
 // via SSH. Used by --on-aware CLI subcommands (rm, retry, etc.) that
 // don't need the prompt-file dance dispatchNewToRemote does for `new`.
@@ -188,6 +205,17 @@ func dispatchVerbToRemote(ctx context.Context, resolved resolvedHost, verb strin
 	cmd.Stderr = stderr
 	cmd.Stdin = strings.NewReader(script)
 	if err := cmd.Run(); err != nil {
+		// Exit 7 — buildRemoteScript's dir-existence pre-check fired.
+		// Surface the actionable remediation instead of bash's terse cd
+		// error. resolved.HostName is set when --on was a registry name
+		// (the common path through the TUI); empty for raw ssh-targets.
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 7 {
+			spec := resolved.HostName
+			if spec == "" {
+				spec = resolved.SSHTarget
+			}
+			return remotePathMissingErr(spec, resolved.RemoteCwd, resolved.HostName)
+		}
 		return fmt.Errorf("remote canopy %s failed: %w", verb, err)
 	}
 	return nil

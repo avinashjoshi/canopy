@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -1369,5 +1370,115 @@ func TestAgentBadge_RemoteRowReadsAgentStateField(t *testing.T) {
 				t.Errorf("AgentState=%q: got %q; want to contain %q", tc.state, got, tc.wantBare)
 			}
 		})
+	}
+}
+
+// TestIsStale covers the v0.19 staleness decision tree: only fires for
+// remote rows (Host!=""), only after a successful refresh (LastSeen
+// non-zero), only when time.Since(LastSeen) > staleThreshold. The
+// renderer relies on this to gate the dim style + section banner —
+// false positives would dim healthy data, false negatives would hide
+// SSH outages.
+func TestIsStale(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		row  state.GlobalRow
+		want bool
+	}{
+		{
+			name: "local row never stale",
+			row:  state.GlobalRow{Host: "", LastSeen: now.Add(-24 * time.Hour)},
+			want: false,
+		},
+		{
+			name: "remote row, never refreshed (zero LastSeen)",
+			row:  state.GlobalRow{Host: "tower"},
+			want: false,
+		},
+		{
+			name: "remote row, refreshed 1s ago",
+			row:  state.GlobalRow{Host: "tower", LastSeen: now.Add(-1 * time.Second)},
+			want: false,
+		},
+		{
+			name: "remote row, refreshed right at threshold (not yet stale)",
+			row:  state.GlobalRow{Host: "tower", LastSeen: now.Add(-staleThreshold + time.Second)},
+			want: false,
+		},
+		{
+			name: "remote row, refreshed past threshold (stale)",
+			row:  state.GlobalRow{Host: "tower", LastSeen: now.Add(-staleThreshold - time.Second)},
+			want: true,
+		},
+		{
+			name: "remote row, refreshed long ago (definitely stale)",
+			row:  state.GlobalRow{Host: "tower", LastSeen: now.Add(-1 * time.Hour)},
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isStale(tc.row); got != tc.want {
+				t.Errorf("isStale = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRender_StaleHostHeaderHasBanner: when a remote host's LastSeen is
+// older than staleThreshold, the host section header gets a "⚠ stale Ns"
+// pill. Catches drift if the dim styling is added but the banner copy
+// is forgotten (the banner is the load-bearing signal for users
+// scanning the list — dim alone is easy to miss on the cursor row).
+func TestRender_StaleHostHeaderHasBanner(t *testing.T) {
+	m := New(Options{})
+	staleTime := time.Now().Add(-30 * time.Second) // 3x threshold
+	m.SetRows([]state.GlobalRow{
+		// Local row first so we exercise the "any remote present"
+		// branch that triggers the host headers at all.
+		{Project: "p", Name: "local-ws", Branch: "b", Status: state.StatusReady, Alive: true, TmuxSession: "p/local"},
+		{Project: "p", Name: "remote-ws", Branch: "b", Status: state.StatusReady, Alive: true, TmuxSession: "p/remote", Host: "tower", LastSeen: staleTime},
+	})
+	m.cursor = -1
+	out := m.View()
+	if !strings.Contains(out, "⚠ stale") {
+		t.Errorf("expected '⚠ stale' banner on tower host header for LastSeen 30s ago, got:\n%s", out)
+	}
+}
+
+// TestRender_FreshHostHeaderNoBanner: a remote host refreshed within
+// the freshness window must NOT show a stale banner. Without this
+// guard the banner could appear permanently if the threshold logic
+// inverts somewhere.
+func TestRender_FreshHostHeaderNoBanner(t *testing.T) {
+	m := New(Options{})
+	freshTime := time.Now().Add(-1 * time.Second)
+	m.SetRows([]state.GlobalRow{
+		{Project: "p", Name: "local-ws", Branch: "b", Status: state.StatusReady, Alive: true, TmuxSession: "p/local"},
+		{Project: "p", Name: "remote-ws", Branch: "b", Status: state.StatusReady, Alive: true, TmuxSession: "p/remote", Host: "tower", LastSeen: freshTime},
+	})
+	m.cursor = -1
+	out := m.View()
+	if strings.Contains(out, "⚠ stale") {
+		t.Errorf("did NOT expect '⚠ stale' banner for fresh remote row (LastSeen 1s ago), got:\n%s", out)
+	}
+}
+
+// TestRender_LocalHostHeaderNeverStale: local rows must never trigger
+// the stale UX even if LastSeen is somehow set on them. Defensive guard
+// against future refactors that might leak per-host LastSeen onto local
+// rows.
+func TestRender_LocalHostHeaderNeverStale(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		// Even if a local row's LastSeen is way old, it must not stale.
+		{Project: "p", Name: "local-ws", Branch: "b", Status: state.StatusReady, Alive: true, TmuxSession: "p/local", LastSeen: time.Now().Add(-1 * time.Hour)},
+		{Project: "p", Name: "remote-ws", Branch: "b", Status: state.StatusReady, Alive: true, TmuxSession: "p/remote", Host: "tower", LastSeen: time.Now()},
+	})
+	m.cursor = -1
+	out := m.View()
+	if strings.Contains(out, "⚠ stale") {
+		t.Errorf("local row with old LastSeen should not trigger stale UX, got:\n%s", out)
 	}
 }

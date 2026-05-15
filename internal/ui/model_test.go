@@ -534,6 +534,60 @@ func TestRenderTargetBanner_ShowsProjectName(t *testing.T) {
 	}
 }
 
+// TestRenderTargetBanner_RemoteShowsHost: when targeting a remote
+// project, the banner switches to "creating on <host> in <project>"
+// and surfaces the REMOTE path (not a missing local root). This is
+// load-bearing for the same reason as the cross-project case — the
+// user should never fire `n` on a remote row thinking it'll create
+// locally. The host pill renders distinctly from the project pill
+// (different bg color); we test the structural change here and let
+// rendering smoke-tests cover the visuals.
+func TestRenderTargetBanner_RemoteShowsHost(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetName = "brain"
+	m.newTargetHost = "pi"
+	m.newTargetRemoteCwd = "/home/jarvis/Work/brain"
+
+	out := stripAnsi(m.renderTargetBanner())
+	if !strings.Contains(out, "creating on") {
+		t.Errorf("remote banner missing 'creating on' label: %q", out)
+	}
+	if !strings.Contains(out, "pi") {
+		t.Errorf("remote banner missing host name: %q", out)
+	}
+	if !strings.Contains(out, "brain") {
+		t.Errorf("remote banner missing project name: %q", out)
+	}
+	if !strings.Contains(out, "/home/jarvis/Work/brain") {
+		t.Errorf("remote banner missing REMOTE cwd: %q", out)
+	}
+	if strings.Contains(out, "creating in") && !strings.Contains(out, "in  ") {
+		// We use "creating on <host> in <project>" — the literal
+		// "creating in" prefix from the local path would be wrong.
+		// The "in" between host and project is fine.
+		t.Errorf("remote banner should say 'creating on', not 'creating in <project>': %q", out)
+	}
+}
+
+// TestRenderTargetBanner_LocalUnchanged: the host-pill addition must
+// not regress the local banner — when newTargetHost is empty, render
+// exactly as before ("creating in <project> <root>"). Guards against
+// accidentally branching the local path through the remote code.
+func TestRenderTargetBanner_LocalUnchanged(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetName = "cravd"
+	m.newTargetRoot = "/Users/avi/Work/cravd"
+	// newTargetHost intentionally empty.
+
+	out := stripAnsi(m.renderTargetBanner())
+	if !strings.Contains(out, "creating in") {
+		t.Errorf("local banner must keep 'creating in' label: %q", out)
+	}
+	if strings.Contains(out, "creating on") {
+		t.Errorf("local banner must not say 'creating on' (that's the remote form): %q", out)
+	}
+}
+
 // TestRenderTargetBanner_EmptyWhenUnset: outside the new-workspace flow
 // the banner returns "" so render paths that include it (busy view's
 // non-create ops, future call sites) emit nothing rather than a stray
@@ -3459,5 +3513,230 @@ func TestErrMsg_SetsErrAndStaysIdle(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Errorf("errMsg returned cmd %v; want nil (no refresh)", cmd)
+	}
+}
+
+// TestParseRemoteWorkspaceName covers the parser that scrapes the new-
+// workspace name out of a streamed `canopy new --on` log. The remote
+// canopy emits "Workspace ready: <name>" on success; if absent, the
+// auto-attach path falls back to the "press Enter on the row" hint.
+func TestParseRemoteWorkspaceName(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{"empty output", "", ""},
+		{"no ready line", "Dispatching to tower (registry):\nsome output\n", ""},
+		{
+			"ready line present",
+			"Dispatching to tower:\n  exec canopy new --no-attach\n\nWorkspace ready: bold-tiger\n  branch:  bold-tiger\n",
+			"bold-tiger",
+		},
+		{
+			"ready line with trailing whitespace",
+			"Workspace ready:  spaced-name  \n",
+			"spaced-name",
+		},
+		{
+			// Defends against output earlier in the stream containing
+			// the marker (e.g., a prompt or setup hook echoing it).
+			// The remote canopy emits the canonical line once, last —
+			// taking the LAST occurrence prevents redirection.
+			"last occurrence wins",
+			"Setup script:\nWorkspace ready: decoy-name\n(more output)\nWorkspace ready: real-name\n",
+			"real-name",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseRemoteWorkspaceName(tc.output)
+			if got != tc.want {
+				t.Errorf("parseRemoteWorkspaceName(%q) = %q; want %q",
+					tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAvailableOpenBrowser_HiddenOnHostsTab: pressing B with a workspace
+// row stale on the cursor while the Hosts tab is active used to silently
+// fire the open-browser flow. Now gated to non-Hosts tabs so the B chip
+// disappears from the help line on the Hosts tab.
+func TestAvailableOpenBrowser_HiddenOnHostsTab(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+	m.setTestRows([]Row{{Name: "ws", Alive: true, Port: 3001}})
+	if availableOpenBrowser(m) {
+		t.Errorf("availableOpenBrowser = true on Hosts tab; want false")
+	}
+	m.tab = tabLocal
+	if !availableOpenBrowser(m) {
+		t.Errorf("availableOpenBrowser = false on Local tab with alive+port row; want true")
+	}
+}
+
+// TestAvailableHostSSH_RequiresTarget: `s` is surfaced when the cursor
+// has a registered SSH target, and hidden when there's no target or
+// the cursor is off the Hosts tab. No probe / status gate — SSH is the
+// recovery path for everything else, so we surface it unconditionally
+// as long as we have somewhere to connect.
+func TestAvailableHostSSH_RequiresTarget(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh"},
+		{Name: "bare", SSHTarget: "", Type: "ssh"},
+	}
+
+	// selectedHost() re-sorts alphabetically, so cursor 0 = "bare"
+	// (empty target → hidden), cursor 1 = "tower" (has target → shown).
+	m.hostsCursor = 0
+	if availableHostSSH(m) {
+		t.Errorf("hostsCursor=bare (empty target): availableHostSSH = true; want false")
+	}
+	m.hostsCursor = 1
+	if !availableHostSSH(m) {
+		t.Errorf("hostsCursor=tower: availableHostSSH = false; want true")
+	}
+
+	m.tab = tabLocal
+	if availableHostSSH(m) {
+		t.Errorf("Local tab: availableHostSSH = true; want false")
+	}
+}
+
+// TestActionHostSSH_OpensConfirmModal: pressing `s` on the Hosts tab
+// stages a y/N prompt instead of execing ssh directly. The exec only
+// fires once the user types y in handleConfirmHostSSHKey — a stray `s`
+// shouldn't kick the user out of the TUI.
+func TestActionHostSSH_OpensConfirmModal(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+	m.hostsCursor = 0
+	_, cmd := actionHostSSH(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if cmd != nil {
+		t.Errorf("actionHostSSH returned a cmd; want nil (modal-only, exec happens on confirm)")
+	}
+	if m.mode != confirmHostSSHMode {
+		t.Errorf("mode = %v; want confirmHostSSHMode", m.mode)
+	}
+	if m.hostSSHName != "tower" {
+		t.Errorf("hostSSHName = %q; want %q", m.hostSSHName, "tower")
+	}
+	if m.hostSSHTarget != "u@t" {
+		t.Errorf("hostSSHTarget = %q; want %q", m.hostSSHTarget, "u@t")
+	}
+}
+
+// TestActionHostSSH_NoTargetNoOp: when the cursor's host has no SSH
+// target, `s` is a no-op (no cmd, no error, no mode change). The keymap
+// predicate already hides the binding, but the action stays defensive
+// in case it ever fires through a stale registry snapshot.
+func TestActionHostSSH_NoTargetNoOp(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabHosts
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: ""}}
+	m.hostsCursor = 0
+	_, cmd := actionHostSSH(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	if cmd != nil {
+		t.Errorf("actionHostSSH on empty target returned cmd; want nil")
+	}
+	if m.mode == confirmHostSSHMode {
+		t.Errorf("mode = confirmHostSSHMode on empty target; want listMode")
+	}
+}
+
+// TestHandleConfirmHostSSHKey_YExecsSSH: typing y in the confirm modal
+// runs ssh via tea.ExecProcess, clears the modal state, and returns to
+// listMode. We don't run the cmd (that would exec ssh) — just check
+// the wiring.
+func TestHandleConfirmHostSSHKey_YExecsSSH(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = confirmHostSSHMode
+	m.hostSSHName = "tower"
+	m.hostSSHTarget = "u@t"
+
+	_, cmd := m.handleConfirmHostSSHKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if cmd == nil {
+		t.Fatalf("y in confirm-host-ssh: got nil cmd; want tea.ExecProcess wrapper")
+	}
+	if m.mode != listMode {
+		t.Errorf("mode = %v; want listMode (modal should close)", m.mode)
+	}
+	if m.hostSSHName != "" || m.hostSSHTarget != "" {
+		t.Errorf("modal state not cleared: name=%q target=%q", m.hostSSHName, m.hostSSHTarget)
+	}
+}
+
+// TestCreateDoneMsg_RemoteSuccessAutoAttaches: after a successful
+// remote create, the parsed workspace name + newTargetHost trigger
+// an auto-attach via attachRemoteRow. Without this branch, the user
+// would land back in busyMode and have to manually press Enter on
+// the new row — the entire v0.17 laptop-to-tower create-and-attach
+// flow depends on this.
+func TestCreateDoneMsg_RemoteSuccessAutoAttaches(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOp = busyOpCreate
+	m.busyOutput = "Dispatching to tower...\nWorkspace ready: bold-tiger\n"
+	m.newTargetHost = "tower"
+	m.newTargetName = "canopy"
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+
+	_, cmd := m.Update(createDoneMsg{remote: true, err: nil, output: ""})
+	if cmd == nil {
+		t.Fatalf("remote createDoneMsg with parseable name: got nil cmd; want attachRemoteRow")
+	}
+	if m.mode != listMode {
+		t.Errorf("mode = %v after auto-attach; want listMode (busy cleared)", m.mode)
+	}
+	if m.busyOp != busyOpNone {
+		t.Errorf("busyOp = %v; want busyOpNone (state cleared)", m.busyOp)
+	}
+}
+
+// TestCreateDoneMsg_RemoteSuccessNoNameFallsBack: if the output
+// doesn't contain a parseable workspace name, fall back to the
+// "press Enter on the new row" hint and stay in busyMode. The user
+// can still attach manually; the auto-attach is best-effort.
+func TestCreateDoneMsg_RemoteSuccessNoNameFallsBack(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = busyMode
+	m.busyOp = busyOpCreate
+	m.busyOutput = "Dispatching to tower...\n(no ready line — output truncated)\n"
+	m.newTargetHost = "tower"
+
+	_, cmd := m.Update(createDoneMsg{remote: true, err: nil, output: ""})
+	if cmd != nil {
+		t.Errorf("remote createDoneMsg with no parseable name: got cmd %v; want nil (fallback hint)", cmd)
+	}
+	if m.mode != busyMode {
+		t.Errorf("mode = %v; want busyMode (stay in busy view for hint)", m.mode)
+	}
+	if !strings.Contains(m.busyTitle, "Press any key") {
+		t.Errorf("busyTitle = %q; want hint mentioning 'Press any key'", m.busyTitle)
+	}
+}
+
+// TestHandleConfirmHostSSHKey_NCancels: any non-y key cancels the
+// modal without exec'ing ssh. State is cleared either way.
+func TestHandleConfirmHostSSHKey_NCancels(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = confirmHostSSHMode
+	m.hostSSHName = "tower"
+	m.hostSSHTarget = "u@t"
+
+	_, cmd := m.handleConfirmHostSSHKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if cmd != nil {
+		t.Errorf("n in confirm-host-ssh: got cmd %v; want nil (cancel)", cmd)
+	}
+	if m.mode != listMode {
+		t.Errorf("mode after cancel = %v; want listMode", m.mode)
+	}
+	if m.hostSSHName != "" || m.hostSSHTarget != "" {
+		t.Errorf("modal state not cleared after cancel: name=%q target=%q", m.hostSSHName, m.hostSSHTarget)
 	}
 }

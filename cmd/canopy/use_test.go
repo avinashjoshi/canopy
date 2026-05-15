@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/avinashjoshi/canopy/internal/state"
+	"github.com/avinashjoshi/canopy/internal/ui"
 )
 
 // TestAtomicSymlink_replacesExisting: a pre-existing symlink to one
@@ -905,5 +906,310 @@ func TestRunUse_buildWithRelease(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "only valid with a workspace target") {
 		t.Errorf("error should refuse --build release; got %v", err)
+	}
+}
+
+// setupUseHome wires a $HOME for a use-flow test: builds ~/.local/bin
+// with a canopy.bin + symlink, plus a ~/.canopy state store. Returns
+// the symlinkPath and releaseTargetPath, which mirror canopyBinDir()
+// resolution against the temp HOME. Used by the TTY-routing tests
+// below.
+func setupUseHome(t *testing.T) (symlinkPath, releaseTargetPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	releaseTargetPath = filepath.Join(binDir, "canopy.bin")
+	if err := os.WriteFile(releaseTargetPath, []byte("rel"), 0o755); err != nil {
+		t.Fatalf("seed canopy.bin: %v", err)
+	}
+	symlinkPath = filepath.Join(binDir, "canopy")
+	if err := os.Symlink("canopy.bin", symlinkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	canopyHome := filepath.Join(dir, ".canopy")
+	if err := os.MkdirAll(canopyHome, 0o755); err != nil {
+		t.Fatalf("mkdir canopy home: %v", err)
+	}
+	t.Setenv("HOME", dir)
+	return symlinkPath, releaseTargetPath
+}
+
+// stubPicker captures invocations so tests can assert the picker was
+// or wasn't called and inspect the rows handed in. Returns a restore
+// func suitable for `defer`.
+type pickerCall struct {
+	called          bool
+	rowsTargets     []string
+	activeText      string
+	returnTarget    string
+	returnBuild     bool
+	returnErr       error
+}
+
+func stubPicker(t *testing.T, ret string, retBuild bool, retErr error) *pickerCall {
+	t.Helper()
+	pc := &pickerCall{returnTarget: ret, returnBuild: retBuild, returnErr: retErr}
+	prev := runUsePickerFn
+	runUsePickerFn = func(rows []ui.UseRow, activeText string) (string, bool, error) {
+		pc.called = true
+		pc.activeText = activeText
+		pc.rowsTargets = make([]string, 0, len(rows))
+		for _, r := range rows {
+			pc.rowsTargets = append(pc.rowsTargets, r.Target)
+		}
+		return pc.returnTarget, pc.returnBuild, pc.returnErr
+	}
+	t.Cleanup(func() { runUsePickerFn = prev })
+	return pc
+}
+
+// stubUseIsTerminal flips the TTY-detection branch. defer-restored.
+func stubUseIsTerminal(t *testing.T, isTTY bool) {
+	t.Helper()
+	prev := useIsTerminal
+	useIsTerminal = func(*os.File) bool { return isTTY }
+	t.Cleanup(func() { useIsTerminal = prev })
+}
+
+// TestRunUse_TTYBranch_LaunchesPicker: stdin is a tty, no args, no
+// --list → picker fires. Picker returns "release" → caller switches
+// to release. End-to-end routing assertion.
+func TestRunUse_TTYBranch_LaunchesPicker(t *testing.T) {
+	setupUseHome(t)
+	stubUseIsTerminal(t, true)
+	pc := stubPicker(t, "release", false, nil)
+
+	cmd := newUseCmd()
+	cmd.SetArgs([]string{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !pc.called {
+		t.Fatal("picker was not invoked on TTY + no-args")
+	}
+	if !strings.Contains(out.String(), "Mode:   release") {
+		t.Errorf("expected release switch output; got:\n%s", out.String())
+	}
+}
+
+// TestRunUse_NotTTY_FallsBackToList: piped/non-TTY stdin keeps the
+// existing tabular behavior. Locks the "scripts and CI keep working"
+// contract that the picker is gated behind.
+func TestRunUse_NotTTY_FallsBackToList(t *testing.T) {
+	setupUseHome(t)
+	stubUseIsTerminal(t, false)
+	pc := stubPicker(t, "", false, nil)
+
+	cmd := newUseCmd()
+	cmd.SetArgs([]string{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if pc.called {
+		t.Error("picker should not be invoked when stdin is not a TTY")
+	}
+	for _, want := range []string{"Active:", "Available targets:", "TARGET", "release"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("tabular output missing %q; got:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestRunUse_ListFlag_BypassesPickerOnTTY: --list forces tabular
+// output even on an interactive terminal. The documented escape
+// hatch for screen recordings, debugging, or just preference.
+func TestRunUse_ListFlag_BypassesPickerOnTTY(t *testing.T) {
+	setupUseHome(t)
+	stubUseIsTerminal(t, true)
+	pc := stubPicker(t, "release", false, nil)
+
+	cmd := newUseCmd()
+	cmd.SetArgs([]string{"--list"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if pc.called {
+		t.Error("--list should bypass the picker, but it was invoked")
+	}
+	if !strings.Contains(out.String(), "Available targets:") {
+		t.Errorf("expected tabular output with --list; got:\n%s", out.String())
+	}
+}
+
+// TestRunUse_PickerCancel_NoSwitch_Exit0: picker returns ("", false,
+// nil) → silent exit 0, no error, no switch. Ensures Esc/q/^c on the
+// picker behaves like every other "press q" dismissal in canopy.
+func TestRunUse_PickerCancel_NoSwitch_Exit0(t *testing.T) {
+	symlinkPath, _ := setupUseHome(t)
+	stubUseIsTerminal(t, true)
+	pc := stubPicker(t, "", false, nil)
+
+	// Capture the symlink target before — must be unchanged after.
+	pre, err := os.Readlink(symlinkPath)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+
+	cmd := newUseCmd()
+	cmd.SetArgs([]string{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute on cancel should be nil err; got %v", err)
+	}
+	if !pc.called {
+		t.Error("picker should have been called")
+	}
+	if out.String() != "" {
+		t.Errorf("cancel path should be silent; got:\n%s", out.String())
+	}
+	post, _ := os.Readlink(symlinkPath)
+	if post != pre {
+		t.Errorf("symlink changed on cancel: pre=%q post=%q", pre, post)
+	}
+}
+
+// TestRunUse_PickerError_Propagates: a Bubbletea program failure
+// flows up through RunE → cobra exit 1 with a useful error.
+func TestRunUse_PickerError_Propagates(t *testing.T) {
+	setupUseHome(t)
+	stubUseIsTerminal(t, true)
+	stubPicker(t, "", false, errors.New("tea borked"))
+
+	cmd := newUseCmd()
+	cmd.SetArgs([]string{})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error from failing picker")
+	}
+	if !strings.Contains(err.Error(), "tea borked") {
+		t.Errorf("error chain should preserve picker err; got %v", err)
+	}
+}
+
+// TestRunUse_PickerWorkspaceWithBuild_CallsSwitchWithBuild: picker
+// returns a workspace name and withBuild=true → switchToWorkspace
+// runs with build=true. Asserted indirectly via the build hook stub:
+// goBuildInWorktree fires (means build=true path was taken).
+func TestRunUse_PickerWorkspaceWithBuild_CallsSwitchWithBuild(t *testing.T) {
+	symlinkPath, _ := setupUseHome(t)
+	stubUseIsTerminal(t, true)
+
+	// Seed a canopy worktree with a dev binary so switchToWorkspace
+	// will succeed past the --build stage.
+	wsDir := filepath.Join(filepath.Dir(filepath.Dir(symlinkPath)), "..", "ws")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("mkdir ws: %v", err)
+	}
+	makeCanopyWorktree(t, wsDir)
+	devBin := filepath.Join(wsDir, "canopy")
+	if err := os.WriteFile(devBin, []byte("dev"), 0o755); err != nil {
+		t.Fatalf("seed devbin: %v", err)
+	}
+
+	canopyHome := filepath.Join(filepath.Dir(filepath.Dir(symlinkPath)), "..", ".canopy")
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{{Name: "feature-A", Path: wsDir}},
+	}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	stubPicker(t, "feature-A", true, nil)
+
+	// Stub the build hook so we can detect it was called.
+	buildCalled := false
+	prevBuild := goBuildInWorktree
+	t.Cleanup(func() { goBuildInWorktree = prevBuild })
+	goBuildInWorktree = func(ctx context.Context, dir string) error {
+		buildCalled = true
+		return nil
+	}
+
+	cmd := newUseCmd()
+	cmd.SetArgs([]string{})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !buildCalled {
+		t.Error("withBuild=true from picker should have triggered goBuildInWorktree")
+	}
+}
+
+// TestUseRows_ActiveFlag_TracksSymlink: useRows reads the current
+// symlink target and marks the matching row Active=true. This is the
+// data driving the ▶ marker in the picker.
+func TestUseRows_ActiveFlag_TracksSymlink(t *testing.T) {
+	symlinkPath, releaseTargetPath := setupUseHome(t)
+	rows := useRows(context.Background(), symlinkPath, releaseTargetPath)
+	if len(rows) == 0 {
+		t.Fatal("useRows returned no rows")
+	}
+	if !rows[0].IsRelease {
+		t.Fatalf("first row should be release; got %q", rows[0].Target)
+	}
+	if !rows[0].Active {
+		t.Error("release row should be Active=true; symlink points at canopy.bin")
+	}
+}
+
+// TestUseRows_HasBinary_ReflectsDisk: HasBinary flag tracks whether
+// BinaryPath exists. Workspace rows with missing ./canopy must report
+// HasBinary=false so the picker can mute them.
+func TestUseRows_HasBinary_ReflectsDisk(t *testing.T) {
+	symlinkPath, releaseTargetPath := setupUseHome(t)
+
+	// Add a workspace with NO ./canopy.
+	homeDir := filepath.Dir(filepath.Dir(filepath.Dir(symlinkPath)))
+	wsDir := filepath.Join(homeDir, "ws-nobin")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("mkdir ws: %v", err)
+	}
+	makeCanopyWorktree(t, wsDir)
+
+	canopyHome := filepath.Join(homeDir, ".canopy")
+	store, _ := state.NewStore(canopyHome)
+	if err := store.Save(&state.State{
+		Workspaces: []state.Workspace{{Name: "ws-nobin", Path: wsDir}},
+	}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	rows := useRows(context.Background(), symlinkPath, releaseTargetPath)
+	var wsRow *ui.UseRow
+	for i := range rows {
+		if rows[i].Target == "ws-nobin" {
+			wsRow = &rows[i]
+			break
+		}
+	}
+	if wsRow == nil {
+		t.Fatalf("ws-nobin row missing; rows: %+v", rows)
+	}
+	if wsRow.HasBinary {
+		t.Errorf("ws-nobin has no ./canopy; HasBinary should be false")
 	}
 }
