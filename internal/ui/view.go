@@ -48,6 +48,8 @@ func (m *Model) View() string {
 		return m.renderConfirmHostRemove()
 	case addHostFormMode:
 		return m.renderAddHostForm()
+	case addProjectFormMode:
+		return m.renderAddProjectForm()
 	case hostDetailMode:
 		return m.renderHostDetail()
 	case confirmSSHCopyIDMode:

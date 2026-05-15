@@ -199,6 +199,16 @@ var listModeBindings = []Binding{
 		Action:    actionHostSetupAuth,
 	},
 	{
+		// `a` on Local/Global tabs opens the Add Project form. The
+		// host-tab `a` (above) wins when both bindings match because
+		// availableHostAuth gates it to a host row; for non-host
+		// tabs, availableAddProject fires this. v0.18.
+		K:         key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add project")),
+		Group:     "act",
+		Available: availableAddProject,
+		Action:    actionAddProject,
+	},
+	{
 		// K (capital) kills the workspace's tmux session without
 		// removing state. Lower-case k is cursor-up, intentional —
 		// the muscle-memory case is nav, the deliberate-keypress
@@ -379,6 +389,14 @@ func availableInWorkspaceContext(m *Model) bool {
 // only fire while the Hosts tab is active.
 func availableOnHostsTab(m *Model) bool {
 	return m.tab == tabHosts && len(m.hostList) > 0
+}
+
+// availableAddProject gates the v0.18 Add Project keybind to non-Hosts
+// tabs AND to TUI invocations where main() wired the RunInitFunc
+// callback. Without the callback the form has no way to run init, so
+// hide it cleanly rather than show a broken option.
+func availableAddProject(m *Model) bool {
+	return m.tab != tabHosts && m.RunInitFunc != nil
 }
 
 // availableHostAuth gates the `a` key (set up auth) to Hosts-tab rows

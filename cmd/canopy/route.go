@@ -124,7 +124,7 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 		if !hasProjects {
 			isRepo, _ := git.IsRepo(ctx, cwd)
 			if isRepo {
-				return runInitSplashFlow(cwd, stdout)
+				return runInitSplashFlow(ctx, cwd, stdout)
 			}
 		}
 	}
@@ -244,6 +244,15 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 		ChangelogFn:    changelogFn,
 		ShellFn:        shellFn,
 		DismissFn:      dismissFn,
+		// v0.18 Add Project: closure binds the TUI's form to
+		// runInit. The TUI handles git clone via tea.ExecProcess
+		// (so auth prompts work natively), then calls back here to
+		// finish the init half.
+		RunInitFunc: func(absPath string, withScripts, force bool) error {
+			// Output discarded for in-TUI flows; success/error is
+			// rendered by the form itself (toast / inline error).
+			return runInit(absPath, initOptions{Force: force, WithScripts: withScripts}, io.Discard)
+		},
 	})
 }
 
@@ -280,16 +289,26 @@ func resolveProjectContext(cwd string, st *state.State) (string, *config.Config,
 	return cfg.ProjectRoot, cfg, nil
 }
 
-// runInitSplashFlow shows the init prompt. If the user opts in, this
-// function runs `canopy init` against cwd synchronously (same code path
-// the standalone `canopy init` command uses).
-func runInitSplashFlow(cwd string, stdout io.Writer) error {
-	didInit, err := ui.RunInitSplash(cwd)
+// runInitSplashFlow shows the v0.18 Add Project splash. The splash
+// returns either Dismiss (user pressed esc) or Submit + an arg (path
+// or URL). On Submit, we drop out of altscreen (splash's tea.Program
+// already exited) and invoke runAddProject — the same orchestrator
+// the CLI `canopy init` command uses. Because we're now post-altscreen,
+// git's auth prompts (SSH passphrase, HTTPS credential helpers) work
+// on the user's real tty.
+func runInitSplashFlow(ctx context.Context, cwd string, stdout io.Writer) error {
+	result, err := ui.RunInitSplash(cwd)
 	if err != nil {
 		return fmt.Errorf("init splash: %w", err)
 	}
-	if !didInit {
+	if result.Action == ui.SplashDismiss {
 		return nil
 	}
-	return runInit(cwd, initOptions{}, stdout)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("init splash: home dir: %w", err)
+	}
+	canopyHome := filepath.Join(home, ".canopy")
+	_, err = runAddProject(ctx, result.Arg, addProjectOptions{}, stdout, canopyHome)
+	return err
 }

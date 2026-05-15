@@ -18,7 +18,7 @@
 //	       ▼              ▼
 //	  abs(arg)        pre-clone basename + path-safety checks
 //	       │              ▼
-//	       │         resolveCloneDest → ensureSourceRoot
+//	       │         canopyinit.ResolveCloneDest → canopyinit.EnsureSourceRoot
 //	       │              ▼
 //	       │         existing .git? skip clone (idempotent)
 //	       │         existing non-git dir? error: collision
@@ -40,6 +40,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/avinashjoshi/canopy/internal/canopyinit"
 	"github.com/avinashjoshi/canopy/internal/config"
 	"github.com/avinashjoshi/canopy/internal/git"
 )
@@ -87,7 +88,7 @@ func runAddProject(ctx context.Context, arg string, opts addProjectOptions, stdo
 	}
 
 	// Branch 2: arg is a local path.
-	if !looksLikeGitURL(arg) {
+	if !canopyinit.LooksLikeGitURL(arg) {
 		if opts.DestOverride != "" {
 			return "", errors.New("canopy init: <dest> only valid when first arg is a git URL")
 		}
@@ -127,7 +128,7 @@ func runAddProjectFromURL(ctx context.Context, rawURL string, opts addProjectOpt
 
 	// Resolve where the clone will land BEFORE doing any network work,
 	// so a bad config / unparseable URL fails fast.
-	dest, sourceLabel, err := resolveCloneDest(rawURL, opts.DestOverride, userCfg, canopyHome)
+	dest, sourceLabel, err := canopyinit.ResolveCloneDest(rawURL, opts.DestOverride, userCfg, canopyHome)
 	if err != nil {
 		return "", fmt.Errorf("canopy init: %w", err)
 	}
@@ -159,7 +160,7 @@ func runAddProjectFromURL(ctx context.Context, rawURL string, opts addProjectOpt
 	// known canopy workspace (decision #7). Reconcile would treat the
 	// clone as garbage and the user would get phantom data inside a
 	// worktree.
-	if err := validateDestNotInsideWorkspace(dest, st); err != nil {
+	if err := canopyinit.ValidateDestNotInsideWorkspace(dest, st); err != nil {
 		return "", fmt.Errorf("canopy init: %w", err)
 	}
 
@@ -187,7 +188,7 @@ func runAddProjectFromURL(ctx context.Context, rawURL string, opts addProjectOpt
 	}
 
 	if !skipClone {
-		if err := ensureSourceRoot(dest); err != nil {
+		if err := canopyinit.EnsureSourceRoot(dest); err != nil {
 			return "", fmt.Errorf("canopy init: %w", err)
 		}
 		fmt.Fprintf(stdout, "Cloning %s into %s (source-root: %s)...\n", rawURL, dest, sourceLabel)

@@ -1,4 +1,4 @@
-package main
+package canopyinit
 
 import (
 	"os"
@@ -38,16 +38,16 @@ func TestLooksLikeGitURL(t *testing.T) {
 
 		// Edge cases — must return false (path or rejected).
 		{"", false},
-		{"git@host", false},        // no colon
-		{"user@host:", false},      // no path after colon
-		{"mailto:x@y", false},      // unsupported scheme
+		{"git@host", false},   // no colon
+		{"user@host:", false}, // no path after colon
+		{"mailto:x@y", false}, // unsupported scheme
 		{"gopher://host/path", false},
 		{"c:foo", false}, // Windows-style; canopy is unix but be defensive
 	}
 	for _, tc := range cases {
-		got := looksLikeGitURL(tc.in)
+		got := LooksLikeGitURL(tc.in)
 		if got != tc.want {
-			t.Errorf("looksLikeGitURL(%q) = %v; want %v", tc.in, got, tc.want)
+			t.Errorf("LooksLikeGitURL(%q) = %v; want %v", tc.in, got, tc.want)
 		}
 	}
 }
@@ -74,19 +74,19 @@ func TestDeriveBasename(t *testing.T) {
 		{"", "", true},
 	}
 	for _, tc := range cases {
-		got, err := deriveBasename(tc.in)
+		got, err := DeriveBasename(tc.in)
 		if tc.wantError {
 			if err == nil {
-				t.Errorf("deriveBasename(%q): nil error; want refused", tc.in)
+				t.Errorf("DeriveBasename(%q): nil error; want refused", tc.in)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("deriveBasename(%q): %v", tc.in, err)
+			t.Errorf("DeriveBasename(%q): %v", tc.in, err)
 			continue
 		}
 		if got != tc.want {
-			t.Errorf("deriveBasename(%q) = %q; want %q", tc.in, got, tc.want)
+			t.Errorf("DeriveBasename(%q) = %q; want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -98,9 +98,9 @@ func TestResolveCloneDest_OverrideWins(t *testing.T) {
 	t.Setenv("CANOPY_SOURCE_ROOT", "/from-env")
 	c := &config.UserConfig{SourceRoot: "/from-config"}
 
-	got, src, err := resolveCloneDest("https://github.com/foo/bar.git", "/explicit/dest", c, "/home/canopy")
+	got, src, err := ResolveCloneDest("https://github.com/foo/bar.git", "/explicit/dest", c, "/home/canopy")
 	if err != nil {
-		t.Fatalf("resolveCloneDest: %v", err)
+		t.Fatalf("ResolveCloneDest: %v", err)
 	}
 	if got != "/explicit/dest" {
 		t.Errorf("dest = %q; want /explicit/dest", got)
@@ -115,9 +115,9 @@ func TestResolveCloneDest_OverrideWins(t *testing.T) {
 // but we can assert it's absolute.
 func TestResolveCloneDest_OverrideRelative(t *testing.T) {
 	// Not parallel — sibling tests Unsetenv CANOPY_SOURCE_ROOT.
-	got, _, err := resolveCloneDest("https://github.com/foo/bar.git", "./relative-dest", nil, "/home/canopy")
+	got, _, err := ResolveCloneDest("https://github.com/foo/bar.git", "./relative-dest", nil, "/home/canopy")
 	if err != nil {
-		t.Fatalf("resolveCloneDest: %v", err)
+		t.Fatalf("ResolveCloneDest: %v", err)
 	}
 	if !filepath.IsAbs(got) {
 		t.Errorf("dest = %q; want absolute", got)
@@ -132,9 +132,9 @@ func TestResolveCloneDest_FromEnv(t *testing.T) {
 	t.Setenv("CANOPY_SOURCE_ROOT", "/from-env")
 	c := &config.UserConfig{SourceRoot: "/from-config"}
 
-	got, src, err := resolveCloneDest("https://github.com/foo/bar.git", "", c, "/home/canopy")
+	got, src, err := ResolveCloneDest("https://github.com/foo/bar.git", "", c, "/home/canopy")
 	if err != nil {
-		t.Fatalf("resolveCloneDest: %v", err)
+		t.Fatalf("ResolveCloneDest: %v", err)
 	}
 	if got != "/from-env/bar" {
 		t.Errorf("dest = %q; want /from-env/bar", got)
@@ -149,9 +149,9 @@ func TestResolveCloneDest_FromConfig(t *testing.T) {
 	os.Unsetenv("CANOPY_SOURCE_ROOT")
 	c := &config.UserConfig{SourceRoot: "/from-config"}
 
-	got, src, err := resolveCloneDest("https://github.com/foo/bar.git", "", c, "/home/canopy")
+	got, src, err := ResolveCloneDest("https://github.com/foo/bar.git", "", c, "/home/canopy")
 	if err != nil {
-		t.Fatalf("resolveCloneDest: %v", err)
+		t.Fatalf("ResolveCloneDest: %v", err)
 	}
 	if got != "/from-config/bar" {
 		t.Errorf("dest = %q; want /from-config/bar", got)
@@ -165,9 +165,9 @@ func TestResolveCloneDest_FromConfig(t *testing.T) {
 // Default is <canopyHome>/sources/<basename>.
 func TestResolveCloneDest_FromDefault(t *testing.T) {
 	os.Unsetenv("CANOPY_SOURCE_ROOT")
-	got, src, err := resolveCloneDest("https://github.com/foo/bar.git", "", nil, "/home/canopy")
+	got, src, err := ResolveCloneDest("https://github.com/foo/bar.git", "", nil, "/home/canopy")
 	if err != nil {
-		t.Fatalf("resolveCloneDest: %v", err)
+		t.Fatalf("ResolveCloneDest: %v", err)
 	}
 	want := "/home/canopy/sources/bar"
 	if got != want {
@@ -181,10 +181,10 @@ func TestResolveCloneDest_FromDefault(t *testing.T) {
 // TestResolveCloneDest_BadURL: a URL that derives an empty basename
 // fails before any dest is built.
 func TestResolveCloneDest_BadURL(t *testing.T) {
-	// Not parallel — keeps the resolveCloneDest test group serial.
-	_, _, err := resolveCloneDest("git://host.example/", "", nil, "/home/canopy")
+	// Not parallel — keeps the ResolveCloneDest test group serial.
+	_, _, err := ResolveCloneDest("git://host.example/", "", nil, "/home/canopy")
 	if err == nil {
-		t.Fatal("resolveCloneDest with empty basename: nil error; want refused")
+		t.Fatal("ResolveCloneDest with empty basename: nil error; want refused")
 	}
 }
 
@@ -195,16 +195,16 @@ func TestEnsureSourceRoot_Idempotent(t *testing.T) {
 	root := t.TempDir()
 	dest := filepath.Join(root, "fresh", "bar") // parent doesn't exist
 
-	if err := ensureSourceRoot(dest); err != nil {
-		t.Fatalf("ensureSourceRoot first call: %v", err)
+	if err := EnsureSourceRoot(dest); err != nil {
+		t.Fatalf("EnsureSourceRoot first call: %v", err)
 	}
 	// Parent should exist now.
 	if _, err := os.Stat(filepath.Join(root, "fresh")); err != nil {
-		t.Errorf("ensureSourceRoot didn't create parent: %v", err)
+		t.Errorf("EnsureSourceRoot didn't create parent: %v", err)
 	}
 	// Second call: idempotent.
-	if err := ensureSourceRoot(dest); err != nil {
-		t.Fatalf("ensureSourceRoot second call: %v", err)
+	if err := EnsureSourceRoot(dest); err != nil {
+		t.Fatalf("EnsureSourceRoot second call: %v", err)
 	}
 }
 
@@ -222,9 +222,9 @@ func TestEnsureSourceRoot_PermissionDenied(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	dest := filepath.Join(locked, "child", "bar")
-	err := ensureSourceRoot(dest)
+	err := EnsureSourceRoot(dest)
 	if err == nil {
-		t.Fatal("ensureSourceRoot into read-only parent: nil error; want failure")
+		t.Fatal("EnsureSourceRoot into read-only parent: nil error; want failure")
 	}
 	if !strings.Contains(err.Error(), "ensure source-root") {
 		t.Errorf("err missing wrapping prefix; got %q", err)
@@ -254,7 +254,7 @@ func TestValidateDestNotInsideWorkspace(t *testing.T) {
 		{"/home/avi/.canopy/workspaces/proj", false, "parent of workspaces — ok"},
 	}
 	for _, tc := range cases {
-		err := validateDestNotInsideWorkspace(tc.dest, st)
+		err := ValidateDestNotInsideWorkspace(tc.dest, st)
 		if tc.wantError && err == nil {
 			t.Errorf("%s: dest=%s nil error; want refused", tc.desc, tc.dest)
 		}
@@ -269,7 +269,7 @@ func TestValidateDestNotInsideWorkspace(t *testing.T) {
 // collide with.
 func TestValidateDestNotInsideWorkspace_NilState(t *testing.T) {
 	t.Parallel()
-	if err := validateDestNotInsideWorkspace("/home/avi/Work/bar", nil); err != nil {
+	if err := ValidateDestNotInsideWorkspace("/home/avi/Work/bar", nil); err != nil {
 		t.Errorf("nil state: %v", err)
 	}
 }
@@ -279,7 +279,7 @@ func TestValidateDestNotInsideWorkspace_NilState(t *testing.T) {
 func TestValidateDestNotInsideWorkspace_EmptyState(t *testing.T) {
 	t.Parallel()
 	st := &state.State{}
-	if err := validateDestNotInsideWorkspace("/home/avi/Work/bar", st); err != nil {
+	if err := ValidateDestNotInsideWorkspace("/home/avi/Work/bar", st); err != nil {
 		t.Errorf("empty state: %v", err)
 	}
 }

@@ -147,6 +147,17 @@ const (
 	// captured buffer (no tty pass-through; no flicker). See
 	// internal/ui/update_host_upgrade.go for the state machine.
 	hostUpgradeMode
+	// addProjectFormMode is the in-TUI "Add Project" form (v0.18).
+	// Single textinput; Enter classifies the value as path or URL
+	// and dispatches:
+	//   - path → sync runInit via the m.RunInitFunc callback
+	//   - URL  → tea.ExecProcess git clone (drops altscreen so SSH
+	//            passphrase / HTTPS credential helpers work natively),
+	//            then runInit on the cloned dir
+	// Esc cancels back to listMode. ctrl+s opens inline source-root
+	// edit (decision #18 in v0.18-add-project.md). Reachable from
+	// the Global tab via `a`; same flow drives the splash screen.
+	addProjectFormMode
 )
 
 // inNewFlow reports whether the current mode is any step of the
@@ -406,6 +417,45 @@ type Model struct {
 	// build the ssh-copy-id command. v0.17 Phase 1l.
 	pendingProbeHost   string
 	pendingProbeTarget string
+
+	// Add Project (v0.18) form fields.
+	//
+	// addProjectInput captures the URL/path the user types. Reset on
+	// open via openAddProjectForm. Kept separate from nameInput so the
+	// Add Project form and the new-workspace flow can coexist without
+	// fighting over textinput state.
+	addProjectInput textinput.Model
+
+	// addProjectError renders below the input in errorStyle when
+	// validation or the orchestrator returns an error. Cleared on the
+	// next keystroke so the user sees feedback only while their input
+	// is still the problem.
+	addProjectError string
+
+	// addProjectToast is the post-success line (e.g. "✓ Added bar at
+	// ~/Work/bar"). Set when an add succeeds; cleared by a tick after
+	// addProjectToastFor expires so the form auto-closes.
+	addProjectToast    string
+	addProjectToastFor time.Time
+
+	// addProjectEditingSourceRoot is true while the user is editing
+	// source-root inline (ctrl+s on the form). The textinput is
+	// reused — addProjectInput becomes the source-root editor for
+	// the duration. On Enter we write to ~/.canopy/config.json and
+	// restore the previous input value.
+	addProjectEditingSourceRoot bool
+	// addProjectSavedInput holds the URL/path the user was typing
+	// when they hit ctrl+s. Restored to addProjectInput when they
+	// finish editing source-root.
+	addProjectSavedInput string
+
+	// RunInitFunc is the post-clone init callback. main() injects a
+	// closure that calls runInit (and registers the project in
+	// state.json) on the given absolute path. nil disables Add Project.
+	//
+	// withScripts and force mirror `canopy init` flags. The TUI never
+	// sets force=true today; --with-scripts is a future toggle.
+	RunInitFunc func(absPath string, withScripts, force bool) error
 
 	// searchMode is true while the user is typing in the fuzzy-search
 	// box (entered via /). Captures keystrokes into searchQuery
@@ -744,6 +794,13 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	tgti.CharLimit = 200
 	tgti.Width = 40
 
+	// addProjectInput backs the Add Project form's URL/path field
+	// (v0.18). CharLimit large enough for a long GitHub Enterprise URL.
+	api := textinput.New()
+	api.Placeholder = "https://github.com/foo/bar.git or ~/code/foo"
+	api.CharLimit = 1024
+	api.Width = 60
+
 	// Multi-line textarea: Enter inserts newline, Ctrl+S submits
 	// (intercepted by handleNewPromptKey before this widget sees the
 	// key — see internal/ui/update.go). CharLimit 8KB caps the
@@ -801,6 +858,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 		nameInput:            ti,
 		listInput:            li,
 		targetInput:          tgti,
+		addProjectInput:      api,
 		promptInput:          pi,
 		mode:                 listMode,
 		inPopup:              os.Getenv("CANOPY_IN_POPUP") == "1",
@@ -870,6 +928,13 @@ type RunUnifiedOptions struct {
 	// DismissFn writes dismissed_version into the auto-check cache
 	// for the D key. Nil disables D.
 	DismissFn UpgradeDismissFn
+
+	// RunInitFunc is the v0.18 Add Project callback. Wires the TUI's
+	// addProjectFormMode to cmd/canopy/runInit so the form can finish
+	// the init half of the add-project flow without internal/ui
+	// importing cmd/canopy. Nil disables the `a` keybind cleanly
+	// (the binding is gated on this being non-nil).
+	RunInitFunc func(absPath string, withScripts, force bool) error
 }
 
 // RunUnified is the v0.8 public entry point used by cmd/canopy/route.go.
@@ -886,6 +951,7 @@ type RunUnifiedOptions struct {
 // popup is keyboard-driven and mouse handling adds latency.
 func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, currentProject, currentWorkspaceRoot, currentWorkspace string, opts RunUnifiedOptions) error {
 	m := NewUnified(mgr, store, tc, currentProject, currentWorkspaceRoot, currentWorkspace)
+	m.RunInitFunc = opts.RunInitFunc
 	m.SetVersionInfo(opts.VersionLabel, opts.DevWorkspace)
 	m.SetUpgradeAvailable(opts.InitialUpgrade)
 	m.SetUpgradeRefreshFn(opts.RefreshFn)
