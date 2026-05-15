@@ -85,6 +85,13 @@ func classifyCall(args []string, stdin []byte) string {
 		strings.Contains(string(stdin), "/canopy") {
 		return "mkdir-remote-sockdir"
 	}
+	// Remote tmux config: `bash` + stdin script that updates
+	// ~/.tmux.conf with the copy-pipe binds.
+	if len(args) == 1 && args[0] == "bash" && len(stdin) > 0 &&
+		strings.Contains(string(stdin), "copy-pipe-and-cancel") &&
+		strings.Contains(string(stdin), "tmux.conf") {
+		return "configure-remote-tmux"
+	}
 	// Verify-step 1: `bash` (no -c) + stdin = `exec ".../wl-paste"
 	// --list-types`. Stdin pattern avoids SSH word-split.
 	if len(args) == 1 && args[0] == "bash" && len(stdin) > 0 &&
@@ -127,12 +134,13 @@ func newTestHostInstaller(t *testing.T) (*HostInstaller, *fakeSSH) {
 // UID) don't have to spell out six others.
 func happyPathResponses() map[string]fakeSSHResp {
 	return map[string]fakeSSHResp{
-		"id":                   {stdout: []byte("1001\n")},
-		"mkdir-remote-sockdir": {},
-		"push-wl-paste":        {},
-		"push-wl-copy":         {},
-		"verify-wrapper":       {stdout: []byte("text/plain;charset=utf-8\n")},
-		"verify-path":          {stdout: []byte("/home/avi/.local/bin/wl-paste\n")},
+		"id":                    {stdout: []byte("1001\n")},
+		"mkdir-remote-sockdir":  {},
+		"push-wl-paste":         {},
+		"push-wl-copy":          {},
+		"configure-remote-tmux": {},
+		"verify-wrapper":        {stdout: []byte("text/plain;charset=utf-8\n")},
+		"verify-path":           {stdout: []byte("/home/avi/.local/bin/wl-paste\n")},
 	}
 }
 
@@ -144,9 +152,9 @@ func TestInstallOnHost_HappyPath(t *testing.T) {
 	if err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out); err != nil {
 		t.Fatalf("InstallOnHost: %v", err)
 	}
-	// Six SSH calls: id + mkdir + push wl-paste + push wl-copy + verify-wrapper + verify-path.
-	if len(f.calls) != 6 {
-		t.Fatalf("expected 6 SSH calls, got %d: %v", len(f.calls), f.calls)
+	// Seven SSH calls: id + mkdir + push×2 + configure-tmux + verify-wrapper + verify-path.
+	if len(f.calls) != 7 {
+		t.Fatalf("expected 7 SSH calls, got %d", len(f.calls))
 	}
 	// SSH snippet landed in the per-host file (filename keyed by canopy
 	// host name; Host directive INSIDE keyed by SSH hostname):

@@ -155,11 +155,81 @@ func (h *HostInstaller) InstallOnHost(ctx context.Context, hostName, sshTarget s
 		return fmt.Errorf("InstallOnHost: %w", err)
 	}
 
+	// Configuring tmux copy-mode binds on the remote is UX polish, not
+	// load-bearing for the bridge mechanism itself. If the SSH or
+	// shell-script side fails, log + continue — the bridge still
+	// works for command-line `wl-copy` and Claude Code paste; only
+	// tmux's `y` / Enter shortcuts would be missing.
+	if err := h.EnsureRemoteTmuxConfig(ctx, sshTarget, out); err != nil {
+		fmt.Fprintf(out, "  ⚠  warning: tmux copy-mode binds not configured on remote: %v\n", err)
+		fmt.Fprintln(out, "     Bridge still works; manually add the binds from")
+		fmt.Fprintln(out, "     docs/remote-workspaces.md if you want copy-mode selections to flow.")
+	}
+
 	if err := h.verifyBridge(ctx, hostName, sshTarget, out); err != nil {
 		return fmt.Errorf("InstallOnHost: bridge installed but verify failed: %w", err)
 	}
 
 	fmt.Fprintln(out, "  bridge active.")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Optional nvim config on the remote (one-time, manual) so yanks reach the laptop clipboard:")
+	fmt.Fprintln(out, "  vim.opt.clipboard = \"unnamedplus\"   -- init.lua")
+	fmt.Fprintln(out, "  set clipboard+=unnamedplus           \" init.vim")
+	return nil
+}
+
+// remoteTmuxConfigScript splices a marker-bounded block into the
+// remote's ~/.tmux.conf containing the canopy bindings:
+//
+//	# canopy:start clipboard-bridge ...
+//	bind-key -T copy-mode-vi y     send-keys -X copy-pipe-and-cancel "wl-copy"
+//	bind-key -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "wl-copy"
+//	bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "wl-copy"
+//	bind-key -T copy-mode M-w     send-keys -X copy-pipe-and-cancel "wl-copy"
+//	# canopy:end clipboard-bridge
+//
+// Idempotent: re-running deletes any existing canopy block before
+// appending a fresh one. Best-effort `tmux source-file` at the end
+// re-reads the config in any running tmux server so existing
+// sessions pick up the new binds without restart; failure (no tmux
+// running on the remote) is silenced.
+const remoteTmuxConfigScript = `set -e
+CONF="$HOME/.tmux.conf"
+touch "$CONF"
+
+sed -i '/# canopy:start clipboard-bridge/,/# canopy:end clipboard-bridge/d' "$CONF"
+
+cat >> "$CONF" <<'CANOPY_TMUX_EOF'
+
+# canopy:start clipboard-bridge - managed by canopy; reinstall via 'canopy host clipboard <name>'
+# Routes tmux copy-mode selections through wl-copy to the laptop clipboard.
+# extended-keys on lets tmux distinguish modifier combinations like
+# Ctrl+Shift+C from plain Ctrl+C (tmux 3.2+ feature).
+set -g extended-keys on
+
+bind-key -T copy-mode-vi y     send-keys -X copy-pipe-and-cancel "wl-copy"
+bind-key -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "wl-copy"
+bind-key -T copy-mode-vi C-S-c send-keys -X copy-pipe-and-cancel "wl-copy"
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "wl-copy"
+bind-key -T copy-mode    M-w   send-keys -X copy-pipe-and-cancel "wl-copy"
+bind-key -T copy-mode    C-S-c send-keys -X copy-pipe-and-cancel "wl-copy"
+# canopy:end clipboard-bridge
+CANOPY_TMUX_EOF
+
+tmux source-file "$CONF" 2>/dev/null || true
+`
+
+// EnsureRemoteTmuxConfig pushes the tmux copy-mode bindings to the
+// remote's ~/.tmux.conf via marker-block splice. After-install side
+// effect: a tmux yank/select inside any tmux session on the remote
+// pipes the selection through wl-copy → canopy wrapper →
+// clip-copy.sock → laptop daemon → local Wayland clipboard.
+func (h *HostInstaller) EnsureRemoteTmuxConfig(ctx context.Context, sshTarget string, out io.Writer) error {
+	_, stderr, err := h.SSHExec(ctx, sshTarget, strings.NewReader(remoteTmuxConfigScript), "bash")
+	if err != nil {
+		return fmt.Errorf("EnsureRemoteTmuxConfig: %w (stderr: %s)", err, strings.TrimSpace(string(stderr)))
+	}
+	fmt.Fprintln(out, "  configured tmux copy-mode binds on remote (~/.tmux.conf)")
 	return nil
 }
 
