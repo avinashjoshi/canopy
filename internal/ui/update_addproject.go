@@ -315,7 +315,25 @@ func (m *Model) submitAddProjectRemote(rawURL, hostName string) (tea.Model, tea.
 	// PATH (incl. ~/.local/bin where canopy typically lives) is set,
 	// and allocates a pty so git auth prompts can read /dev/tty.
 	remote := "canopy init " + shellQuoteUI(rawURL)
-	cmd := host.SSHRunUser(context.Background(), h.SSHTarget, remote)
+	ctx := context.Background()
+	sshCmd := host.SSHRunUser(ctx, h.SSHTarget, remote)
+
+	// Wrap ssh in a tiny shell preamble that prints a "connecting"
+	// line BEFORE ssh starts its silent handshake. Without this the
+	// user sees several seconds of dead terminal between the form
+	// submit and the first remote output — easy to mistake for a hang.
+	//
+	// Implementation: `sh -c 'echo $1; shift; exec "$@"' -- <preamble> <ssh argv>`
+	// passes the ssh argv as positional args so its exact shape is
+	// preserved (no fragile re-quoting of paths-with-% characters
+	// like ssh's ControlPath). On subsequent dispatches the
+	// ControlMaster socket reuses the connection — handshake is
+	// instant — so the user mostly sees the line and immediately
+	// sees ssh's output. On first dispatch they see the line and
+	// then a few seconds of wait, which is honest signal.
+	preamble := fmt.Sprintf("Connecting to %s (%s)... (first dispatch may take a few seconds)", h.Name, h.SSHTarget)
+	wrapArgs := append([]string{"-c", `echo "$1"; shift; exec "$@"`, "--", preamble}, sshCmd.Args...)
+	cmd := exec.CommandContext(ctx, "sh", wrapArgs...)
 	cmd.Env = os.Environ()
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return addProjectRemoteDoneMsg{hostName: hostName, rawURL: rawURL, err: err}
