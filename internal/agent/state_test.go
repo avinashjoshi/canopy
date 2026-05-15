@@ -431,6 +431,73 @@ func TestIsTrustDialog(t *testing.T) {
 	}
 }
 
+// TestClassifyTwoShot covers the v0.19 remote-status-observability
+// stateless motion classifier. Two pane captures taken a short interval
+// apart are diffed via normalize() — same definition of "motion" the
+// Detector uses for local rows, so badges match across local/remote.
+func TestClassifyTwoShot(t *testing.T) {
+	idleClaude := "❯ Try \"explain auth.ts\"\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+	awaitingClaude := "Allow tool use of Bash? (y/N)"
+
+	cases := []struct {
+		name     string
+		launcher string
+		prev     string
+		cur      string
+		want     State
+	}{
+		{"empty prev", "claude", "", idleClaude, StateUnknown},
+		{"empty cur", "claude", idleClaude, "", StateUnknown},
+		{"empty launcher", "", "a", "b", StateUnknown},
+		{"non-claude launcher with motion", "aider", "first", "second", StateUnknown},
+		{"non-claude launcher stable", "codex", "stable", "stable", StateUnknown},
+		{"claude motion → Thinking", "claude", "first response chunk", "first response chunk plus more", StateThinking},
+		{
+			"claude cosmetic-only motion → NOT Thinking (normalize masks spinner)",
+			"claude",
+			idleClaude + "\n✻ Baked for 1s",
+			idleClaude + "\n✻ Baked for 17s",
+			StateIdle,
+		},
+		{
+			"claude stable + awaiting pattern → AwaitingInput",
+			"claude",
+			awaitingClaude,
+			awaitingClaude,
+			StateAwaitingInput,
+		},
+		{
+			"claude stable + idle marker → Idle",
+			"claude",
+			idleClaude,
+			idleClaude,
+			StateIdle,
+		},
+		{
+			"claude stable + no marker → Unknown",
+			"claude",
+			"opaque text with no markers",
+			"opaque text with no markers",
+			StateUnknown,
+		},
+		{
+			"awaiting beats idle when stable + both match (matches Observe order)",
+			"claude",
+			"Welcome back\nAllow tool use? (y/N)",
+			"Welcome back\nAllow tool use? (y/N)",
+			StateAwaitingInput,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyTwoShot(tc.launcher, tc.prev, tc.cur); got != tc.want {
+				t.Errorf("ClassifyTwoShot(%q, prev=%q, cur=%q) = %v; want %v",
+					tc.launcher, tc.prev, tc.cur, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestClassifyOneShot covers the v0.17 Phase 1d.2 single-shot
 // classifier used by `canopy ls --json` to stamp each workspace's
 // agent_state without diff/history. AwaitingInput pattern matches
