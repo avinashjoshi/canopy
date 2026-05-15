@@ -2768,3 +2768,27 @@ launcher map. See `docs/design/v0.6-agent-lifecycle.md`.
 **Depends on / blocked by:** v0.20 land.
 
 ---
+
+## 📋 OPEN (P3) — `canopy host install` should put canopy on remote PATH
+
+**What:** When `canopy host install` succeeds (installs canopy on the remote), verify `canopy` is reachable from a login shell. If not, append the standard PATH export to the user's `~/.bashrc` (and `~/.zshrc` if it exists) with their permission.
+
+**Why:** v0.20's `canopy init --on <host>` runs the remote canopy via `bash -lc 'canopy init ...'`. If the remote's login profile doesn't add `~/.local/bin` to PATH, the dispatch fails with `canopy: command not found`. Today we work around this in `internal/host.SSHRunUser` by prepending `export PATH="$HOME/.local/bin:$PATH"` defensively — that fixes the immediate symptom but assumes canopy lives at `~/.local/bin/canopy`. A proper setup-time fix removes the assumption and makes `ssh <host> canopy ...` Just Work for every dispatch path (including ones that don't go through SSHRunUser).
+
+**Pros:** No more invisible PATH gotchas. Users who SSH into the host manually also see `canopy` on their PATH. Cleaner separation: `SSHRunUser` doesn't need to encode install-path assumptions.
+
+**Cons:** Modifying user shell config (~/.bashrc) is intrusive. Need to be careful about idempotency (don't append the line twice), shell detection (bash vs zsh vs fish), and an opt-out for users who manage PATH some other way.
+
+**Context:** Verified on a fresh Arch host (a10i-tower): `ssh tower 'bash -lc "which canopy"'` returned empty even though `canopy host install` had succeeded. SSHRunUser's PATH prepend is the workaround; this TODO is the proper fix.
+
+Implementation sketch:
+1. After install, run `ssh <host> 'bash -lc "command -v canopy"'`. If non-empty, done.
+2. Else, detect the actual install path the script wrote to. Probably `~/.local/bin/canopy`.
+3. Detect the user's shell rc files (~/.bashrc, ~/.zshrc, ~/.profile).
+4. Use AskUserQuestion to confirm before editing.
+5. Append a clearly-marked line: `# canopy installer (canopy host install)\nexport PATH="$HOME/.local/bin:$PATH"` — idempotent via the comment marker.
+6. Note in the post-install output: "Added ~/.local/bin to PATH in ~/.bashrc. Source it (`exec bash -l`) or open a new shell for it to take effect."
+
+**Depends on / blocked by:** v0.20 land.
+
+---

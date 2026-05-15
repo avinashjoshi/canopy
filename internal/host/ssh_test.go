@@ -180,9 +180,21 @@ func TestSSHRunUser_LoginShellAndPTY(t *testing.T) {
 	// the whole command as one token. (Without this the symptom is
 	// `init: line 1: canopy: command not found` — bash splits the
 	// command on spaces and runs only the first word.)
-	want := "'canopy init '\\''https://x.git'\\'''"
-	if args[bashIdx+2] != want {
-		t.Errorf("remote cmd = %q; want %q", args[bashIdx+2], want)
+	//
+	// SSHRunUser also prepends `export PATH=...` to ensure canopy is
+	// found even when the remote login profile doesn't add
+	// ~/.local/bin to PATH (which we observed in the wild on a fresh
+	// Arch host: bash -lc PATH was /usr/local/sbin:/usr/local/bin:
+	// /usr/bin:... only).
+	got := args[bashIdx+2]
+	if !strings.Contains(got, `canopy init '\''https://x.git'\''`) {
+		t.Errorf("remote cmd missing properly-quoted user command; got %q", got)
+	}
+	if !strings.Contains(got, `export PATH="$HOME/.local/bin:$PATH"`) {
+		t.Errorf("remote cmd missing PATH prepend (canopy must be findable on hosts without profile setup); got %q", got)
+	}
+	if got[0] != '\'' || got[len(got)-1] != '\'' {
+		t.Errorf("remote cmd not outer-quoted; got %q", got)
 	}
 	// ControlMaster reuse must still apply so a previously-opened
 	// socket is shared (no re-handshake on the second dispatch).

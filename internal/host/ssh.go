@@ -118,11 +118,27 @@ func SSHCmdBatch(ctx context.Context, target string, args ...string) *exec.Cmd {
 // handshake cost on the second + Nth call).
 func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd {
 	socketPath := filepath.Join(canopyHome(), "ssh-%C.sock")
+	// Prepend $HOME/.local/bin to PATH defensively. `bash -l` SHOULD
+	// source the user's profile and pick up ~/.local/bin (canopy's
+	// conventional install dir), but plenty of real-world setups
+	// don't: a minimal bashrc, a non-default login shell, an Arch box
+	// where PATH is owned by /etc/profile, etc. Prepending here costs
+	// nothing if the dir is already on PATH (duplicate entry, harmless)
+	// and fixes the "canopy: command not found" failure mode users hit
+	// the first time they `canopy init --on <host>`.
+	//
+	// $HOME and $PATH stay LITERAL through the outer-quote step below
+	// — the wire-level shell strips the single quotes and bash -lc
+	// then expands the variables when it parses its argument as a
+	// shell command body. (Inside single quotes, expansion is
+	// suppressed; once the outer shell unwraps them, the inner string
+	// reaches bash with raw $HOME / $PATH tokens to expand.)
+	withPath := `export PATH="$HOME/.local/bin:$PATH"; ` + remoteCmd
 	// SSH joins all post-target argv with spaces and sends ONE string
 	// to the remote shell. So `bash -lc <quoted-string>` must arrive
 	// as 3 tokens — not 3+N tokens where N is the word count of
-	// remoteCmd. Outer-shell-quote remoteCmd so the remote shell sees
-	// it as one arg to bash -lc:
+	// remoteCmd. Outer-shell-quote so the remote shell sees it as one
+	// arg to bash -lc:
 	//
 	//   ssh ... target bash -lc 'canopy init '\''https://x'\'''
 	//                            └─────────── one arg ──────────┘
@@ -131,7 +147,7 @@ func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd 
 	// `bash -lc canopy init 'url'` on the wire; bash -lc consumed
 	// only "canopy", set $0 to "init", and the URL leaked into $1.
 	// Symptom: "init: line 1: canopy: command not found".
-	quoted := "'" + strings.ReplaceAll(remoteCmd, "'", `'\''`) + "'"
+	quoted := "'" + strings.ReplaceAll(withPath, "'", `'\''`) + "'"
 	sshArgs := []string{
 		"-t", // allocate remote pty for interactive auth prompts
 		"-o", "ControlMaster=auto",
