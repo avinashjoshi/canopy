@@ -73,11 +73,24 @@ func WrapperContent(w WrapperScript, canopyVersion string) (content string, hash
 // SnippetData is what snippet.tmpl renders against. Kept as a named
 // type (not map[string]any) so a missing field becomes a compile-time
 // error instead of an empty-string template hole at runtime.
+//
+// HostName is canopy's internal name for the host (e.g., "tower") —
+// used in the snippet's comment header and the --reinstall hint.
+//
+// SSHHostname is the hostname portion of the SSH target string
+// (e.g., "tower.lan" extracted from "avi@tower.lan:22"). This is
+// what goes in the snippet's `Host` directive: SSH matches Host
+// patterns against the hostname portion of the target the user types
+// on the command line, NOT against canopy's internal alias. Using
+// HostName for the directive (a v0.18 Phase-1 bug) silently dropped
+// the RemoteForwards whenever canopy or the user did
+// `ssh user@hostname` instead of `ssh canopy-alias`.
 type SnippetData struct {
-	HostName  string
-	Version   string
-	LocalUID  int
-	RemoteUID int
+	HostName    string
+	SSHHostname string
+	Version     string
+	LocalUID    int
+	RemoteUID   int
 }
 
 // SnippetContent renders the per-host SSH config snippet. The output
@@ -86,13 +99,17 @@ type SnippetData struct {
 // `canopy install clipboard-bridge` wrote.
 //
 // Errors:
-//   - empty HostName: snippet would target every host (catastrophic).
+//   - empty HostName or SSHHostname: snippet would generate a `Host `
+//     (whitespace) stanza which SSH treats as `Host *`. Catastrophic.
 //   - non-positive UIDs: socket paths /run/user/<uid>/ would resolve
 //     to /run/user/0/ which is root's runtime dir (won't exist for an
 //     unprivileged daemon). Fail loudly.
 func SnippetContent(d SnippetData) (string, error) {
 	if d.HostName == "" {
-		return "", fmt.Errorf("SnippetContent: empty HostName would generate a Host * stanza; refused")
+		return "", fmt.Errorf("SnippetContent: empty HostName would break the snippet's comment + reinstall hint; refused")
+	}
+	if d.SSHHostname == "" {
+		return "", fmt.Errorf("SnippetContent: empty SSHHostname would generate a `Host ` (== `Host *`) stanza, broadcasting RemoteForwards to every SSH target; refused")
 	}
 	if d.LocalUID <= 0 || d.RemoteUID <= 0 {
 		return "", fmt.Errorf("SnippetContent: non-positive UID (local=%d, remote=%d) would point sockets at /run/user/0/", d.LocalUID, d.RemoteUID)

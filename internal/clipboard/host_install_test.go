@@ -131,7 +131,8 @@ func TestInstallOnHost_HappyPath(t *testing.T) {
 	if len(f.calls) != 5 {
 		t.Fatalf("expected 5 SSH calls, got %d: %v", len(f.calls), f.calls)
 	}
-	// SSH snippet landed in the per-host file:
+	// SSH snippet landed in the per-host file (filename keyed by canopy
+	// host name; Host directive INSIDE keyed by SSH hostname):
 	snippetPath := filepath.Join(inst.HomeDir, ".ssh", "config.d", "canopy", "tower.conf")
 	data, err := os.ReadFile(snippetPath)
 	if err != nil {
@@ -139,13 +140,43 @@ func TestInstallOnHost_HappyPath(t *testing.T) {
 	}
 	body := string(data)
 	for _, must := range []string{
-		"Host tower",
+		"Host tower.lan", // hostname parsed from "avi@tower.lan" — NOT "Host tower" (canopy alias)
 		"/run/user/1000/canopy/clip-text.sock",
 		"/run/user/1001/canopy/clip-text.sock",
 		"v0.18.0+test",
 	} {
 		if !strings.Contains(body, must) {
 			t.Errorf("snippet missing %q\nbody:\n%s", must, body)
+		}
+	}
+}
+
+func TestHostnameFromSSHTarget(t *testing.T) {
+	// SSH's Host pattern matching keys off the hostname portion of
+	// the target. The snippet's Host directive must use that exact
+	// string — anything else silently fails to match.
+	cases := []struct {
+		target string
+		want   string
+	}{
+		{"tower.lan", "tower.lan"},
+		{"avi@tower.lan", "tower.lan"},
+		{"avi@tower.lan:22", "tower.lan"},
+		{"tower.lan:2222", "tower.lan"},
+		{"cassy@a10i-tower.geep-carat.ts.net", "a10i-tower.geep-carat.ts.net"},
+		{"cassy@a10i-tower.geep-carat.ts.net:22", "a10i-tower.geep-carat.ts.net"},
+		// LastIndex defends against an @ inside the user portion.
+		{"weird@user@host.example.com", "host.example.com"},
+		// A trailing :word that ISN'T digits is left attached (defends
+		// against accidental IPv6 mangling; IPv6 isn't supported
+		// upstream yet but the parser shouldn't actively make it
+		// worse).
+		{"host:notaport", "host:notaport"},
+	}
+	for _, c := range cases {
+		got := hostnameFromSSHTarget(c.target)
+		if got != c.want {
+			t.Errorf("hostnameFromSSHTarget(%q) = %q, want %q", c.target, got, c.want)
 		}
 	}
 }

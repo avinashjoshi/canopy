@@ -6,6 +6,13 @@
 # reachable on the remote host. The remote-side wl-paste / wl-copy
 # wrappers in ~/.local/bin/ connect to these paths via socat.
 #
+# Host directive uses the SSH hostname ({{.SSHHostname}}), NOT canopy's
+# internal name "{{.HostName}}", because SSH matches Host patterns
+# against the hostname portion of the target string. A directive like
+# `Host tower` only fires for `ssh tower`; canopy uses the full
+# `[user@]hostname[:port]` form, whose hostname part matches the
+# pattern below.
+#
 # Socket paths use the literal UIDs detected at install time
 # (laptop UID {{.LocalUID}}, remote UID {{.RemoteUID}}) because $XDG_RUNTIME_DIR
 # isn't reliably set in sshd's environment when establishing the
@@ -16,7 +23,7 @@
 # socket from a prior session blocks the next reconnect with
 # "remote port forwarding failed for ..." and the bridge silently
 # breaks. With it, sshd removes stale sockets on each connect.
-Host {{.HostName}}
+Host {{.SSHHostname}}
   RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-text.sock  /run/user/{{.LocalUID}}/canopy/clip-text.sock
   RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-image.sock /run/user/{{.LocalUID}}/canopy/clip-image.sock
   RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-copy.sock  /run/user/{{.LocalUID}}/canopy/clip-copy.sock

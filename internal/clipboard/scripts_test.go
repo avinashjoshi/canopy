@@ -117,16 +117,17 @@ func TestWrapperRemoteName_StripsShExtension(t *testing.T) {
 
 func TestSnippetContent_RendersWithUIDsAndHostName(t *testing.T) {
 	content, err := SnippetContent(SnippetData{
-		HostName:  "tower",
-		Version:   "v0.18.0+test",
-		LocalUID:  1000,
-		RemoteUID: 1001,
+		HostName:    "tower",
+		SSHHostname: "tower.example.com",
+		Version:     "v0.18.0+test",
+		LocalUID:    1000,
+		RemoteUID:   1001,
 	})
 	if err != nil {
 		t.Fatalf("SnippetContent: %v", err)
 	}
 	for _, must := range []string{
-		"Host tower",
+		"Host tower.example.com",
 		"/run/user/1000/canopy/clip-text.sock",
 		"/run/user/1001/canopy/clip-text.sock",
 		"/run/user/1000/canopy/clip-image.sock",
@@ -136,6 +137,35 @@ func TestSnippetContent_RendersWithUIDsAndHostName(t *testing.T) {
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("snippet missing %q\nbody:\n%s", must, content)
+		}
+	}
+}
+
+func TestSnippetContent_HostDirectiveUsesSSHHostnameNotCanopyAlias(t *testing.T) {
+	// The bug this catches: snippet's Host pattern must match what SSH
+	// sees on the command line. SSH keys off the hostname portion of
+	// the target string, not against any user-defined alias. Using
+	// canopy's internal alias for the directive (a v0.18 Phase-1 bug)
+	// silently dropped the RemoteForwards whenever canopy did
+	// `ssh user@hostname` instead of `ssh canopy-alias`.
+	content, _ := SnippetContent(SnippetData{
+		HostName:    "tower",
+		SSHHostname: "a10i-tower.geep-carat.ts.net",
+		LocalUID:    1000,
+		RemoteUID:   1000,
+	})
+	// Must have `Host <ssh-hostname>` exactly. Must NOT have a bare
+	// `Host tower\n` line (that line existed in the v0.18 Phase-1 bug
+	// and silently mismatched real SSH targets).
+	if !strings.Contains(content, "Host a10i-tower.geep-carat.ts.net\n") {
+		t.Errorf("snippet missing Host directive with SSH hostname; body:\n%s", content)
+	}
+	for _, line := range strings.Split(content, "\n") {
+		// "Host tower" alone (with no other patterns on the same line)
+		// is the bug shape. The comment header mentioning the canopy
+		// alias is fine; we're checking actual directive lines.
+		if strings.HasPrefix(line, "Host tower") && !strings.Contains(line, "tower.example.com") && !strings.Contains(line, "a10i-tower") {
+			t.Errorf("snippet has bare `Host tower` line — SSH won't match this against real ssh targets; line: %q", line)
 		}
 	}
 }
@@ -170,21 +200,28 @@ func TestSnippetContent_RemoteUIDFirstOnEachLine(t *testing.T) {
 }
 
 func TestSnippetContent_RefusesEmptyHostName(t *testing.T) {
-	// Empty HostName would render as `Host ` (whitespace + nothing),
+	_, err := SnippetContent(SnippetData{HostName: "", SSHHostname: "tower.lan", Version: "v0", LocalUID: 1000, RemoteUID: 1001})
+	if err == nil {
+		t.Fatal("SnippetContent must refuse empty HostName")
+	}
+}
+
+func TestSnippetContent_RefusesEmptySSHHostname(t *testing.T) {
+	// Empty SSHHostname would render as `Host ` (whitespace + nothing),
 	// which SSH treats as the wildcard `Host *` — broadcasting every
 	// canopy bridge to every SSH connection. Catastrophic; refuse.
-	_, err := SnippetContent(SnippetData{HostName: "", Version: "v0", LocalUID: 1000, RemoteUID: 1001})
+	_, err := SnippetContent(SnippetData{HostName: "tower", SSHHostname: "", Version: "v0", LocalUID: 1000, RemoteUID: 1001})
 	if err == nil {
-		t.Fatal("SnippetContent must refuse empty HostName (would broadcast to all hosts)")
+		t.Fatal("SnippetContent must refuse empty SSHHostname (would broadcast to all hosts)")
 	}
 }
 
 func TestSnippetContent_RefusesNonPositiveUID(t *testing.T) {
 	cases := []SnippetData{
-		{HostName: "tower", LocalUID: 0, RemoteUID: 1001},
-		{HostName: "tower", LocalUID: 1000, RemoteUID: 0},
-		{HostName: "tower", LocalUID: -1, RemoteUID: 1001},
-		{HostName: "tower", LocalUID: 1000, RemoteUID: -1},
+		{HostName: "tower", SSHHostname: "tower.lan", LocalUID: 0, RemoteUID: 1001},
+		{HostName: "tower", SSHHostname: "tower.lan", LocalUID: 1000, RemoteUID: 0},
+		{HostName: "tower", SSHHostname: "tower.lan", LocalUID: -1, RemoteUID: 1001},
+		{HostName: "tower", SSHHostname: "tower.lan", LocalUID: 1000, RemoteUID: -1},
 	}
 	for _, c := range cases {
 		_, err := SnippetContent(c)

@@ -115,7 +115,7 @@ func (h *HostInstaller) InstallOnHost(ctx context.Context, hostName, sshTarget s
 		}
 	}
 
-	if err := h.writeSSHSnippet(hostName, remoteUID, out); err != nil {
+	if err := h.writeSSHSnippet(hostName, sshTarget, remoteUID, out); err != nil {
 		return fmt.Errorf("InstallOnHost: %w", err)
 	}
 
@@ -193,17 +193,29 @@ func (h *HostInstaller) pushWrapper(ctx context.Context, sshTarget string, w Wra
 // Filename is the canopy host name, NOT the SSH target. Two hosts
 // with the same SSH target (uncommon but legal — same machine reached
 // by IP vs hostname) get distinct snippets.
-func (h *HostInstaller) writeSSHSnippet(hostName string, remoteUID int, out io.Writer) error {
+//
+// The `Host` directive in the snippet body uses the SSH HOSTNAME (the
+// hostname portion of sshTarget, e.g., "tower.lan" extracted from
+// "avi@tower.lan:22") — NOT canopy's internal hostName. SSH matches
+// Host patterns against the hostname portion of the target string on
+// the command line; using canopy's alias silently fails to match when
+// canopy (or the user) does `ssh user@hostname`.
+func (h *HostInstaller) writeSSHSnippet(hostName, sshTarget string, remoteUID int, out io.Writer) error {
 	dir := filepath.Join(h.HomeDir, ".ssh", "config.d", "canopy")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("writeSSHSnippet: mkdir %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, hostName+".conf")
+	sshHostname := hostnameFromSSHTarget(sshTarget)
+	if sshHostname == "" {
+		return fmt.Errorf("writeSSHSnippet: could not parse hostname from ssh target %q", sshTarget)
+	}
 	content, err := SnippetContent(SnippetData{
-		HostName:  hostName,
-		Version:   h.Version,
-		LocalUID:  h.LocalUID,
-		RemoteUID: remoteUID,
+		HostName:    hostName,
+		SSHHostname: sshHostname,
+		Version:     h.Version,
+		LocalUID:    h.LocalUID,
+		RemoteUID:   remoteUID,
 	})
 	if err != nil {
 		return fmt.Errorf("writeSSHSnippet: %w", err)
@@ -211,8 +223,50 @@ func (h *HostInstaller) writeSSHSnippet(hostName string, remoteUID int, out io.W
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("writeSSHSnippet: write %s: %w", path, err)
 	}
-	fmt.Fprintf(out, "  wrote %s\n", path)
+	fmt.Fprintf(out, "  wrote %s (Host %s)\n", path, sshHostname)
 	return nil
+}
+
+// hostnameFromSSHTarget extracts the hostname portion of an SSH target
+// string. Examples:
+//
+//	avi@tower.lan      → tower.lan
+//	avi@tower.lan:22   → tower.lan
+//	tower.lan          → tower.lan
+//	tower.lan:22       → tower.lan
+//
+// SSH's Host pattern matching keys off this string (the hostname part
+// of `[user@]host[:port]`). The snippet must use it, not canopy's
+// internal alias, or the `Host` directive won't match.
+//
+// IPv6-bracketed targets ([::1]:22) are not handled — Phase 1 ignores
+// IPv6 entirely. Tracked as a follow-up; will revisit if anyone runs
+// canopy against an IPv6-only host.
+func hostnameFromSSHTarget(target string) string {
+	// Strip any `user@` prefix. LastIndex defends against the
+	// pathological "weird-user-name-with-@@-in-it@host" case (legal in
+	// some shells; SSH parses the LAST @ as the user/host separator).
+	if at := strings.LastIndex(target, "@"); at >= 0 {
+		target = target[at+1:]
+	}
+	// Strip `:port` suffix when present. Only strip the LAST colon and
+	// only if the remainder is digits — defends against accidental
+	// IPv6 mangling (a future IPv6-target user gets a no-op instead of
+	// a wrong-host snippet).
+	if colon := strings.LastIndex(target, ":"); colon > 0 {
+		portPart := target[colon+1:]
+		allDigits := portPart != ""
+		for _, r := range portPart {
+			if r < '0' || r > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			target = target[:colon]
+		}
+	}
+	return target
 }
 
 // verifyBridge confirms two distinct things, in order:
