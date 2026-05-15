@@ -273,6 +273,80 @@ func TestNewUserStore_EmptyHome(t *testing.T) {
 	}
 }
 
+// TestExpandTilde covers the cases that cause the "literal ~ inside
+// an absolute path" bork reported in the wild. The TUI Settings modal
+// stores whatever the user types — `~/Work` stays literal — and the
+// shell normally would have expanded it, so callers must explicitly
+// expand on read. Without this, filepath.Abs produces nonsense like
+// `/cwd/~/Work/cravd` and clones land in a literal dir named "~".
+func TestExpandTilde(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no $HOME — can't exercise the expansion")
+	}
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"~", home},
+		{"~/Work", filepath.Join(home, "Work")},
+		{"~/Work/cravd", filepath.Join(home, "Work", "cravd")},
+		// Already-absolute paths pass through unchanged.
+		{"/abs/path", "/abs/path"},
+		// `~user/...` is left alone — we don't do /etc/passwd lookups.
+		{"~someone/x", "~someone/x"},
+		// Empty stays empty.
+		{"", ""},
+		// `~` only at the start matters; mid-string is left alone.
+		{"/already/has/~/inside", "/already/has/~/inside"},
+	}
+	for _, tc := range cases {
+		got := config.ExpandTilde(tc.in)
+		if got != tc.want {
+			t.Errorf("ExpandTilde(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestResolveSourceRoot_ExpandsTilde: regression for the cravd path
+// borked-by-literal-~ bug. A config value of `~/Work` must come out as
+// `<HOME>/Work`, not `~/Work`.
+func TestResolveSourceRoot_ExpandsTilde(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no $HOME")
+	}
+	os.Unsetenv("CANOPY_SOURCE_ROOT")
+	c := &config.UserConfig{SourceRoot: "~/Work"}
+	got, src := config.ResolveSourceRoot(c, "/anywhere")
+	want := filepath.Join(home, "Work")
+	if got != want {
+		t.Errorf("got %q; want %q", got, want)
+	}
+	if src != config.SourceRootFromConfig {
+		t.Errorf("source = %q; want config", src)
+	}
+}
+
+// TestResolveSourceRoot_ExpandsTildeFromEnv: env-set tildes also
+// expand. Bash usually expands `~` in arg position but NOT inside
+// variable values, so `CANOPY_SOURCE_ROOT="~/Work"` ships literally.
+func TestResolveSourceRoot_ExpandsTildeFromEnv(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		t.Skip("no $HOME")
+	}
+	t.Setenv("CANOPY_SOURCE_ROOT", "~/Work")
+	got, src := config.ResolveSourceRoot(nil, "/anywhere")
+	want := filepath.Join(home, "Work")
+	if got != want {
+		t.Errorf("got %q; want %q", got, want)
+	}
+	if src != config.SourceRootFromEnv {
+		t.Errorf("source = %q; want env", src)
+	}
+}
+
 // TestUserStore_Path returns the absolute path to config.json. Error
 // messages embed this string, so it's part of the public contract.
 func TestUserStore_Path(t *testing.T) {

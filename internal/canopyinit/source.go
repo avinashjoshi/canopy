@@ -104,7 +104,10 @@ func DeriveBasename(rawURL string) (string, error) {
 // canopyHome is passed in so tests can inject t.TempDir().
 func ResolveCloneDest(rawURL, destOverride string, c *config.UserConfig, canopyHome string) (absDest, sourceLabel string, err error) {
 	if destOverride != "" {
-		abs, err := filepath.Abs(destOverride)
+		// Expand leading `~` so a TUI-typed dest like `~/Work/foo`
+		// resolves to `$HOME/Work/foo` rather than passing literal
+		// `~` to filepath.Abs (which would build `/cwd/~/Work/foo`).
+		abs, err := filepath.Abs(config.ExpandTilde(destOverride))
 		if err != nil {
 			return "", "", fmt.Errorf("resolve dest: %w", err)
 		}

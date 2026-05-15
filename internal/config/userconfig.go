@@ -200,14 +200,53 @@ const SourceRootEnvVar = "CANOPY_SOURCE_ROOT"
 // Setting a config value should not mutate the filesystem; setting then
 // changing your mind shouldn't leave empty dirs behind.
 //
+// Tilde expansion: `~/foo` and `~` are expanded to $HOME-relative paths
+// when reading. The shell normally does this before canopy sees an
+// argument, but values coming from non-shell paths (TUI text input,
+// hand-edited config.json) keep their literal `~`. Without expansion,
+// filepath.Abs later produces nonsense like `/cwd/~/foo`. Expanding on
+// READ keeps the JSON friendly to humans (config.json shows `~/Work`,
+// not `/home/cassy/Work`) and bullet-proofs every caller.
+//
 // canopyHome is passed in (not derived from os.UserHomeDir) so tests
 // can inject a tempdir without monkey-patching HOME.
 func ResolveSourceRoot(c *UserConfig, canopyHome string) (path string, source SourceRootSource) {
 	if env := os.Getenv(SourceRootEnvVar); env != "" {
-		return env, SourceRootFromEnv
+		return ExpandTilde(env), SourceRootFromEnv
 	}
 	if c != nil && c.SourceRoot != "" {
-		return c.SourceRoot, SourceRootFromConfig
+		return ExpandTilde(c.SourceRoot), SourceRootFromConfig
 	}
 	return filepath.Join(canopyHome, "sources"), SourceRootFromDefault
+}
+
+// ExpandTilde returns p with a leading `~` or `~/` expanded to the
+// current user's home dir. Other forms (`~user/...`) are left unchanged
+// because we'd need /etc/passwd parsing for the general case and that's
+// rare enough to not be worth the complexity.
+//
+// Used by ResolveSourceRoot AND by callers that resolve user-typed
+// destinations (e.g. the 2nd positional of `canopy init <url> <dest>`).
+//
+// Public because cmd/canopy and internal/ui both need it.
+func ExpandTilde(p string) string {
+	if p == "" || p[0] != '~' {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		// Best-effort: if we can't resolve $HOME, return the literal
+		// path. The caller's filepath.Abs may produce something
+		// surprising, but failing loudly elsewhere beats silently
+		// substituting an empty string here.
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	if len(p) >= 2 && p[1] == '/' {
+		return filepath.Join(home, p[2:])
+	}
+	// `~name` form — leave alone. We don't /etc/passwd lookup.
+	return p
 }
