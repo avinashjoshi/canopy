@@ -1125,6 +1125,7 @@ func refreshRemoteCmd() tea.Cmd {
 					Hints:         w.Hints,
 					LastErrorHint: w.LastErrorHint,
 					AgentState:    w.AgentState,
+					Attached:      w.Attached,
 				})
 				rows = append(rows, state.GlobalRow{
 					Host:    r.HostName,
@@ -1148,6 +1149,15 @@ func refreshRemoteCmd() tea.Cmd {
 					Hints:         w.Hints,
 					LastErrorHint: w.LastErrorHint,
 					AgentState:    w.AgentState,
+					Attached:      w.Attached,
+					// LastSeen carries the host's most-recent successful
+					// refresh timestamp onto every remote row from that
+					// host. The TUI renderer compares it against time.Now
+					// to dim stale rows + show a stale banner on the host
+					// section header. Zero for local rows (their Host is
+					// empty, so the renderer's "is remote and stale?"
+					// check short-circuits). v0.19.
+					LastSeen: r.LastSeen,
 				})
 			}
 			snaps[r.HostName] = snap
