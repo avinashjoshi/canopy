@@ -347,6 +347,60 @@ func TestResolveSourceRoot_ExpandsTildeFromEnv(t *testing.T) {
 	}
 }
 
+// TestUserConfig_PreservesUnknownKeys is the regression test for the
+// v0.20 silent-clobber bug: internal/settings also reads/writes
+// ~/.canopy/config.json (for its `ports` block) but with a different
+// schema than UserConfig. Without round-tripping unknown keys, a
+// `canopy config set source-root <path>` would drop the entire
+// `ports` block on next Save.
+//
+// Scenario: hand-edited config.json with `ports.base = 50000`, then
+// canopy config set source-root → both fields must survive Save.
+func TestUserConfig_PreservesUnknownKeys(t *testing.T) {
+	t.Parallel()
+	s, home := userStore(t)
+
+	// Seed the file with a ports block (what internal/settings would
+	// have written, or what a user hand-edited).
+	seed := `{
+  "version": 1,
+  "ports": {
+    "base": 50000,
+    "project_stride": 1000,
+    "workspace_stride": 10
+  }
+}`
+	if err := os.WriteFile(filepath.Join(home, config.UserConfigFileName), []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+
+	// Load + mutate source-root + save.
+	c, err := s.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.Extra) == 0 || c.Extra["ports"] == nil {
+		t.Fatal("Load did not capture ports block into Extra")
+	}
+	c.SourceRoot = "/home/avi/Work"
+	if err := s.Save(c); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Verify both source-root and ports survived on disk.
+	written, err := os.ReadFile(filepath.Join(home, config.UserConfigFileName))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	got := string(written)
+	if !contains(got, `"source-root": "/home/avi/Work"`) {
+		t.Errorf("source-root missing after Save; got:\n%s", got)
+	}
+	if !contains(got, `"base": 50000`) {
+		t.Errorf("ports block dropped — round-trip failed; got:\n%s", got)
+	}
+}
+
 // TestUserStore_Path returns the absolute path to config.json. Error
 // messages embed this string, so it's part of the public contract.
 func TestUserStore_Path(t *testing.T) {
