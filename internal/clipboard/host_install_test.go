@@ -95,10 +95,14 @@ func newTestHostInstaller(t *testing.T) (*HostInstaller, *fakeSSH) {
 	home := t.TempDir()
 	f := &fakeSSH{responses: map[string]fakeSSHResp{}}
 	return &HostInstaller{
-		SSHExec:  f.exec,
-		HomeDir:  home,
-		Version:  "v0.18.0+test",
-		LocalUID: 1000,
+		SSHExec: f.exec,
+		// Default to a no-op CloseMaster so existing tests don't have
+		// to thread it through. Tests that specifically assert master
+		// teardown reach in and override this field.
+		CloseMaster: func(string) {},
+		HomeDir:     home,
+		Version:     "v0.18.0+test",
+		LocalUID:    1000,
 	}, f
 }
 
@@ -296,6 +300,67 @@ func TestInstallOnHost_VerifyWarnsOnPathPrecedenceButSucceeds(t *testing.T) {
 		if !strings.Contains(body, must) {
 			t.Errorf("PATH-precedence warning missing %q\nout:\n%s", must, body)
 		}
+	}
+}
+
+func TestInstallOnHost_ResetsControlMasterBetweenSnippetAndVerify(t *testing.T) {
+	// The bug this catches: RemoteForward directives in the freshly-
+	// written snippet only take effect at the NEXT SSH handshake. An
+	// already-open ControlMaster from a prior canopy command (host
+	// install / refresh) carries no forwards, so verify would reuse
+	// that master and the remote socket would never get created.
+	// CloseMaster must fire AFTER the snippet write and BEFORE verify.
+	inst, f := newTestHostInstaller(t)
+	f.responses = happyPathResponses()
+
+	var closedTargets []string
+	var orderTrace []string
+	inst.CloseMaster = func(target string) {
+		closedTargets = append(closedTargets, target)
+		orderTrace = append(orderTrace, "close-master")
+	}
+	// Hook into the snippet+verify ordering by wrapping SSHExec to
+	// log each call's classification, so we can assert close-master
+	// fell between snippet and verify-wrapper. Drain stdin into a
+	// byte slice for our classification AND wrap it back into a
+	// reader so the underlying fakeSSH still sees the push payload
+	// (otherwise its own classifier reports "unknown" and the canned
+	// response lookup misses).
+	originalExec := inst.SSHExec
+	inst.SSHExec = func(ctx context.Context, target string, stdin io.Reader, args ...string) ([]byte, []byte, error) {
+		var stdinBytes []byte
+		if stdin != nil {
+			stdinBytes, _ = io.ReadAll(stdin)
+		}
+		orderTrace = append(orderTrace, classifyCall(args, stdinBytes))
+		return originalExec(ctx, target, bytes.NewReader(stdinBytes), args...)
+	}
+
+	var out bytes.Buffer
+	if err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out); err != nil {
+		t.Fatalf("InstallOnHost: %v", err)
+	}
+	if len(closedTargets) != 1 || closedTargets[0] != "avi@tower.lan" {
+		t.Errorf("CloseMaster should fire exactly once with the SSH target; got %v", closedTargets)
+	}
+	// Order assertion: id → push×2 → close-master → verify-wrapper → verify-path.
+	// Specifically, close-master MUST be between the last push and verify-wrapper.
+	closeIdx, verifyIdx := -1, -1
+	lastPushIdx := -1
+	for i, c := range orderTrace {
+		switch c {
+		case "close-master":
+			closeIdx = i
+		case "verify-wrapper":
+			if verifyIdx == -1 {
+				verifyIdx = i
+			}
+		case "push-wl-paste", "push-wl-copy":
+			lastPushIdx = i
+		}
+	}
+	if !(lastPushIdx < closeIdx && closeIdx < verifyIdx) {
+		t.Errorf("CloseMaster must fall between last push (%d) and verify-wrapper (%d); got close at %d\ntrace: %v", lastPushIdx, verifyIdx, closeIdx, orderTrace)
 	}
 }
 

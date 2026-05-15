@@ -58,9 +58,17 @@ func defaultSSHExec(ctx context.Context, target string, stdin io.Reader, args ..
 //     presence, and end-to-end forwarding all work.
 type HostInstaller struct {
 	SSHExec sshExec
-	HomeDir string
-	Version string
-	LocalUID int
+	// CloseMaster terminates the SSH ControlMaster for `target` if one
+	// is alive. Called between writeSSHSnippet and verifyBridge so the
+	// verify SSH (and every subsequent canopy command to this host)
+	// re-establishes a master that picks up the freshly-written
+	// RemoteForward directives. Default production impl is
+	// internal/host.ExitControlMaster; tests substitute a recording
+	// fake so the call shape is verifiable.
+	CloseMaster func(target string)
+	HomeDir     string
+	Version     string
+	LocalUID    int
 }
 
 // NewHostInstaller returns an installer keyed to the current process's
@@ -72,10 +80,11 @@ func NewHostInstaller(version string) (*HostInstaller, error) {
 		return nil, fmt.Errorf("NewHostInstaller: %w", err)
 	}
 	return &HostInstaller{
-		SSHExec:  defaultSSHExec,
-		HomeDir:  home,
-		Version:  version,
-		LocalUID: os.Getuid(),
+		SSHExec:     defaultSSHExec,
+		CloseMaster: host.ExitControlMaster,
+		HomeDir:     home,
+		Version:     version,
+		LocalUID:    os.Getuid(),
 	}, nil
 }
 
@@ -109,6 +118,15 @@ func (h *HostInstaller) InstallOnHost(ctx context.Context, hostName, sshTarget s
 	if err := h.writeSSHSnippet(hostName, remoteUID, out); err != nil {
 		return fmt.Errorf("InstallOnHost: %w", err)
 	}
+
+	// The snippet's RemoteForward directives only take effect when SSH
+	// reads them at handshake time. Any existing ControlMaster for
+	// this target was opened by a prior canopy command (host install,
+	// refresh probe, etc.) BEFORE the snippet existed — it carries no
+	// forwards. Kill it so the verify SSH (and every subsequent canopy
+	// command) opens a fresh master that picks up the new config.
+	h.CloseMaster(sshTarget)
+	fmt.Fprintln(out, "  reset SSH ControlMaster so RemoteForward picks up the new config")
 
 	if err := h.verifyBridge(ctx, sshTarget, out); err != nil {
 		return fmt.Errorf("InstallOnHost: bridge installed but verify failed: %w", err)
