@@ -468,6 +468,18 @@ type Model struct {
 	// finish editing source-root.
 	addProjectSavedInput string
 
+	// addProjectTargets is the ordered list of dispatch targets the
+	// form's Tab key cycles through. Index 0 is always "" (local
+	// canopy); subsequent entries are registered host names in
+	// sorted order. Populated by openAddProjectForm so a host
+	// registered mid-session shows up next time the form opens.
+	addProjectTargets []string
+
+	// addProjectTargetIdx is the cursor into addProjectTargets. 0
+	// means local; >0 means a remote host. Tab increments mod len;
+	// Shift+Tab decrements.
+	addProjectTargetIdx int
+
 	// RunInitFunc is the post-clone init callback. main() injects a
 	// closure that calls runInit (and registers the project in
 	// state.json) on the given absolute path. nil disables Add Project.

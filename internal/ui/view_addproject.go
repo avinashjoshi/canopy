@@ -43,21 +43,49 @@ func (m *Model) renderAddProjectForm() string {
 	b.WriteString("  " + m.addProjectInput.View() + "\n")
 	b.WriteString("\n")
 
-	// Status line: source-root + label (config / env / default).
+	// Target line: which canopy will execute the init. Highlighted
+	// with selectedStyle (violet background) when remote, subtle when
+	// local — makes "you're about to add to a remote" unmissable.
+	b.WriteString("  " + m.renderTargetStatus())
+	b.WriteString("\n")
+
+	// Status line: source-root + label (config / env / default). On
+	// remote targets, source-root applies on the REMOTE canopy, not
+	// here — annotate so the user knows the local value doesn't apply.
 	srcLine := m.renderSourceRootStatus()
+	if m.currentAddProjectTarget() != "" {
+		srcLine = "Source: (resolved on " + m.currentAddProjectTarget() + ")"
+	}
 	b.WriteString("  " + subtleStyle.Render(srcLine))
 	b.WriteString("\n\n")
 
-	// Footer: error, toast, or default legend.
+	// Footer: error, toast, or default legend. Legend includes the
+	// Tab hint only when there's more than one target to cycle through.
 	switch {
 	case m.addProjectError != "":
 		b.WriteString("  " + errorStyle.Render(m.addProjectError))
 	case m.addProjectToast != "":
 		b.WriteString("  " + readyStyle.Render(m.addProjectToast))
 	default:
-		b.WriteString("  " + subtleStyle.Render("enter: add  ·  esc: cancel  ·  ctrl+s: change source"))
+		legend := "enter: add  ·  esc: cancel  ·  ctrl+s: change source"
+		if len(m.addProjectTargets) > 1 {
+			legend = "enter: add  ·  esc: cancel  ·  tab: cycle target  ·  ctrl+s: change source"
+		}
+		b.WriteString("  " + subtleStyle.Render(legend))
 	}
 	return b.String()
+}
+
+// renderTargetStatus renders the "Target: <name>" line. Local uses
+// subtleStyle so it doesn't shout; remote uses selectedStyle (the
+// same violet background used for the cursor's row in the list) so
+// the user immediately sees they're targeting a different machine.
+func (m *Model) renderTargetStatus() string {
+	target := m.currentAddProjectTarget()
+	if target == "" {
+		return subtleStyle.Render("Target: local canopy")
+	}
+	return selectedStyle.Render(" Target: " + target + " (remote) ")
 }
 
 // renderSourceRootStatus formats the "Source: <path>  (<label>)" line.

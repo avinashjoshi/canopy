@@ -6,6 +6,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/avinashjoshi/canopy/internal/host"
 )
 
 // newAddProjectTestModel builds a minimal *Model wired up for the
@@ -178,6 +180,140 @@ func TestActionAddProject_Available(t *testing.T) {
 	m.RunInitFunc = nil
 	if availableAddProject(m) {
 		t.Error("availableAddProject: should be false when RunInitFunc is nil")
+	}
+}
+
+// TestBuildAddProjectTargets returns [""] when no hosts; ["", names...]
+// sorted alphabetically when hosts exist. Index 0 is always local.
+func TestBuildAddProjectTargets(t *testing.T) {
+	cases := []struct {
+		name  string
+		hosts []host.Host
+		want  []string
+	}{
+		{"no hosts", nil, []string{""}},
+		{"empty slice", []host.Host{}, []string{""}},
+		{
+			"two hosts sorted",
+			[]host.Host{{Name: "tower"}, {Name: "pi"}},
+			[]string{"", "pi", "tower"},
+		},
+	}
+	for _, tc := range cases {
+		got := buildAddProjectTargets(tc.hosts)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: len = %d; want %d", tc.name, len(got), len(tc.want))
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: targets[%d] = %q; want %q", tc.name, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+// TestCycleAddProjectTarget Tab/Shift+Tab cycling wraps cleanly.
+func TestCycleAddProjectTarget(t *testing.T) {
+	m, _ := newAddProjectTestModel(t)
+	m.hostList = []host.Host{{Name: "tower"}, {Name: "pi"}}
+	m.openAddProjectForm()
+	// Targets: ["", "pi", "tower"]
+	if m.currentAddProjectTarget() != "" {
+		t.Errorf("default target = %q; want '' (local)", m.currentAddProjectTarget())
+	}
+	// Tab → pi
+	m.cycleAddProjectTarget(+1)
+	if m.currentAddProjectTarget() != "pi" {
+		t.Errorf("after +1: target = %q; want pi", m.currentAddProjectTarget())
+	}
+	// Tab → tower
+	m.cycleAddProjectTarget(+1)
+	if m.currentAddProjectTarget() != "tower" {
+		t.Errorf("after +2: target = %q; want tower", m.currentAddProjectTarget())
+	}
+	// Tab → wraps to local
+	m.cycleAddProjectTarget(+1)
+	if m.currentAddProjectTarget() != "" {
+		t.Errorf("after wrap: target = %q; want '' (local)", m.currentAddProjectTarget())
+	}
+	// Shift+Tab → tower (wrap backward)
+	m.cycleAddProjectTarget(-1)
+	if m.currentAddProjectTarget() != "tower" {
+		t.Errorf("after -1 from local: target = %q; want tower (wrap)", m.currentAddProjectTarget())
+	}
+}
+
+// TestCycleAddProjectTarget_OnlyLocal: with no registered hosts,
+// Tab is a no-op. No panic, no out-of-bounds.
+func TestCycleAddProjectTarget_OnlyLocal(t *testing.T) {
+	m, _ := newAddProjectTestModel(t)
+	m.openAddProjectForm()
+	m.cycleAddProjectTarget(+1)
+	if m.currentAddProjectTarget() != "" {
+		t.Errorf("Tab with only local: target = %q; want '' (no-op)", m.currentAddProjectTarget())
+	}
+}
+
+// TestSubmitAddProject_RemotePathRefused: a path arg with a remote
+// target should error inline — paths can't be resolved across machines.
+func TestSubmitAddProject_RemotePathRefused(t *testing.T) {
+	m, rec := newAddProjectTestModel(t)
+	m.hostList = []host.Host{{Name: "tower"}}
+	m.openAddProjectForm()
+	m.cycleAddProjectTarget(+1) // → tower
+	m.addProjectInput.SetValue("/some/local/path")
+	m.submitAddProject()
+	if m.addProjectError == "" {
+		t.Error("remote+path: no error rendered")
+	}
+	if !strings.Contains(m.addProjectError, "only git URLs") {
+		t.Errorf("err = %q; want 'only git URLs' message", m.addProjectError)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("remote+path called RunInitFunc %d times; want 0", len(rec.calls))
+	}
+}
+
+// TestTargetCycleClearsError: cycling target clears a stale error
+// (e.g. "remote needs URL" after the user switches back to local).
+func TestTargetCycleClearsError(t *testing.T) {
+	m, _ := newAddProjectTestModel(t)
+	m.hostList = []host.Host{{Name: "tower"}}
+	m.openAddProjectForm()
+	m.cycleAddProjectTarget(+1) // → tower
+	m.addProjectInput.SetValue("/path")
+	m.submitAddProject()
+	if m.addProjectError == "" {
+		t.Fatal("setup: no error to clear")
+	}
+	m.cycleAddProjectTarget(-1) // back to local
+	if m.addProjectError != "" {
+		t.Errorf("cycle didn't clear error: %q", m.addProjectError)
+	}
+}
+
+// TestAddProjectFormView_RendersTargetLine: the rendered form
+// includes the Target line, and the legend includes Tab hint when
+// hosts are registered.
+func TestAddProjectFormView_RendersTargetLine(t *testing.T) {
+	m, _ := newAddProjectTestModel(t)
+	m.width = 80
+	// No hosts: target line says "local", legend has no Tab hint.
+	m.openAddProjectForm()
+	out := m.renderAddProjectForm()
+	if !strings.Contains(out, "Target: local") {
+		t.Error("no-hosts: view missing 'Target: local'")
+	}
+	if strings.Contains(out, "tab: cycle target") {
+		t.Error("no-hosts: legend unexpectedly mentions Tab")
+	}
+	// With hosts: legend mentions Tab.
+	m.hostList = []host.Host{{Name: "tower"}}
+	m.openAddProjectForm()
+	out = m.renderAddProjectForm()
+	if !strings.Contains(out, "tab: cycle target") {
+		t.Error("with-hosts: legend missing Tab hint")
 	}
 }
 

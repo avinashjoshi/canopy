@@ -516,13 +516,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refresh()
 
 	case addProjectCloneDoneMsg:
-		// v0.18 Add Project: tea.ExecProcess returned from the git
+		// v0.20 Add Project: tea.ExecProcess returned from the git
 		// clone subprocess. Run the init half via RunInitFunc and
 		// surface success / failure into the form.
 		return m.handleAddProjectCloneDone(msg)
 
+	case addProjectRemoteDoneMsg:
+		// v0.20 Add Project: SSH dispatch via tea.ExecProcess
+		// returned. Remote canopy already ran its own init; we toast
+		// + the refresh tick in showAddProjectToast pulls the new
+		// remote row into the Global tab.
+		return m.handleAddProjectRemoteDone(msg)
+
 	case addProjectToastExpireMsg:
-		// v0.18 Add Project: success toast's display window elapsed.
+		// v0.20 Add Project: success toast's display window elapsed.
 		// Close the form.
 		return m.handleAddProjectToastExpire()
 

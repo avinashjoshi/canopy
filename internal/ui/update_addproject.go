@@ -29,10 +29,12 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,6 +42,7 @@ import (
 
 	"github.com/avinashjoshi/canopy/internal/canopyinit"
 	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/host"
 )
 
 // actionAddProject is the binding-table entry for the `a` keybind on
@@ -70,7 +73,51 @@ func (m *Model) openAddProjectForm() tea.Cmd {
 	m.addProjectToastFor = time.Time{}
 	m.addProjectEditingSourceRoot = false
 	m.addProjectSavedInput = ""
+	m.addProjectTargets = buildAddProjectTargets(m.hostList)
+	m.addProjectTargetIdx = 0 // default to local
 	return textinputBlink()
+}
+
+// buildAddProjectTargets returns the dispatch-target list the Tab key
+// cycles through: empty string (local) first, then registered host
+// names in sorted order. Sorted so cycling order is deterministic
+// across sessions (no host-order surprises after a re-add).
+func buildAddProjectTargets(hosts []host.Host) []string {
+	out := []string{""} // "" = local
+	names := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		names = append(names, h.Name)
+	}
+	sort.Strings(names)
+	return append(out, names...)
+}
+
+// currentAddProjectTarget returns the target the user has cycled to.
+// Empty string means local canopy. Safe to call even when targets
+// haven't been initialized — falls back to local.
+func (m *Model) currentAddProjectTarget() string {
+	if len(m.addProjectTargets) == 0 {
+		return ""
+	}
+	idx := m.addProjectTargetIdx
+	if idx < 0 || idx >= len(m.addProjectTargets) {
+		idx = 0
+	}
+	return m.addProjectTargets[idx]
+}
+
+// cycleAddProjectTarget advances the target cursor by delta (+1 for
+// Tab, -1 for Shift+Tab), wrapping at both ends so the user can
+// cycle in either direction without thinking about bounds.
+func (m *Model) cycleAddProjectTarget(delta int) {
+	if len(m.addProjectTargets) <= 1 {
+		return // only local; nothing to cycle
+	}
+	n := len(m.addProjectTargets)
+	m.addProjectTargetIdx = ((m.addProjectTargetIdx + delta) % n + n) % n
+	// Clear error so any "remote requires URL" message from a previous
+	// submit doesn't linger across target changes.
+	m.addProjectError = ""
 }
 
 // closeAddProjectForm returns to listMode, blurring the input and
@@ -105,6 +152,18 @@ func (m *Model) handleAddProjectFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+s":
 		return m.handleAddProjectSettingsKey()
+	case "tab":
+		if m.addProjectEditingSourceRoot {
+			return m, nil // tab is a no-op inside the source-root editor
+		}
+		m.cycleAddProjectTarget(+1)
+		return m, nil
+	case "shift+tab":
+		if m.addProjectEditingSourceRoot {
+			return m, nil
+		}
+		m.cycleAddProjectTarget(-1)
+		return m, nil
 	case "enter":
 		if m.addProjectEditingSourceRoot {
 			return m.submitSourceRootEdit()
@@ -179,10 +238,20 @@ func (m *Model) restorePrimaryInput() {
 }
 
 // submitAddProject is the Enter handler for the primary URL/path
-// input. Classifies the value and dispatches to either the
-// path-init or URL-clone path.
+// input. Classifies the value AND consults the current dispatch
+// target (local vs remote host) to pick the right flow.
+//
+// Target matrix:
+//
+//	            local                  remote host
+//	  ─────────┼──────────────────────┼─────────────────────────────
+//	  empty    │ inline error          │ inline error
+//	  path     │ sync runInit          │ refuse (paths are local-only)
+//	  URL      │ tea.ExecProcess git   │ tea.ExecProcess ssh dispatch
+//	  ─────────┴──────────────────────┴─────────────────────────────
 func (m *Model) submitAddProject() (tea.Model, tea.Cmd) {
 	value := strings.TrimSpace(m.addProjectInput.Value())
+	target := m.currentAddProjectTarget()
 
 	// Empty input on Global tab → error. Splash uses a different
 	// model (see model_splash.go) which treats empty as "init cwd";
@@ -193,13 +262,102 @@ func (m *Model) submitAddProject() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Local path → sync runInit. Fast (<100ms), no network.
-	if !canopyinit.LooksLikeGitURL(value) {
-		return m.submitAddProjectPath(value)
+	isURL := canopyinit.LooksLikeGitURL(value)
+
+	// Remote target: only URLs make sense. A path is a string on the
+	// local filesystem; we can't validate it against a different
+	// machine's disk. Refuse with a clear error rather than dispatching
+	// something that'll fail confusingly on the remote.
+	if target != "" {
+		if !isURL {
+			m.addProjectError = fmt.Sprintf("✗ Target %s is remote — only git URLs are allowed (paths can't be resolved on another machine).", target)
+			return m, nil
+		}
+		return m.submitAddProjectRemote(value, target)
 	}
 
-	// Git URL → resolve dest, run safety checks, then tea.ExecProcess.
+	// Local target: split path vs URL.
+	if !isURL {
+		return m.submitAddProjectPath(value)
+	}
 	return m.submitAddProjectURL(value)
+}
+
+// submitAddProjectRemote dispatches the URL clone+init to a registered
+// remote canopy via SSH. Identical mechanism to the CLI's
+// `canopy init <url> --on <host>` — re-uses host.SSHCmd's
+// ControlMaster plumbing and inherits the user's tty via
+// tea.ExecProcess so git auth prompts on the remote come back to the
+// local terminal.
+//
+// We don't follow up with RunInitFunc — the remote canopy did its
+// own init. We DO emit refreshAllMsg so the Global tab pulls the new
+// project into the remote-rows snapshot.
+func (m *Model) submitAddProjectRemote(rawURL, hostName string) (tea.Model, tea.Cmd) {
+	canopyHome, err := canopyHomeDir()
+	if err != nil {
+		m.addProjectError = "✗ " + err.Error()
+		return m, nil
+	}
+	reg, err := host.NewRegistry(canopyHome)
+	if err != nil {
+		m.addProjectError = "✗ " + err.Error()
+		return m, nil
+	}
+	h, err := reg.Resolve(hostName)
+	if err != nil {
+		m.addProjectError = fmt.Sprintf("✗ %v. Register the host: canopy host add %s <ssh-target>", err, hostName)
+		return m, nil
+	}
+
+	// Shell-quote the URL so metacharacters can't be reinterpreted on
+	// the remote shell. shellQuoteUI mirrors cmd/canopy.shellQuote so
+	// ui can use it without a cross-package import.
+	cmd := host.SSHCmd(context.Background(), h.SSHTarget, "canopy", "init", shellQuoteUI(rawURL))
+	cmd.Env = os.Environ()
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return addProjectRemoteDoneMsg{hostName: hostName, rawURL: rawURL, err: err}
+	})
+}
+
+// addProjectRemoteDoneMsg is the result of an SSH dispatch via
+// tea.ExecProcess. Distinct from the local addProjectCloneDoneMsg
+// because the post-success action is different: no RunInitFunc to
+// run (remote canopy already did it), but we DO want to refresh the
+// remote-rows cache so the new project appears in the Global tab.
+type addProjectRemoteDoneMsg struct {
+	hostName string
+	rawURL   string
+	err      error
+}
+
+// handleAddProjectRemoteDone surfaces success/failure of an SSH
+// dispatch into the form. Mirrors handleAddProjectCloneDone but
+// triggers a remote refresh instead of a local runInit.
+func (m *Model) handleAddProjectRemoteDone(msg addProjectRemoteDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.mode = addProjectFormMode
+		m.addProjectError = fmt.Sprintf("✗ remote init failed on %s: %v", msg.hostName, msg.err)
+		m.addProjectInput.Focus()
+		return m, textinputBlink()
+	}
+	// Derive a friendly name for the toast. Best-effort: the URL
+	// basename is what the remote canopy clones into.
+	name := msg.hostName
+	if base, derr := canopyinit.DeriveBasename(msg.rawURL); derr == nil {
+		name = base + " on " + msg.hostName
+	}
+	return m, m.showAddProjectToast(name, msg.hostName)
+}
+
+// shellQuoteUI is the ui-package twin of cmd/canopy.shellQuote in
+// install_tmux.go. Same logic; duplicated so internal/ui can avoid a
+// cross-package import (cmd → ui, not ui → cmd, per CLAUDE.md).
+//
+// Wraps s in single quotes; escapes embedded quotes via the standard
+// close-escape-reopen dance.
+func shellQuoteUI(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // submitAddProjectPath handles the local-path branch. Validates the
