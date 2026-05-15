@@ -173,8 +173,16 @@ func TestSSHRunUser_LoginShellAndPTY(t *testing.T) {
 	if args[bashIdx+1] != "-lc" {
 		t.Errorf("expected -lc after bash, got %q", args[bashIdx+1])
 	}
-	if args[bashIdx+2] != "canopy init 'https://x.git'" {
-		t.Errorf("remote cmd = %q; want literal passthrough", args[bashIdx+2])
+	// The remoteCmd is outer-shell-quoted before being passed as the
+	// argv slot. SSH joins all post-target args with spaces and
+	// transmits one string to the remote shell, so the wrapping
+	// 'single quotes' must arrive intact for `bash -lc` to consume
+	// the whole command as one token. (Without this the symptom is
+	// `init: line 1: canopy: command not found` — bash splits the
+	// command on spaces and runs only the first word.)
+	want := "'canopy init '\\''https://x.git'\\'''"
+	if args[bashIdx+2] != want {
+		t.Errorf("remote cmd = %q; want %q", args[bashIdx+2], want)
 	}
 	// ControlMaster reuse must still apply so a previously-opened
 	// socket is shared (no re-handshake on the second dispatch).

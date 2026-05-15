@@ -76,16 +76,29 @@ func (m *Model) renderAddProjectForm() string {
 	return b.String()
 }
 
-// renderTargetStatus renders the "Target: <name>" line. Local uses
-// subtleStyle so it doesn't shout; remote uses selectedStyle (the
-// same violet background used for the cursor's row in the list) so
-// the user immediately sees they're targeting a different machine.
+// renderTargetStatus renders the "Target: <name>" line. Three states:
+//
+//   - No registered hosts: subtleStyle "Target: local canopy" — dim,
+//     because there's nothing to switch to and we don't want to draw
+//     attention to a non-choice.
+//   - Hosts registered + local selected: titleStyle "Target: local"
+//     (violet fg, no bg) plus a "tab to switch" hint. Bright enough
+//     to signal "this is a choice you've made, others exist", subtle
+//     enough that it doesn't dominate the form.
+//   - Remote selected: selectedStyle (full violet bg) " Target: <host>
+//     (remote) ". Mirrors the cursor row's highlight in the list so
+//     the user immediately registers "this isn't going to my machine."
 func (m *Model) renderTargetStatus() string {
 	target := m.currentAddProjectTarget()
-	if target == "" {
-		return subtleStyle.Render("Target: local canopy")
+	if target != "" {
+		return selectedStyle.Render(" Target: " + target + " (remote) ")
 	}
-	return selectedStyle.Render(" Target: " + target + " (remote) ")
+	if len(m.addProjectTargets) > 1 {
+		// Hosts exist, local selected: highlight so the user sees
+		// there ARE other choices.
+		return titleStyle.Render("Target: local") + subtleStyle.Render("  (tab to switch host)")
+	}
+	return subtleStyle.Render("Target: local canopy")
 }
 
 // renderSourceRootStatus formats the "Source: <path>  (<label>)" line.

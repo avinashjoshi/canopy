@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 )
@@ -117,6 +118,20 @@ func SSHCmdBatch(ctx context.Context, target string, args ...string) *exec.Cmd {
 // handshake cost on the second + Nth call).
 func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd {
 	socketPath := filepath.Join(canopyHome(), "ssh-%C.sock")
+	// SSH joins all post-target argv with spaces and sends ONE string
+	// to the remote shell. So `bash -lc <quoted-string>` must arrive
+	// as 3 tokens — not 3+N tokens where N is the word count of
+	// remoteCmd. Outer-shell-quote remoteCmd so the remote shell sees
+	// it as one arg to bash -lc:
+	//
+	//   ssh ... target bash -lc 'canopy init '\''https://x'\'''
+	//                            └─────────── one arg ──────────┘
+	//
+	// Pre-fix bug: a bare remoteCmd like "canopy init 'url'" became
+	// `bash -lc canopy init 'url'` on the wire; bash -lc consumed
+	// only "canopy", set $0 to "init", and the URL leaked into $1.
+	// Symptom: "init: line 1: canopy: command not found".
+	quoted := "'" + strings.ReplaceAll(remoteCmd, "'", `'\''`) + "'"
 	sshArgs := []string{
 		"-t", // allocate remote pty for interactive auth prompts
 		"-o", "ControlMaster=auto",
@@ -126,7 +141,7 @@ func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd 
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
 		target,
-		"bash", "-lc", remoteCmd,
+		"bash", "-lc", quoted,
 	}
 	log.Debug("ssh.run-user", "target", target, "remote_cmd", remoteCmd)
 	return exec.CommandContext(ctx, "ssh", sshArgs...)
