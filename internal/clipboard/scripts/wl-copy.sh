@@ -25,7 +25,10 @@
 
 set -euo pipefail
 
-CLIP_DIR="${XDG_RUNTIME_DIR:-/tmp}/canopy"
+# Same robust runtime-dir resolution as wl-paste.sh — non-interactive
+# SSH sessions don't reliably carry $XDG_RUNTIME_DIR, so fall back to
+# the canonical systemd-logind path keyed off the current UID.
+CLIP_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/canopy"
 
 while [ $# -gt 0 ]; do
   case "$1" in

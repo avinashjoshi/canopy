@@ -59,33 +59,33 @@ func (f *fakeSSH) exec(_ context.Context, target string, stdin io.Reader, args .
 }
 
 // classifyCall reduces an arbitrary SSH invocation into one of the
-// four shapes InstallOnHost emits, so tests don't have to encode the
-// full argv to match. Order matters: the install probe must come
-// before the generic "bash -lc" classifier because the verify call
-// uses bash -lc too.
+// shapes InstallOnHost emits. Tests don't have to encode the full
+// argv to match. Order matters: more specific classifiers come first
+// (push uses `bash -c` + a path that overlaps with the verify shape).
 func classifyCall(args []string, stdin []byte) string {
 	if len(args) == 2 && args[0] == "id" && args[1] == "-u" {
 		return "id"
 	}
-	if len(args) >= 3 && args[0] == "bash" && args[1] == "-lc" && strings.Contains(args[2], "wl-paste --list-types") {
-		return "verify"
-	}
-	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" && strings.Contains(args[2], "wl-paste") {
-		return "push-wl-paste"
-	}
-	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" && strings.Contains(args[2], "wl-copy") {
-		return "push-wl-copy"
-	}
-	// Push wrappers don't actually have wl-paste/wl-copy in argv — the
-	// remote shell command is `cat > $HOME/.local/bin/<name>; chmod ...`.
-	// Match on the path instead.
-	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" {
-		if strings.Contains(args[2], "$HOME/.local/bin/wl-paste") {
+	// Push wrappers: `bash -c "set -e; mkdir -p ...; cat > $HOME/.local/bin/<name>; chmod ..."`.
+	// stdin carries the wrapper bytes. The `cat > $HOME/.local/bin/<name>`
+	// part distinguishes which wrapper.
+	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" && len(stdin) > 0 {
+		switch {
+		case strings.Contains(args[2], "$HOME/.local/bin/wl-paste"):
 			return "push-wl-paste"
-		}
-		if strings.Contains(args[2], "$HOME/.local/bin/wl-copy") {
+		case strings.Contains(args[2], "$HOME/.local/bin/wl-copy"):
 			return "push-wl-copy"
 		}
+	}
+	// Verify-step 1: `bash -c "$HOME/.local/bin/wl-paste --list-types"`
+	// — no stdin, absolute-path invocation.
+	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" && strings.Contains(args[2], "wl-paste --list-types") {
+		return "verify-wrapper"
+	}
+	// Verify-step 2: `bash -lc "command -v wl-paste"` — login-shell
+	// PATH-precedence check.
+	if len(args) >= 3 && args[0] == "bash" && args[1] == "-lc" && strings.Contains(args[2], "command -v wl-paste") {
+		return "verify-path"
 	}
 	return "unknown"
 }
@@ -104,13 +104,14 @@ func newTestHostInstaller(t *testing.T) (*HostInstaller, *fakeSSH) {
 
 // happyPathResponses is the canned set every "everything works" test
 // uses. Extracted so tests focused on one failure mode (e.g., bad
-// UID) don't have to spell out four others.
+// UID) don't have to spell out five others.
 func happyPathResponses() map[string]fakeSSHResp {
 	return map[string]fakeSSHResp{
-		"id":            {stdout: []byte("1001\n")},
-		"push-wl-paste": {},
-		"push-wl-copy":  {},
-		"verify":        {stdout: []byte("text/plain;charset=utf-8\n")},
+		"id":             {stdout: []byte("1001\n")},
+		"push-wl-paste":  {},
+		"push-wl-copy":   {},
+		"verify-wrapper": {stdout: []byte("text/plain;charset=utf-8\n")},
+		"verify-path":    {stdout: []byte("/home/avi/.local/bin/wl-paste\n")},
 	}
 }
 
@@ -122,9 +123,9 @@ func TestInstallOnHost_HappyPath(t *testing.T) {
 	if err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out); err != nil {
 		t.Fatalf("InstallOnHost: %v", err)
 	}
-	// All four SSH calls made:
-	if len(f.calls) != 4 {
-		t.Fatalf("expected 4 SSH calls (id, push×2, verify), got %d: %v", len(f.calls), f.calls)
+	// Five SSH calls: id + push wl-paste + push wl-copy + verify-wrapper + verify-path.
+	if len(f.calls) != 5 {
+		t.Fatalf("expected 5 SSH calls, got %d: %v", len(f.calls), f.calls)
 	}
 	// SSH snippet landed in the per-host file:
 	snippetPath := filepath.Join(inst.HomeDir, ".ssh", "config.d", "canopy", "tower.conf")
@@ -224,13 +225,13 @@ func TestInstallOnHost_VerifyFailureSurfacesAfterArtifactsWritten(t *testing.T) 
 	// to work with.
 	inst, f := newTestHostInstaller(t)
 	f.responses = happyPathResponses()
-	f.responses["verify"] = fakeSSHResp{err: errors.New("wl-paste: command not found")}
+	f.responses["verify-wrapper"] = fakeSSHResp{err: errors.New("wl-paste: command not found")}
 	var out bytes.Buffer
 	err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out)
 	if err == nil {
 		t.Fatal("InstallOnHost should report verify failure")
 	}
-	if !strings.Contains(err.Error(), "verify failed") {
+	if !strings.Contains(err.Error(), "verify") {
 		t.Errorf("error message should mention verify; got %v", err)
 	}
 	snippetPath := filepath.Join(inst.HomeDir, ".ssh", "config.d", "canopy", "tower.conf")
@@ -247,11 +248,73 @@ func TestInstallOnHost_VerifyRejectsImpostorOutput(t *testing.T) {
 	// text/plain. Refuse the install.
 	inst, f := newTestHostInstaller(t)
 	f.responses = happyPathResponses()
-	f.responses["verify"] = fakeSSHResp{stdout: []byte("image/png\n")}
+	f.responses["verify-wrapper"] = fakeSSHResp{stdout: []byte("image/png\n")}
 	var out bytes.Buffer
 	err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out)
 	if err == nil {
 		t.Fatal("InstallOnHost should refuse when verify output doesn't carry text/plain")
+	}
+}
+
+func TestInstallOnHost_VerifyClassifiesMissingSocat(t *testing.T) {
+	// When socat isn't on the remote, the wrapper exits with a
+	// distinctive stderr. Surface a `apt install socat` hint rather
+	// than the raw error text.
+	inst, f := newTestHostInstaller(t)
+	f.responses = happyPathResponses()
+	f.responses["verify-wrapper"] = fakeSSHResp{
+		err:    errors.New("exit status 127"),
+		stderr: []byte("/home/avi/.local/bin/wl-paste: line 50: socat: command not found"),
+	}
+	var out bytes.Buffer
+	err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out)
+	if err == nil {
+		t.Fatal("InstallOnHost should report verify failure on missing socat")
+	}
+	if !strings.Contains(err.Error(), "socat") || !strings.Contains(err.Error(), "install") {
+		t.Errorf("error should hint at installing socat; got %v", err)
+	}
+}
+
+func TestInstallOnHost_VerifyWarnsOnPathPrecedenceButSucceeds(t *testing.T) {
+	// Wrapper itself works (verify-wrapper passes), but login-shell PATH
+	// resolves wl-paste to /usr/bin/wl-paste — Claude Code on the remote
+	// won't use our wrapper. The install completes successfully (the
+	// bridge is functionally installed) but the user gets a clear inline
+	// warning + fix suggestion. Crucial test: without this branch the
+	// user discovers the symptom much later when image paste silently
+	// fails inside a remote Claude session.
+	inst, f := newTestHostInstaller(t)
+	f.responses = happyPathResponses()
+	f.responses["verify-path"] = fakeSSHResp{stdout: []byte("/usr/bin/wl-paste\n")}
+	var out bytes.Buffer
+	if err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out); err != nil {
+		t.Fatalf("InstallOnHost should succeed even when PATH precedence is wrong: %v", err)
+	}
+	body := out.String()
+	for _, must := range []string{"warning", "/usr/bin/wl-paste", "PATH", ".bashrc"} {
+		if !strings.Contains(body, must) {
+			t.Errorf("PATH-precedence warning missing %q\nout:\n%s", must, body)
+		}
+	}
+}
+
+func TestInstallOnHost_VerifyClassifiesConnectionRefused(t *testing.T) {
+	// Daemon down on the laptop → socat fails to connect → wrapper
+	// exits non-zero. Distinct error message from missing-socat case.
+	inst, f := newTestHostInstaller(t)
+	f.responses = happyPathResponses()
+	f.responses["verify-wrapper"] = fakeSSHResp{
+		err:    errors.New("exit status 1"),
+		stderr: []byte("socat[1234] E connect(...) Connection refused"),
+	}
+	var out bytes.Buffer
+	err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out)
+	if err == nil {
+		t.Fatal("InstallOnHost should report verify failure on connection refused")
+	}
+	if !strings.Contains(err.Error(), "daemon") {
+		t.Errorf("error should hint that the laptop daemon may be down; got %v", err)
 	}
 }
 

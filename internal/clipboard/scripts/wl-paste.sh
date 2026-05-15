@@ -18,7 +18,17 @@
 
 set -euo pipefail
 
-CLIP_DIR="${XDG_RUNTIME_DIR:-/tmp}/canopy"
+# Compute the runtime dir robustly:
+#   - Interactive shells: $XDG_RUNTIME_DIR is set by pam_systemd
+#     (typically /run/user/<uid>).
+#   - Non-interactive SSH-exec'd shells: $XDG_RUNTIME_DIR is often
+#     unset; fall back to the canonical systemd-logind path keyed
+#     off the current UID so the wrapper still finds the
+#     SSH-forwarded sockets at /run/user/<uid>/canopy/.
+#
+# Falling back to /tmp (the prior default) would silently route
+# socat at /tmp/canopy/*.sock — wrong path, "connection refused".
+CLIP_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/canopy"
 
 list_types=0
 type_arg=""

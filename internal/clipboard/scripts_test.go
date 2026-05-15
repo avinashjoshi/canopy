@@ -68,6 +68,23 @@ func TestWrapperContent_TimeoutGuardOnSocat(t *testing.T) {
 	}
 }
 
+func TestWrapperContent_RobustToMissingXDGRuntime(t *testing.T) {
+	// The SSH RemoteForward establishes sockets at
+	// /run/user/<uid>/canopy/. The wrapper must compute the same path,
+	// EVEN WHEN $XDG_RUNTIME_DIR isn't set in env (typical for
+	// non-interactive SSH sessions). Falling back to /tmp (the
+	// pre-fix default) silently routed socat to the wrong dir.
+	for _, w := range []WrapperScript{WrapperWlPaste, WrapperWlCopy} {
+		content, _, _ := WrapperContent(w, "v0")
+		if strings.Contains(content, `XDG_RUNTIME_DIR:-/tmp`) {
+			t.Errorf("%s wrapper falls back to /tmp when XDG_RUNTIME_DIR is unset — SSH RemoteForward sockets live in /run/user/<uid>/", w)
+		}
+		if !strings.Contains(content, `XDG_RUNTIME_DIR:-/run/user/$(id -u)`) {
+			t.Errorf("%s wrapper missing the /run/user/$(id -u) fallback for non-interactive sessions", w)
+		}
+	}
+}
+
 func TestWrapperContent_PNGSignatureProbe(t *testing.T) {
 	// wl-paste --list-types path inspects the first 8 PNG header bytes
 	// to decide whether to report image/png. Catch regression where

@@ -197,29 +197,65 @@ func (h *HostInstaller) writeSSHSnippet(hostName string, remoteUID int, out io.W
 	return nil
 }
 
-// verifyBridge runs the freshly-deployed wl-paste wrapper over SSH and
-// asserts that the basic round-trip works. `--list-types` is the
-// cheapest invocation (one socket open, eight bytes read for the PNG
-// probe, no full clipboard transfer) and exercises the same code path
-// Claude Code uses when deciding whether image/png is available.
+// verifyBridge confirms two distinct things, in order:
 //
-// Output must contain `text/plain` for the bridge to be considered
-// healthy — our wrapper always emits it. If we don't see it, something
-// in the chain broke: wrapper missing (PATH problem), socat missing
-// (auto-install needed), daemon down, sshd ForwardLocalSockets
-// disabled, or the SSH config snippet not picked up by sshd's reload.
+//  1. The wrapper script itself works end-to-end — invoked by absolute
+//     path so PATH precedence is irrelevant. If this fails, the
+//     wrapper, the daemon, or the SSH socket forwarding is broken.
+//  2. The wrapper takes precedence in PATH lookup — Claude Code on
+//     the remote does plain `wl-paste`, not the absolute path; if
+//     real `/usr/bin/wl-paste` wins, the bridge mechanism is fine
+//     but Claude can't use it.
+//
+// Step 2 produces a WARNING, not an error: the install is functionally
+// complete (the wrapper exists and works), the user's shell config is
+// what needs adjusting. Surfacing the fix inline beats letting the
+// user discover the symptom much later when an image paste mysteriously
+// fails inside Claude Code.
 func (h *HostInstaller) verifyBridge(ctx context.Context, sshTarget string, out io.Writer) error {
-	// `bash -lc` so ~/.bashrc's PATH-prepend for ~/.local/bin runs
-	// before we invoke the wrapper. Non-interactive SSH-exec'd
-	// commands skip .bashrc by default on Arch/omarchy/Debian.
-	stdout, stderr, err := h.SSHExec(ctx, sshTarget, nil, "bash", "-lc", "wl-paste --list-types")
+	// Step 1: invoke the wrapper by absolute path. `bash -c` (NOT
+	// `bash -lc`) — no shell config sourcing, no PATH dependency.
+	// Just runs the script we know we deployed.
+	stdout, stderr, err := h.SSHExec(ctx, sshTarget, nil, "bash", "-c", `$HOME/.local/bin/wl-paste --list-types`)
+	stderrStr := strings.TrimSpace(string(stderr))
 	if err != nil {
-		return fmt.Errorf("verifyBridge: wl-paste --list-types on %s: %w (stderr: %s)", sshTarget, err, strings.TrimSpace(string(stderr)))
+		// Classify the most common failure modes with actionable hints.
+		switch {
+		case strings.Contains(stderrStr, "socat: command not found"),
+			strings.Contains(stderrStr, "timeout: command not found"):
+			return fmt.Errorf("verifyBridge: required tool missing on remote — install with `apt install socat` / `pacman -S socat` and re-run `canopy host clipboard <name>`. Original stderr: %s", stderrStr)
+		case strings.Contains(stderrStr, "Connection refused"),
+			strings.Contains(stderrStr, "No such file or directory") && strings.Contains(stderrStr, "clip-"):
+			return fmt.Errorf("verifyBridge: wrapper ran but couldn't reach the laptop's daemon — either the laptop's `canopy clipboard-server` isn't running OR your SSH connection didn't establish the RemoteForward (try re-SSHing). Stderr: %s", stderrStr)
+		default:
+			return fmt.Errorf("verifyBridge: $HOME/.local/bin/wl-paste failed: %w (stderr: %s)", err, stderrStr)
+		}
 	}
-	body := string(stdout)
-	if !strings.Contains(body, "text/plain") {
-		return fmt.Errorf("verifyBridge: wrapper ran but did not emit text/plain (got %q) — wrapper may be the system wl-paste, not ours", strings.TrimSpace(body))
+	if !strings.Contains(string(stdout), "text/plain") {
+		return fmt.Errorf("verifyBridge: wrapper ran (exit 0) but didn't emit text/plain (got %q) — wrapper file may have been overwritten by something else", strings.TrimSpace(string(stdout)))
 	}
-	fmt.Fprintf(out, "  verified wrapper on %s\n", sshTarget)
+	fmt.Fprintln(out, "  wrapper round-trips text/plain ✓")
+
+	// Step 2: confirm Claude Code will actually find the wrapper.
+	// `bash -lc command -v` resolves wl-paste through the user's
+	// login-shell PATH. If `/usr/bin/wl-paste` wins, the install is
+	// functional but Claude won't use the wrapper — that's a hint,
+	// not a hard failure.
+	pathOut, _, _ := h.SSHExec(ctx, sshTarget, nil, "bash", "-lc", "command -v wl-paste")
+	resolved := strings.TrimSpace(string(pathOut))
+	switch {
+	case resolved == "":
+		fmt.Fprintln(out, "  ⚠  warning: `command -v wl-paste` returned nothing — login shell can't find any wl-paste at all")
+	case !strings.Contains(resolved, ".local/bin/wl-paste"):
+		fmt.Fprintf(out, "  ⚠  warning: login-shell PATH resolves wl-paste to %s\n", resolved)
+		fmt.Fprintln(out, "     Claude Code on the remote will use the system wl-paste, not the canopy wrapper.")
+		fmt.Fprintln(out, "     Fix: append to ~/.bashrc on the remote (and re-source / re-attach tmux):")
+		fmt.Fprintln(out, "       export PATH=\"$HOME/.local/bin:$PATH\"")
+		fmt.Fprintf(out, "  bridge installed but PATH needs fixing on %s\n", sshTarget)
+		return nil
+	default:
+		fmt.Fprintf(out, "  PATH resolves wl-paste to %s ✓\n", resolved)
+	}
+	fmt.Fprintf(out, "  verified bridge on %s\n", sshTarget)
 	return nil
 }
