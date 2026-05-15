@@ -150,15 +150,25 @@ sudo tailscale set --ssh=false
 (You can still use Tailscale for the network path; this only disables
 Tailscale's in-band SSH server in favor of OpenSSH on the same host.)
 
-### Mosh-attached sessions lose `Ctrl+Shift+C`
+### Mosh has exactly ONE limitation: `Ctrl+Shift+C` in tmux copy-mode
 
-Mosh's UDP wire protocol doesn't faithfully forward the
-modifier-distinguishing escape sequences (`extended-keys` /
-CSI-u) that tmux 3.2+ uses to tell `Ctrl+Shift+C` apart from plain
-`Ctrl+C`. Mosh-attached, `Ctrl+Shift+C` in tmux copy-mode arrives at
-tmux as plain `Ctrl+C` and our binding doesn't match.
+The bridge is **attach-method-agnostic**. The persistent SSH tunnel
+(the systemd unit) holds the RemoteForward sockets open continuously
+on the remote. When you mosh OR ssh to the host, Claude/nvim/shell
+all reach the wrapper through the same live sockets — image paste,
+text paste, command-line `wl-copy`, tmux copy-mode `y` / `Enter` /
+mouse-drag-release, nvim yank — every one of these works identically
+over both attach methods.
 
-Workarounds for mosh-attached sessions:
+The single thing that differs is **`Ctrl+Shift+C` in tmux copy-mode**.
+Mosh's wire protocol normalizes input — it doesn't forward the CSI-u /
+modifyOtherKeys escape sequences that tmux 3.2+ uses to distinguish
+`Ctrl+Shift+C` from plain `Ctrl+C`. Your terminal generates the right
+sequence, but mosh boils it down to `Ctrl+C` by the time tmux sees it.
+The canopy `bind-key -T copy-mode-vi C-S-c …` we install doesn't match
+because tmux only ever sees `C-c` over mosh.
+
+Workarounds:
 
 - Use `y` or `Enter` in tmux copy-mode — both bypass extended-keys
   entirely and always work.
@@ -169,6 +179,11 @@ Workarounds for mosh-attached sessions:
 - SSH-attach instead of mosh-attach if `Ctrl+Shift+C` muscle memory
   is non-negotiable. Plain SSH passes the escape sequence through
   faithfully and the binding fires.
+
+**Everything else about the bridge works fine over mosh.** Don't
+switch attach methods preemptively — mosh's resilience to network
+churn is a real benefit; only ssh-attach when `Ctrl+Shift+C`
+specifically matters.
 
 ### Terminal emulator may eat `Ctrl+Shift+C` before tmux sees it
 
