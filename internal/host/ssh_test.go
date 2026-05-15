@@ -146,6 +146,61 @@ func TestCheckMoshAvailable_Errors(t *testing.T) {
 	}
 }
 
+// TestSSHRunUser_LoginShellAndPTY verifies the v0.20 ad-hoc dispatch
+// helper builds an ssh invocation that:
+//   - allocates a remote pty (-t) so git auth prompts read from /dev/tty
+//   - wraps the remote command in `bash -lc` so the user's login
+//     profile sources PATH (fixing the exit-127 "canopy not found"
+//     case the Add Project --on flow hit pre-fix)
+func TestSSHRunUser_LoginShellAndPTY(t *testing.T) {
+	cmd := SSHRunUser(context.Background(), "avi@tower", "canopy init 'https://x.git'")
+	args := cmd.Args
+	if args[0] != "ssh" {
+		t.Fatalf("args[0] = %q, want ssh", args[0])
+	}
+	if indexOf(args, "-t") < 0 {
+		t.Errorf("SSHRunUser missing -t (pty allocation): %v", args)
+	}
+	// bash -lc <cmd> must appear in order, AFTER the target.
+	targetIdx := indexOf(args, "avi@tower")
+	if targetIdx < 0 {
+		t.Fatalf("target not in args: %v", args)
+	}
+	bashIdx := indexOf(args, "bash")
+	if bashIdx < targetIdx {
+		t.Errorf("bash must come after target; bashIdx=%d targetIdx=%d", bashIdx, targetIdx)
+	}
+	if args[bashIdx+1] != "-lc" {
+		t.Errorf("expected -lc after bash, got %q", args[bashIdx+1])
+	}
+	// The remoteCmd is outer-shell-quoted before being passed as the
+	// argv slot. SSH joins all post-target args with spaces and
+	// transmits one string to the remote shell, so the wrapping
+	// 'single quotes' must arrive intact for `bash -lc` to consume
+	// the whole command as one token. (Without this the symptom is
+	// `init: line 1: canopy: command not found` — bash splits the
+	// command on spaces and runs only the first word.)
+	//
+	// SSHRunUser also prepends `export PATH=...` to ensure canopy is
+	// found even when the remote login profile doesn't add
+	// ~/.local/bin to PATH (which we observed in the wild on a fresh
+	// Arch host: bash -lc PATH was /usr/local/sbin:/usr/local/bin:
+	// /usr/bin:... only).
+	got := args[bashIdx+2]
+	if !strings.Contains(got, `canopy init '\''https://x.git'\''`) {
+		t.Errorf("remote cmd missing properly-quoted user command; got %q", got)
+	}
+	if !strings.Contains(got, `export PATH="$HOME/.local/bin:$PATH"`) {
+		t.Errorf("remote cmd missing PATH prepend (canopy must be findable on hosts without profile setup); got %q", got)
+	}
+	if got[0] != '\'' || got[len(got)-1] != '\'' {
+		t.Errorf("remote cmd not outer-quoted; got %q", got)
+	}
+	// ControlMaster reuse must still apply so a previously-opened
+	// socket is shared (no re-handshake on the second dispatch).
+	mustContainPair(t, args, "-o", "ControlMaster=auto")
+}
+
 // TestCanopyHome_NonEmpty ensures the helper never returns an empty
 // string (which would produce an invalid ControlPath like `ssh-%C.sock`
 // in the cwd).

@@ -126,6 +126,7 @@ func main() {
 	root.AddCommand(newUpgradeCmd())
 	root.AddCommand(hostCmd())    // v0.17.0 Phase 1a: remote host registry
 	root.AddCommand(projectCmd()) // v0.17.0 Phase 1a: project-on-host registry
+	root.AddCommand(configCmd())  // v0.18 Phase A: user-level config (~/.canopy/config.json)
 
 	if err := root.Execute(); err != nil {
 		// Distinguish "workspace OK, prompt failed" (exit 2) from

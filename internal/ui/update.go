@@ -515,6 +515,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// too — refreshCmd alone only updates local. v0.17 Phase 1h.
 		return m, m.refresh()
 
+	case addProjectCloneDoneMsg:
+		// v0.20 Add Project: tea.ExecProcess returned from the git
+		// clone subprocess. Run the init half via RunInitFunc and
+		// surface success / failure into the form.
+		return m.handleAddProjectCloneDone(msg)
+
+	case addProjectRemoteDoneMsg:
+		// v0.20 Add Project: SSH dispatch via tea.ExecProcess
+		// returned. Remote canopy already ran its own init; we toast
+		// + the refresh tick in showAddProjectToast pulls the new
+		// remote row into the Global tab.
+		return m.handleAddProjectRemoteDone(msg)
+
+	case addProjectToastExpireMsg:
+		// v0.20 Add Project: success toast's display window elapsed.
+		// Close the form.
+		return m.handleAddProjectToastExpire()
+
 	case hostProbeResultMsg:
 		// Post-Add probe result. AuthFailed → open the ssh-copy-id
 		// offer modal. Other errors surface on m.err so the user
@@ -613,6 +631,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmHostRemoveKey(msg)
 	case addHostFormMode:
 		return m.handleAddHostFormKey(msg)
+	case addProjectFormMode:
+		return m.handleAddProjectFormKey(msg)
+	case settingsFormMode:
+		return m.handleSettingsFormKey(msg)
 	case hostDetailMode:
 		return m.handleHostDetailKey(msg)
 	case confirmSSHCopyIDMode:
