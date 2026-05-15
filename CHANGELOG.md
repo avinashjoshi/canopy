@@ -5,6 +5,48 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0.0] - 2026-05-14 — Clipboard bridge for remote workspaces
+
+The laptop's clipboard is now available inside any registered canopy host. Paste a screenshot you copied locally into Claude Code running on tower; copy text from a remote tmux session straight to the local Wayland clipboard; nvim's `y` yanks land on the laptop. None of it requires per-session setup once installed.
+
+User reference + troubleshooting: [docs/clipboard-bridge.md](docs/clipboard-bridge.md). Architecture + design history: [docs/design/v0.18-clipboard-bridge.md](docs/design/v0.18-clipboard-bridge.md).
+
+### Added
+
+- **`canopy install clipboard-bridge`** — one-time per laptop. Writes the systemd user unit that supervises `canopy clipboard-server` (the local daemon), creates `~/.ssh/config.d/canopy/`, and adds the `Include` marker block to `~/.ssh/config` wrapped in `Host *` so it loads regardless of where it lands in the file.
+- **`canopy host clipboard <name>`** — per remote host. Full install flow: detects remote UID via SSH; `mkdir -p /run/user/<uid>/canopy` so sshd can bind() the forward sockets; pushes wl-paste/wl-copy wrapper scripts to `~/.local/bin/` on the remote; writes a per-host SSH snippet with a dedicated `Host canopy-tunnel-<name>` alias; writes + enables a per-host systemd user unit (`canopy-clipboard-tunnel-<name>.service`) that holds `ssh -N` open persistently with respawn-on-failure; splices tmux copy-mode bindings into the remote's `~/.tmux.conf` via marker block; verifies end-to-end including PATH precedence for the wrapper.
+- **`c` key on the Hosts tab** — TUI surface for the same install flow. Streams the install transcript inline.
+- **`📋 bridged` / `📋!` status pill on the Hosts tab** — visible at terminal width ≥ 80c. Populated from the new `clipboard_bridge` field in `canopy ls --json` (schema bumped to v4).
+- **`canopy clipboard-server`** — the local daemon. New canopy subcommand; ships in the same binary, no separate goreleaser target. Listens on three Unix sockets in `$XDG_RUNTIME_DIR/canopy/` (clip-text, clip-image, clip-copy) and proxies clipboard reads/writes through the local `wl-clipboard` provider.
+- **Tmux copy-mode integration** — `bind-key -T copy-mode-vi y/Enter/C-S-c/MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "wl-copy"` is auto-spliced into the remote's `~/.tmux.conf`. `set -g extended-keys on` enables modifier distinction for `C-S-c`. `tmux source-file` re-reads in live sessions.
+
+### Architecture
+
+- **Wayland local + Linux remote** in Phase 1. X11/macOS providers are Phase 2 single-file additions behind the `Provider` interface already in place.
+- **SSH `RemoteForward` of Unix sockets** is the transport. No new daemons-on-the-wire, no new ports, no third-party services. The local daemon's sockets are mirrored on the remote at the same paths (`/run/user/<uid>/canopy/clip-*.sock`).
+- **Persistent tunnel as systemd user unit** — the SSH connection that owns the forwards lives independently of the canopy TUI, any user session, or mosh-attach lifecycle. `WantedBy=default.target` so it comes up at login; `Restart=on-failure` with `StartLimitBurst=10` so a permanently broken setup doesn't pin a CPU.
+- **Dedicated `Host canopy-tunnel-<name>` alias** in each per-host SSH snippet — normal `ssh user@host` doesn't match the alias, so the user's everyday SSH (and mosh's bootstrap SSH) doesn't try to bind the RemoteForward sockets and doesn't conflict with the persistent tunnel.
+
+### Caveats (documented in docs/clipboard-bridge.md)
+
+- Tailscale SSH on a bridged host must be disabled (`tailscale set --ssh=false`) — Tailscale's embedded SSH doesn't support Unix-socket forwarding.
+- Mosh-attached sessions get `Ctrl+Shift+C` translated to plain `Ctrl+C` (mosh doesn't faithfully forward extended-keys sequences). Use `y` / `Enter` in tmux copy-mode, or SSH-attach instead.
+- Single laptop per host at a time — concurrent bridges fight over the bind. Multi-laptop arbitration is parked for v0.19+.
+- nvim integration is a manual one-line config (`vim.opt.clipboard = "unnamedplus"`) — install prints the hint; auto-rewriting nvim configs is too varied.
+
+### Out of scope (tracked)
+
+- X11 local + macOS local providers (Phase 2 — single-file Provider additions).
+- macOS remote, Windows local (inherited from v0.17.x; project-level).
+- `canopy switch --ssh` flag (v0.18.x — for users who want extended-keys fidelity in mosh-attach territory).
+- Auto-install of `socat` on the remote when missing (v0.18.x — install.sh's pattern exists; just needs wiring).
+- Continuous clipboard content sync (out of scope — different security model than the request/response bridge).
+- Audit logging of clipboard content (out of scope — compliance feature; needs separate security review).
+
+### Bug fixes shipped during dogfood
+
+Eight failure modes surfaced + permanently fixed in the same release. Full registry in [docs/design/v0.18-clipboard-bridge.md](docs/design/v0.18-clipboard-bridge.md#failure-modes-registry--design-time--dogfood-discovered).
+
 ## [0.17.4.0] - 2026-05-14 — Remote workspace attach/kill fixes + SSH from Hosts tab
 
 A handful of dogfooding-found rough edges in the v0.17 remote-workspaces flow. Three were reported back-to-back: couldn't attach to a remote project's main session, kill on a remote main row hit the wrong workspace, and the Open Browser key was active on the Hosts tab where it had no port to point at. Plus an auto-attach win on remote create.
