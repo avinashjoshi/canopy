@@ -5,6 +5,14 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0.1] - 2026-05-14 — Capture P3 TODO: recognize my own remote attach
+
+A planning artifact from /plan-eng-review for remote-workspace observability gaps. The full implementation (live claude status, attached-client indicator, attach-warn modal, SSH-drop freshness) was scoped in the review; this release captures one deferred design question from that session — should the confirm-attach modal recognize "this is my own remote attach" and skip the prompt — as a P3 TODO with full context so it's not lost when the implementation lands.
+
+### Added
+
+- **TODOS.md entry (P3): "Recognize 'this is my own remote attach' to skip confirm-attach modal."** Documents the friction that will appear once the remote-status implementation wires `Attached` through for remote rows, and lays out the two cross-machine identity design options (hint file vs marker comparison) with their tradeoffs. Notes why the over-warn-by-default behavior is correct as a starting point.
+
 ## [0.18.0.0] - 2026-05-14 — TUI picker for `canopy use`
 
 Typing `canopy use` always meant "see a list, then run the command again with the name you saw." Two steps. This release collapses it to one: on an interactive terminal, `canopy use` (no args) opens a single-screen picker that shows every workspace canopy knows about — release row first, marked with `▶` for whichever is active — and lets you arrow to one and press Enter. The symlink swap, the build flow, the error messages all use the same code paths as the CLI; the picker is just a faster front door. Piped invocations (`canopy use | grep …`, CI scripts, anything with stdin redirected) still get the tabular list, byte-identical to before. `--list` forces tabular even on a TTY, for screen recordings or scripts that want it.
