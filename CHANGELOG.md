@@ -5,7 +5,7 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.18.0.0] - 2026-05-14 — Clipboard bridge for remote workspaces
+## [0.20.0.0] - 2026-05-14 — Clipboard bridge for remote workspaces
 
 The laptop's clipboard is now available inside any registered canopy host. Paste a screenshot you copied locally into Claude Code running on tower; copy text from a remote tmux session straight to the local Wayland clipboard; nvim's `y` yanks land on the laptop. None of it requires per-session setup once installed.
 
@@ -46,6 +46,85 @@ User reference + troubleshooting: [docs/clipboard-bridge.md](docs/clipboard-brid
 ### Bug fixes shipped during dogfood
 
 Eight failure modes surfaced + permanently fixed in the same release. Full registry in [docs/design/v0.18-clipboard-bridge.md](docs/design/v0.18-clipboard-bridge.md#failure-modes-registry--design-time--dogfood-discovered).
+
+## [0.19.0.0] - 2026-05-14 — Remote workspace observability: live claude status, attach indicator, attach warning, stale UX
+
+Three things broke the remote-workspace experience: claude always looked like it was sleeping (the ⚡ thinking badge never fired across SSH), there was no way to tell if someone was already attached to a remote tmux session before you stomped on it, and when wifi flickered the TUI kept showing last-known data with no visual cue. This release closes all three. Remote rows now do everything local rows do: ⚡ when claude is mid-response, ⊙ when someone has a client attached, the confirm-attach modal fires before Enter steals/shares an active session, and stale data dims itself with a "⚠ stale Ns" pill on the host header so you know to retry.
+
+### Added
+
+- **Live claude activity on remote workspaces (⚡ Thinking badge).** `canopy ls --json` on a remote host now captures each agent pane twice (100ms apart, all panes in parallel) and runs the same motion-aware classifier (`ClassifyTwoShot`) that local rows use. Before this, the remote path used single-shot classification and could never return "thinking" by construction — the badge stayed on 💤 even while claude was streaming a response. Per-pane work runs in goroutines so wall-clock stays under ~700ms regardless of how many agent panes a host has.
+- **Attached-client indicator (⊙) on remote workspaces.** `LsJSONWorkspace.attached` joins the wire format; `RemoteWorkspace.Attached` and `RemoteWorkspaceRow.Attached` pick it up on the laptop side and stamp `GlobalRow.Attached`. The existing ⊙ glyph renderer and confirm-attach modal start working for remote rows automatically — they were already wired, just never had a signal.
+- **Confirm-attach modal fires for remote-attached sessions.** Press Enter on a remote workspace where someone (you, in another mosh session, or a teammate) already has a tmux client attached and you get the share/cancel modal. Y/Enter proceeds with shared attach via `canopy switch --share`; N/Esc cancels. Same flow you already know from local rows, now uniform across the fleet.
+- **"⚠ stale Ns" host-section banner + per-row dim when SSH refresh stops landing.** When a host's most-recent successful refresh is older than 10s (≈5 missed TUI ticks), the host header in the Workspaces tab gets an amber "⚠ stale 14s" pill and every remote row from that host renders dimmed via lipgloss's `Faint` (~50% opacity). Gives you a visual "this is last-known, retry with `r`" cue instead of silently showing stale data.
+
+### Changed
+
+- **Wire format: `lsJSONSchemaVersion` bumped from 3 → 4** (added `attached`, `agent_state` now motion-aware). Additive — older laptop clients ignore the new field and older remotes leave it false, so partial rollouts work in both directions.
+- **`internal/agent`: new `ClassifyTwoShot(launcher, prev, cur)` helper.** Stateless companion to `ClassifyOneShot` — pure function, no shared state, easy to test. Lives next to `ClassifyOneShot` in `state.go` and reuses the same `normalize()` motion definition so local and remote produce identical badges for identical pane content.
+- **`state.GlobalRow` gains `LastSeen time.Time`.** Zero for local rows; the host's most-recent successful refresh timestamp for remote rows. Render-layer only — not persisted; recomputed every refresh tick.
+- **`classifyAgentPanes` in `cmd/canopy/ls.go` now does parallel double-capture.** Each agent pane gets its own goroutine; per-pane captures bounded by the existing 500ms timeout each, with a 100ms gap between captures. If the second capture fails after the first succeeded, falls back to `ClassifyOneShot` on the first — lose motion detection that tick but keep awaiting/idle pattern matches.
+
+### Fixed
+
+- **Older remotes (v0.18.x and earlier) without the new fields still render correctly.** Additive JSON: missing `attached` defaults to false, missing thinking-state defaults to the existing single-shot behavior. Verified by `TestRemoteWorkspace_LegacyParseStillWorks`.
+
+## [0.18.0.1] - 2026-05-14 — Capture P3 TODO: recognize my own remote attach
+
+A planning artifact from /plan-eng-review for remote-workspace observability gaps. The full implementation (live claude status, attached-client indicator, attach-warn modal, SSH-drop freshness) was scoped in the review; this release captures one deferred design question from that session — should the confirm-attach modal recognize "this is my own remote attach" and skip the prompt — as a P3 TODO with full context so it's not lost when the implementation lands.
+
+### Added
+
+- **TODOS.md entry (P3): "Recognize 'this is my own remote attach' to skip confirm-attach modal."** Documents the friction that will appear once the remote-status implementation wires `Attached` through for remote rows, and lays out the two cross-machine identity design options (hint file vs marker comparison) with their tradeoffs. Notes why the over-warn-by-default behavior is correct as a starting point.
+
+## [0.18.0.0] - 2026-05-14 — TUI picker for `canopy use`
+
+Typing `canopy use` always meant "see a list, then run the command again with the name you saw." Two steps. This release collapses it to one: on an interactive terminal, `canopy use` (no args) opens a single-screen picker that shows every workspace canopy knows about — release row first, marked with `▶` for whichever is active — and lets you arrow to one and press Enter. The symlink swap, the build flow, the error messages all use the same code paths as the CLI; the picker is just a faster front door. Piped invocations (`canopy use | grep …`, CI scripts, anything with stdin redirected) still get the tabular list, byte-identical to before. `--list` forces tabular even on a TTY, for screen recordings or scripts that want it.
+
+### Added
+
+- **Interactive picker on bare `canopy use`.** ↑/↓ (or `j`/`k`) to move, Enter to switch, `b` to build-then-switch on a workspace row, `q`/Esc/Ctrl-C to cancel without changes. `▶` marks the currently-active target so you don't accidentally switch to where you already are. Rows whose binary doesn't exist on disk render dim; pressing Enter on them shows a one-line nudge ("press b to build it now") instead of crashing out post-altscreen with a stat error. Narrow terminals (<40 cols) get a hint pointing at `--list` instead of letting lipgloss wrap the rows into something unreadable.
+- **`canopy use --list` flag.** Forces the tabular output even when stdin is a TTY. Documented escape hatch for screen recordings, debugging, and personal preference.
+- **`internal/ui.UseRow` + `internal/ui.UsePickerModel`.** The picker follows the existing `InitSplashModel` precedent — single-screen Bubbletea model that sets state, exits cleanly, and hands control back to `cmd/canopy/use.go` for the actual symlink swap. The boundary keeps build output ("Building canopy in …") on a normal terminal post-altscreen and lets `switchToRelease` / `switchToWorkspace` errors flow through cobra's `RunE` chain unchanged.
+
+### Changed
+
+- **`printUseList` and the new picker now share `useRows()`.** Both surfaces build rows the same way (release first, canopy worktrees alphabetically, non-canopy projects filtered out), so a column edit can't ship to one without the other. Tabular output is byte-compatible with v0.17.5.0 — locked in by the existing `TestPrintUseList` substring assertions plus a new `TestRunUse_NotTTY_FallsBackToList`.
+- **TTY detection uses `term.IsTerminal` (ioctl) instead of the mode-bit check** the rest of canopy's prompts use. The mode-bit pattern returns true for `/dev/null` (also a character device), which would route `canopy use < /dev/null` into the altscreen path and fail. The ioctl check distinguishes real ptys from other character devices, so piped and `</dev/null` invocations correctly fall back to tabular.
+
+### Fixed
+
+- **`canopy use < /dev/null` no longer errors with "could not open a new TTY".** Was a latent bug in the copy-pasted `hostInstallIsTerminal` pattern — surfaced as soon as the picker became the default path on a TTY. The new `term.IsTerminal` check is the standard Go answer and matches what bubbletea itself uses internally.
+
+## [0.17.6.0] - 2026-05-14 — Clearer errors when a remote project path is mis-registered
+
+Three symptoms with one root cause kept tripping users up on a fresh remote host: `n` on a remote row failed with bash's terse `cd: No such file or directory`, attaching to a remote main row exited mosh silently with no on-screen reason, and the TUI's "creating in brain" banner read identically for a local `brain` project and a remote one on a different machine. All three trace back to the same thing — the registered remote path doesn't exist on the host (e.g. `/home/avi/Work/brain` registered for a host whose remote user is `jarvis`, not `avi`). This release surfaces that root cause in every flow: the banner now shouts the host, the dispatch scripts pre-check the path and emit a copy-pasteable remediation, and `canopy project add --on` warns when the path doesn't exist on the remote at register-time.
+
+### Added
+
+- **Host pill in the new-workspace banner.** When `n` is pressed on a remote row, the banner now reads `creating on [pi] in [brain] /home/jarvis/Work/brain` — the host name renders as a cyan pill (color 37) so it can't be confused with the violet project pill (color 99). For a remote target the trailing path shows the REMOTE cwd (`newTargetRemoteCwd`), not the missing local root. Closes the failure mode where "creating in brain" looked identical for the local `brain` project and a remote one on pi, making it easy to fire `n` thinking it'd create locally and end up with a remote workspace. `internal/ui/view.go renderTargetBanner`.
+- **Dir-existence pre-check in `buildRemoteScript`.** Every remote canopy dispatch (via SSH) now emits `if [ ! -d <path> ]; then echo "..." >&2; exit 7; fi` before the `cd`. Exit 7 is a sentinel the laptop-side dispatcher (`dispatchNewToRemote`, `dispatchVerbToRemote`) keys off to rewrap the failure with a clear "remote project path X does not exist on host Y" error plus a copy-pasteable `canopy project add <project> <correct-path> --on <host>` hint. Without it, the user saw bash's terse `cd: No such file or directory` and had to guess at the registration. `cmd/canopy/new.go buildRemoteScript`, `dispatchNewToRemote`, `cmd/canopy/host_resolve.go dispatchVerbToRemote`.
+- **SSH pre-probe before mosh exec in `dispatchSwitchToRemote`.** `canopy switch --on <host>` exec-replaces itself with mosh via `syscall.Exec`, which means a `cd` failure inside the mosh child shell tears down with no message back to the TUI — the user pressed Enter, the screen flashed, and they're back at the list with nothing to act on. A 1-roundtrip `ssh <target> test -d <path>` (sub-100ms over a warm ControlMaster socket) now runs before the mosh exec; on miss it surfaces the same actionable error the new-workspace path uses, in the terminal the TUI is still drawing in. `cmd/canopy/switch.go`, `cmd/canopy/host_resolve.go probeRemoteCwd`.
+- **Path probe at registration time in `canopy project add --on`.** The CLI now runs a 5s SSH `test -d <path>` against the registered host before persisting the project entry. If the host's reachable and the path doesn't exist (`test -d` exits 1), the user sees a loud warning: `path "..." does not exist on host "..." — canopy new --on ... and canopy switch --on ... will fail until the path exists`. Best-effort: if the probe fails for transport reasons (host asleep, key not set up), the registration still proceeds — registering ahead of a `git clone` on the remote is a real workflow. `cmd/canopy/project.go projectAddCmd`.
+
+### Why
+
+The original failure-mode trace: a user registered `brain` for the pi host with the path they copy-pasted from their local config (`/home/avi/Work/brain`), but the pi's remote user is `jarvis` — so the actual path is `/home/jarvis/...` and every `cd` on the remote fails. Three separate UX problems flowed from that one mismatch, and none of them named the root cause. Now all three (create, attach-main, attach-named) emit the same actionable error, and `project add` catches the mismatch at the source.
+
+
+## [0.17.5.0] - 2026-05-14 — Remote version-drift indicator on the Hosts tab
+
+A new release on canopy lit up the local upgrade pill but said nothing about the fleet — the laptop knew it was upgrading and what to, the Hosts tab knew each remote's installed version, but the two never met. So a host on v0.17.3 sat next to a host on v0.17.4 with no way to tell which one needed `U` without comparing the strings by eye. This release closes that gap: every row carries a yellow `⇑` next to its version when it's behind the laptop, a `⇓` when it's ahead, and silence when matched. The host detail drawer spells the same out longhand with a `press U` nudge.
+
+### Added
+
+- **Drift badge on Hosts-tab rows.** Every host with a reported `canopy_version` now compares against a reference (your laptop's running version on release builds; the cached upstream-latest on dev builds). Older than reference renders `v0.17.3.0 ⇑` in yellow; newer renders `v0.17.4.0 ⇓`. Same vocabulary as the top-bar version pill's upgrade arrow — one palette, one meaning everywhere. Suppressed silently when either side is `dev` / `(unknown)` / unreachable so the badge never lies about a comparison we couldn't actually make.
+- **Spelled-out drift annotation in the host detail drawer.** Press Enter on a host row to open the detail view and the `canopy: v0.17.3.0` line now grows a yellow trailing `⇑ upgrade available (your local: v0.17.4.0) — press U` (or `⇓ host is ahead of your local (v0.17.4.0)` in the inverted case). The badge tells you *that* there's drift; the drawer tells you *what to press*. Silent when matched.
+- **`Model.hostReferenceVersion()`** picks the bare semver each remote is compared against, on a priority ladder: release laptop wins (use its own version, the dogfood case), dev laptop falls back to the cached upstream-latest (the contributor case), dev with no cache returns empty so badges suppress entirely instead of mis-firing.
+
+### Changed
+
+- **`hosts.BuildRows` signature** grew a `referenceVersion string` parameter so the renderer can compute drift per row. Single internal caller in `view.go renderHostsTab`; no external API breakage. Pass `""` to suppress drift detection globally (the dev-with-no-cache fallback path).
 
 ## [0.17.4.0] - 2026-05-14 — Remote workspace attach/kill fixes + SSH from Hosts tab
 

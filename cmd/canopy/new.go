@@ -275,6 +275,13 @@ func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []s
 			fmt.Fprintf(stdout, "\nRemote workspace created (initial prompt failed). Re-send the prompt manually after attaching.\n")
 			return &workspace.ErrPromptFailed{Reason: "remote prompt delivery failed (exit 2)"}
 		}
+		// Exit 7 = the dir-existence pre-check in buildRemoteScript fired.
+		// Surface a clear, actionable remediation instead of bash's terse
+		// "No such file or directory" — the registered remote path is the
+		// real bug and the user needs to know which command to run.
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 7 {
+			return remotePathMissingErr(newWorkspaceFlags.onHost, resolved.RemoteCwd, resolved.HostName)
+		}
 		return fmt.Errorf("remote canopy new failed: %w", err)
 	}
 
@@ -311,6 +318,15 @@ func buildRemoteScript(remoteCwd string, canopyArgs []string, promptText string)
 	// interactive SSH-command shells.
 	b.WriteString(`export PATH="$HOME/.local/bin:$PATH"` + "\n")
 	if remoteCwd != "" {
+		// Pre-check the cwd with a distinct exit code (7) so the caller can
+		// distinguish "remote project path not registered correctly" from
+		// other failures. Without this, a typo or local-vs-remote user
+		// mismatch (e.g. /home/avi/Work/brain registered for a pi host
+		// whose user is jarvis) bubbles up as a generic `cd: No such file`
+		// — opaque to anyone who didn't set up the host. exitRemotePathMissing
+		// is the matching constant on the laptop side.
+		fmt.Fprintf(&b, "if [ ! -d %s ]; then echo \"canopy: remote project path %s does not exist on this host\" >&2; exit 7; fi\n",
+			shellQuote(remoteCwd), shellQuote(remoteCwd))
 		fmt.Fprintf(&b, "cd %s\n", shellQuote(remoteCwd))
 	}
 
@@ -374,6 +390,32 @@ func indent(s, prefix string) string {
 		out += prefix + line + "\n"
 	}
 	return out
+}
+
+// remotePathMissingErr formats the exit-7 ("remote project path doesn't
+// exist") response from buildRemoteScript's pre-check into a clear,
+// remediable error. hostName is the registry name (empty for raw
+// ssh-targets); when set, it's used to build a copy-pasteable
+// `canopy project add` command.
+func remotePathMissingErr(onHostSpec, remotePath, hostName string) error {
+	hint := ""
+	if hostName != "" {
+		// The project name component matches the local project basename
+		// resolution path that wrote this registration in the first
+		// place. Quoting the path is fine — shells handle it.
+		hint = fmt.Sprintf("\n  Update the registered remote path with:\n    canopy project add %s <correct-remote-path> --on %s\n  (current registered path: %s)",
+			localProjectBasename(currentCwd()), hostName, remotePath)
+	}
+	return fmt.Errorf("remote project path %q does not exist on host %q.%s",
+		remotePath, onHostSpec, hint)
+}
+
+// currentCwd is os.Getwd with the error swallowed — used only for the
+// hint string in remotePathMissingErr where an empty value just yields
+// a less-specific (but still correct) hint.
+func currentCwd() string {
+	cwd, _ := os.Getwd()
+	return cwd
 }
 
 // joinArgs is a tiny display helper for the "Dispatching to X: canopy

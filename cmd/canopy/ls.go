@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -327,13 +328,23 @@ type LsJSONWorkspace struct {
 
 	// AgentState is the workspace agent pane's classification at
 	// emit time: "idle", "thinking", "awaiting_input", or "" (unknown
-	// / no agent pane). Single-shot pattern match via
-	// agent.ClassifyOneShot — so "thinking" is never set from this
-	// path (it requires motion across observations the laptop tracks).
-	// The laptop Refresher reads this onto GlobalRow.AgentState which
-	// the row renderer uses to populate the badge for remote rows.
-	// v0.17 Phase 1d.2.
+	// / no agent pane). v0.19 — now sourced from ClassifyTwoShot
+	// (two captures 100ms apart, motion-aware) so remote rows CAN
+	// report "thinking" same as local rows. v0.17 Phase 1d.2 introduced
+	// the field with single-shot classification; v0.19 upgraded to
+	// motion detection. Empty when classification is unknown or the
+	// double-capture both failed.
 	AgentState string `json:"agent_state,omitempty"`
+
+	// Attached is true when at least one tmux client is currently
+	// connected to TmuxSession. Sourced from a single batch tmux call
+	// (`list-sessions -F #{session_attached}`) on the remote, mirrored
+	// onto GlobalRow.Attached by the laptop's refresh path. The TUI
+	// uses it for the `⊙` glyph and to trigger the confirm-attach
+	// modal when Enter would steal/share an active session. Without
+	// this field, remote rows always rendered as detached and the
+	// modal never fired for them. v0.19 remote-status-observability.
+	Attached bool `json:"attached,omitempty"`
 }
 
 // canopyVersionInfo is what `canopy ls --json` reports under
@@ -356,7 +367,7 @@ func init() {
 	}
 }
 
-const lsJSONSchemaVersion = 4 // v0.18 Lane C.3: + clipboard_bridge
+const lsJSONSchemaVersion = 5 // v0.19: + attached, agent_state now motion-aware. v0.20: + clipboard_bridge
 
 func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 	store, err := openStateReadOnly()
@@ -410,12 +421,19 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 		}
 		mainBranchByRoot[r.ProjectRoot] = b
 	}
-	// v0.17 Phase 1d.2: classify each workspace's agent pane via
-	// single-shot pattern matching so the laptop can render the
-	// awaiting-input / idle badge on remote rows. One ListAgentPanes
-	// call up front; per-pane CapturePane bounded by a tight timeout
-	// so a wedged pane can't stall ls --json. Errors fail-open: the
-	// row's agent_state stays empty and the laptop renders blank.
+	// v0.17 Phase 1d.2 / v0.19 remote-status-observability: classify
+	// each workspace's agent pane via the two-snapshot motion detector
+	// (was single-shot in v0.17–v0.18). One ListAgentPanes call up
+	// front; per-pane double-capture runs in parallel goroutines with
+	// a 100ms gap. Errors fail-open: the row's agent_state stays empty
+	// and the laptop renders blank.
+	//
+	// GlobalRow.Attached is already populated by
+	// BuildGlobalRowsWithLoad via the AttachedProbe path
+	// (state/listing.go:182) — one batch `tmux list-sessions -F` call
+	// stamps r.Attached for each row. The wire emit below copies it
+	// straight to LsJSONWorkspace.Attached, so the laptop sees the
+	// same source-of-truth signal across local and remote rows.
 	agentStateBySession := classifyAgentPanes(ctx, tc)
 	for _, r := range rows {
 		var hints []state.Hint
@@ -453,6 +471,7 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 			Hints:         hints,
 			LastErrorHint: hintByKey[r.ProjectRoot+"|"+r.Name],
 			AgentState:    agentState,
+			Attached:      r.Attached,
 		})
 	}
 	enc := json.NewEncoder(out)
@@ -476,15 +495,36 @@ func (a lsLoadAdapter) SessionLoad(ctx context.Context, session string) (state.L
 	return state.LoadValue{RSS: got.RSS, CPU: got.CPU}, nil
 }
 
-// classifyAgentPanes runs ListAgentPanes + per-pane CapturePane,
-// classifies each pane via agent.ClassifyOneShot, and returns a map
-// keyed by tmux session name. Used by lsGlobalJSON to stamp each row's
-// agent_state. v0.17 Phase 1d.2.
+// classifyAgentPanes runs ListAgentPanes + per-pane double-capture,
+// classifies each pane via agent.ClassifyTwoShot, and returns a map
+// keyed by tmux session name. v0.19 remote-status-observability
+// upgraded from ClassifyOneShot (single capture, no motion) to
+// ClassifyTwoShot (two captures 100ms apart, motion → Thinking).
+//
+// Per-pane work runs in parallel goroutines (D7=C from
+// /plan-eng-review) so total wall-clock is one pane's budget, not
+// Npanes × budget. With N agent panes ~500ms each, serial
+// double-capture would exceed the Refresher's 3s per-host timeout
+// for hosts with 3+ agents. Parallel keeps the worst case under
+// ~700ms (capture1 + 100ms gap + capture2 + classify) regardless of
+// pane count.
 //
 // Failure modes are all fail-open — the map just doesn't carry an
 // entry for the missing/timed-out pane, and the row's agent_state in
-// the JSON output stays empty. Per-pane CapturePane wrapped in a
-// 500ms timeout so one wedged pane can't stall the whole emit.
+// the JSON output stays empty. If the second capture fails after
+// the first succeeded, we fall back to ClassifyOneShot on capture1
+// — we lose motion detection for that pane this tick but the
+// awaiting-input / idle pattern matches still work.
+//
+// Capture cadence per pane (all panes run this concurrently):
+//
+//	t=0ms      capture1 (500ms timeout)
+//	t=Nms      sleep 100ms
+//	t=N+100ms  capture2 (500ms timeout)
+//	t=...      ClassifyTwoShot(launcher, capture1, capture2)
+const remoteCaptureGap = 100 * time.Millisecond
+const remoteCaptureTimeout = 500 * time.Millisecond
+
 func classifyAgentPanes(ctx context.Context, tc *tmux.Client) map[string]agent.State {
 	out := make(map[string]agent.State)
 	listCtx, listCancel := context.WithTimeout(ctx, 1*time.Second)
@@ -493,20 +533,63 @@ func classifyAgentPanes(ctx context.Context, tc *tmux.Client) map[string]agent.S
 	if err != nil || len(panes) == 0 {
 		return out
 	}
+
+	type result struct {
+		session string
+		state   agent.State
+	}
+	results := make(chan result, len(panes))
+	var wg sync.WaitGroup
 	for _, p := range panes {
 		launcher := agent.LauncherFromRole(p.Role)
 		if launcher == "" {
 			continue
 		}
-		capCtx, capCancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		content, err := tc.CapturePane(capCtx, p.ID)
-		capCancel()
-		if err != nil {
-			continue
+		wg.Add(1)
+		go func(p tmux.PaneRoleInfo, launcher string) {
+			defer wg.Done()
+			results <- result{session: p.Session, state: classifyOnePane(ctx, tc, p.ID, launcher)}
+		}(p, launcher)
+	}
+	wg.Wait()
+	close(results)
+	for r := range results {
+		if r.state != agent.StateUnknown {
+			out[r.session] = r.state
 		}
-		out[p.Session] = agent.ClassifyOneShot(launcher, content)
 	}
 	return out
+}
+
+// classifyOnePane is the per-pane work one goroutine runs in the
+// fan-out above. Two captures 100ms apart, then ClassifyTwoShot. If
+// capture2 fails after capture1 succeeded, falls back to
+// ClassifyOneShot on capture1. If capture1 fails, returns Unknown —
+// nothing to classify against.
+func classifyOnePane(ctx context.Context, tc *tmux.Client, paneID, launcher string) agent.State {
+	cap1Ctx, cap1Cancel := context.WithTimeout(ctx, remoteCaptureTimeout)
+	prev, err := tc.CapturePane(cap1Ctx, paneID)
+	cap1Cancel()
+	if err != nil {
+		return agent.StateUnknown
+	}
+	// Parent cancelled mid-classify (e.g., the SSH client side gave
+	// up): don't sleep, don't capture again. The result we'd produce
+	// would be discarded anyway. Fall back to one-shot on prev.
+	select {
+	case <-ctx.Done():
+		return agent.ClassifyOneShot(launcher, prev)
+	case <-time.After(remoteCaptureGap):
+	}
+	cap2Ctx, cap2Cancel := context.WithTimeout(ctx, remoteCaptureTimeout)
+	cur, err := tc.CapturePane(cap2Ctx, paneID)
+	cap2Cancel()
+	if err != nil {
+		// One-shot fallback on prev — lose Thinking detection for this
+		// tick but keep awaiting/idle pattern matches.
+		return agent.ClassifyOneShot(launcher, prev)
+	}
+	return agent.ClassifyTwoShot(launcher, prev, cur)
 }
 
 // openStateReadOnly returns a state.Store rooted at ~/.canopy. Used for

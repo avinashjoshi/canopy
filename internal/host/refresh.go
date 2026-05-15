@@ -94,9 +94,19 @@ type RemoteWorkspace struct {
 	LastErrorHint string      `json:"last_error_hint,omitempty"`
 
 	// AgentState is the workspace agent pane's classification: "idle",
-	// "thinking", "awaiting_input", or empty. Populated by canopy ls
-	// --json's single-shot ClassifyOneShot. v0.17 Phase 1d.2.
+	// "thinking", "awaiting_input", or empty. v0.17 Phase 1d.2 introduced
+	// single-shot classification; v0.19 upgraded the remote emit path
+	// to ClassifyTwoShot (motion-aware) so "thinking" is now reachable
+	// for remote rows. Field semantics unchanged on the laptop side —
+	// just a richer signal.
 	AgentState string `json:"agent_state,omitempty"`
+
+	// Attached is true when at least one tmux client is connected to
+	// TmuxSession on the remote host. Mirrored onto GlobalRow.Attached
+	// in the cache merge so the TUI's `⊙` glyph and confirm-attach
+	// modal work uniformly across local and remote rows. v0.19
+	// remote-status-observability.
+	Attached bool `json:"attached,omitempty"`
 }
 
 // remoteLsResponse mirrors LsJSONOutput on the cmd/canopy side. Kept

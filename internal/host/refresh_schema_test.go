@@ -70,6 +70,10 @@ func TestRemoteWorkspace_LegacyParseStillWorks(t *testing.T) {
 	if got.MemRSS != 0 || got.CPU != 0 || len(got.Hints) != 0 || got.LastErrorHint != "" {
 		t.Errorf("legacy parse leaked non-zero fields: %+v", got)
 	}
+	// v0.19: also confirm Attached defaults to false for older remotes.
+	if got.Attached {
+		t.Errorf("legacy parse leaked Attached=true (should default to false for older remotes that don't emit the field)")
+	}
 	// Sanity check: the Hint type is reachable from this package via the
 	// state import, so a new contributor adding a Hint field will see
 	// this test fail at compile time if they forget to update the wire
@@ -77,15 +81,15 @@ func TestRemoteWorkspace_LegacyParseStillWorks(t *testing.T) {
 	_ = state.Hint{}
 }
 
-// TestRemoteLsResponse_ClipboardBridgeParse verifies the v0.18 Lane C.3
-// schema bump (top-level clipboard_bridge field) parses correctly on
-// the laptop side. Drift between the emitter (cmd/canopy/ls.go) and
-// this parser would leave the Hosts-tab pill neutral on every refresh
+// TestRemoteLsResponse_ClipboardBridgeParse verifies the v0.20 schema
+// bump (top-level clipboard_bridge field) parses correctly on the
+// laptop side. Drift between the emitter (cmd/canopy/ls.go) and this
+// parser would leave the Hosts-tab pill neutral on every refresh
 // even for bridged hosts.
 func TestRemoteLsResponse_ClipboardBridgeParse(t *testing.T) {
 	wire := []byte(`{
-	  "schema_version": 4,
-	  "canopy_version": "0.18.0+test",
+	  "schema_version": 5,
+	  "canopy_version": "0.20.0+test",
 	  "clipboard_bridge": "bridged",
 	  "workspaces": []
 	}`)
@@ -98,13 +102,13 @@ func TestRemoteLsResponse_ClipboardBridgeParse(t *testing.T) {
 	}
 }
 
-// TestRemoteLsResponse_ClipboardBridgeAbsentIsEmpty: pre-v0.18 remotes
+// TestRemoteLsResponse_ClipboardBridgeAbsentIsEmpty: pre-v0.20 remotes
 // omit the field. Laptop must read it as empty rather than failing the
 // whole parse — otherwise mixed-version fleets would lose data.
 func TestRemoteLsResponse_ClipboardBridgeAbsentIsEmpty(t *testing.T) {
 	wire := []byte(`{
-	  "schema_version": 3,
-	  "canopy_version": "0.17.5",
+	  "schema_version": 4,
+	  "canopy_version": "0.19.0",
 	  "workspaces": []
 	}`)
 	var got remoteLsResponse
@@ -112,6 +116,34 @@ func TestRemoteLsResponse_ClipboardBridgeAbsentIsEmpty(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if got.ClipboardBridge != "" {
-		t.Errorf("ClipboardBridge from pre-v0.18 response should be empty, got %q", got.ClipboardBridge)
+		t.Errorf("ClipboardBridge from pre-v0.20 response should be empty, got %q", got.ClipboardBridge)
+	}
+}
+
+// TestRemoteWorkspace_AttachedParse verifies the laptop-side Refresher
+// parses the v0.19 `attached` wire-format addition. This is what makes
+// remote rows correctly trigger the confirm-attach modal — without
+// parsing, GlobalRow.Attached stays false and the gate never fires for
+// remote workspaces.
+func TestRemoteWorkspace_AttachedParse(t *testing.T) {
+	wire := []byte(`{
+	  "name": "foo",
+	  "project": "cravd",
+	  "branch": "b",
+	  "status": "ready",
+	  "tmux_session": "cravd/foo",
+	  "alive": true,
+	  "attached": true,
+	  "agent_state": "thinking"
+	}`)
+	var got RemoteWorkspace
+	if err := json.Unmarshal(wire, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Attached {
+		t.Errorf("Attached = false, want true (wire had attached:true)")
+	}
+	if got.AgentState != "thinking" {
+		t.Errorf("AgentState = %q, want \"thinking\" (v0.19 motion-aware classification reachable)", got.AgentState)
 	}
 }

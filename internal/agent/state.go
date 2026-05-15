@@ -142,6 +142,56 @@ func (d *Detector) Observe(paneID, launcher, current string) (State, int) {
 	return StateUnknown, 4
 }
 
+// ClassifyTwoShot returns a state from two captures of the same pane
+// taken a short interval apart. Used by `canopy ls --json` on a remote
+// host to detect motion (Thinking) without persistent Detector state:
+// the CLI captures the agent pane twice (e.g., 100ms apart), passes
+// both contents in here, and we hash-diff normalize(prev) vs
+// normalize(cur) to decide Thinking. v0.18 remote-status-observability.
+//
+// Compared with ClassifyOneShot, this can return Thinking. Compared
+// with Detector.Observe, it's stateless — no per-pane history map to
+// maintain across calls, which fits the one-shot CLI invocation model
+// of canopy ls --json.
+//
+// Decision tree (matches Detector.Observe's rules so local and remote
+// produce the same badge for the same pane content):
+//
+//  1. prev=="" OR cur=="" OR launcher=="" → Unknown
+//  2. launcher != "claude" → Unknown (no idle markers registered for
+//     codex/opencode/aider yet — same as ClassifyOneShot)
+//  3. normalize(prev) != normalize(cur) → Thinking (motion detected)
+//  4. stable + awaiting pattern match on RAW cur → AwaitingInput
+//  5. stable + idle marker match on RAW cur → Idle
+//  6. stable + no marker → Unknown (we have motion data but no idle
+//     signal — same low-confidence behavior as Detector.Observe at
+//     this point)
+//
+// Pattern matching uses RAW cur, not normalize(cur), so footer-living
+// markers aren't stripped before they can be matched (codex review M2).
+func ClassifyTwoShot(launcher, prev, cur string) State {
+	if prev == "" || cur == "" || launcher == "" {
+		return StateUnknown
+	}
+	if launcher != "claude" {
+		return StateUnknown
+	}
+	if normalize(prev) != normalize(cur) {
+		return StateThinking
+	}
+	for _, p := range claudeAwaitingPatterns {
+		if p.MatchString(cur) {
+			return StateAwaitingInput
+		}
+	}
+	for _, p := range claudeIdleMarkers {
+		if p.MatchString(cur) {
+			return StateIdle
+		}
+	}
+	return StateUnknown
+}
+
 // ClassifyOneShot returns a state from a single pane capture using
 // static pattern matching only — no motion / history needed. Used by
 // `canopy ls --json` to stamp each workspace's agent_state per
@@ -155,6 +205,10 @@ func (d *Detector) Observe(paneID, launcher, current string) (State, int) {
 // blocked on me" (AwaitingInput), which pattern matching handles
 // well. Local rows keep the diff-based Observe path for the full
 // Idle/Thinking/AwaitingInput trio.
+//
+// Superseded by ClassifyTwoShot on remote hosts as of v0.19 — kept
+// as a fallback when the second capture fails (network blip, pane
+// disappeared between captures).
 //
 // launcher mirrors LauncherFromRole(roleTag); empty means malformed
 // role → Unknown. Empty content also → Unknown.

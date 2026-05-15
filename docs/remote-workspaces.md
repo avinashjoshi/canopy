@@ -119,7 +119,7 @@ canopy retry --on tower broken-one      # re-run scripts.setup remotely
 
 The tab lists every registered host with:
 
-- Current canopy version (probed every 2 seconds via `canopy ls --json`)
+- Current canopy version (probed every 2 seconds via `canopy ls --json`) with a yellow `⇑` badge when the host is behind your laptop (or `⇓` when it's ahead) — silent when matched
 - Last-seen timestamp
 - Workspace count + per-host CPU / memory hints
 - Agent badges for each remote workspace (the laptop now shows `💤` / `✋` / `⚡` for remote rows, not just local)
@@ -157,6 +157,8 @@ Two flows, both on the **Remote hosts** tab:
 - **`S`** — `canopy use release` on the host. The recovery path when a host is running a dev binary and `canopy upgrade` refuses with "Switch to the released canopy first."
 
 `U` is hidden on hosts already running a DEV binary (it would error); `S` is hidden on hosts reporting a real semver (it would no-op). Both keys show up on hosts reporting `(unknown)` — that's the legacy state for hosts older than v0.17.1 that didn't emit version over the wire.
+
+Hosts that are behind your laptop's canopy show a yellow `⇑` next to their version in the row; the host detail drawer (press `enter`) spells the same out as `⇑ upgrade available (your local: vX.Y.Z) — press U`. Hosts ahead of your laptop render `⇓`. Comparison suppresses silently when either side reports `dev` or `(unknown)`.
 
 ## How it works under the hood
 

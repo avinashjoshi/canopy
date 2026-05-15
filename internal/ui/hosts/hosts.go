@@ -27,6 +27,7 @@ package hosts
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ type Row struct {
 	Projects     int    // count from host.Host.Projects
 	Workspaces   int    // count from RemoteHostSnapshot.Workspaces
 	Version      string // from snapshot.CanopyVersion, empty if never reached
+	Drift        Drift  // how Version compares to the reference passed to BuildRows
 	LastSeen     time.Time
 	LastError    string // raw error string from snapshot, displayed verbatim
 
@@ -55,6 +57,35 @@ type Row struct {
 	// is older than v0.18 (no field emitted). Drives the `📋` pill.
 	ClipboardBridge string
 }
+
+// Drift describes how the host's reported canopy version compares to a
+// reference version (the laptop's running binary, or — when the laptop
+// is on a dev build — the upstream-latest cached value). Drives the
+// yellow ⇑ / ⇓ badge on the version cell so users can spot "this host
+// needs a `U` upgrade" without comparing strings by eye.
+//
+// "Unknown" covers every case where we deliberately suppress the badge:
+// missing reference, missing remote version, dev on either side, or
+// "(unknown)" sentinels emitted by older remote canopy builds.
+type Drift int
+
+const (
+	// DriftUnknown — comparison not possible or not meaningful.
+	// Includes: empty remote version, "dev" or "(unknown)" on either
+	// side, missing reference. Renders the version cell in the existing
+	// subtle gray with no badge.
+	DriftUnknown Drift = iota
+	// DriftSame — remote matches reference exactly. Same render as
+	// DriftUnknown (no badge) — silence is the signal.
+	DriftSame
+	// DriftBehind — remote is older than reference. Yellow ⇑ badge
+	// after the version: "this host should be upgraded."
+	DriftBehind
+	// DriftAhead — remote is newer than reference. Yellow ⇓ badge:
+	// "your laptop is older than this host." Uncommon but worth
+	// surfacing so users don't miss the inverted mismatch.
+	DriftAhead
+)
 
 // Status enumerates the per-host health states the Hosts tab renders.
 // Distinct from state.Status (workspace-level): this is host-level.
@@ -85,8 +116,14 @@ const (
 // orphans — surfaced as a separate "(stale)" entry until the next
 // refresh prunes them.
 //
+// referenceVersion is the version each host's CanopyVersion is compared
+// against to compute Row.Drift. Pass the bare semver of the laptop's
+// running canopy (release builds) or the cached upstream-latest semver
+// (dev builds). Pass "" to suppress drift detection across the board —
+// every row gets DriftUnknown.
+//
 // Sort: name ASC. Deterministic so the cursor doesn't shuffle.
-func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot) []Row {
+func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot, referenceVersion string) []Row {
 	rows := make([]Row, 0, len(hosts))
 	for _, h := range hosts {
 		r := Row{
@@ -102,6 +139,7 @@ func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot
 		} else {
 			r.Workspaces = len(snap.Workspaces)
 			r.Version = snap.CanopyVersion
+			r.Drift = ComputeDrift(snap.CanopyVersion, referenceVersion)
 			r.LastSeen = snap.LastSeen
 			r.LastError = snap.LastError
 			r.ClipboardBridge = snap.ClipboardBridge
@@ -158,7 +196,7 @@ func renderRow(r Row, width int, selected bool) string {
 	if selected {
 		parts := []string{statusGlyphPlain(r.Status), r.Name}
 		if width >= 80 && r.Version != "" {
-			parts = append(parts, "v"+r.Version)
+			parts = append(parts, "v"+r.Version+driftGlyphPlain(r.Drift))
 		}
 		if width >= 80 {
 			if pill := clipboardPillPlain(r.ClipboardBridge); pill != "" {
@@ -185,7 +223,7 @@ func renderRow(r Row, width int, selected bool) string {
 	detail := statusDetailStyle(r.Status).Render(r.StatusDetail)
 	parts := []string{glyph, name}
 	if width >= 80 && r.Version != "" {
-		parts = append(parts, subtleStyle().Render("v"+r.Version))
+		parts = append(parts, renderVersionCell(r.Version, r.Drift))
 	}
 	if width >= 80 {
 		if pill := clipboardPill(r.ClipboardBridge); pill != "" {
@@ -334,4 +372,142 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// renderVersionCell renders the "v<version><glyph>" cell for one row,
+// styled by drift. DriftSame / DriftUnknown render in the subtle gray
+// already used for non-drift versions; DriftBehind / DriftAhead use
+// the yellow ⇑ / ⇓ vocabulary the top-bar version pill established
+// for "upgrade available" (render.go's renderVersionPill).
+func renderVersionCell(version string, d Drift) string {
+	body := "v" + version
+	switch d {
+	case DriftBehind, DriftAhead:
+		return driftStyle().Render(body + driftGlyphPlain(d))
+	default:
+		return subtleStyle().Render(body)
+	}
+}
+
+// driftStyle is the yellow attention color used by the version-pill
+// upgrade arrow (render.go:220). Keeping the palette identical means
+// "yellow on the version" reads as "upgrade available" everywhere it
+// appears, top-bar pill and Hosts tab alike.
+func driftStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+}
+
+// driftGlyphPlain returns the trailing glyph (with leading space) for
+// a row's drift. Plain because the selected-row path can't carry
+// inner foreground colors — the outer selection bg wins anyway.
+// Empty string for DriftSame/DriftUnknown keeps the cell unchanged in
+// the common case.
+func driftGlyphPlain(d Drift) string {
+	switch d {
+	case DriftBehind:
+		return " ⇑"
+	case DriftAhead:
+		return " ⇓"
+	default:
+		return ""
+	}
+}
+
+// ComputeDrift compares a remote canopy version against a reference
+// (laptop or upstream-latest). Returns DriftUnknown the moment either
+// input is non-comparable — "dev", "(unknown)", "", or any string that
+// doesn't parse as a dotted-number sequence — because the alternative
+// (showing a yellow upgrade arrow with no real comparison behind it)
+// would be misleading.
+//
+// Both inputs are normalized via ExtractBareSemver, so callers can pass
+// raw wire forms (the laptop's "v0.17.4.0+abc" or the remote's
+// "0.17.4.0+abc") without pre-trimming.
+func ComputeDrift(remote, reference string) Drift {
+	r := extractBareSemver(remote)
+	ref := extractBareSemver(reference)
+	if r == "" || ref == "" {
+		return DriftUnknown
+	}
+	cmp := compareSemver(r, ref)
+	switch {
+	case cmp < 0:
+		return DriftBehind
+	case cmp > 0:
+		return DriftAhead
+	default:
+		return DriftSame
+	}
+}
+
+// ExtractBareSemver is the exported normalizer paired with
+// ComputeDrift. The host-detail drawer uses it to format the reference
+// version in the drift annotation line ("upgrade available: v0.17.4.0"
+// reads better than "v0.17.4.0+abc1234").
+func ExtractBareSemver(s string) string { return extractBareSemver(s) }
+
+// extractBareSemver strips the conventional "v" prefix and "+sha"
+// build-metadata suffix from a canopy version string and returns the
+// bare dotted-number form ("0.17.4.0"). Returns "" for "dev",
+// "(unknown)", "", or any input whose first segment isn't a number
+// — those don't represent a comparable release.
+//
+// Tolerant of both wire forms canopy emits:
+//   - laptop running binary: "v0.17.4.0+abc1234" (Makefile ldflags)
+//   - remote ls --json:      "0.17.4.0+abc1234" ("v" already stripped)
+func extractBareSemver(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "dev" || s == "(unknown)" {
+		return ""
+	}
+	s = strings.TrimPrefix(s, "v")
+	if i := strings.Index(s, "+"); i >= 0 {
+		s = s[:i]
+	}
+	// Guard against arbitrary strings sneaking through — require the
+	// first segment to parse as a number. Anything else (e.g. a
+	// branch name, "main-abc1234") is not a comparable release.
+	parts := strings.SplitN(s, ".", 2)
+	if _, err := strconv.Atoi(parts[0]); err != nil {
+		return ""
+	}
+	return s
+}
+
+// compareSemver compares two dotted-number version strings by
+// integer-valued components. Returns -1 if a < b, 0 if equal, 1 if a
+// > b. Both inputs must already be normalized (no "v" prefix, no
+// "+sha" suffix) — callers route through extractBareSemver.
+//
+// Tolerant of trailing zeros and length differences: "0.17" compares
+// equal to "0.17.0.0". Non-numeric components are treated as 0 — a
+// defensive choice against malformed remote payloads, not a feature.
+//
+// Parallel to cmd/canopy.compareSemver: kept duplicated rather than
+// dragged across the package boundary because cmd/canopy is package
+// main and can't be imported. ~20 lines is cheaper than carving out a
+// shared internal/version package for v0.17.
+func compareSemver(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	n := len(aParts)
+	if len(bParts) > n {
+		n = len(bParts)
+	}
+	for i := 0; i < n; i++ {
+		var ai, bi int
+		if i < len(aParts) {
+			ai, _ = strconv.Atoi(aParts[i])
+		}
+		if i < len(bParts) {
+			bi, _ = strconv.Atoi(bParts[i])
+		}
+		if ai < bi {
+			return -1
+		}
+		if ai > bi {
+			return 1
+		}
+	}
+	return 0
 }

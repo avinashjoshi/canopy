@@ -534,6 +534,60 @@ func TestRenderTargetBanner_ShowsProjectName(t *testing.T) {
 	}
 }
 
+// TestRenderTargetBanner_RemoteShowsHost: when targeting a remote
+// project, the banner switches to "creating on <host> in <project>"
+// and surfaces the REMOTE path (not a missing local root). This is
+// load-bearing for the same reason as the cross-project case — the
+// user should never fire `n` on a remote row thinking it'll create
+// locally. The host pill renders distinctly from the project pill
+// (different bg color); we test the structural change here and let
+// rendering smoke-tests cover the visuals.
+func TestRenderTargetBanner_RemoteShowsHost(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetName = "brain"
+	m.newTargetHost = "pi"
+	m.newTargetRemoteCwd = "/home/jarvis/Work/brain"
+
+	out := stripAnsi(m.renderTargetBanner())
+	if !strings.Contains(out, "creating on") {
+		t.Errorf("remote banner missing 'creating on' label: %q", out)
+	}
+	if !strings.Contains(out, "pi") {
+		t.Errorf("remote banner missing host name: %q", out)
+	}
+	if !strings.Contains(out, "brain") {
+		t.Errorf("remote banner missing project name: %q", out)
+	}
+	if !strings.Contains(out, "/home/jarvis/Work/brain") {
+		t.Errorf("remote banner missing REMOTE cwd: %q", out)
+	}
+	if strings.Contains(out, "creating in") && !strings.Contains(out, "in  ") {
+		// We use "creating on <host> in <project>" — the literal
+		// "creating in" prefix from the local path would be wrong.
+		// The "in" between host and project is fine.
+		t.Errorf("remote banner should say 'creating on', not 'creating in <project>': %q", out)
+	}
+}
+
+// TestRenderTargetBanner_LocalUnchanged: the host-pill addition must
+// not regress the local banner — when newTargetHost is empty, render
+// exactly as before ("creating in <project> <root>"). Guards against
+// accidentally branching the local path through the remote code.
+func TestRenderTargetBanner_LocalUnchanged(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetName = "cravd"
+	m.newTargetRoot = "/Users/avi/Work/cravd"
+	// newTargetHost intentionally empty.
+
+	out := stripAnsi(m.renderTargetBanner())
+	if !strings.Contains(out, "creating in") {
+		t.Errorf("local banner must keep 'creating in' label: %q", out)
+	}
+	if strings.Contains(out, "creating on") {
+		t.Errorf("local banner must not say 'creating on' (that's the remote form): %q", out)
+	}
+}
+
 // TestRenderTargetBanner_EmptyWhenUnset: outside the new-workspace flow
 // the banner returns "" so render paths that include it (busy view's
 // non-create ops, future call sites) emit nothing rather than a stray

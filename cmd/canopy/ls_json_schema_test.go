@@ -135,8 +135,8 @@ func TestLsJSONSchemaVersion_BumpedForClipboardBridge(t *testing.T) {
 	// Schema version must bump when the wire format changes. Lane C.3
 	// brings it to 4. If someone reverts the field without reverting
 	// the schema bump (or vice versa), this test catches the drift.
-	if lsJSONSchemaVersion != 4 {
-		t.Errorf("lsJSONSchemaVersion = %d, want 4 (v0.18 Lane C.3: + clipboard_bridge)", lsJSONSchemaVersion)
+	if lsJSONSchemaVersion != 5 {
+		t.Errorf("lsJSONSchemaVersion = %d, want 5 (v0.19 added attached + motion-aware agent_state; v0.20 added clipboard_bridge)", lsJSONSchemaVersion)
 	}
 }
 
@@ -150,9 +150,50 @@ func TestLsJSONWorkspace_OmitEmptyKeepsPayloadLean(t *testing.T) {
 	}
 	data, _ := json.Marshal(in)
 	s := string(data)
-	for _, key := range []string{`"mem_rss"`, `"cpu"`, `"hints"`, `"last_error_hint"`, `"port"`} {
+	for _, key := range []string{`"mem_rss"`, `"cpu"`, `"hints"`, `"last_error_hint"`, `"port"`, `"attached"`} {
 		if strings.Contains(s, key) {
 			t.Errorf("empty workspace emitted %s: %s", key, s)
 		}
+	}
+}
+
+// TestLsJSONWorkspace_AttachedRoundTrip verifies the v0.19
+// remote-status-observability wire-format addition: Attached round-trips
+// through JSON so the laptop's host.RemoteWorkspace decode picks it up
+// and the cache merge stamps it onto GlobalRow.Attached. Without this,
+// remote rows always rendered as detached and the confirm-attach modal
+// never fired for them.
+func TestLsJSONWorkspace_AttachedRoundTrip(t *testing.T) {
+	in := LsJSONWorkspace{
+		Name: "foo", Project: "p", Branch: "b",
+		Status: "ready", TmuxSession: "p/foo", Alive: true,
+		Attached: true,
+	}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, `"attached":true`) {
+		t.Errorf("emitted JSON missing attached=true: %s", s)
+	}
+	var out LsJSONWorkspace
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !out.Attached {
+		t.Errorf("Attached lost in round-trip: in=true out=false")
+	}
+}
+
+// TestLsJSONSchemaVersion_BumpedForV019 guards against a future PR
+// adding a field but forgetting to bump the schema version. Older
+// laptops parse additive fields fine (json tag `omitempty` + unknown
+// fields ignored), but the version is a coordination signal for
+// breaking changes — we still bump it on every additive change so a
+// `--require-schema=N` flag stays meaningful.
+func TestLsJSONSchemaVersion_BumpedForV019(t *testing.T) {
+	if lsJSONSchemaVersion < 4 {
+		t.Errorf("lsJSONSchemaVersion = %d, want >= 4 (v0.19 added attached + motion-aware agent_state)", lsJSONSchemaVersion)
 	}
 }
