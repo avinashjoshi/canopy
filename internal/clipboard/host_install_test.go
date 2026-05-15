@@ -77,6 +77,10 @@ func classifyCall(args []string, stdin []byte) string {
 			return "push-wl-copy"
 		}
 	}
+	// Remote socket-dir mkdir: `bash -c "mkdir -p /run/user/<uid>/canopy ..."`
+	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" && strings.Contains(args[2], "mkdir -p /run/user/") && strings.Contains(args[2], "/canopy") {
+		return "mkdir-remote-sockdir"
+	}
 	// Verify-step 1: `bash -c "$HOME/.local/bin/wl-paste --list-types"`
 	// — no stdin, absolute-path invocation.
 	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" && strings.Contains(args[2], "wl-paste --list-types") {
@@ -108,14 +112,15 @@ func newTestHostInstaller(t *testing.T) (*HostInstaller, *fakeSSH) {
 
 // happyPathResponses is the canned set every "everything works" test
 // uses. Extracted so tests focused on one failure mode (e.g., bad
-// UID) don't have to spell out five others.
+// UID) don't have to spell out six others.
 func happyPathResponses() map[string]fakeSSHResp {
 	return map[string]fakeSSHResp{
-		"id":             {stdout: []byte("1001\n")},
-		"push-wl-paste":  {},
-		"push-wl-copy":   {},
-		"verify-wrapper": {stdout: []byte("text/plain;charset=utf-8\n")},
-		"verify-path":    {stdout: []byte("/home/avi/.local/bin/wl-paste\n")},
+		"id":                   {stdout: []byte("1001\n")},
+		"mkdir-remote-sockdir": {},
+		"push-wl-paste":        {},
+		"push-wl-copy":         {},
+		"verify-wrapper":       {stdout: []byte("text/plain;charset=utf-8\n")},
+		"verify-path":          {stdout: []byte("/home/avi/.local/bin/wl-paste\n")},
 	}
 }
 
@@ -127,9 +132,9 @@ func TestInstallOnHost_HappyPath(t *testing.T) {
 	if err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out); err != nil {
 		t.Fatalf("InstallOnHost: %v", err)
 	}
-	// Five SSH calls: id + push wl-paste + push wl-copy + verify-wrapper + verify-path.
-	if len(f.calls) != 5 {
-		t.Fatalf("expected 5 SSH calls, got %d: %v", len(f.calls), f.calls)
+	// Six SSH calls: id + mkdir + push wl-paste + push wl-copy + verify-wrapper + verify-path.
+	if len(f.calls) != 6 {
+		t.Fatalf("expected 6 SSH calls, got %d: %v", len(f.calls), f.calls)
 	}
 	// SSH snippet landed in the per-host file (filename keyed by canopy
 	// host name; Host directive INSIDE keyed by SSH hostname):
@@ -148,6 +153,44 @@ func TestInstallOnHost_HappyPath(t *testing.T) {
 		if !strings.Contains(body, must) {
 			t.Errorf("snippet missing %q\nbody:\n%s", must, body)
 		}
+	}
+}
+
+func TestInstallOnHost_CreatesRemoteSocketDirWithDetectedUID(t *testing.T) {
+	// Regression: SSH RemoteForward bind() needs the parent dir to
+	// exist. sshd doesn't mkdir. Without this step the snippet's
+	// directives + Include scope can be perfect and the bridge still
+	// silently fails because /run/user/<uid>/canopy/ on the remote
+	// doesn't exist.
+	inst, f := newTestHostInstaller(t)
+	f.responses = happyPathResponses()
+	// Detect a non-default UID to confirm we use IT, not the local
+	// one. (Both default to 1001 in happyPathResponses; bump the
+	// remote.)
+	f.responses["id"] = fakeSSHResp{stdout: []byte("2042\n")}
+
+	var out bytes.Buffer
+	if err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out); err != nil {
+		t.Fatalf("InstallOnHost: %v", err)
+	}
+	// Find the mkdir call and assert it uses the detected UID.
+	var found bool
+	for _, c := range f.calls {
+		if classifyCall(c.args, c.stdin) != "mkdir-remote-sockdir" {
+			continue
+		}
+		joined := strings.Join(c.args, " ")
+		if !strings.Contains(joined, "/run/user/2042/canopy") {
+			t.Errorf("mkdir step used wrong UID; argv=%q", joined)
+		}
+		if !strings.Contains(joined, "chmod 0700") {
+			t.Errorf("mkdir step missing chmod 0700; argv=%q", joined)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Errorf("InstallOnHost did not invoke the remote-socket-dir mkdir step")
 	}
 }
 

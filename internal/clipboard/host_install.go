@@ -109,6 +109,10 @@ func (h *HostInstaller) InstallOnHost(ctx context.Context, hostName, sshTarget s
 	}
 	fmt.Fprintf(out, "  remote UID: %d (local: %d)\n", remoteUID, h.LocalUID)
 
+	if err := h.ensureRemoteSocketDir(ctx, sshTarget, remoteUID, out); err != nil {
+		return fmt.Errorf("InstallOnHost: %w", err)
+	}
+
 	for _, w := range []WrapperScript{WrapperWlPaste, WrapperWlCopy} {
 		if err := h.pushWrapper(ctx, sshTarget, w, out); err != nil {
 			return fmt.Errorf("InstallOnHost: %w", err)
@@ -155,6 +159,28 @@ func (h *HostInstaller) detectRemoteUID(ctx context.Context, sshTarget string) (
 		return 0, fmt.Errorf("detectRemoteUID: refusing UID %d on remote (sockets would land in /run/user/0/)", uid)
 	}
 	return uid, nil
+}
+
+// ensureRemoteSocketDir creates /run/user/<uid>/canopy/ on the remote
+// host. SSH's RemoteForward of a unix socket calls bind() at the
+// configured path, and bind() returns ENOENT if the parent directory
+// doesn't exist — sshd does NOT mkdir for you. Without this step the
+// SSH forward silently fails on every connect and the wrapper sees
+// "No such file or directory" when trying to reach the (never-created)
+// socket.
+//
+// Mode 0700 matches the local daemon's MkdirAll permissions. Belt-
+// and-suspenders mkdir -p tolerates a re-install where the dir
+// already exists.
+func (h *HostInstaller) ensureRemoteSocketDir(ctx context.Context, sshTarget string, remoteUID int, out io.Writer) error {
+	dir := fmt.Sprintf("/run/user/%d/canopy", remoteUID)
+	cmd := fmt.Sprintf("mkdir -p %s && chmod 0700 %s", dir, dir)
+	_, stderr, err := h.SSHExec(ctx, sshTarget, nil, "bash", "-c", cmd)
+	if err != nil {
+		return fmt.Errorf("ensureRemoteSocketDir: %s: %w (stderr: %s)", dir, err, strings.TrimSpace(string(stderr)))
+	}
+	fmt.Fprintf(out, "  ensured %s exists on remote\n", dir)
+	return nil
 }
 
 // pushWrapper renders one wrapper script and uploads it via the
