@@ -1,7 +1,10 @@
 package git
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -57,6 +60,54 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// Clone runs `git clone <url> <dest>` via exec.CommandContext.
+//
+// Captures stderr and embeds it in the returned error so auth failures,
+// invalid URLs, and unreachable hosts surface readably to the caller —
+// e.g. `canopy init <url>` can render the git error directly to the
+// user instead of a generic "git failed."
+//
+// stdout is passed through to the provided writer when non-nil (so CLI
+// callers can show git's "Cloning into 'foo'..." progress); pass nil to
+// discard. stderr is always captured for the error message, regardless
+// of the writer. (Bytes printed by git on a "fatal" exit go to stderr.)
+//
+// Cancellation: on ctx.Done, exec.CommandContext sends SIGKILL to git.
+// Git's partial-clone dir is left behind — canopy doesn't rm -rf the
+// partial because the dest path comes from user input and a buggy
+// resolver could otherwise destroy real data. (Cleanup-on-cancel is
+// captured in TODOS.md for a future PR with strict safety bounds.)
+//
+// Auth: this function does NOT capture stdin. SSH agent / HTTPS
+// credential helpers / host-key prompts only work when the caller
+// inherits stdin (CLI: just leave it; TUI: use tea.ExecProcess so git
+// gets the real tty). Passing a tty-less context here silently breaks
+// auth — the design doc records this constraint.
+//
+// Does NOT mkdir dest's parent. Caller must ensure the parent exists
+// (cmd/canopy/init_source.ensureSourceRoot does this for the URL flow).
+func Clone(ctx context.Context, url, dest string, stdout io.Writer) error {
+	cmd := exec.CommandContext(ctx, "git", "clone", url, dest)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if stdout != nil {
+		cmd.Stdout = stdout
+	}
+	if err := cmd.Run(); err != nil {
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Cancellation wins as the surfaced error so callers can
+			// distinguish "user hit ctrl+c" from "git rejected creds."
+			return fmt.Errorf("git clone: cancelled: %w", ctxErr)
+		}
+		if stderr != "" {
+			return fmt.Errorf("git clone %s: %w (%s)", url, err, stderr)
+		}
+		return fmt.Errorf("git clone %s: %w", url, err)
+	}
+	return nil
 }
 
 // SourceRepoFromWorktree returns the absolute path of the source repo
