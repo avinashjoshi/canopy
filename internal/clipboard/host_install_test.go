@@ -85,14 +85,16 @@ func classifyCall(args []string, stdin []byte) string {
 		strings.Contains(string(stdin), "/canopy") {
 		return "mkdir-remote-sockdir"
 	}
-	// Verify-step 1: `bash -c "$HOME/.local/bin/wl-paste --list-types"`
-	// — no stdin, absolute-path invocation.
-	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" && strings.Contains(args[2], "wl-paste --list-types") {
+	// Verify-step 1: `bash` (no -c) + stdin = `exec ".../wl-paste"
+	// --list-types`. Stdin pattern avoids SSH word-split.
+	if len(args) == 1 && args[0] == "bash" && len(stdin) > 0 &&
+		strings.Contains(string(stdin), "wl-paste") &&
+		strings.Contains(string(stdin), "--list-types") {
 		return "verify-wrapper"
 	}
-	// Verify-step 2: `bash -lc "command -v wl-paste"` — login-shell
-	// PATH-precedence check.
-	if len(args) >= 3 && args[0] == "bash" && args[1] == "-lc" && strings.Contains(args[2], "command -v wl-paste") {
+	// Verify-step 2: `bash -l` (login) + stdin = `command -v wl-paste`.
+	if len(args) == 2 && args[0] == "bash" && args[1] == "-l" && len(stdin) > 0 &&
+		strings.Contains(string(stdin), "command -v wl-paste") {
 		return "verify-path"
 	}
 	return "unknown"

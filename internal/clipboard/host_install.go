@@ -321,10 +321,14 @@ func hostnameFromSSHTarget(target string) string {
 // user discover the symptom much later when an image paste mysteriously
 // fails inside Claude Code.
 func (h *HostInstaller) verifyBridge(ctx context.Context, sshTarget string, out io.Writer) error {
-	// Step 1: invoke the wrapper by absolute path. `bash -c` (NOT
-	// `bash -lc`) — no shell config sourcing, no PATH dependency.
-	// Just runs the script we know we deployed.
-	stdout, stderr, err := h.SSHExec(ctx, sshTarget, nil, "bash", "-c", `$HOME/.local/bin/wl-paste --list-types`)
+	// Step 1: invoke the wrapper by absolute path. Script piped via
+	// SSH stdin to a bare `bash`, NOT passed as `bash -c <script>`
+	// argv — same word-splitting trap that broke ensureRemoteSocketDir
+	// would otherwise feed `--list-types` to bash-c's $0 instead of
+	// to the wrapper's argv, making the wrapper run with no args and
+	// silently hit its default text case. exec passes the wrapper's
+	// exit code straight through (no bash wrapper in the chain).
+	stdout, stderr, err := h.SSHExec(ctx, sshTarget, strings.NewReader(`exec "$HOME/.local/bin/wl-paste" --list-types`+"\n"), "bash")
 	stderrStr := strings.TrimSpace(string(stderr))
 	if err != nil {
 		// Classify the most common failure modes with actionable hints.
@@ -345,11 +349,12 @@ func (h *HostInstaller) verifyBridge(ctx context.Context, sshTarget string, out 
 	fmt.Fprintln(out, "  wrapper round-trips text/plain ✓")
 
 	// Step 2: confirm Claude Code will actually find the wrapper.
-	// `bash -lc command -v` resolves wl-paste through the user's
-	// login-shell PATH. If `/usr/bin/wl-paste` wins, the install is
-	// functional but Claude won't use the wrapper — that's a hint,
-	// not a hard failure.
-	pathOut, _, _ := h.SSHExec(ctx, sshTarget, nil, "bash", "-lc", "command -v wl-paste")
+	// Script piped via stdin so SSH word-splitting doesn't mangle
+	// `command -v wl-paste` into `command` (with `-v` as $0). `bash
+	// -l` makes it a login shell so ~/.bash_profile / ~/.profile run
+	// and PATH includes the user's ~/.local/bin if their config
+	// adds it.
+	pathOut, _, _ := h.SSHExec(ctx, sshTarget, strings.NewReader("command -v wl-paste\n"), "bash", "-l")
 	resolved := strings.TrimSpace(string(pathOut))
 	switch {
 	case resolved == "":
