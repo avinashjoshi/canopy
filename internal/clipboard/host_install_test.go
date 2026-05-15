@@ -77,8 +77,12 @@ func classifyCall(args []string, stdin []byte) string {
 			return "push-wl-copy"
 		}
 	}
-	// Remote socket-dir mkdir: `bash -c "mkdir -p /run/user/<uid>/canopy ..."`
-	if len(args) >= 3 && args[0] == "bash" && args[1] == "-c" && strings.Contains(args[2], "mkdir -p /run/user/") && strings.Contains(args[2], "/canopy") {
+	// Remote socket-dir mkdir: `bash` (no -c) + script piped via stdin.
+	// Pattern from refresh.go: avoids the SSH-word-split trap that
+	// turned bash -c "mkdir -p X && chmod Y X" into a no-op + error.
+	if len(args) == 1 && args[0] == "bash" && len(stdin) > 0 &&
+		strings.Contains(string(stdin), "mkdir -p /run/user/") &&
+		strings.Contains(string(stdin), "/canopy") {
 		return "mkdir-remote-sockdir"
 	}
 	// Verify-step 1: `bash -c "$HOME/.local/bin/wl-paste --list-types"`
@@ -173,18 +177,26 @@ func TestInstallOnHost_CreatesRemoteSocketDirWithDetectedUID(t *testing.T) {
 	if err := inst.InstallOnHost(context.Background(), "tower", "avi@tower.lan", &out); err != nil {
 		t.Fatalf("InstallOnHost: %v", err)
 	}
-	// Find the mkdir call and assert it uses the detected UID.
+	// Find the mkdir call and assert its stdin script uses the
+	// detected UID. (The script lives in stdin, NOT argv — argv is
+	// just `bash`. The script-via-stdin pattern is load-bearing; see
+	// the long comment in ensureRemoteSocketDir for why.)
 	var found bool
 	for _, c := range f.calls {
 		if classifyCall(c.args, c.stdin) != "mkdir-remote-sockdir" {
 			continue
 		}
-		joined := strings.Join(c.args, " ")
-		if !strings.Contains(joined, "/run/user/2042/canopy") {
-			t.Errorf("mkdir step used wrong UID; argv=%q", joined)
+		body := string(c.stdin)
+		if !strings.Contains(body, "/run/user/2042/canopy") {
+			t.Errorf("mkdir step used wrong UID in script; body=\n%s", body)
 		}
-		if !strings.Contains(joined, "chmod 0700") {
-			t.Errorf("mkdir step missing chmod 0700; argv=%q", joined)
+		if !strings.Contains(body, "chmod 0700") {
+			t.Errorf("mkdir step missing chmod 0700; body=\n%s", body)
+		}
+		// argv must be just `bash` so the remote shell tokenizes the
+		// whole script from stdin, not from a word-split bash -c arg.
+		if len(c.args) != 1 || c.args[0] != "bash" {
+			t.Errorf("mkdir step argv = %v, want exactly [bash] (script comes via stdin)", c.args)
 		}
 		found = true
 		break

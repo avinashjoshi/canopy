@@ -165,17 +165,27 @@ func (h *HostInstaller) detectRemoteUID(ctx context.Context, sshTarget string) (
 // host. SSH's RemoteForward of a unix socket calls bind() at the
 // configured path, and bind() returns ENOENT if the parent directory
 // doesn't exist — sshd does NOT mkdir for you. Without this step the
-// SSH forward silently fails on every connect and the wrapper sees
-// "No such file or directory" when trying to reach the (never-created)
-// socket.
+// SSH forward silently fails on every connect (sshd emits "remote
+// port forwarding failed for listen path ..." warnings client-side)
+// and the wrapper sees "No such file or directory" when trying to
+// reach the (never-created) socket.
+//
+// Script is piped via SSH stdin to `bash`, NOT passed as `bash -c
+// <script>` argv. Same reason refresh.go documents at length: SSH
+// joins all post-target args with spaces, so `bash -c "mkdir -p
+// /foo && chmod ..."` ends up as `bash -c mkdir -p /foo && chmod
+// ...` on the remote's shell command line, which tokenizes such
+// that bash receives only "mkdir" as its script and mkdir runs with
+// no args ("missing operand"). Stdin avoids the quoting nightmare
+// entirely — bash reads the script as one stream of bytes.
 //
 // Mode 0700 matches the local daemon's MkdirAll permissions. Belt-
 // and-suspenders mkdir -p tolerates a re-install where the dir
 // already exists.
 func (h *HostInstaller) ensureRemoteSocketDir(ctx context.Context, sshTarget string, remoteUID int, out io.Writer) error {
 	dir := fmt.Sprintf("/run/user/%d/canopy", remoteUID)
-	cmd := fmt.Sprintf("mkdir -p %s && chmod 0700 %s", dir, dir)
-	_, stderr, err := h.SSHExec(ctx, sshTarget, nil, "bash", "-c", cmd)
+	script := fmt.Sprintf("set -e\nmkdir -p %s\nchmod 0700 %s\n", dir, dir)
+	_, stderr, err := h.SSHExec(ctx, sshTarget, strings.NewReader(script), "bash")
 	if err != nil {
 		return fmt.Errorf("ensureRemoteSocketDir: %s: %w (stderr: %s)", dir, err, strings.TrimSpace(string(stderr)))
 	}
