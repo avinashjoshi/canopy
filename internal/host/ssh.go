@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 )
@@ -84,6 +85,82 @@ func SSHCmd(ctx context.Context, target string, args ...string) *exec.Cmd {
 // interactive variant; only BatchMode differs.
 func SSHCmdBatch(ctx context.Context, target string, args ...string) *exec.Cmd {
 	return sshCmdInternal(ctx, target, true /* batch */, args...)
+}
+
+// SSHRunUser builds an ssh invocation for ad-hoc commands that need
+// to run as if the user typed them in a real terminal on the remote.
+// Two things differ from SSHCmd:
+//
+//  1. The remote command is wrapped in `bash -lc` (login shell). SSH's
+//     default non-interactive command does NOT source the user's
+//     profile (.bashrc / .zshrc / .profile etc.), so $PATH is the bare
+//     /usr/bin:/bin shape. Tools installed under ~/.local/bin or
+//     ~/.cargo/bin etc. aren't visible without -l. Login shell sources
+//     the user's full profile and produces the same $PATH they see in
+//     a regular terminal.
+//
+//  2. -t forces remote pty allocation so the remote process can read
+//     from /dev/tty. Required for any command that prompts the user —
+//     git asking for an SSH passphrase or HTTPS credentials, an
+//     editor opening, etc. Without -t the prompt would silently hang.
+//
+// remoteCmd is passed verbatim to `bash -lc`. The caller is responsible
+// for shell-quoting any user-provided values inside it.
+//
+//	cmd := host.SSHRunUser(ctx, "avi@tower", "canopy init 'https://x'")
+//	cmd.Stdin = os.Stdin
+//	cmd.Stdout = os.Stdout
+//	cmd.Stderr = os.Stderr
+//	err := cmd.Run()
+//
+// Uses the same ControlMaster + ConnectTimeout config as SSHCmd so a
+// previously-established master socket gets reused (no extra
+// handshake cost on the second + Nth call).
+func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd {
+	socketPath := filepath.Join(canopyHome(), "ssh-%C.sock")
+	// Prepend $HOME/.local/bin to PATH defensively. `bash -l` SHOULD
+	// source the user's profile and pick up ~/.local/bin (canopy's
+	// conventional install dir), but plenty of real-world setups
+	// don't: a minimal bashrc, a non-default login shell, an Arch box
+	// where PATH is owned by /etc/profile, etc. Prepending here costs
+	// nothing if the dir is already on PATH (duplicate entry, harmless)
+	// and fixes the "canopy: command not found" failure mode users hit
+	// the first time they `canopy init --on <host>`.
+	//
+	// $HOME and $PATH stay LITERAL through the outer-quote step below
+	// — the wire-level shell strips the single quotes and bash -lc
+	// then expands the variables when it parses its argument as a
+	// shell command body. (Inside single quotes, expansion is
+	// suppressed; once the outer shell unwraps them, the inner string
+	// reaches bash with raw $HOME / $PATH tokens to expand.)
+	withPath := `export PATH="$HOME/.local/bin:$PATH"; ` + remoteCmd
+	// SSH joins all post-target argv with spaces and sends ONE string
+	// to the remote shell. So `bash -lc <quoted-string>` must arrive
+	// as 3 tokens — not 3+N tokens where N is the word count of
+	// remoteCmd. Outer-shell-quote so the remote shell sees it as one
+	// arg to bash -lc:
+	//
+	//   ssh ... target bash -lc 'canopy init '\''https://x'\'''
+	//                            └─────────── one arg ──────────┘
+	//
+	// Pre-fix bug: a bare remoteCmd like "canopy init 'url'" became
+	// `bash -lc canopy init 'url'` on the wire; bash -lc consumed
+	// only "canopy", set $0 to "init", and the URL leaked into $1.
+	// Symptom: "init: line 1: canopy: command not found".
+	quoted := "'" + strings.ReplaceAll(withPath, "'", `'\''`) + "'"
+	sshArgs := []string{
+		"-t", // allocate remote pty for interactive auth prompts
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + socketPath,
+		"-o", "ControlPersist=300",
+		"-o", "ConnectTimeout=5",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=3",
+		target,
+		"bash", "-lc", quoted,
+	}
+	log.Debug("ssh.run-user", "target", target, "remote_cmd", remoteCmd)
+	return exec.CommandContext(ctx, "ssh", sshArgs...)
 }
 
 // sshCmdInternal is the shared implementation. Splits on the batch

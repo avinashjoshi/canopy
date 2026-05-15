@@ -26,57 +26,95 @@ type initOptions struct {
 var initFlags struct {
 	force       bool
 	withScripts bool
+	onHost      string
 }
 
 // initCmd returns the `canopy init` cobra subcommand.
 //
-// Onboards a project to canopy by dropping a minimal canopy.json into
-// the current directory. Scripts are optional: by default the generated
-// canopy.json has empty scripts and canopy will create workspaces with
-// no setup hook, no server command, and no archive — fine for projects
-// that just want git worktrees + tmux sessions.
+// Three call shapes (v0.20+):
+//
+//   - `canopy init`                          init the cwd (backwards-compat)
+//   - `canopy init <path>`                   init <path> (no cd-ing in)
+//   - `canopy init <git-url>`                clone to source-root, init
+//   - `canopy init <git-url> <dest>`         clone to <dest>, init
+//
+// Scripts are optional: by default the generated canopy.json has empty
+// scripts and canopy will create workspaces with no setup hook, no
+// server command, and no archive — fine for projects that just want
+// git worktrees + tmux sessions.
 //
 // --with-scripts also writes stubs at bin/canopy-{setup,run,archive}
 // for projects that want to grow into the full pattern.
 //
-// If a conductor.json exists, init mirrors its script paths into the
-// new canopy.json (Conductor's schema is identical to canopy's). Stub
-// scripts are not written in this mode — Conductor projects already
-// have working scripts under bin/conductor-*.
+// If a conductor.json exists in the resolved init dir, init mirrors
+// its script paths into the new canopy.json. Stub scripts are not
+// written in this mode — Conductor projects already have working
+// scripts under bin/conductor-*.
 //
 // Refuses to overwrite an existing canopy.json unless --force is set.
+// However, if canopy.json exists AND the project isn't yet in
+// state.json (typical post-clone), init still REGISTERS the project
+// so `canopy ls` sees it — see runInit's bug-fix comment.
 func initCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "init",
-		Short: "Onboard the current directory to canopy (creates canopy.json)",
-		Long: "Drops a minimal canopy.json into the current directory.\n\n" +
-			"By default the canopy.json has no scripts — canopy will create\n" +
-			"workspaces with just a worktree + tmux session, no setup or run\n" +
-			"hooks. Pass --with-scripts to also generate stub scripts at\n" +
-			"bin/canopy-{setup,run,archive} you can customize.\n\n" +
-			"If a conductor.json exists in the current directory, init mirrors\n" +
-			"its script paths into canopy.json verbatim — Conductor's schema is\n" +
-			"identical to canopy's. The bin/conductor-* scripts are NOT copied\n" +
-			"or renamed; canopy invokes them directly.",
+		Use:   "init [path-or-url] [dest]",
+		Short: "Onboard a project to canopy (creates canopy.json)",
+		Long: "Onboard a project to canopy. Accepts:\n\n" +
+			"  canopy init                              init the current directory\n" +
+			"  canopy init <path>                       init <path> without cd-ing in\n" +
+			"  canopy init <git-url>                    clone to source-root, then init\n" +
+			"  canopy init <git-url> <dest>             clone to <dest>, then init\n\n" +
+			"Source-root precedence (clone target): explicit <dest> > $CANOPY_SOURCE_ROOT >\n" +
+			"~/.canopy/config.json source-root > default ~/.canopy/sources.\n\n" +
+			"Auth (private URLs): canopy delegates to git, so SSH agent + HTTPS credential\n" +
+			"helpers + host-key prompts work the same as a plain `git clone`.\n\n" +
+			"Cloned dir already exists with .git: skip clone, init in place (idempotent).\n" +
+			"Dest exists but isn't a git repo: refuse with a collision error.\n\n" +
+			"By default canopy.json has empty scripts. Pass --with-scripts to scaffold\n" +
+			"bin/canopy-{setup,run,archive} stubs. Conductor projects auto-mirror their\n" +
+			"conductor.json scripts (stubs are skipped — bin/conductor-* already work).",
+		Args: cobra.MaximumNArgs(2),
 		// Already-initialized is a friendly "you're done" state, not an
 		// error worthy of a usage block. SilenceUsage keeps the cobra
 		// help text from printing when we return early below.
 		SilenceUsage:  true,
 		SilenceErrors: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("init: getwd: %w", err)
+			arg, dest := "", ""
+			if len(args) > 0 {
+				arg = args[0]
 			}
-			return runInit(cwd, initOptions{
-				Force:       initFlags.force,
-				WithScripts: initFlags.withScripts,
-			}, cmd.OutOrStdout())
+			if len(args) > 1 {
+				dest = args[1]
+			}
+			opts := addProjectOptions{
+				Force:        initFlags.force,
+				WithScripts:  initFlags.withScripts,
+				DestOverride: dest,
+			}
+
+			// --on <host>: dispatch the whole flow to a remote canopy
+			// installation via SSH. Per-host source-root applies on
+			// the remote side; nothing happens locally except the
+			// SSH passthrough.
+			if initFlags.onHost != "" {
+				return runAddProjectRemote(cmd.Context(), initFlags.onHost, arg, opts, cmd.OutOrStdout())
+			}
+
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("init: home dir: %w", err)
+			}
+			canopyHome := filepath.Join(home, ".canopy")
+			_, err = runAddProject(cmd.Context(), arg, opts, cmd.OutOrStdout(), canopyHome)
+			return err
 		},
 	}
 	cmd.Flags().BoolVar(&initFlags.force, "force", false, "overwrite an existing canopy.json")
 	cmd.Flags().BoolVar(&initFlags.withScripts, "with-scripts", false,
 		"also write stub bin/canopy-{setup,run,archive} scripts (ignored when a conductor.json is detected)")
+	cmd.Flags().StringVar(&initFlags.onHost, "on", "",
+		"dispatch to a registered remote canopy host (e.g. --on tower). Requires the host to be registered via 'canopy host add'. Source-root on the remote applies; local config is ignored.")
 	return cmd
 }
 
@@ -112,9 +150,26 @@ func runInit(cwd string, opts initOptions, stdout io.Writer) error {
 	canopyJSON := filepath.Join(cwd, "canopy.json")
 	if _, err := os.Stat(canopyJSON); err == nil && !opts.Force {
 		// Already initialized — friendly path, exit 0.
+		//
+		// v0.20 fix: also register the project in state.json if it
+		// isn't already. The pre-v0.20 early-return skipped registration
+		// entirely, so cloning a repo that shipped canopy.json (e.g.
+		// canopy itself) would leave the project invisible to
+		// `canopy ls`. The registerProject helper is idempotent — a
+		// no-op if the project is already registered — so this is
+		// safe to run unconditionally on the existing-canopy.json path.
 		fmt.Fprintf(stdout,
 			"%s already exists. This project is already initialized.\n",
 			canopyJSON)
+		canonicalRoot, cerr := canonicalize(cwd)
+		if cerr == nil {
+			if rerr := registerProject(canonicalRoot, filepath.Base(canonicalRoot)); rerr != nil {
+				fmt.Fprintf(stdout,
+					"warning: project not in state.json and couldn't register it: %v\n", rerr)
+			}
+			// v0.20 remote-dispatch result file: see writeInitResultFile.
+			writeInitResultFile(canonicalRoot)
+		}
 		fmt.Fprintln(stdout, "")
 		fmt.Fprintln(stdout, "  - Run `canopy new` to create a workspace.")
 		fmt.Fprintln(stdout, "  - Run `canopy init --force` to regenerate canopy.json.")
@@ -187,6 +242,12 @@ func runInit(cwd string, opts initOptions, stdout io.Writer) error {
 			"warning: registered canopy.json but couldn't update state.json: %v\n", err)
 		fmt.Fprintln(stdout, "  Project will be registered automatically on first `canopy new`.")
 	}
+	// v0.20 remote-dispatch result file: when the laptop's
+	// `canopy init --on <host>` runs us via SSH, it sets
+	// CANOPY_INIT_RESULT_FILE so it can fetch our canonical root
+	// path and register the project in its hosts.json. No-op when
+	// env unset (the common local-CLI case).
+	writeInitResultFile(canonicalRoot)
 
 	fmt.Fprintln(stdout, "")
 	fmt.Fprintln(stdout, "Next steps:")

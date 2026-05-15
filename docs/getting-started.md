@@ -40,16 +40,30 @@ The block is idempotent (re-running refuses unless you pass `--force`), so it's 
 
 ## Onboard a project
 
-`cd` into any git repo, then:
+Four shapes, all equivalent ways of "make this a canopy project":
 
 ```bash
+# Inside the repo (the classic shape):
+cd ~/code/myproject
 canopy init                       # writes canopy.json (no scripts)
 canopy init --with-scripts        # also drops stub bin/canopy-{setup,run,archive}
+
+# From anywhere on your laptop (v0.20+):
+canopy init ~/code/myproject      # init a folder without cd-ing in
+canopy init https://github.com/foo/bar.git    # clone + init in one shot
+canopy init https://github.com/foo/bar.git ~/code/bar    # explicit dest
+
+# On a remote canopy host (v0.20+, requires `canopy host add` first):
+canopy init https://github.com/foo/bar.git --on tower
 ```
+
+For the URL form, canopy clones into a configurable **source-root** (default `~/.canopy/sources`; change with `canopy config set source-root ~/Work`). Press `,` from any TUI tab to edit the source-root visually.
 
 If the project already has a Conductor `conductor.json`, canopy detects it and copies the script paths verbatim — see [`migrate-from-conductor.md`](migrate-from-conductor.md).
 
 Edit the scripts to do whatever per-workspace setup your project needs (database, dependency install, secrets symlink), then commit them. Schema details: [`canopy-json.md`](canopy-json.md).
+
+You can also drive Add Project from the TUI: launch `canopy` in a fresh repo (or press `a` on the Global tab in any existing TUI session) and paste a path or URL. Press `Tab` to cycle between local and registered hosts; the violet pill on the Target line tells you whether the dispatch is going to a remote machine.
 
 ## Create a workspace
 

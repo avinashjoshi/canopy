@@ -8,7 +8,7 @@ import (
 )
 
 // TestNewInitSplash_Constructs: NewInitSplash returns a non-nil Model
-// with the cwd set, didInit false.
+// with the cwd seeded into the input, no result yet.
 func TestNewInitSplash_Constructs(t *testing.T) {
 	m := NewInitSplash("/tmp/foo")
 	if m == nil {
@@ -17,77 +17,92 @@ func TestNewInitSplash_Constructs(t *testing.T) {
 	if m.cwd != "/tmp/foo" {
 		t.Errorf("cwd = %q, want /tmp/foo", m.cwd)
 	}
-	if m.didInit {
-		t.Errorf("didInit should start false")
+	if m.input.Value() != "/tmp/foo" {
+		t.Errorf("input prefill = %q, want /tmp/foo (back-compat: Enter on default inits cwd)", m.input.Value())
 	}
 }
 
-// TestInitSplash_View_ContainsCwd: cwd is shown so the user can verify
-// they're about to init the right directory.
-func TestInitSplash_View_ContainsCwd(t *testing.T) {
+// TestInitSplash_View_ContainsForm: the splash renders the form
+// elements — title, prompt, input value. Replaces the pre-v0.18
+// "press i" view assertion.
+func TestInitSplash_View_ContainsForm(t *testing.T) {
 	m := NewInitSplash("/home/avi/Work/myrepo")
 	out := m.View()
+	if !strings.Contains(out, "Add Project") {
+		t.Errorf("View missing 'Add Project' title: %q", out)
+	}
 	if !strings.Contains(out, "/home/avi/Work/myrepo") {
-		t.Errorf("View missing cwd: %q", out)
+		t.Errorf("View missing prefilled cwd: %q", out)
 	}
-	if !strings.Contains(out, "canopy init") {
-		t.Errorf("View missing 'canopy init' prompt: %q", out)
+	if !strings.Contains(out, "Folder path or git URL") {
+		t.Errorf("View missing input prompt: %q", out)
 	}
 }
 
-// TestInitSplash_IKey_SetsDidInitAndQuits: pressing 'i' sets didInit
-// and returns tea.Quit so the caller can run init synchronously after.
-func TestInitSplash_IKey_SetsDidInitAndQuits(t *testing.T) {
+// TestInitSplash_EnterOnPrefilledCwd_SubmitsCwd preserves the pre-v0.18
+// muscle memory: Enter on the default value (no editing) inits cwd.
+// Decision #11 in the v0.18 design doc.
+func TestInitSplash_EnterOnPrefilledCwd_SubmitsCwd(t *testing.T) {
 	m := NewInitSplash("/tmp/foo")
-	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	sm := model.(*InitSplashModel)
-	if !sm.didInit {
-		t.Errorf("'i' should set didInit=true")
+	if sm.result.Action != SplashSubmit {
+		t.Errorf("Enter on default: action = %v, want SplashSubmit", sm.result.Action)
+	}
+	if sm.result.Arg != "/tmp/foo" {
+		t.Errorf("Enter on default: arg = %q, want /tmp/foo", sm.result.Arg)
 	}
 	if cmd == nil {
-		t.Fatal("'i' should return tea.Quit cmd")
+		t.Fatal("Enter should return tea.Quit cmd")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Errorf("'i' cmd produced %T, want tea.QuitMsg", cmd())
+		t.Errorf("Enter cmd produced %T, want tea.QuitMsg", cmd())
 	}
 }
 
-// TestInitSplash_QKey_QuitsWithoutInit: 'q' quits but leaves didInit false.
-func TestInitSplash_QKey_QuitsWithoutInit(t *testing.T) {
+// TestInitSplash_EnterAfterEdit_SubmitsTypedValue: editing the input
+// then pressing Enter submits the new value (URL or other path).
+func TestInitSplash_EnterAfterEdit_SubmitsTypedValue(t *testing.T) {
 	m := NewInitSplash("/tmp/foo")
-	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	// Replace the default value with a git URL.
+	m.input.SetValue("https://github.com/foo/bar.git")
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	sm := model.(*InitSplashModel)
-	if sm.didInit {
-		t.Errorf("'q' should leave didInit=false")
+	if sm.result.Action != SplashSubmit {
+		t.Errorf("action = %v, want SplashSubmit", sm.result.Action)
+	}
+	if sm.result.Arg != "https://github.com/foo/bar.git" {
+		t.Errorf("arg = %q, want the typed URL", sm.result.Arg)
+	}
+}
+
+// TestInitSplash_Esc_DismissesWithoutInit: esc dismisses with no init.
+func TestInitSplash_Esc_DismissesWithoutInit(t *testing.T) {
+	m := NewInitSplash("/tmp/foo")
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	sm := model.(*InitSplashModel)
+	if sm.result.Action != SplashDismiss {
+		t.Errorf("esc: action = %v, want SplashDismiss", sm.result.Action)
+	}
+	if sm.result.Arg != "" {
+		t.Errorf("esc: arg = %q, want empty (no submit)", sm.result.Arg)
 	}
 	if cmd == nil {
-		t.Fatal("'q' should return tea.Quit cmd")
+		t.Fatal("esc should return tea.Quit cmd")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Errorf("'q' cmd produced %T, want tea.QuitMsg", cmd())
+		t.Errorf("esc cmd produced %T, want tea.QuitMsg", cmd())
 	}
 }
 
-// TestInitSplash_StrayKey_NoOp: pressing a random key (not in the keymap)
-// is a no-op — splash is intentionally explicit, no accidental dismissal.
-func TestInitSplash_StrayKey_NoOp(t *testing.T) {
-	m := NewInitSplash("/tmp/foo")
-	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	sm := model.(*InitSplashModel)
-	if sm.didInit {
-		t.Errorf("stray key set didInit; should be no-op")
-	}
-	if cmd != nil {
-		t.Errorf("stray key produced cmd; should be nil")
-	}
-}
-
-// TestInitSplash_CapitalI: 'I' (capital) also opts into init. Cheap
-// usability win — users mash shift sometimes.
-func TestInitSplash_CapitalI(t *testing.T) {
-	m := NewInitSplash("/tmp/foo")
-	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("I")})
-	if !model.(*InitSplashModel).didInit {
-		t.Errorf("'I' (capital) should set didInit=true")
+// TestInitSplash_TypingForwardsToInput: regular character keys forward
+// to the textinput, mutating the value. This is how the user replaces
+// the prefilled cwd with a URL or different path.
+func TestInitSplash_TypingForwardsToInput(t *testing.T) {
+	m := NewInitSplash("")
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("h")})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	if !strings.Contains(m.input.Value(), "h") || !strings.Contains(m.input.Value(), "i") {
+		t.Errorf("typing didn't reach input; value = %q", m.input.Value())
 	}
 }

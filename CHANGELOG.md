@@ -5,7 +5,7 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.20.0.0] - 2026-05-14 — Clipboard bridge for remote workspaces
+## [0.21.0.0] - 2026-05-15 — Clipboard bridge for remote workspaces
 
 The laptop's clipboard is now available inside any registered canopy host. Paste a screenshot you copied locally into Claude Code running on tower; copy text from a remote tmux session straight to the local Wayland clipboard; nvim's `y` yanks land on the laptop. None of it requires per-session setup once installed.
 
@@ -46,6 +46,53 @@ User reference + troubleshooting: [docs/clipboard-bridge.md](docs/clipboard-brid
 ### Bug fixes shipped during dogfood
 
 Eight failure modes surfaced + permanently fixed in the same release. Full registry in [docs/design/v0.18-clipboard-bridge.md](docs/design/v0.18-clipboard-bridge.md#failure-modes-registry--design-time--dogfood-discovered).
+
+## [0.20.0.1] - 2026-05-15 — tmux statusline: yellow pill marks remote-attached sessions, workspace folder name shown alongside renamed branch
+
+When you have multiple tmux sessions across local and remote canopies, every statusline looked identical. After `git branch -m`, the folder name vanished from view — the statusline only knew about the branch. This release fixes both visual gaps and includes a stale-tag clear so the pill never lies.
+
+### Added
+
+- **Yellow background pill `@<host>` on canopy-driven remote attaches.** When `canopy switch --on <host>` mosh-attaches into a registered host, the remote canopy's statusline now renders `#[bg=yellow,fg=black] @tower #[default]` as a prefix. The pill mirrors the existing TUI DEV-pill convention (cyan bg pill), guarantees contrast across themes (vs. a foreground-only color, which is muddy on solarized and near-invisible on light themes), and uses the *registered* host nickname from `hosts.json` (not `os.Hostname()`). Pill style codes assembled outside the `escapeForTmux` boundary; only the user-controlled host name inside the pill is escaped, so a hostile `CANOPY_REMOTE_HOST=tower#[bg=red]` can't inject style codes.
+- **Workspace folder name shown alongside branch when they differ.** Today's auto-slug workspaces have `wsName == branch` so the statusline renders one identifier (`canopy / robust-otter`). After `git branch -m`, the names diverge; the new format renders both (`canopy / robust-otter / tmux-statusline-remote-local-context`) so you can always identify which directory you're sitting in. The `/` separator extends the existing project-slash-workspace path metaphor; no new visual idioms introduced.
+- **Proportional width-collapse: both names shrink together, project survives last.** Under narrow terminals, `wsName` and `branch` share the truncation budget weighted by their display widths, then both drop to initials (`canopy / ro / tsr`), then the whole segment drops below the existing 30-col threshold. Honors the "I want to see both" intent — the alternative ("drop wsName first") silently undoes the feature the user just turned on.
+
+### Fixed
+
+- **Stale `CANOPY_REMOTE_HOST` no longer persists across local re-attach.** Adversarial review caught this: if you `canopy switch foo --on tower` (sets the session env), then later physically attach to that same session on the tower box, the previously-set tmux session env stayed and the pill kept rendering `@tower` — falsely signaling a remote attach. `propagateRemoteHostEnv` now explicitly *unsets* the session env via `tmux set-environment -u` when `CANOPY_REMOTE_HOST` is empty in the calling process. The pill always reflects the actual connection.
+
+### Internal
+
+- New `internal/tmux/env.go`: `SetSessionEnv` / `UnsetSessionEnv` wrap `tmux set-environment -t <session>` (and its `-u` form) with the same missing-session-swallow + error-propagation contract as the rest of `internal/tmux`.
+- `cmd/canopy/switch.go`'s `buildRemoteSwitchCmd` gains a `hostName` parameter that conditionally exports `CANOPY_REMOTE_HOST` in the mosh remote bash one-liner; shell-quoted to neutralize injection from hostile nicknames.
+- `propagateRemoteHostEnv` helper called from `canopy switch` (named workspace, resurrected, and `canopy main` attach paths) so every attach reconciles the session tag with this process's env.
+- 6 new tests; ~96% coverage of the new code paths. Regression test pins today's local-only output shape so the wsName-folded-into-branch case can't drift.
+
+## [0.20.0.0] - 2026-05-15 — Add Project from anywhere: `canopy init <url>`, configurable source-root, TUI Add Project form, remote-host dispatch
+
+Onboarding a project used to require `cd`-ing into it and running `canopy init` from inside. That breaks the flow when you have a GitHub URL in your clipboard, or a project sitting at `~/code/foo` you've been meaning to register, or a remote canopy on `tower` you want to feed without SSH-ing in first. This release does the obvious thing: `canopy init` accepts a path, a git URL, OR a remote-host target, and the TUI grows a matching Add Project form that lives on the splash screen for first-time onboarding and on the Global tab (`a` keybind) for everything after.
+
+### Added
+
+- **`canopy init [PATH_OR_URL] [DEST]` accepts path or git URL.** Auto-detects: scheme-prefixed URLs (`https://`, `http://`, `git://`, `ssh://`, `file://`) and SSH-shortcut URLs (`git@github.com:foo/bar.git`) route through `git clone`; anything else is a local-folder init. No `--type` flag, no separate `clone` subcommand. Optional second positional overrides the destination: `canopy init <url> ~/code/foo`. Backwards-compatible: `canopy init` with no args still inits the cwd.
+- **`canopy init <url> --on <host>` dispatches to a registered remote canopy.** Reuses the v0.17 SSH plumbing (`internal/host.SSHCmd`) with a new `SSHRunUser` helper that wraps the remote command in `bash -lc` (so the user's login PATH picks up `~/.local/bin/canopy`) and forces pty allocation (`-t`) so git auth prompts from the remote come back to the local terminal. After dispatch, the laptop fetches a `CANOPY_INIT_RESULT_FILE` written by the remote canopy and auto-registers the project in `~/.canopy/hosts.json` so the next `canopy new --on <host>` resolves the project path without a manual `canopy project add`.
+- **`canopy config set|get|list|unset` subcommand.** First user-level config key is `source-root` (where `canopy init <url>` clones go). Storage is `~/.canopy/config.json` with flock-protected reads/writes via the same `WithLock` pattern as `state.json`. Precedence: per-call `--to`/2nd positional > `$CANOPY_SOURCE_ROOT` env > `config.json source-root` > default `~/.canopy/sources`. `canopy config get source-root` prints the value with its origin label (`(config)`, `(env)`, `(default)`) so users can debug "why isn't my setting taking effect?" at a glance. `ls` is aliased to `list` to match canopy's `canopy ls` / `host ls` / `project ls` muscle memory.
+- **TUI Add Project form.** Lives on the splash screen for first-run users (replaces the single-key `i` shortcut with a text input pre-loaded with cwd — Enter on the default preserves the muscle memory) and on the Global tab for everyone else (`a` keybind). Modal overlay (`lipgloss.RoundedBorder`, list behind dimmed via `subtleStyle`), `tea.ExecProcess` for git clone so SSH passphrases and HTTPS credential prompts work natively, 3-second `✓ Added <name> at <path>` toast then auto-close. `Tab`/`Shift+Tab` cycles a target picker between local canopy and each registered host; the violet pill on the Target line makes "you're about to add to a remote machine" unmissable. A `Connecting to <host>...` preamble line prints before the SSH handshake so the multi-second first-connect doesn't look like a hang.
+- **Settings modal (`,` keybind, top-level).** Edits source-root from any tab without going through `a` then `ctrl+s`. Same flock-protected save flow as the CLI `canopy config set`. Discoverable in the help legend.
+- **Auto-register remote projects.** After `canopy init <url> --on <host>` succeeds, the laptop fetches the remote's canonical project root from a hardened temp file (128-bit-random suffix, opened with O_EXCL on the remote so symlink pre-creation fails the write, contents validated as absolute UTF-8 path with no control chars before touching `hosts.json`) and writes the entry to its own `~/.canopy/hosts.json`. Eliminates the post-init manual `canopy project add` step that pre-v0.20 required before `canopy new --on <host>` could resolve the project's path on the remote.
+
+### Changed
+
+- **Splash screen is now a form, not a single-key prompt.** `RunInitSplash` returns a `SplashResult` (Action + Arg) instead of `(didInit bool, err error)`. The caller in `cmd/canopy/route.go` switches on the action and passes the typed value through to the same `runAddProject` orchestrator the CLI uses. Pre-v0.20 behavior is preserved by pre-loading the input field with cwd: pressing Enter on the default mirrors the old `i` keypress.
+- **`canopy init`'s early-return path now registers the project in `state.json`.** Pre-v0.20, when `canopy init` was run in a directory that already had `canopy.json`, it printed "already initialized" and returned without touching `state.json`. That worked fine for the rare hand-created-canopy.json case but broke the moment we shipped `canopy init <url>`: cloning a repo that *itself* ships a `canopy.json` (canopy's own repo, for instance) would clone successfully but leave the project invisible to `canopy ls`. The early-return now calls `registerProject` (idempotent — no-op if already registered) so the cloned-existing-canopy.json path is whole.
+
+### Fixed
+
+- **Tilde expansion in source-root paths.** Setting source-root via the TUI Settings modal — or hand-editing `~/.canopy/config.json` — left literal `~/Work` in the stored value. The shell wasn't there to expand it, so `filepath.Abs` later produced absolute nonsense like `/home/cassy/~/Work/cravd` and clones landed in a directory literally named `~`. `config.ExpandTilde` handles the expansion at the read boundary (env var and config file both), so every caller sees a clean absolute path regardless of where the value came from.
+
+### Refactored
+
+- **Init helpers moved to `internal/canopyinit/`.** `LooksLikeGitURL`, `DeriveBasename`, `ResolveCloneDest`, `EnsureSourceRoot`, and `ValidateDestNotInsideWorkspace` were in `cmd/canopy/init_source.go` (package main). Moved to `internal/canopyinit/source.go` as public exports so `internal/ui` can call them without violating the leaf-up dependency rule (cmd → ui, never ui → cmd). The TUI Add Project form's validation logic shares the exact same implementation the CLI uses; no more drift hazard.
 
 ## [0.19.0.0] - 2026-05-14 — Remote workspace observability: live claude status, attach indicator, attach warning, stale UX
 

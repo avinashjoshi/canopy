@@ -161,7 +161,33 @@ func renderCurrentLine(ctx context.Context) string {
 	// or `make dev` and forgot to swap back.
 	d := versionDetails()
 	cols := paneColsForStatusline()
-	return formatCurrent(ws.ProjectBasename(), ws.Branch, ws.Name, ws.Status, ws.Port, d.IsDev, d.DevWorkspace, cols)
+	remoteHost := readRemoteMarker()
+	return formatCurrent(ws.ProjectBasename(), ws.Branch, ws.Name, ws.Status, ws.Port, d.IsDev, d.DevWorkspace, remoteHost, cols)
+}
+
+// readRemoteMarker returns the host nickname to display in the remote
+// statusline pill, or "" when the current tmux session is local.
+//
+// Sole signal: CANOPY_REMOTE_HOST. The laptop sets this in the bash
+// one-liner that mosh runs on the remote, and canopy switch propagates
+// it to the tmux session env via SetSessionEnv so statusline subprocesses
+// inherit it across re-attaches. The value is the registered host
+// nickname from hosts.json (e.g., "tower"), not os.Hostname().
+//
+// Why no SSH_CONNECTION fallback: users typically run their own tmux
+// status-right hostname segment (#H or similar), which already shows
+// "where am I" for any sshd-launched shell — manual ssh, dogfood-into-
+// own-box, mosh-from-anywhere. A canopy pill repeating that data
+// renders the same hostname twice with no incremental signal. The pill's
+// unique value is the *registered nickname* for canopy-driven attaches,
+// which only CANOPY_REMOTE_HOST carries. Restricting the trigger keeps
+// the pill meaningful instead of noisy.
+//
+// The returned value is the raw nickname (no styling). formatCurrent
+// wraps it in the yellow pill #[bg=yellow,fg=black] segment and runs the
+// nickname through escapeForTmux to neutralize style injection.
+func readRemoteMarker() string {
+	return strings.TrimSpace(os.Getenv("CANOPY_REMOTE_HOST"))
 }
 
 // newStoreForStatusline returns a state.Store handle for the statusline
@@ -204,34 +230,40 @@ func findWorkspaceBySession(st *state.State, sessionName string) *state.Workspac
 
 // formatCurrent renders one tmux status-right line:
 //
-//	<project> / <branch> <glyph> :<port> [DEV:<x>]
+//	[#[bg=yellow,fg=black] @<host> #[default] ]<project> / <wsName> / <branch> <glyph> :<port> [DEV:<x>]
 //
-// Width-aware: when cols is positive, the branch segment collapses
-// (full -> right-ellipsis -> initials -> dropped) per the design D2
-// algorithm so narrow tmux panes don't smear the line.
+// The leading yellow-pill prefix only renders when remoteHost is non-empty
+// (the user is attached to this tmux session via mosh/ssh — see readRemoteMarker).
+// Pill style codes are assembled OUTSIDE the escapeForTmux boundary so the
+// `#[...]` sequences reach tmux unescaped; the user-controlled host nickname
+// inside the pill IS escaped, so a hostile `CANOPY_REMOTE_HOST=tower#[bg=red]`
+// can't inject extra styles.
+//
+// The workspace segment shows both wsName and branch when they differ
+// (the post-`git branch -m` case where the folder name and branch
+// diverged). When wsName == branch (the common auto-slug case) the
+// segment renders as a single identifier, matching today's behavior.
+// Width-aware: under pressure, wsName and branch share the truncation
+// budget proportionally so neither piece vanishes entirely until the
+// budget falls below dropThreshold. Project survives last.
 //
 // branch falls back to wsName when empty (legacy state.json rows that
 // pre-date the live-sync pipeline). project falls back to "canopy" when
 // empty (defensive: a corrupted state row shouldn't blank the line).
 //
 // The DEV suffix is independent of which workspace the user is in: it
-// reflects the running canopy binary, not the active session. So a
-// user inside workspace B's tmux who has `canopy use feature-A` flipped
-// will see `canopy / B ● :40010 [DEV:feature-A]` — exactly the
-// confusion-buster the design calls for.
+// reflects the running canopy binary, not the active session. Collapses
+// to bare [DEV] when devWorkspace == active branch.
 //
-// devWorkspace may be empty even when isDev is true (binary lives
-// outside any known worktree); we fall back to bare "[DEV]" then so
-// the user still sees the dev marker.
-//
-// Drops the [DEV:<x>] suffix down to bare [DEV] when devWorkspace ==
-// the workspace's branch — saves ~24 cols on the screenshot's exact
-// pain point (where the workspace name and the active dev binary
-// reference the same thing, so the suffix is just noise).
-//
-// Always passes through escapeForTmux so `#` in a name can't inject
-// style sequences.
-func formatCurrent(project, branch, wsName string, status state.Status, port int, isDev bool, devWorkspace string, cols int) string {
+// Per /plan-eng-review + /plan-design-review:
+//   - D1 + D3: remote host marker sourced from CANOPY_REMOTE_HOST (canopy-
+//     driven attaches) or SSH_CONNECTION/MOSH_TOKEN fallback (manual ssh).
+//   - C1-revised: inner separator is "/" not ":" so it doesn't collide
+//     with the port marker ":40010" in the tail.
+//   - C2-revised: proportional truncation, not "drop wsName first."
+//   - Color: yellow background pill, not foreground magenta — matches the
+//     TUI DEV-pill convention and guarantees contrast across themes.
+func formatCurrent(project, branch, wsName string, status state.Status, port int, isDev bool, devWorkspace, remoteHost string, cols int) string {
 	if project == "" {
 		project = "canopy"
 	}
@@ -239,12 +271,19 @@ func formatCurrent(project, branch, wsName string, status state.Status, port int
 	if displayBranch == "" {
 		displayBranch = wsName
 	}
+	// leftName is the workspace-folder name shown to the left of the slash
+	// separator, only when it differs from the branch. When they match
+	// (auto-slug case) we keep the single-identifier render for symmetry
+	// with today's statusline.
+	leftName := ""
+	if wsName != "" && wsName != displayBranch {
+		leftName = wsName
+	}
 
 	devSuffix := ""
 	if isDev {
-		// DEV-suffix-when-redundant drop (collapse step 1): if the
-		// running dev binary belongs to this same branch, the [DEV:x]
-		// part is just noise — collapse to bare [DEV].
+		// DEV-suffix-when-redundant drop: if the running dev binary
+		// belongs to this same branch, the [DEV:x] part is just noise.
 		if devWorkspace != "" && devWorkspace != displayBranch {
 			devSuffix = fmt.Sprintf(" [DEV:%s]", devWorkspace)
 		} else {
@@ -255,20 +294,39 @@ func formatCurrent(project, branch, wsName string, status state.Status, port int
 	glyph := statuslineGlyph(status)
 	tail := fmt.Sprintf(" %s :%d%s", glyph, port, devSuffix)
 
-	// Width budget for the branch segment = total cols minus the fixed
-	// pieces (project name + tail). When cols <= 0 (no width info from
-	// tmux), render at full and let tmux do whatever it does.
-	var branchSeg string
+	// Workspace segment ("/wsName/branch", or "/branch") fitted to the
+	// remaining budget. cols<=0 means "no width info from tmux" — render
+	// unbounded and let tmux deal with overflow.
+	var wsSeg string
 	if cols <= 0 {
-		if displayBranch != "" {
-			branchSeg = " / " + displayBranch
+		if leftName != "" && displayBranch != "" {
+			wsSeg = " / " + leftName + " / " + displayBranch
+		} else if displayBranch != "" {
+			wsSeg = " / " + displayBranch
 		}
 	} else {
-		fixedCols := runewidth.StringWidth(project) + runewidth.StringWidth(tail)
-		branchSeg = renderBranchSegment(displayBranch, cols-fixedCols)
+		// Reserve visible-width budget for the marker pill so the workspace
+		// segment isn't overcounted when we're attached remote. The pill
+		// occupies " @<host> " visible cols (3 fixed + len(host)); the
+		// #[...] style codes don't render on screen so don't count.
+		markerVisibleW := 0
+		if remoteHost != "" {
+			markerVisibleW = 3 + runewidth.StringWidth(remoteHost)
+		}
+		fixedCols := markerVisibleW + runewidth.StringWidth(project) + runewidth.StringWidth(tail)
+		wsSeg = renderWorkspaceSegment(leftName, displayBranch, cols-fixedCols)
 	}
 
-	return escapeForTmux(project + branchSeg + tail)
+	// Body (everything except the pill) gets escaped as one unit, matching
+	// the original escape boundary. The pill is assembled OUTSIDE this
+	// boundary; only the host nickname inside it is user-controlled and
+	// therefore individually escaped.
+	body := escapeForTmux(project + wsSeg + tail)
+	if remoteHost == "" {
+		return body
+	}
+	pill := "#[bg=yellow,fg=black] @" + escapeForTmux(remoteHost) + " #[default] "
+	return pill + body
 }
 
 // paneColsForStatusline reads tmux's current client width so the collapse

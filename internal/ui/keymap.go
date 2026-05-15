@@ -199,6 +199,25 @@ var listModeBindings = []Binding{
 		Action:    actionHostSetupAuth,
 	},
 	{
+		// `a` on Local/Global tabs opens the Add Project form. The
+		// host-tab `a` (above) wins when both bindings match because
+		// availableHostAuth gates it to a host row; for non-host
+		// tabs, availableAddProject fires this. v0.18.
+		K:         key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add project")),
+		Group:     "act",
+		Available: availableAddProject,
+		Action:    actionAddProject,
+	},
+	{
+		// `,` opens the settings modal (v0.18 Phase D1). Top-level
+		// entry point for editing source-root without going through
+		// Add Project + ctrl+s. Comma is unused elsewhere in canopy's
+		// keymap; ergonomic on most layouts. Tab-agnostic.
+		K:      key.NewBinding(key.WithKeys(","), key.WithHelp(",", "settings")),
+		Group:  "meta",
+		Action: actionOpenSettings,
+	},
+	{
 		// `s` on the Hosts tab opens an interactive SSH session to the
 		// cursor's host. Drops the user into a shell on the remote;
 		// closing the shell returns to the TUI.
@@ -402,6 +421,14 @@ func availableInWorkspaceContext(m *Model) bool {
 // only fire while the Hosts tab is active.
 func availableOnHostsTab(m *Model) bool {
 	return m.tab == tabHosts && len(m.hostList) > 0
+}
+
+// availableAddProject gates the v0.18 Add Project keybind to non-Hosts
+// tabs AND to TUI invocations where main() wired the RunInitFunc
+// callback. Without the callback the form has no way to run init, so
+// hide it cleanly rather than show a broken option.
+func availableAddProject(m *Model) bool {
+	return m.tab != tabHosts && m.RunInitFunc != nil
 }
 
 // availableHostAuth gates the `a` key (set up auth) to Hosts-tab rows

@@ -64,6 +64,63 @@ func TestInitialsForBranch(t *testing.T) {
 	}
 }
 
+// TestRenderWorkspaceSegment covers the proportional-truncation behavior
+// added by /plan-design-review C2-revised: when wsName and branch differ,
+// they share the truncation budget so neither piece vanishes until the
+// overall budget drops below dropThreshold. When wsName == branch (or
+// either is empty), this helper delegates to renderBranchSegment so the
+// single-identifier tier behavior stays unchanged.
+func TestRenderWorkspaceSegment(t *testing.T) {
+	cases := []struct {
+		name      string
+		wsName    string
+		branch    string
+		availCols int
+		want      string
+	}{
+		// Both empty → empty segment.
+		{"both_empty", "", "", 80, ""},
+
+		// Single-name cases delegate to renderBranchSegment.
+		{"branch_only", "", "fix-bug", 60, " / fix-bug"},
+		{"wsname_only", "robust-otter", "", 60, " / robust-otter"},
+		{"wsname_eq_branch", "fix-bug", "fix-bug", 60, " / fix-bug"},
+
+		// Full render when both pieces comfortably fit.
+		{"both_distinct_fit", "robust-otter", "tmux-stat", 80,
+			" / robust-otter / tmux-stat"},
+		{"both_distinct_fit_exact", "rust", "go", 60, " / rust / go"},
+
+		// Proportional truncation in the wide tier when full doesn't fit.
+		// Budget 50 cols, sep*2 = 6 → nameBudget = 44. wsName=12, branch=36,
+		// totalW=48. wsShare = 44*12/48 = 11; brShare = 44-11 = 33. After
+		// truncateForWidth (budget-1 then "…"), the segment fits the full
+		// 50-col budget exactly: 11 + 6 + 33 = 50.
+		{"proportional_at_50", "robust-otter", "tmux-statusline-remote-local-context", 50,
+			" / robust-ott… / tmux-statusline-remote-local-con…"},
+
+		// Tight enough to need initials tier — both sides collapse.
+		{"initials_at_35", "robust-otter", "tmux-statusline-remote-local-context", 35,
+			" / ro / tsrlc"},
+		{"initials_at_30", "robust-otter", "fix-bug", 30,
+			" / ro / fb"},
+
+		// Under dropThreshold: drop everything.
+		{"drop_at_29", "robust-otter", "tmux-statusline-remote-local-context", 29, ""},
+		{"drop_at_0", "robust-otter", "fix-bug", 0, ""},
+		{"drop_at_negative", "robust-otter", "fix-bug", -10, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderWorkspaceSegment(tc.wsName, tc.branch, tc.availCols)
+			if got != tc.want {
+				t.Errorf("renderWorkspaceSegment(%q, %q, %d) = %q; want %q",
+					tc.wsName, tc.branch, tc.availCols, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderBranchSegment(t *testing.T) {
 	cases := []struct {
 		name      string

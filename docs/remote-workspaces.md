@@ -95,6 +95,8 @@ canopy switch --on tower fix-the-bug
 
 Under the hood that's `mosh --ssh="ssh ..." -- tmux attach -t canopy/<branch>`. Mosh's UDP transport tolerates laptop suspend, flaky wifi, and roaming between networks. If mosh isn't installed, canopy falls back to `ssh -t tmux attach`.
 
+Once attached, the tmux statusline prefixes the workspace segment with a yellow `@<host>` pill (using the registered host nickname from `hosts.json`, not the remote's `hostname`). Two long-running sessions side by side — one local, one on `tower` — now look distinct at a glance, no more "wait, which box am I typing into?". The pill clears automatically when you re-attach to that same session locally (canopy unsets the tmux session env on local attach, so the pill never lies).
+
 For multi-attach (you want to watch the session from two machines):
 
 ```bash
