@@ -29,6 +29,7 @@ package projectlist
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -36,6 +37,29 @@ import (
 	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/state"
 )
+
+// staleThreshold is how long since the host's last successful refresh
+// before remote rows from that host render dimmed + the section header
+// shows a stale banner. The TUI refresh tick is 2s; 10s = 5 missed
+// ticks, well past noise from a single slow tick. Tuned with the
+// per-host 3s refresh timeout in mind — a single timeout doesn't
+// trigger stale UX, but a sustained outage does. v0.19.
+const staleThreshold = 10 * time.Second
+
+// isStale reports whether a remote row's host hasn't been heard from
+// recently enough to trust the row's data. Local rows (Host=="") and
+// rows from hosts we haven't yet contacted (LastSeen zero) are never
+// stale — there's no "last successful refresh" to compare against.
+// v0.19.
+func isStale(r state.GlobalRow) bool {
+	if r.Host == "" {
+		return false
+	}
+	if r.LastSeen.IsZero() {
+		return false
+	}
+	return time.Since(r.LastSeen) > staleThreshold
+}
 
 // Options is the parent's wiring for a projectlist Model. All callbacks
 // are optional; supplying nil makes the corresponding key a no-op.
@@ -468,7 +492,17 @@ func (m Model) renderTable() (string, int) {
 				if label == "" {
 					label = "local"
 				}
-				b.WriteString(hostHeaderStyle().Render(label))
+				header := hostHeaderStyle().Render(label)
+				// v0.19 remote-status-observability: when this host's
+				// most-recent refresh is older than staleThreshold, append
+				// a "⚠ stale Ns" pill so the user knows the rows below
+				// are last-known, not live. Local rows (Host=="") never
+				// get this treatment.
+				if r.Host != "" && !r.LastSeen.IsZero() && time.Since(r.LastSeen) > staleThreshold {
+					ago := time.Since(r.LastSeen).Round(time.Second)
+					header += "  " + stalePillStyle().Render(fmt.Sprintf("⚠ stale %s", ago))
+				}
+				b.WriteString(header)
 				b.WriteString("\n")
 				lineCount++
 			}
@@ -605,6 +639,17 @@ func (m Model) renderTable() (string, int) {
 			if isCurrent {
 				line += "  " + currentMarkerStyle().Render("← here")
 			}
+		}
+		// v0.19 remote-status-observability: dim the entire row when its
+		// host hasn't been heard from recently. Faint applies ANSI CSI 2m
+		// (low-intensity) which most terminals render as ~50% opacity —
+		// signals "this is last-known data" without losing legibility.
+		// Skip for the selected row: selectionStyle's bg already commands
+		// the eye, and faint over selection-bg is muddier than selection
+		// alone. The host header banner still shows "⚠ stale Ns" so the
+		// signal isn't lost on the cursor's row.
+		if isStale(r) && i != m.cursor {
+			line = staleRowStyle().Render(line)
 		}
 		b.WriteString(line)
 		if i == m.cursor {
@@ -963,6 +1008,26 @@ func hostHeaderStyle() lipgloss.Style {
 		Foreground(lipgloss.Color("99")).
 		Bold(true).
 		Underline(true)
+}
+
+// stalePillStyle is the "⚠ stale Ns" pill appended to a host section
+// header when the host's most-recent successful refresh is older than
+// staleThreshold. Amber matches StatusAuthFailed on the Hosts tab so
+// "something needs attention" reads consistently across surfaces.
+// v0.19 remote-status-observability.
+func stalePillStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("214")).
+		Bold(true)
+}
+
+// staleRowStyle dims an entire remote-row line when its host is stale.
+// Uses lipgloss.Faint which emits the CSI 2m ANSI escape — terminals
+// render that as low-intensity, typically ~50% opacity. Keeps the
+// row legible while signaling "this is last-known, not live."
+// v0.19 remote-status-observability.
+func staleRowStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Faint(true)
 }
 
 // hintRenameStyle: amber/orange — "your attention is wanted but it's
