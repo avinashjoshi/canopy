@@ -16,6 +16,7 @@ import (
 	"context"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // LivenessProbe is the slice of tmux.Client that BuildGlobalRows uses. We
@@ -143,6 +144,15 @@ type GlobalRow struct {
 	// agentStates poll on the laptop (which classifies via Detector,
 	// not single-shot). v0.17 Phase 1d.2.
 	AgentState string
+
+	// LastSeen carries the timestamp of the host's most-recent
+	// successful refresh onto every REMOTE row from that host. Zero
+	// for local rows. The TUI renderer compares time.Since(LastSeen)
+	// against a freshness threshold to dim stale rows and surface a
+	// banner on the host section header — gives the user a visual cue
+	// when SSH has dropped and they're looking at last-known data.
+	// v0.19 remote-status-observability.
+	LastSeen time.Time
 }
 
 // BuildGlobalRows is the single source of truth for the cross-project

@@ -83,6 +83,12 @@ type RemoteWorkspaceRow struct {
 
 	// AgentState mirrors LsJSONWorkspace.AgentState (v0.17 Phase 1d.2).
 	AgentState string `json:"agent_state,omitempty"`
+
+	// Attached mirrors LsJSONWorkspace.Attached. Persists across TUI
+	// restarts so the laptop renders ⊙ on remote rows that had a
+	// client attached during the last successful refresh, even when
+	// the host is currently offline. v0.19 remote-status-observability.
+	Attached bool `json:"attached,omitempty"`
 }
 
 const remotesCacheVersion = 1
