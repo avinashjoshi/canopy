@@ -74,11 +74,22 @@ var importedSessionEnvVars = []string{
 }
 
 // sshIncludeBlock is the marker-delimited block added to ~/.ssh/config.
-// One leading newline so the block sits in its own paragraph even when
-// appended to a file that doesn't end with a newline.
+//
+// The `Host *` wrapper is load-bearing: without it, appending the
+// marker at the bottom of an ~/.ssh/config that ends in a `Host xyz`
+// stanza puts our Include INSIDE that Host's block (comments don't
+// terminate blocks — only another `Host` or `Match` keyword does).
+// That made the Include conditional on matching `xyz` and silently
+// no-op for every other target. Wrapping in `Host *` makes the
+// Include unconditional regardless of where in the file the block
+// ends up.
+//
+// One leading newline so the block sits in its own paragraph even
+// when appended to a file that doesn't end with a newline.
 const sshIncludeBlock = "\n" +
 	SSHIncludeMarkerStart + " — managed by canopy; do not edit between markers\n" +
-	"Include ~/.ssh/config.d/canopy/*.conf\n" +
+	"Host *\n" +
+	"  Include ~/.ssh/config.d/canopy/*.conf\n" +
 	SSHIncludeMarkerEnd + "\n"
 
 // systemctlRunner is the swap point for tests. Default impl shells out
@@ -301,14 +312,20 @@ func (l *LocalInstaller) EnsureCanopySSHDir(out io.Writer) error {
 	return nil
 }
 
-// EnsureSSHInclude adds the canopy marker block to ~/.ssh/config so the
-// per-host snippets in ~/.ssh/config.d/canopy/ are picked up.
+// EnsureSSHInclude adds (or refreshes) the canopy marker block in
+// ~/.ssh/config so the per-host snippets in ~/.ssh/config.d/canopy/
+// are picked up.
 //
-// Idempotent: if the start marker is already present, no-op.
-// Conservative: doesn't rewrite the block in place even if its content
-// drifted (e.g., user manually edited the Include path between
-// markers). Phase 1.5+ may add a --reinstall flag that force-rewrites;
-// for now the user can delete the block by hand and re-run.
+// Idempotency rules:
+//   - Marker absent → append fresh block.
+//   - Marker present with current content → no-op.
+//   - Marker present with stale content → rewrite in place. Required
+//     because the v0.18 Phase-1 block had a structural bug (Include
+//     not wrapped in `Host *`, so it became conditional on whatever
+//     Host block preceded it in the file). Users who already ran
+//     `canopy install clipboard-bridge` have the broken shape and a
+//     simple "marker present, skip" check would leave them broken
+//     forever.
 //
 // If ~/.ssh/config doesn't exist, creates it with just the marker
 // block. If ~/.ssh/ doesn't exist (very fresh user account), creates
@@ -329,30 +346,67 @@ func (l *LocalInstaller) EnsureSSHInclude(out io.Writer) error {
 		existing = string(data)
 	}
 
-	if strings.Contains(existing, SSHIncludeMarkerStart) {
-		fmt.Fprintf(out, "  %s already has canopy Include block\n", sshConfig)
+	// Compose what the file SHOULD contain.
+	var desired string
+	if startIdx, endIdx, ok := findCanopyMarkerSpan(existing); ok {
+		// Marker present — splice the current block in place of the
+		// existing one. The new block always starts with a newline
+		// (per sshIncludeBlock); strip it here so we don't double up
+		// blank lines on rewrite.
+		newBlock := strings.TrimLeft(sshIncludeBlock, "\n")
+		desired = existing[:startIdx] + newBlock + existing[endIdx:]
+	} else {
+		switch {
+		case existing == "":
+			desired = strings.TrimLeft(sshIncludeBlock, "\n")
+		case strings.HasSuffix(existing, "\n"):
+			desired = existing + sshIncludeBlock
+		default:
+			desired = existing + sshIncludeBlock
+		}
+	}
+
+	if desired == existing {
+		fmt.Fprintf(out, "  %s already has canopy Include block (up to date)\n", sshConfig)
 		return nil
 	}
-
-	// Compose new content. Three cases:
-	//   1. config missing or empty → marker block only (no leading newline).
-	//   2. config exists, ends with newline → append block (block has its own leading newline).
-	//   3. config exists, no trailing newline → insert one before the block.
-	var content string
-	switch {
-	case existing == "":
-		content = strings.TrimLeft(sshIncludeBlock, "\n")
-	case strings.HasSuffix(existing, "\n"):
-		content = existing + sshIncludeBlock
-	default:
-		content = existing + sshIncludeBlock
-	}
-
-	if err := os.WriteFile(sshConfig, []byte(content), 0o600); err != nil {
+	if err := os.WriteFile(sshConfig, []byte(desired), 0o600); err != nil {
 		return fmt.Errorf("EnsureSSHInclude: write %s: %w", sshConfig, err)
 	}
-	fmt.Fprintf(out, "  added canopy Include block to %s\n", sshConfig)
+	verb := "added"
+	if strings.Contains(existing, SSHIncludeMarkerStart) {
+		verb = "refreshed"
+	}
+	fmt.Fprintf(out, "  %s canopy Include block in %s\n", verb, sshConfig)
 	return nil
+}
+
+// findCanopyMarkerSpan returns the byte range of the canopy-managed
+// block in `existing`, INCLUDING the start-marker line and the
+// end-marker line + its trailing newline. The third return value is
+// false if the markers aren't found (or aren't paired correctly), in
+// which case the caller appends fresh.
+//
+// The span is intentionally inclusive of the trailing newline so a
+// rewrite that produces an empty block doesn't leave a stray blank
+// line behind.
+func findCanopyMarkerSpan(existing string) (start, end int, ok bool) {
+	startIdx := strings.Index(existing, SSHIncludeMarkerStart)
+	if startIdx < 0 {
+		return 0, 0, false
+	}
+	endIdx := strings.Index(existing[startIdx:], SSHIncludeMarkerEnd)
+	if endIdx < 0 {
+		return 0, 0, false
+	}
+	endIdx += startIdx + len(SSHIncludeMarkerEnd)
+	// Consume one trailing newline if present so rewrites don't leave
+	// a phantom blank line wedged between the old block's tail and the
+	// next directive.
+	if endIdx < len(existing) && existing[endIdx] == '\n' {
+		endIdx++
+	}
+	return startIdx, endIdx, true
 }
 
 // EnableSystemdUnit reloads the user systemd manager (pickup any new

@@ -229,14 +229,16 @@ func TestEnsureSSHInclude_AppendsWhenConfigMissingTrailingNewline(t *testing.T) 
 	}
 }
 
-func TestEnsureSSHInclude_IdempotentWhenMarkerPresent(t *testing.T) {
+func TestEnsureSSHInclude_IdempotentWhenMarkerCurrent(t *testing.T) {
+	// Re-running with the current sshIncludeBlock body shouldn't
+	// touch the file or print "refreshed".
 	inst, _ := newTestInstaller(t)
 	sshDir := filepath.Join(inst.HomeDir, ".ssh")
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	configPath := filepath.Join(sshDir, "config")
-	pre := "Host foo\n  User bar\n\n" + SSHIncludeMarkerStart + "\nInclude ~/.ssh/config.d/canopy/*.conf\n" + SSHIncludeMarkerEnd + "\n"
+	pre := "Host foo\n  User bar\n\n" + strings.TrimLeft(sshIncludeBlock, "\n")
 	if err := os.WriteFile(configPath, []byte(pre), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -249,8 +251,60 @@ func TestEnsureSSHInclude_IdempotentWhenMarkerPresent(t *testing.T) {
 	if string(data) != pre {
 		t.Errorf("idempotent run changed file content:\ngot:\n%s\nwant:\n%s", data, pre)
 	}
-	if !strings.Contains(out.String(), "already has canopy Include block") {
-		t.Errorf("expected no-op message, got %q", out.String())
+	if !strings.Contains(out.String(), "up to date") {
+		t.Errorf("expected up-to-date message, got %q", out.String())
+	}
+}
+
+func TestEnsureSSHInclude_RewritesStaleMarkerBlock(t *testing.T) {
+	// The v0.18 Phase-1 block had a structural bug: bare `Include`
+	// without `Host *`, so appending at the bottom of a file that
+	// ends in a Host stanza put the Include inside that block (the
+	// bug avi+cassy hit on tower). Users who installed with the
+	// broken version need the marker block REWRITTEN, not skipped.
+	inst, _ := newTestInstaller(t)
+	sshDir := filepath.Join(inst.HomeDir, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configPath := filepath.Join(sshDir, "config")
+	staleBlock := SSHIncludeMarkerStart + " — managed by canopy; do not edit between markers\n" +
+		"Include ~/.ssh/config.d/canopy/*.conf\n" +
+		SSHIncludeMarkerEnd + "\n"
+	pre := "Host last\n  User x\n\n" + staleBlock
+	if err := os.WriteFile(configPath, []byte(pre), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := inst.EnsureSSHInclude(&out); err != nil {
+		t.Fatalf("EnsureSSHInclude: %v", err)
+	}
+	data, _ := os.ReadFile(configPath)
+	body := string(data)
+	// Marker block must now contain the Host * wrapper.
+	if !strings.Contains(body, "Host *\n  Include ~/.ssh/config.d/canopy/*.conf") {
+		t.Errorf("stale block not rewritten with Host * wrapper:\n%s", body)
+	}
+	// Stale bare-Include line must be GONE.
+	if strings.Contains(body, "\nInclude ~/.ssh/config.d/canopy/*.conf\n") {
+		t.Errorf("stale bare Include line still present:\n%s", body)
+	}
+	// User content outside the markers must be preserved verbatim.
+	if !strings.HasPrefix(body, "Host last\n  User x\n\n") {
+		t.Errorf("user content above marker was lost:\n%s", body)
+	}
+	if !strings.Contains(out.String(), "refreshed") {
+		t.Errorf("expected 'refreshed' message on rewrite, got %q", out.String())
+	}
+}
+
+func TestEnsureSSHInclude_NewBlockWrapsIncludeInHostStar(t *testing.T) {
+	// Regression guard: future refactors of sshIncludeBlock must keep
+	// the Host * wrapper. Without it, the include silently becomes
+	// conditional on whatever Host block precedes it in the file.
+	if !strings.Contains(sshIncludeBlock, "Host *\n  Include ~/.ssh/config.d/canopy/*.conf") {
+		t.Errorf("sshIncludeBlock missing `Host *` wrapper — Include will silently fail when appended after another Host block. Body:\n%s", sshIncludeBlock)
 	}
 }
 
