@@ -1,0 +1,40 @@
+# Canopy clipboard-bridge SSH snippet for host "{{.HostName}}".
+# Managed by canopy {{.Version}}. Do not edit; reinstall via
+#   canopy host clipboard {{.HostName}} --reinstall
+#
+# Dedicated `Host canopy-tunnel-{{.HostName}}` alias — ONLY the
+# persistent SSH tunnel (canopy-clipboard-tunnel-{{.HostName}}.service
+# under systemd --user) matches this directive. Normal SSH/mosh to
+# {{.SSHHostname}} does NOT trigger the RemoteForwards, so the
+# tunnel's binds aren't disturbed by everyday connections and you
+# don't see "remote port forwarding failed" warnings on every ssh.
+#
+# HostName / User / Port directives let `ssh canopy-tunnel-{{.HostName}}`
+# resolve to the real target without the user typing user@host:port.
+#
+# Socket paths use the literal UIDs detected at install time (laptop
+# UID {{.LocalUID}}, remote UID {{.RemoteUID}}) because $XDG_RUNTIME_DIR
+# isn't reliably set in sshd's environment when establishing the
+# RemoteForward — sshd resolves these socket paths before user shell
+# init runs.
+#
+# ServerAliveInterval/CountMax: tunnel detects a dead connection
+# within ~90s and exits, prompting systemd's Restart=on-failure.
+# ExitOnForwardFailure: if RemoteForward bind fails (e.g., a stale
+# socket lingered past pre-clean), ssh exits non-zero so systemd
+# notices and retries with the pre-clean step.
+Host canopy-tunnel-{{.HostName}}
+  HostName {{.SSHHostname}}
+{{- if .SSHUser}}
+  User {{.SSHUser}}
+{{- end}}
+{{- if .SSHPort}}
+  Port {{.SSHPort}}
+{{- end}}
+  RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-text.sock  /run/user/{{.LocalUID}}/canopy/clip-text.sock
+  RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-image.sock /run/user/{{.LocalUID}}/canopy/clip-image.sock
+  RemoteForward /run/user/{{.RemoteUID}}/canopy/clip-copy.sock  /run/user/{{.LocalUID}}/canopy/clip-copy.sock
+  StreamLocalBindUnlink yes
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  ExitOnForwardFailure yes

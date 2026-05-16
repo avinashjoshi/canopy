@@ -641,6 +641,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleConfirmSSHCopyIDKey(msg)
 	case confirmHostSSHMode:
 		return m.handleConfirmHostSSHKey(msg)
+	case confirmHostClipboardMode:
+		return m.handleConfirmHostClipboardKey(msg)
 	case confirmRetryMode:
 		return m.handleConfirmRetryKey(msg)
 	case drawerMode:

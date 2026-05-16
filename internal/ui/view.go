@@ -58,6 +58,8 @@ func (m *Model) View() string {
 		return m.renderConfirmSSHCopyID()
 	case confirmHostSSHMode:
 		return m.renderConfirmHostSSH()
+	case confirmHostClipboardMode:
+		return m.renderConfirmHostClipboard()
 	case drawerMode:
 		return m.renderDrawer()
 	case busyMode:

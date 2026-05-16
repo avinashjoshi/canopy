@@ -217,6 +217,39 @@ func MoshCmd(ctx context.Context, target string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "mosh", moshArgs...)
 }
 
+// ExitControlMaster terminates the persistent SSH ControlMaster
+// connection for `target` if one is alive. Used by code paths that
+// modify SSH config (e.g., per-host RemoteForward snippets written
+// by the v0.18 clipboard bridge): an already-open ControlMaster only
+// carries the forwards it negotiated at handshake time, so a fresh
+// snippet's directives don't apply until the NEXT master is opened.
+//
+// Calling this between "write snippet" and "use snippet via ssh" makes
+// the next SSH command establish a new master that reads the freshly-
+// written config. ControlPersist will keep that new master alive for
+// the rest of the canopy session.
+//
+// Errors are deliberately swallowed: "no master alive" is the same
+// outcome as "we killed one" from the caller's perspective (next ssh
+// gets a fresh master). Returning nil here keeps callers from having
+// to branch on a no-op condition.
+func ExitControlMaster(target string) {
+	socketPath := filepath.Join(canopyHome(), "ssh-%C.sock")
+	cmd := exec.Command("ssh",
+		"-o", "ControlPath="+socketPath,
+		"-O", "exit",
+		target,
+	)
+	// `ssh -O exit` writes "Exit request sent." on success or
+	// "Control socket connect(...): No such file or directory" when
+	// no master is alive. Both go to stderr; neither is interesting
+	// to the user mid-install. Discard.
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	_ = cmd.Run()
+	log.Debug("ssh.control-master.exit", "target", target)
+}
+
 // CheckMoshAvailable returns nil if `mosh` is on PATH, else a helpful
 // error. Called once at attach time so failure surfaces clearly rather
 // than as a confusing exec error.

@@ -51,6 +51,12 @@ type Result struct {
 	// CanopyVersion is whatever the remote canopy reports about itself.
 	// Empty if Err != nil or schema didn't include it.
 	CanopyVersion string
+	// ClipboardBridge is the v0.18 clipboard-bridge status reported in
+	// the remote's `canopy ls --json` envelope. One of "off",
+	// "bridged", "broken", or "" when the remote canopy is older than
+	// v0.18 (no field emitted). Drives the Hosts tab `📋` pill via
+	// state.RemoteHostSnapshot.
+	ClipboardBridge string
 	// LastSeen is set to the moment the tick succeeded. Zero on Err.
 	LastSeen time.Time
 	// RTT is the wall-clock duration the goroutine spent on this host
@@ -107,9 +113,10 @@ type RemoteWorkspace struct {
 // internal — we only need the workspace listing + version for the
 // refresher's purposes.
 type remoteLsResponse struct {
-	SchemaVersion int               `json:"schema_version"`
-	CanopyVersion string            `json:"canopy_version"`
-	Workspaces    []RemoteWorkspace `json:"workspaces"`
+	SchemaVersion   int               `json:"schema_version"`
+	CanopyVersion   string            `json:"canopy_version"`
+	ClipboardBridge string            `json:"clipboard_bridge,omitempty"`
+	Workspaces      []RemoteWorkspace `json:"workspaces"`
 }
 
 // Tick runs one refresh pass across all `hosts`, returning a slice of
@@ -220,6 +227,7 @@ exec canopy ls --json --all
 
 	res.Workspaces = parsed.Workspaces
 	res.CanopyVersion = parsed.CanopyVersion
+	res.ClipboardBridge = parsed.ClipboardBridge
 	res.LastSeen = time.Now()
 	res.RTT = time.Since(start)
 	log.Debug("host.refresh.ok", "host", h.Name, "workspaces", len(res.Workspaces), "rtt_ms", res.RTT.Milliseconds())

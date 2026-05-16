@@ -51,6 +51,11 @@ type Row struct {
 	Drift        Drift  // how Version compares to the reference passed to BuildRows
 	LastSeen     time.Time
 	LastError    string // raw error string from snapshot, displayed verbatim
+
+	// ClipboardBridge is the v0.18 bridge status reported by the host.
+	// One of "off", "bridged", "broken" — or "" when the remote canopy
+	// is older than v0.18 (no field emitted). Drives the `📋` pill.
+	ClipboardBridge string
 }
 
 // Drift describes how the host's reported canopy version compares to a
@@ -137,6 +142,7 @@ func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot
 			r.Drift = ComputeDrift(snap.CanopyVersion, referenceVersion)
 			r.LastSeen = snap.LastSeen
 			r.LastError = snap.LastError
+			r.ClipboardBridge = snap.ClipboardBridge
 			switch {
 			case snap.LastError == "":
 				r.Status = StatusOnline
@@ -192,6 +198,11 @@ func renderRow(r Row, width int, selected bool) string {
 		if width >= 80 && r.Version != "" {
 			parts = append(parts, "v"+r.Version+driftGlyphPlain(r.Drift))
 		}
+		if width >= 80 {
+			if pill := clipboardPillPlain(r.ClipboardBridge); pill != "" {
+				parts = append(parts, pill)
+			}
+		}
 		if width >= 100 {
 			parts = append(parts, fmt.Sprintf("%dp %dw", r.Projects, r.Workspaces))
 		}
@@ -214,6 +225,11 @@ func renderRow(r Row, width int, selected bool) string {
 	if width >= 80 && r.Version != "" {
 		parts = append(parts, renderVersionCell(r.Version, r.Drift))
 	}
+	if width >= 80 {
+		if pill := clipboardPill(r.ClipboardBridge); pill != "" {
+			parts = append(parts, pill)
+		}
+	}
 	if width >= 100 {
 		parts = append(parts, subtleStyle().Render(fmt.Sprintf("%dp %dw", r.Projects, r.Workspaces)))
 	}
@@ -222,6 +238,40 @@ func renderRow(r Row, width int, selected bool) string {
 	}
 	parts = append(parts, detail)
 	return "  " + strings.Join(parts, "  ")
+}
+
+// clipboardPill renders the bridge state pill. Returns "" for the off
+// case (no pill, keep the row uncluttered for the common state) and
+// for the unknown/empty case (pre-v0.18 remote or no snapshot yet).
+//
+// v0.18 design-doc palette: 📋 (clipboard) glyph + suffix word, never
+// glyph alone (a11y rule from /plan-design-review).
+//   - bridged  → green   📋 bridged
+//   - broken   → amber   📋! broken
+//   - off      → ""      (no pill — common state, keep row lean)
+//   - unknown  → ""      (same — no signal to display)
+func clipboardPill(bridge string) string {
+	switch bridge {
+	case "bridged":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Render("📋 bridged")
+	case "broken":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("📋! broken")
+	default:
+		return ""
+	}
+}
+
+// clipboardPillPlain is the selected-row variant: no inner foreground
+// color (the selection style's bright-white fg wins uniformly).
+func clipboardPillPlain(bridge string) string {
+	switch bridge {
+	case "bridged":
+		return "📋 bridged"
+	case "broken":
+		return "📋! broken"
+	default:
+		return ""
+	}
 }
 
 // statusGlyphPlain returns the same glyph as statusGlyph but without

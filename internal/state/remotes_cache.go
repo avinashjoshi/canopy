@@ -60,6 +60,13 @@ type RemoteHostSnapshot struct {
 	// attempt, success or failure. Used to render "tower (last seen
 	// 47s ago)" on the section header.
 	LastRefreshAttempt time.Time `json:"last_refresh_attempt"`
+
+	// ClipboardBridge is the v0.18 bridge status reported by the
+	// remote's `canopy ls --json`. One of "off", "bridged", "broken",
+	// or "" when the remote canopy predates v0.18 (the JSON field is
+	// absent and the decoder leaves it empty). Drives the `📋` pill
+	// on the Hosts tab (Lane C.4).
+	ClipboardBridge string `json:"clipboard_bridge,omitempty"`
 }
 
 // RemoteWorkspaceRow is the on-disk + in-memory cached shape of one
