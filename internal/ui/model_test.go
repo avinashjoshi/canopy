@@ -3502,6 +3502,72 @@ func TestRefreshAllMsg_TriggersBothLocalAndRemote(t *testing.T) {
 	}
 }
 
+// TestHostsSpinnerTick_AdvancesFrameWhileRefreshing pins the new
+// loading-spinner tick loop: while remoteRefreshing is true, each
+// tick bumps the frame index AND re-arms the next tick. Without
+// re-arming, the animation would stop after one frame.
+func TestHostsSpinnerTick_AdvancesFrameWhileRefreshing(t *testing.T) {
+	m := newTestModel(false)
+	m.remoteRefreshing = true
+	m.hostsSpinnerActive = true
+	m.hostsSpinnerFrame = 3
+
+	_, cmd := m.Update(hostsSpinnerTickMsg{})
+	if m.hostsSpinnerFrame != 4 {
+		t.Errorf("hostsSpinnerFrame = %d, want 4 (advanced by 1)", m.hostsSpinnerFrame)
+	}
+	if cmd == nil {
+		t.Errorf("tick handler returned nil cmd while refreshing; expected re-arm")
+	}
+	if !m.hostsSpinnerActive {
+		t.Errorf("hostsSpinnerActive flipped false while refreshing; should stay latched")
+	}
+}
+
+// TestHostsSpinnerTick_StopsWhenRefreshSettles is the OTHER branch:
+// once remoteRefreshing flips false (via remoteRowsLoadedMsg), the
+// next tick must drop the active latch AND return no cmd — otherwise
+// the tick loop runs forever, burning a wakeup every 120ms forever.
+func TestHostsSpinnerTick_StopsWhenRefreshSettles(t *testing.T) {
+	m := newTestModel(false)
+	m.remoteRefreshing = false
+	m.hostsSpinnerActive = true
+	m.hostsSpinnerFrame = 7
+
+	_, cmd := m.Update(hostsSpinnerTickMsg{})
+	if cmd != nil {
+		t.Errorf("tick returned cmd %v after refresh settled; loop should stop", cmd)
+	}
+	if m.hostsSpinnerActive {
+		t.Errorf("hostsSpinnerActive still true after settle; should clear so next refresh re-arms cleanly")
+	}
+	if m.hostsSpinnerFrame != 7 {
+		t.Errorf("hostsSpinnerFrame = %d, want 7 (must not advance after settle)", m.hostsSpinnerFrame)
+	}
+}
+
+// TestRefresh_StartsSpinnerTickAlongsideRemoteFanOut: refresh() must
+// dispatch BOTH the remote tick AND the spinner tick when no
+// in-flight fan-out exists. Regression target if a future refactor
+// re-orders the cmd batch and drops the spinner kick.
+func TestRefresh_StartsSpinnerTickAlongsideRemoteFanOut(t *testing.T) {
+	m := newTestModel(false)
+	m.remoteRefreshing = false
+	m.hostsSpinnerActive = false
+	m.hostsSpinnerFrame = 99 // sentinel: must be reset to 0
+
+	cmd := m.refresh()
+	if cmd == nil {
+		t.Fatalf("refresh returned nil cmd")
+	}
+	if !m.hostsSpinnerActive {
+		t.Errorf("refresh did not latch hostsSpinnerActive")
+	}
+	if m.hostsSpinnerFrame != 0 {
+		t.Errorf("hostsSpinnerFrame = %d, want 0 (fresh refresh resets the animation)", m.hostsSpinnerFrame)
+	}
+}
+
 // TestErrMsg_SetsErrAndStaysIdle: an errMsg delivered to Update sets
 // m.err and returns no follow-up cmd (no refresh, no retry).
 func TestErrMsg_SetsErrAndStaysIdle(t *testing.T) {

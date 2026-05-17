@@ -57,9 +57,37 @@ build:
 # is updated in place so a parallel `make dev` from another worktree
 # doesn't get clobbered by an install — the symlink target changes,
 # the file at $(BIN_REAL) gets refreshed, both states coexist.
+#
+# Pre-flight: probe whether $(BIN_DIR) is writable BEFORE go build
+# writes a partial artifact. The classic failure mode is a prior
+# install that ran as root (sudo) and left $(BIN_REAL) owned by root,
+# so the current user can't overwrite it on the next upgrade. Catching
+# it here means we surface "fix permissions on ~/.local/bin" instead
+# of the muddier "go: open ...canopy.bin: permission denied".
 .PHONY: install
 install:
-	@mkdir -p $(BIN_DIR)
+	@mkdir -p $(BIN_DIR) || { \
+		echo "ERROR: could not create $(BIN_DIR)."; \
+		echo "  Check that the parent directory exists and is writable:"; \
+		echo "    ls -ld $$(dirname $(BIN_DIR))"; \
+		exit 1; \
+	}
+	@if ! ( touch $(BIN_DIR)/.canopy-install-probe 2>/dev/null && rm -f $(BIN_DIR)/.canopy-install-probe ); then \
+		echo "ERROR: $(BIN_DIR) is not writable by $$(whoami)."; \
+		echo "  This usually means a previous install ran as root via sudo."; \
+		echo "  Recover with:"; \
+		echo "    sudo chown -R $$(whoami) $(BIN_DIR)"; \
+		echo "  Then re-run 'make install' (or 'canopy upgrade')."; \
+		exit 1; \
+	fi
+	@if [ -e $(BIN_REAL) ] && [ ! -w $(BIN_REAL) ]; then \
+		echo "ERROR: $(BIN_REAL) exists but is not writable by $$(whoami)."; \
+		echo "  A previous install likely ran as root via sudo."; \
+		echo "  Recover with:"; \
+		echo "    sudo chown $$(whoami) $(BIN_REAL)"; \
+		echo "  Then re-run 'make install' (or 'canopy upgrade')."; \
+		exit 1; \
+	fi
 	@go build -ldflags='$(LDFLAGS)' -o $(BIN_REAL) ./cmd/canopy
 	@chmod 0755 $(BIN_REAL)
 	@ln -sfn canopy.bin $(BIN)

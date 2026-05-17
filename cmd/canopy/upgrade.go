@@ -473,17 +473,39 @@ var upgradePromptYesNo = func(in io.Reader, out io.Writer) bool {
 // Exposed as a package-level var so tests can stub the streaming
 // path independently of the CLI's upgradeRunShell.
 var upgradeRunShellStreaming = func(ctx context.Context, srcDir string, w io.Writer) error {
+	// Tee output into the caller's writer AND into a local buffer so
+	// the post-failure error message can surface a permission-denied
+	// hint without making the user scroll back through the streamed
+	// output. The buffer is bounded only by command output volume —
+	// typical upgrades stream a few hundred KB at most.
+	pullBuf := &strings.Builder{}
 	pull := exec.CommandContext(ctx, "git", "-C", srcDir, "pull", "--ff-only")
-	pull.Stdout = w
-	pull.Stderr = w
+	pull.Stdout = io.MultiWriter(w, pullBuf)
+	pull.Stderr = io.MultiWriter(w, pullBuf)
 	if err := pull.Run(); err != nil {
+		if isPermissionDeniedStderr(pullBuf.String()) {
+			return fmt.Errorf(
+				"git pull --ff-only failed in %s: %w\n  "+
+					"Hint: a file in %s isn't writable by the current user; "+
+					"fix with `sudo chown -R $(whoami) %s` and re-run.",
+				srcDir, err, srcDir, srcDir)
+		}
 		return fmt.Errorf("git pull --ff-only failed in %s: %w", srcDir, err)
 	}
 
+	makeBuf := &strings.Builder{}
 	makeInstall := exec.CommandContext(ctx, "make", "-C", srcDir, "install")
-	makeInstall.Stdout = w
-	makeInstall.Stderr = w
+	makeInstall.Stdout = io.MultiWriter(w, makeBuf)
+	makeInstall.Stderr = io.MultiWriter(w, makeBuf)
 	if err := makeInstall.Run(); err != nil {
+		if isPermissionDeniedStderr(makeBuf.String()) {
+			return fmt.Errorf(
+				"make install failed in %s: %w\n  "+
+					"Hint: ~/.local/bin isn't writable by the current user "+
+					"(prior install likely ran as root). "+
+					"Fix with `sudo chown -R $(whoami) ~/.local/bin %s` and re-run.",
+				srcDir, err, srcDir)
+		}
 		return fmt.Errorf("make install failed in %s: %w", srcDir, err)
 	}
 	return nil
@@ -498,11 +520,28 @@ var upgradeRunShellStreaming = func(ctx context.Context, srcDir string, w io.Wri
 // --ff-only is load-bearing: a non-fast-forward would mean local
 // commits in the user's source clone, which the upgrade flow has no
 // business merging silently. Refuse and tell the user to investigate.
+//
+// Permission-denied detection: both steps can fail on a host whose
+// ~/.canopy/src or ~/.local/bin holds files owned by another user
+// (the classic case is a prior install that ran as root via sudo).
+// Surfacing the generic "local commits" / "build failed" hint there
+// is misleading — we sniff for "Permission denied" in stderr and
+// emit a targeted recovery hint instead.
 var upgradeRunShell = func(ctx context.Context, srcDir string) error {
 	pull := exec.CommandContext(ctx, "git", "-C", srcDir, "pull", "--ff-only")
 	var pullStderr strings.Builder
 	pull.Stderr = &pullStderr
 	if out, err := pull.Output(); err != nil {
+		if isPermissionDeniedStderr(pullStderr.String()) {
+			return fmt.Errorf(
+				"git pull --ff-only failed in %s: %w\n  stderr: %s\n"+
+					"  Looks like a file in %s isn't writable by the current user.\n"+
+					"  This usually means a previous install ran as root via sudo.\n"+
+					"  Recover with:\n"+
+					"    sudo chown -R $(whoami) %s\n"+
+					"  Then re-run canopy upgrade.",
+				srcDir, err, pullStderr.String(), srcDir, srcDir)
+		}
 		return fmt.Errorf(
 			"git pull --ff-only failed in %s: %w\n  stderr: %s\n  stdout: %s\n"+
 				"  This usually means there are local commits in the source clone.\n"+
@@ -515,6 +554,17 @@ var upgradeRunShell = func(ctx context.Context, srcDir string) error {
 	makeInstall.Stderr = &makeStderr
 	makeInstall.Stdout = io.Discard
 	if err := makeInstall.Run(); err != nil {
+		if isPermissionDeniedStderr(makeStderr.String()) {
+			return fmt.Errorf(
+				"make install failed in %s: %w\n  stderr: %s\n"+
+					"  Looks like ~/.local/bin (or another install target) isn't writable\n"+
+					"  by the current user. This usually means a previous install ran as\n"+
+					"  root via sudo, leaving binaries the current user can't replace.\n"+
+					"  Recover with:\n"+
+					"    sudo chown -R $(whoami) ~/.local/bin %s\n"+
+					"  Then re-run canopy upgrade.",
+				srcDir, err, makeStderr.String(), srcDir)
+		}
 		return fmt.Errorf(
 			"make install failed in %s: %w\n  stderr: %s\n"+
 				"  The git pull succeeded, so source is up to date — only the build failed.\n"+
@@ -522,4 +572,14 @@ var upgradeRunShell = func(ctx context.Context, srcDir string) error {
 			srcDir, err, makeStderr.String(), srcDir)
 	}
 	return nil
+}
+
+// isPermissionDeniedStderr reports whether stderr from a child process
+// indicates a filesystem permission failure. Both git and make
+// generally pass through the underlying open()/write() errno text, so
+// the canonical strings ("Permission denied", "permission denied")
+// match across distros. Lowercase the haystack before contains so
+// "PERMISSION DENIED" from oddball locales also matches.
+func isPermissionDeniedStderr(stderr string) bool {
+	return strings.Contains(strings.ToLower(stderr), "permission denied")
 }

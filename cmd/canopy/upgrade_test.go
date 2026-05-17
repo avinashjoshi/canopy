@@ -698,3 +698,33 @@ func TestRunUpgrade_nonTtyAutoConfirms(t *testing.T) {
 		t.Error("non-tty stdin should NOT trigger the prompt")
 	}
 }
+
+// TestIsPermissionDeniedStderr asserts the sniffer behind the new
+// targeted hints. Both branches of the conditional matter: a
+// positive match must steer the upgrade error toward the "fix
+// ownership" recovery, while a negative match must preserve the
+// pre-existing "local commits" / "build failed" wording so users
+// debugging unrelated failures aren't led astray. Includes the
+// uppercase variant because some embedded shells lowercase errno
+// strings inconsistently across locales.
+func TestIsPermissionDeniedStderr(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"empty stderr", "", false},
+		{"unrelated git error", "fatal: not a git repository", false},
+		{"canonical lowercase", "open /home/avi/.local/bin/canopy.bin: permission denied", true},
+		{"capitalized", "open ~/.canopy/src/.git/FETCH_HEAD: Permission denied", true},
+		{"uppercase locale", "PERMISSION DENIED writing target", true},
+		{"merge conflict (must not match)", "error: Your local changes would be overwritten by merge.", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPermissionDeniedStderr(tc.stderr); got != tc.want {
+				t.Errorf("isPermissionDeniedStderr(%q) = %v, want %v", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}

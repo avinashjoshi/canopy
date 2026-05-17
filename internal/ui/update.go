@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -196,6 +197,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Drop the cancel ref; the goroutine has already returned.
 		m.upgradeCancel = nil
 		return m, nil
+
+	case hostsSpinnerTickMsg:
+		// Drive the Hosts-tab loading spinner. Only re-arm while a
+		// remote fan-out is still in flight; once remoteRowsLoadedMsg
+		// flips remoteRefreshing false, the next tick stops the loop
+		// by returning nil and clearing the active latch. Bumping the
+		// frame triggers a re-render via Bubbletea's standard Cmd
+		// roundtrip — same mechanism as agent_poll's badge animation.
+		if !m.remoteRefreshing {
+			m.hostsSpinnerActive = false
+			return m, nil
+		}
+		m.hostsSpinnerFrame++
+		return m, hostsSpinnerTickCmd()
 
 	case remoteRowsLoadedMsg:
 		// v0.17.0 Phase 1b: result of the remote-host fan-out. Stash the
@@ -928,6 +943,28 @@ type errMsg struct{ err error }
 // callbacks) when both row sources may have changed — local-only
 // refreshCmd would leave remote rows stale until the next 2s tick.
 type refreshAllMsg struct{}
+
+// hostsSpinnerInterval is the cadence at which the Hosts-tab loading
+// spinner advances. 120ms matches the bubbles/spinner default and
+// reads as a smooth Braille rotation without consuming render budget
+// when there's nothing else happening on screen.
+const hostsSpinnerInterval = 120 * time.Millisecond
+
+// hostsSpinnerTickMsg fires every hostsSpinnerInterval while the
+// Hosts-tab spinner is active (i.e., a remote refresh fan-out is in
+// flight). Update bumps m.hostsSpinnerFrame and re-arms the tick;
+// once remoteRefreshing settles to false, the handler stops arming
+// new ticks and the loop dies naturally.
+type hostsSpinnerTickMsg struct{}
+
+// hostsSpinnerTickCmd schedules the next hosts-spinner frame. Kicked
+// off by refresh() when it starts a remote fan-out; re-armed by the
+// Update handler for each frame while refreshing is in flight.
+func hostsSpinnerTickCmd() tea.Cmd {
+	return tea.Tick(hostsSpinnerInterval, func(time.Time) tea.Msg {
+		return hostsSpinnerTickMsg{}
+	})
+}
 // Drawer (i / b) lives in drawer.go. actionInspect, handleDrawerKey,
 // drawerLoadCmd, drawerLoadedMsg, bareAttachCmd are defined there.
 
