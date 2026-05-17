@@ -41,6 +41,18 @@ Phase 1c's huh wizard for `canopy host add` is the natural home for this — the
 
 ---
 
+## 📋 OPEN (P2) — Make `remoteRowsLoadedMsg` the sole owner of `remoteRefreshing` (added 2026-05-16)
+
+**What:** `m.remoteRefreshing = false` is currently written from goroutines in `internal/ui/update_remote.go` and `internal/ui/update_attach.go` outside the Bubbletea Update loop. The hosts-tab spinner (v0.21.1.0) reads the field on a 120 ms tick, so the window for `-race` to fire is much wider than the pre-existing benign race.
+
+**Fix:** route every "we're done refreshing" signal through a `tea.Msg` (e.g., have the goroutine return a `remoteRefreshDoneMsg` or piggy-back on the existing `remoteRowsLoadedMsg`) and have `Update` flip the latch. Audit `update_remote.go` and `update_attach.go` for the direct mutations and convert them.
+
+**Why now:** spinner makes the race observable under `go test -race ./internal/ui/...`. Pre-v0.21.1 the race was effectively benign because only Update read the field; the 120 ms tick changes the math. Documented as a "Known concern" in the v0.21.1.0 CHANGELOG entry.
+
+**Scope:** single PR, internal-only refactor, no behavior change beyond removing the race window. Add a `-race` test that exercises the hosts-tab spinner alongside a refresh fan-out to lock it in.
+
+---
+
 ## 📋 OPEN (P2) — Surface refresh errors in TUI Global tab section header (added 2026-05-12)
 
 Right now hosts whose refresh failed (auth, network, etc.) don't appear in the TUI Global tab at all — their cache entry has empty `workspaces` and `last_error` set, but the projectlist render path skips them entirely. Better UX: render a section header for failed hosts too, with the error condition shown:

@@ -204,6 +204,24 @@ canopy project add cravd /home/cassy/Work/cravd --on tower   # new
 
 Pre-v0.17.0 wire format. Upgrade the host (`U`). v0.17.0+ runs `IsMain=true` and `fillMainBranches` on the remote side of `canopy ls --json` so the laptop gets real values.
 
+### `canopy upgrade` (or in-TUI `U`) fails with "permission denied" on a host
+
+From v0.21.1.0, the upgrade path detects this case explicitly. Either the source clone at `~/.canopy/src` or the install target at `$(BIN_DIR)/canopy.bin` (default `~/.local/bin/canopy.bin`) isn't writable by the user the SSH session runs as — almost always because a previous install was run via `sudo` and left root-owned files behind.
+
+The error names the right directory and the recovery is:
+
+```bash
+ssh <host>
+sudo chown -R $(whoami) ~/.canopy/src ~/.local/bin
+canopy upgrade
+```
+
+Pre-v0.21.1.0 misclassified this as `there are local commits in the source clone` and steered users toward `git reset`, which never helped. If you see the old wording, your host is still on the prior version — `S` (canopy use release) then `U` again should now produce the clearer error. `make install` also pre-flights `$(BIN_DIR)` writability and `$(BIN_REAL)` ownership before `go build`, so the diagnosis surfaces immediately rather than mid-build.
+
+### Hosts tab renders `· (never refreshed)` for every host on first load
+
+Pre-v0.21.1.0 behavior. The Hosts tab now shows a Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, ~120 ms cadence) per host while the initial SSH fan-out is in flight; hosts with a cached snapshot keep their previous status, only never-refreshed hosts spin. Upgrade your laptop canopy.
+
 ## Logs
 
 Everything canopy does at INFO level lands in `~/.canopy/log/canopy.log`. JSON, append-only, rotated automatically (10 MB max per file, 3 backups, 28 days retention, gzip-compressed).
