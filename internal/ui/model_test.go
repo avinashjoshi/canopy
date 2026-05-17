@@ -3568,6 +3568,53 @@ func TestRefresh_StartsSpinnerTickAlongsideRemoteFanOut(t *testing.T) {
 	}
 }
 
+// TestRefresh_NoOpWhenRemoteFanOutInFlight pins the outer guard in
+// refresh(): when remoteRefreshing is already true (a fan-out is
+// running), refresh() must NOT touch the spinner state. Otherwise a
+// rapid second refresh would reset the frame counter mid-animation
+// (visual jitter) AND queue a redundant tick loop.
+func TestRefresh_NoOpWhenRemoteFanOutInFlight(t *testing.T) {
+	m := newTestModel(false)
+	m.remoteRefreshing = true
+	m.hostsSpinnerActive = true
+	m.hostsSpinnerFrame = 5
+
+	_ = m.refresh()
+	if m.hostsSpinnerFrame != 5 {
+		t.Errorf("hostsSpinnerFrame = %d, want 5 (in-flight refresh must not reset the frame)", m.hostsSpinnerFrame)
+	}
+	if !m.hostsSpinnerActive {
+		t.Errorf("hostsSpinnerActive was cleared by a duplicate refresh; should stay latched")
+	}
+}
+
+// TestRefresh_DoesNotDoubleDispatchSpinnerTick pins the inner guard:
+// when no fan-out is in flight (so the outer condition fires) BUT a
+// spinner tick is already pending (hostsSpinnerActive=true from a
+// prior cycle that hasn't drained yet), refresh() must dispatch the
+// remote fan-out without ALSO dispatching a second spinner tick.
+// Without this guard, every external trigger of refresh() while a
+// tick is mid-flight would compound the frame-advance rate.
+func TestRefresh_DoesNotDoubleDispatchSpinnerTick(t *testing.T) {
+	m := newTestModel(false)
+	m.remoteRefreshing = false
+	m.hostsSpinnerActive = true // a tick is already in flight
+	m.hostsSpinnerFrame = 3
+
+	cmd := m.refresh()
+	if cmd == nil {
+		t.Fatalf("refresh returned nil cmd")
+	}
+	// Frame is still reset (fresh refresh) but the active latch stays
+	// the same — no second tick loop spawned.
+	if m.hostsSpinnerFrame != 0 {
+		t.Errorf("hostsSpinnerFrame = %d, want 0 (fresh remote refresh resets the animation even if a tick is pending)", m.hostsSpinnerFrame)
+	}
+	if !m.hostsSpinnerActive {
+		t.Errorf("hostsSpinnerActive flipped off; must remain latched (the inner guard's whole job)")
+	}
+}
+
 // TestErrMsg_SetsErrAndStaysIdle: an errMsg delivered to Update sets
 // m.err and returns no follow-up cmd (no refresh, no retry).
 func TestErrMsg_SetsErrAndStaysIdle(t *testing.T) {

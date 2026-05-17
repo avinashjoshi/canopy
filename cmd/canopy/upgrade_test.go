@@ -719,11 +719,163 @@ func TestIsPermissionDeniedStderr(t *testing.T) {
 		{"capitalized", "open ~/.canopy/src/.git/FETCH_HEAD: Permission denied", true},
 		{"uppercase locale", "PERMISSION DENIED writing target", true},
 		{"merge conflict (must not match)", "error: Your local changes would be overwritten by merge.", false},
+		// SSH auth failures must NOT match: a chown hint would steer
+		// the user toward a destructive (and irrelevant) recovery.
+		// Real-world git pull stderr when the key isn't loaded.
+		{"ssh key auth fail with paren", "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.", false},
+		{"ssh password fail with comma", "Permission denied, please try again.\nPermission denied (publickey,password).", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isPermissionDeniedStderr(tc.stderr); got != tc.want {
 				t.Errorf("isPermissionDeniedStderr(%q) = %v, want %v", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWrapPullErr asserts the four branches of the git-pull error
+// classifier — permission-denied × verbose, permission-denied × terse,
+// generic × verbose, generic × terse. The verbose form is what the CLI
+// flow emits (it embeds captured stderr/stdout); the terse form is
+// what the in-TUI streaming flow emits (output already on screen).
+//
+// The fmt.Errorf bodies aren't logic so we don't pin the exact wording
+// — we pin the *steering* signals the user reads on each path: chown
+// recovery vs the legacy "local commits" hint, and stderr presence
+// for the verbose path.
+func TestWrapPullErr(t *testing.T) {
+	srcDir := "/home/u/.canopy/src"
+	runErr := errors.New("exit status 1")
+
+	cases := []struct {
+		name          string
+		stderr        string
+		stdout        string
+		includeOutput bool
+		wantContains  []string
+		wantAbsent    []string
+	}{
+		{
+			name:          "permission denied verbose (CLI flow)",
+			stderr:        "open .git/FETCH_HEAD: permission denied",
+			stdout:        "",
+			includeOutput: true,
+			wantContains:  []string{"sudo chown -R $(whoami)", srcDir, "previous install ran as root", "stderr: open .git/FETCH_HEAD"},
+			wantAbsent:    []string{"local commits in the source clone"},
+		},
+		{
+			name:          "permission denied terse (streaming flow)",
+			stderr:        "Permission denied",
+			stdout:        "",
+			includeOutput: false,
+			wantContains:  []string{"sudo chown -R $(whoami)", "Hint:"},
+			wantAbsent:    []string{"local commits in the source clone", "stderr:"},
+		},
+		{
+			name:          "generic verbose (CLI flow)",
+			stderr:        "fatal: Your local changes...",
+			stdout:        "From origin",
+			includeOutput: true,
+			wantContains:  []string{"local commits in the source clone", "stderr: fatal:", "stdout: From origin"},
+			wantAbsent:    []string{"sudo chown -R"},
+		},
+		{
+			name:          "generic terse (streaming flow)",
+			stderr:        "fatal: Your local changes...",
+			stdout:        "",
+			includeOutput: false,
+			wantContains:  []string{"git pull --ff-only failed in"},
+			wantAbsent:    []string{"sudo chown -R", "local commits in the source clone", "stderr:"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := wrapPullErr(srcDir, runErr, tc.stderr, tc.stdout, tc.includeOutput)
+			if err == nil {
+				t.Fatalf("wrapPullErr returned nil error")
+			}
+			if !errors.Is(err, runErr) {
+				t.Errorf("returned error does not wrap runErr: %v", err)
+			}
+			msg := err.Error()
+			for _, s := range tc.wantContains {
+				if !strings.Contains(msg, s) {
+					t.Errorf("err = %q\n  missing required substring: %q", msg, s)
+				}
+			}
+			for _, s := range tc.wantAbsent {
+				if strings.Contains(msg, s) {
+					t.Errorf("err = %q\n  unexpectedly contains: %q", msg, s)
+				}
+			}
+		})
+	}
+}
+
+// TestWrapMakeErr mirrors TestWrapPullErr for the make-install branch.
+// The chown hint should mention ~/.local/bin specifically (the bin
+// dir is the typical sudo-install collision point); the generic
+// branch must NOT mention chown.
+func TestWrapMakeErr(t *testing.T) {
+	srcDir := "/home/u/.canopy/src"
+	runErr := errors.New("exit status 2")
+
+	cases := []struct {
+		name          string
+		stderr        string
+		includeOutput bool
+		wantContains  []string
+		wantAbsent    []string
+	}{
+		{
+			name:          "permission denied verbose",
+			stderr:        "go: open /root/.local/bin/canopy.bin: permission denied",
+			includeOutput: true,
+			wantContains:  []string{"sudo chown -R $(whoami) ~/.local/bin", "root via sudo", "stderr: go: open"},
+			wantAbsent:    []string{"only the build failed"},
+		},
+		{
+			name:          "permission denied terse",
+			stderr:        "PERMISSION DENIED",
+			includeOutput: false,
+			wantContains:  []string{"sudo chown -R $(whoami) ~/.local/bin", "Hint:"},
+			wantAbsent:    []string{"only the build failed", "stderr:"},
+		},
+		{
+			name:          "generic verbose",
+			stderr:        "make: gcc: not found",
+			includeOutput: true,
+			wantContains:  []string{"only the build failed", "stderr: make: gcc:"},
+			wantAbsent:    []string{"sudo chown"},
+		},
+		{
+			name:          "generic terse",
+			stderr:        "make: gcc: not found",
+			includeOutput: false,
+			wantContains:  []string{"make install failed in"},
+			wantAbsent:    []string{"sudo chown", "only the build failed", "stderr:"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := wrapMakeErr(srcDir, runErr, tc.stderr, tc.includeOutput)
+			if err == nil {
+				t.Fatalf("wrapMakeErr returned nil error")
+			}
+			if !errors.Is(err, runErr) {
+				t.Errorf("returned error does not wrap runErr: %v", err)
+			}
+			msg := err.Error()
+			for _, s := range tc.wantContains {
+				if !strings.Contains(msg, s) {
+					t.Errorf("err = %q\n  missing required substring: %q", msg, s)
+				}
+			}
+			for _, s := range tc.wantAbsent {
+				if strings.Contains(msg, s) {
+					t.Errorf("err = %q\n  unexpectedly contains: %q", msg, s)
+				}
 			}
 		})
 	}

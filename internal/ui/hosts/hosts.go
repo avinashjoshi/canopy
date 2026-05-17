@@ -210,9 +210,10 @@ func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot
 // column visibility per the D2 tiered drop. cursor indicates the
 // selected row (-1 for "no cursor", e.g. when the cursor is out of
 // bounds or rendering for a non-interactive context). spinnerFrame
-// drives the StatusLoading glyph animation — callers tick it from the
-// hosts spinner tea.Cmd while any row is in Loading state and pass the
-// current value here. v0.17 Phase 1l; spinner add in v0.22.
+// drives the StatusLoading glyph animation — callers advance it from
+// a tea.Cmd while a remote refresh fan-out is in flight (the same
+// condition BuildRows uses to flip rows into StatusLoading). v0.17
+// Phase 1l; spinner add in v0.22.
 func Render(rows []Row, width int, cursor int, spinnerFrame int) string {
 	if len(rows) == 0 {
 		return emptyState()
