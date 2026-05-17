@@ -306,8 +306,12 @@ func (m *Model) hostsHasEntries() bool {
 // renderHostsTab is the Hosts tab body. Delegates to the
 // internal/ui/hosts subpackage's BuildRows + Render. Width-aware per
 // the D2 design decision (tiered column drop at narrow widths).
+// remoteRefreshing + hostsSpinnerFrame feed the first-load spinner so
+// hosts without a cached snapshot animate instead of rendering as a
+// neutral dot ("(never refreshed)") for the duration of the SSH
+// fan-out.
 func (m *Model) renderHostsTab() string {
-	rows := hosts.BuildRows(m.hostList, m.remoteSnaps, m.hostReferenceVersion())
+	rows := hosts.BuildRows(m.hostList, m.remoteSnaps, m.hostReferenceVersion(), m.remoteRefreshing)
 	w := m.width
 	if w <= 0 {
 		w = 100 // reasonable default before WindowSizeMsg lands
@@ -322,7 +326,7 @@ func (m *Model) renderHostsTab() string {
 	if cursor < 0 {
 		cursor = 0
 	}
-	return hosts.Render(rows, w, cursor)
+	return hosts.Render(rows, w, cursor, m.hostsSpinnerFrame)
 }
 
 // renderConfirmHostRemove is the y/N gate for `d` on the Hosts tab.

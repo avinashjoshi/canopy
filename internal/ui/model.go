@@ -395,6 +395,22 @@ type Model struct {
 	// attempts so we don't fan-out twice on overlapping TUI ticks.
 	remoteRefreshing bool
 
+	// hostsSpinnerFrame indexes the Braille frame for every host row
+	// currently in hosts.StatusLoading. Advanced by hostsSpinnerTickMsg
+	// while remoteRefreshing is true; held steady otherwise so the row
+	// doesn't flicker after a single host comes back. Reset to 0 on
+	// each fresh remote-refresh dispatch so the animation starts at
+	// frame 0 rather than mid-rotation.
+	hostsSpinnerFrame int
+
+	// hostsSpinnerActive prevents stacking ticks. refresh() flips this
+	// true when it dispatches a remote tick + the spinner tick; the
+	// tick handler clears it once remoteRefreshing settles back to
+	// false. Without the latch, every refresh would queue another
+	// independent tick loop and the frame counter would advance N×
+	// faster after N refreshes.
+	hostsSpinnerActive bool
+
 	// hostList is the snapshot of registered hosts at the most recent
 	// refresh. Drives the Hosts tab. Repopulated as part of every
 	// remote refresh so the Hosts tab stays in sync without a separate
@@ -1145,7 +1161,12 @@ func (m *Model) refresh() tea.Cmd {
 		// remoteRowsLoadedMsg when no hosts are registered. We always
 		// dispatch it so the refreshing-latch lifecycle is consistent.
 		m.remoteRefreshing = true
+		m.hostsSpinnerFrame = 0
 		cmds = append(cmds, refreshRemoteCmd())
+		if !m.hostsSpinnerActive {
+			m.hostsSpinnerActive = true
+			cmds = append(cmds, hostsSpinnerTickCmd())
+		}
 	}
 	return tea.Batch(cmds...)
 }

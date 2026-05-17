@@ -127,6 +127,8 @@ The tab lists every registered host with:
 - Agent badges for each remote workspace (the laptop now shows `💤` / `✋` / `⚡` for remote rows, not just local)
 - Last error if a fetch failed (auth, network, version mismatch)
 
+On first load — before any host has a cached snapshot — never-refreshed hosts animate a Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, ~120 ms cadence) until their fan-out result lands, instead of showing a static `· (never refreshed)` for the full 3-second SSH window. Hosts with a cached snapshot keep their previous status. The tick loop stops itself once the fan-out settles (v0.21.1.0).
+
 Verbs while on the tab:
 
 | Key | Action |
@@ -155,7 +157,7 @@ If you press `enter` on a session another client is already attached to, the TUI
 
 Two flows, both on the **Remote hosts** tab:
 
-- **`U`** — `canopy upgrade --yes` on the host. Confirms first (no surprise SSH), then streams `git pull && make install` output into the TUI. Errors stay on-screen instead of disappearing inside an alt-screen suspend.
+- **`U`** — `canopy upgrade --yes` on the host. Confirms first (no surprise SSH), then streams `git pull && make install` output into the TUI. Errors stay on-screen instead of disappearing inside an alt-screen suspend. When the failure is a permission problem on `~/.canopy/src` or `~/.local/bin` (typical when a previous install ran as `sudo`), the error names the offending directory and tells you to `sudo chown -R $(whoami) …` it — the misleading "local commits in source clone" hint is gone (v0.21.1.0).
 - **`S`** — `canopy use release` on the host. The recovery path when a host is running a dev binary and `canopy upgrade` refuses with "Switch to the released canopy first."
 
 `U` is hidden on hosts already running a DEV binary (it would error); `S` is hidden on hosts reporting a real semver (it would no-op). Both keys show up on hosts reporting `(unknown)` — that's the legacy state for hosts older than v0.17.1 that didn't emit version over the wire.

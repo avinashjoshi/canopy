@@ -473,18 +473,35 @@ var upgradePromptYesNo = func(in io.Reader, out io.Writer) bool {
 // Exposed as a package-level var so tests can stub the streaming
 // path independently of the CLI's upgradeRunShell.
 var upgradeRunShellStreaming = func(ctx context.Context, srcDir string, w io.Writer) error {
+	// Tee output into the caller's writer AND into a local buffer so the
+	// post-failure error message can surface a permission-denied hint
+	// without making the user scroll back through the streamed output.
+	//
+	// CRITICAL: build ONE io.Writer and assign it to both Stdout and
+	// Stderr. exec.Cmd's stdout/stderr goroutines are only serialized
+	// when `Stdout == Stderr` (interface equality); two distinct
+	// `io.MultiWriter(...)` calls produce different *multiWriter values,
+	// which would spawn two goroutines racing on the same
+	// strings.Builder. Single value + single goroutine = no race. The
+	// underlying Builder is unsafe for concurrent use; the safeBuffer
+	// the caller passes (`w`) IS safe, but the path through this buf
+	// must stay single-threaded by construction.
+	pullBuf := &strings.Builder{}
+	pullTee := io.MultiWriter(w, pullBuf)
 	pull := exec.CommandContext(ctx, "git", "-C", srcDir, "pull", "--ff-only")
-	pull.Stdout = w
-	pull.Stderr = w
+	pull.Stdout = pullTee
+	pull.Stderr = pullTee
 	if err := pull.Run(); err != nil {
-		return fmt.Errorf("git pull --ff-only failed in %s: %w", srcDir, err)
+		return wrapPullErr(srcDir, err, pullBuf.String(), "", false)
 	}
 
+	makeBuf := &strings.Builder{}
+	makeTee := io.MultiWriter(w, makeBuf)
 	makeInstall := exec.CommandContext(ctx, "make", "-C", srcDir, "install")
-	makeInstall.Stdout = w
-	makeInstall.Stderr = w
+	makeInstall.Stdout = makeTee
+	makeInstall.Stderr = makeTee
 	if err := makeInstall.Run(); err != nil {
-		return fmt.Errorf("make install failed in %s: %w", srcDir, err)
+		return wrapMakeErr(srcDir, err, makeBuf.String(), false)
 	}
 	return nil
 }
@@ -498,16 +515,19 @@ var upgradeRunShellStreaming = func(ctx context.Context, srcDir string, w io.Wri
 // --ff-only is load-bearing: a non-fast-forward would mean local
 // commits in the user's source clone, which the upgrade flow has no
 // business merging silently. Refuse and tell the user to investigate.
+//
+// Permission-denied detection: both steps can fail on a host whose
+// ~/.canopy/src or ~/.local/bin holds files owned by another user
+// (the classic case is a prior install that ran as root via sudo).
+// Surfacing the generic "local commits" / "build failed" hint there
+// is misleading — we sniff for "Permission denied" in stderr and
+// emit a targeted recovery hint instead.
 var upgradeRunShell = func(ctx context.Context, srcDir string) error {
 	pull := exec.CommandContext(ctx, "git", "-C", srcDir, "pull", "--ff-only")
 	var pullStderr strings.Builder
 	pull.Stderr = &pullStderr
 	if out, err := pull.Output(); err != nil {
-		return fmt.Errorf(
-			"git pull --ff-only failed in %s: %w\n  stderr: %s\n  stdout: %s\n"+
-				"  This usually means there are local commits in the source clone.\n"+
-				"  Resolve manually (cd %s && git status) or remove the clone and re-run install.sh.",
-			srcDir, err, pullStderr.String(), string(out), srcDir)
+		return wrapPullErr(srcDir, err, pullStderr.String(), string(out), true)
 	}
 
 	makeInstall := exec.CommandContext(ctx, "make", "-C", srcDir, "install")
@@ -515,11 +535,145 @@ var upgradeRunShell = func(ctx context.Context, srcDir string) error {
 	makeInstall.Stderr = &makeStderr
 	makeInstall.Stdout = io.Discard
 	if err := makeInstall.Run(); err != nil {
+		return wrapMakeErr(srcDir, err, makeStderr.String(), true)
+	}
+	return nil
+}
+
+// wrapPullErr classifies a `git pull --ff-only` failure into a
+// user-facing error. The permission-denied path emits a chown-recovery
+// hint; the fallback preserves the legacy "local commits" wording.
+//
+// includeOutput=true folds the captured stderr (and stdout for the
+// generic branch) into the message — that's the CLI flow, where the
+// user hasn't already seen the streamed bytes. =false omits them — the
+// streaming flow already wrote both straight to the user's view and
+// re-printing would just clutter the error.
+//
+// Pure function (no I/O, no goroutines, no globals) so unit tests can
+// pin both branches against both verbosities directly. The package's
+// existing convention is to expose I/O-bearing functions like
+// upgradeRunShell as `var` for stubbing; classification is pulled out
+// here precisely because it doesn't need that escape hatch.
+func wrapPullErr(srcDir string, runErr error, stderr, stdout string, includeOutput bool) error {
+	if isPermissionDeniedStderr(stderr) {
+		if includeOutput {
+			return fmt.Errorf(
+				"git pull --ff-only failed in %s: %w\n  stderr: %s\n"+
+					"  Looks like a file in %s isn't writable by the current user.\n"+
+					"  This usually means a previous install ran as root via sudo.\n"+
+					"  Recover with:\n"+
+					"    sudo chown -R $(whoami) %s\n"+
+					"  Then re-run canopy upgrade.",
+				srcDir, runErr, stderr, srcDir, srcDir)
+		}
+		return fmt.Errorf(
+			"git pull --ff-only failed in %s: %w\n  "+
+				"Hint: a file in %s isn't writable by the current user; "+
+				"fix with `sudo chown -R $(whoami) %s` and re-run.",
+			srcDir, runErr, srcDir, srcDir)
+	}
+	if includeOutput {
+		return fmt.Errorf(
+			"git pull --ff-only failed in %s: %w\n  stderr: %s\n  stdout: %s\n"+
+				"  This usually means there are local commits in the source clone.\n"+
+				"  Resolve manually (cd %s && git status) or remove the clone and re-run install.sh.",
+			srcDir, runErr, stderr, stdout, srcDir)
+	}
+	return fmt.Errorf("git pull --ff-only failed in %s: %w", srcDir, runErr)
+}
+
+// wrapMakeErr is wrapPullErr's sibling for `make install` failures.
+// Same shape: permission-denied steers the hint toward chown,
+// fallback keeps the existing "build failed" wording.
+//
+// The hint references "the install target shown in stderr above"
+// rather than hardcoding ~/.local/bin — the Makefile's $(BIN_DIR)
+// honors $PREFIX, so a user who set PREFIX=/opt/canopy would get
+// misleading recovery instructions if we baked the path in.
+func wrapMakeErr(srcDir string, runErr error, stderr string, includeOutput bool) error {
+	if isPermissionDeniedStderr(stderr) {
+		if includeOutput {
+			return fmt.Errorf(
+				"make install failed in %s: %w\n  stderr: %s\n"+
+					"  Looks like the install target isn't writable by the current user.\n"+
+					"  This usually means a previous install ran as root via sudo,\n"+
+					"  leaving binaries the current user can't replace.\n"+
+					"  Recover by chowning the path shown in the stderr above, e.g.:\n"+
+					"    sudo chown $(whoami) <path-from-stderr>\n"+
+					"  Then re-run canopy upgrade.",
+				srcDir, runErr, stderr)
+		}
+		return fmt.Errorf(
+			"make install failed in %s: %w\n  "+
+				"Hint: the install target isn't writable (prior install likely ran as root). "+
+				"Chown the path shown in the streamed output above, then re-run.",
+			srcDir, runErr)
+	}
+	if includeOutput {
 		return fmt.Errorf(
 			"make install failed in %s: %w\n  stderr: %s\n"+
 				"  The git pull succeeded, so source is up to date — only the build failed.\n"+
 				"  Inspect the error above and re-run 'make install' manually in %s.",
-			srcDir, err, makeStderr.String(), srcDir)
+			srcDir, runErr, stderr, srcDir)
 	}
-	return nil
+	return fmt.Errorf("make install failed in %s: %w", srcDir, runErr)
+}
+
+// isPermissionDeniedStderr reports whether stderr from a child process
+// indicates a *filesystem* permission failure (the kind a `chown`
+// recovery can fix). Both git and make pass through the underlying
+// open()/write() errno text, so the canonical strings ("Permission
+// denied", "permission denied") match across distros. Lowercase the
+// haystack before Contains so "PERMISSION DENIED" from oddball locales
+// also matches.
+//
+// Bias: false NEGATIVES over false positives. The chown hint is
+// destructive (sudo + recursive ownership change); steering a user
+// toward it for an unrelated failure is far worse than missing the
+// hint for a real filesystem permission failure. Two filters apply:
+//
+//  1. Explicit deny: SSH/network forms of "Permission denied" must
+//     never trigger the hint. These include "(publickey)", "(password)",
+//     "(keyboard-interactive)", "(none)", "please try again", and any
+//     "ssh:" prefix (covers "ssh: connect to host …: Permission denied"
+//     from firewall blocks).
+//
+//  2. Filesystem-signal requirement: alongside the phrase, stderr must
+//     contain at least one filesystem-shaped token (an errno-attached
+//     syscall name, "cannot"/"unable to" git wording, or a path
+//     fragment). Without it, the cause is ambiguous and the generic
+//     error message (which doesn't push chown) is the safer default.
+func isPermissionDeniedStderr(stderr string) bool {
+	s := strings.ToLower(stderr)
+	if !strings.Contains(s, "permission denied") {
+		return false
+	}
+	// Filter 1: explicit network/auth deny.
+	denyMarkers := []string{
+		"permission denied (publickey",
+		"permission denied (password",
+		"permission denied (keyboard-interactive",
+		"permission denied (none",
+		"permission denied, please try again",
+		"ssh:",
+	}
+	for _, m := range denyMarkers {
+		if strings.Contains(s, m) {
+			return false
+		}
+	}
+	// Filter 2: filesystem-signal requirement. At least one of these
+	// must co-occur with "permission denied" for the hint to fire.
+	fsMarkers := []string{
+		"open ", "openat ", "mkdir ", "write ", "rename ", "unlink ",
+		"cannot ", "unable to ",
+		".git/", ".bin", ".canopy/", "/.local/bin", "/home/", "/root/", "/var/",
+	}
+	for _, m := range fsMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }

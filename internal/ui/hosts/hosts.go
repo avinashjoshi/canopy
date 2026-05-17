@@ -92,7 +92,8 @@ const (
 type Status int
 
 const (
-	// StatusUnknown — never refreshed this session. Renders neutral.
+	// StatusUnknown — never refreshed this session AND no fan-out is
+	// currently in flight. Renders neutral.
 	StatusUnknown Status = iota
 	// StatusOnline — most recent refresh succeeded.
 	StatusOnline
@@ -106,7 +107,32 @@ const (
 	// canopy responded with an error (binary not installed, version
 	// drift, malformed JSON).
 	StatusBroken
+	// StatusLoading — host has no snapshot yet AND a refresh fan-out
+	// is in flight. Renders a spinner glyph driven by spinnerFrame so
+	// users on the first TUI launch see "we're checking" instead of an
+	// empty Hosts tab. Resolves to one of the four real statuses above
+	// once the per-host refresh result lands.
+	StatusLoading
 )
+
+// spinnerFrames is the Braille rotation used by StatusLoading. Ten
+// frames matches the bubbles/spinner Line preset visually but lives
+// here as a string literal so the hosts package stays free of the
+// charm spinner dependency. The render path indexes this slice by
+// (frame mod len) so callers don't have to clamp.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// spinnerGlyph returns the Braille frame at the given index (mod the
+// frame count, with a defensive guard against negative inputs from a
+// caller that wrapped int math wrong).
+func spinnerGlyph(frame int) string {
+	n := len(spinnerFrames)
+	idx := frame % n
+	if idx < 0 {
+		idx += n
+	}
+	return spinnerFrames[idx]
+}
 
 // BuildRows assembles the display rows by joining the host registry
 // (the source of truth for "which hosts are registered") with the
@@ -122,8 +148,14 @@ const (
 // (dev builds). Pass "" to suppress drift detection across the board —
 // every row gets DriftUnknown.
 //
+// refreshing flags that a remote-fan-out is in flight RIGHT NOW. Hosts
+// without a snapshot under that condition render StatusLoading + the
+// spinner; with refreshing=false they fall back to StatusUnknown so
+// the row still appears (visibility-first per the package doc). The
+// spinnerFrame is forwarded into Render's glyph lookup.
+//
 // Sort: name ASC. Deterministic so the cursor doesn't shuffle.
-func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot, referenceVersion string) []Row {
+func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot, referenceVersion string, refreshing bool) []Row {
 	rows := make([]Row, 0, len(hosts))
 	for _, h := range hosts {
 		r := Row{
@@ -134,8 +166,13 @@ func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot
 		}
 		snap := snapshots[h.Name]
 		if snap == nil {
-			r.Status = StatusUnknown
-			r.StatusDetail = "(never refreshed)"
+			if refreshing {
+				r.Status = StatusLoading
+				r.StatusDetail = "checking…"
+			} else {
+				r.Status = StatusUnknown
+				r.StatusDetail = "(never refreshed)"
+			}
 		} else {
 			r.Workspaces = len(snap.Workspaces)
 			r.Version = snap.CanopyVersion
@@ -172,14 +209,18 @@ func BuildRows(hosts []host.Host, snapshots map[string]*state.RemoteHostSnapshot
 // Render returns the rendered Hosts tab as a string. Width drives
 // column visibility per the D2 tiered drop. cursor indicates the
 // selected row (-1 for "no cursor", e.g. when the cursor is out of
-// bounds or rendering for a non-interactive context). v0.17 Phase 1l.
-func Render(rows []Row, width int, cursor int) string {
+// bounds or rendering for a non-interactive context). spinnerFrame
+// drives the StatusLoading glyph animation — callers advance it from
+// a tea.Cmd while a remote refresh fan-out is in flight (the same
+// condition BuildRows uses to flip rows into StatusLoading). v0.17
+// Phase 1l; spinner add in v0.22.
+func Render(rows []Row, width int, cursor int, spinnerFrame int) string {
 	if len(rows) == 0 {
 		return emptyState()
 	}
 	var b strings.Builder
 	for i, r := range rows {
-		b.WriteString(renderRow(r, width, i == cursor))
+		b.WriteString(renderRow(r, width, i == cursor, spinnerFrame))
 		b.WriteByte('\n')
 	}
 	return b.String()
@@ -189,12 +230,12 @@ func Render(rows []Row, width int, cursor int) string {
 // selected toggles the `❯ ` caret + selection bg padded across the
 // full terminal width — matches the workspace list's selected-row
 // treatment so the two tabs feel like the same surface.
-func renderRow(r Row, width int, selected bool) string {
+func renderRow(r Row, width int, selected bool, spinnerFrame int) string {
 	// Build plain (un-styled) parts for the selection path so the
 	// outer style's background wins across the entire row; inner
 	// foreground colors are dropped by selectionStyle anyway.
 	if selected {
-		parts := []string{statusGlyphPlain(r.Status), r.Name}
+		parts := []string{statusGlyphPlain(r.Status, spinnerFrame), r.Name}
 		if width >= 80 && r.Version != "" {
 			parts = append(parts, "v"+r.Version+driftGlyphPlain(r.Drift))
 		}
@@ -218,7 +259,7 @@ func renderRow(r Row, width int, selected bool) string {
 		return s.Render(body)
 	}
 	// Non-selected: full per-column styling for visual density.
-	glyph := statusGlyph(r.Status)
+	glyph := statusGlyph(r.Status, spinnerFrame)
 	name := nameStyle().Render(r.Name)
 	detail := statusDetailStyle(r.Status).Render(r.StatusDetail)
 	parts := []string{glyph, name}
@@ -276,8 +317,10 @@ func clipboardPillPlain(bridge string) string {
 
 // statusGlyphPlain returns the same glyph as statusGlyph but without
 // the foreground color — used in the selected-row path where the
-// outer selectionStyle's bright-white fg should win uniformly.
-func statusGlyphPlain(s Status) string {
+// outer selectionStyle's bright-white fg should win uniformly. The
+// loading branch consumes the same spinnerFrame so the cursor's row
+// stays in lockstep with the rest of the column.
+func statusGlyphPlain(s Status, spinnerFrame int) string {
 	switch s {
 	case StatusOnline:
 		return "●"
@@ -287,6 +330,8 @@ func statusGlyphPlain(s Status) string {
 		return "!"
 	case StatusBroken:
 		return "✗"
+	case StatusLoading:
+		return spinnerGlyph(spinnerFrame)
 	default:
 		return "·"
 	}
@@ -311,8 +356,11 @@ func emptyState() string {
 
 // statusGlyph maps the status enum to a colored glyph. Per D3 a11y:
 // glyph + color, never color alone. Same vocabulary as v0.16.1
-// agent-state badges so users learn one set of symbols.
-func statusGlyph(s Status) string {
+// agent-state badges so users learn one set of symbols. Loading
+// renders the spinner at the supplied frame in the same dim cyan as
+// other "in-progress" surfaces (matches the workspace-create progress
+// pane vocabulary).
+func statusGlyph(s Status, spinnerFrame int) string {
 	switch s {
 	case StatusOnline:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Render("●") // green
@@ -322,6 +370,8 @@ func statusGlyph(s Status) string {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("!") // amber
 	case StatusBroken:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("✗") // red
+	case StatusLoading:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("87")).Render(spinnerGlyph(spinnerFrame)) // cyan
 	default:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("·") // dim
 	}
@@ -335,6 +385,8 @@ func statusDetailStyle(s Status) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	case StatusBroken:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	case StatusLoading:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("87"))
 	default:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	}

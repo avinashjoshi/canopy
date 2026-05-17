@@ -76,7 +76,7 @@ func TestBuildRows_CopiesClipboardBridgeFromSnapshot(t *testing.T) {
 		},
 		// stale: no snapshot at all → ClipboardBridge stays empty.
 	}
-	rows := BuildRows(hosts, snaps, "")
+	rows := BuildRows(hosts, snaps, "", false)
 	if len(rows) != 3 {
 		t.Fatalf("BuildRows returned %d rows, want 3", len(rows))
 	}
@@ -105,11 +105,11 @@ func TestRenderRow_IncludesPillAtSufficientWidth(t *testing.T) {
 	}
 	// At <80c the pill is dropped first (tiered drop, matches the v0.17
 	// width strategy for version).
-	narrow := renderRow(r, 79, false)
+	narrow := renderRow(r, 79, false, 0)
 	if strings.Contains(narrow, "📋") {
 		t.Errorf("pill rendered at width 79; expected drop until >=80\nrow: %q", narrow)
 	}
-	wide := renderRow(r, 120, false)
+	wide := renderRow(r, 120, false, 0)
 	if !strings.Contains(wide, "📋 bridged") {
 		t.Errorf("pill missing at width 120; expected `📋 bridged`\nrow: %q", wide)
 	}
@@ -125,7 +125,7 @@ func TestRenderRow_PillAlsoRendersOnSelectedRow(t *testing.T) {
 		StatusDetail:    "3s ago",
 		ClipboardBridge: "bridged",
 	}
-	selected := renderRow(r, 120, true)
+	selected := renderRow(r, 120, true, 0)
 	if !strings.Contains(selected, "📋 bridged") {
 		t.Errorf("selected-row path missing pill\nrow: %q", selected)
 	}
@@ -139,7 +139,7 @@ func TestRenderRow_OffStateProducesNoPill(t *testing.T) {
 		ClipboardBridge: "off",
 	}
 	for _, sel := range []bool{false, true} {
-		got := renderRow(r, 120, sel)
+		got := renderRow(r, 120, sel, 0)
 		if strings.Contains(got, "📋") {
 			t.Errorf("off state should NOT render a pill (selected=%v); got %q", sel, got)
 		}
@@ -234,7 +234,7 @@ func TestBuildRows_PopulatesDrift(t *testing.T) {
 		"alpha": {CanopyVersion: "0.17.4.0", LastSeen: now},
 		"beta":  {CanopyVersion: "0.17.3.0", LastSeen: now},
 	}
-	rows := BuildRows(hosts, snaps, "v0.17.4.0")
+	rows := BuildRows(hosts, snaps, "v0.17.4.0", false)
 	want := map[string]Drift{
 		"alpha": DriftSame,
 		"beta":  DriftBehind,
@@ -256,7 +256,7 @@ func TestBuildRows_EmptyReferenceSuppresses(t *testing.T) {
 	snaps := map[string]*state.RemoteHostSnapshot{
 		"alpha": {CanopyVersion: "0.17.3.0"},
 	}
-	rows := BuildRows(hosts, snaps, "")
+	rows := BuildRows(hosts, snaps, "", false)
 	if rows[0].Drift != DriftUnknown {
 		t.Errorf("empty reference: Drift = %v, want DriftUnknown", rows[0].Drift)
 	}
@@ -286,7 +286,7 @@ func TestRenderRow_DriftGlyph(t *testing.T) {
 				Version: "0.17.3.0",
 				Drift:   tc.drift,
 			}
-			out := stripANSI(renderRow(r, 120, false))
+			out := stripANSI(renderRow(r, 120, false, 0))
 			if tc.wantGlyph == "" {
 				for _, g := range []string{"⇑", "⇓"} {
 					if strings.Contains(out, g) {
@@ -313,7 +313,7 @@ func TestRenderRow_DriftGlyphSelectedRow(t *testing.T) {
 		Version: "0.17.3.0",
 		Drift:   DriftBehind,
 	}
-	out := stripANSI(renderRow(r, 120, true))
+	out := stripANSI(renderRow(r, 120, true, 0))
 	if !strings.Contains(out, "⇑") {
 		t.Errorf("selected row missing drift glyph: %q", out)
 	}
@@ -330,9 +330,116 @@ func TestRenderRow_NarrowWidthDropsVersion(t *testing.T) {
 		Version: "0.17.3.0",
 		Drift:   DriftBehind,
 	}
-	out := stripANSI(renderRow(r, 60, false))
+	out := stripANSI(renderRow(r, 60, false, 0))
 	if strings.Contains(out, "0.17.3.0") || strings.Contains(out, "⇑") {
 		t.Errorf("narrow width should drop version+drift; got %q", out)
+	}
+}
+
+// ----------------------------------------------------------------------
+// v0.22 loading-spinner tests (first-load UX: hosts render a spinner
+// instead of "(never refreshed)" while a remote fan-out is in flight).
+// ----------------------------------------------------------------------
+
+// TestBuildRows_LoadingWhenRefreshingAndNoSnapshot pins the new
+// StatusLoading branch: a host with no cached snapshot AND
+// refreshing=true must render as Loading + "checking…", not as the
+// pre-v0.22 "(never refreshed)" Unknown state. Regression target if
+// future refactoring drops the refreshing parameter.
+func TestBuildRows_LoadingWhenRefreshingAndNoSnapshot(t *testing.T) {
+	hostsInput := []host.Host{{Name: "tower", Type: "ssh"}}
+	rows := BuildRows(hostsInput, map[string]*state.RemoteHostSnapshot{}, "", true)
+	if len(rows) != 1 {
+		t.Fatalf("BuildRows returned %d rows, want 1", len(rows))
+	}
+	if rows[0].Status != StatusLoading {
+		t.Errorf("Status = %v, want StatusLoading (refreshing=true + no snap)", rows[0].Status)
+	}
+	if rows[0].StatusDetail != "checking…" {
+		t.Errorf("StatusDetail = %q, want %q", rows[0].StatusDetail, "checking…")
+	}
+}
+
+// TestBuildRows_UnknownWhenNotRefreshing covers the OTHER branch of
+// the new conditional: with refreshing=false the no-snapshot path
+// still produces StatusUnknown + "(never refreshed)" — i.e., the
+// pre-v0.22 behavior is preserved when no fan-out is in flight.
+func TestBuildRows_UnknownWhenNotRefreshing(t *testing.T) {
+	hostsInput := []host.Host{{Name: "tower", Type: "ssh"}}
+	rows := BuildRows(hostsInput, map[string]*state.RemoteHostSnapshot{}, "", false)
+	if rows[0].Status != StatusUnknown {
+		t.Errorf("Status = %v, want StatusUnknown (refreshing=false + no snap)", rows[0].Status)
+	}
+	if rows[0].StatusDetail != "(never refreshed)" {
+		t.Errorf("StatusDetail = %q, want %q", rows[0].StatusDetail, "(never refreshed)")
+	}
+}
+
+// TestBuildRows_LoadingIgnoredOnceSnapshotExists asserts the
+// refreshing flag only marks rows with no snapshot. A subsequent
+// refresh on a host that already has a cached snapshot must NOT
+// regress to the loading state — the user would see a snap of the
+// row going dark in the middle of normal use.
+func TestBuildRows_LoadingIgnoredOnceSnapshotExists(t *testing.T) {
+	hostsInput := []host.Host{{Name: "tower", Type: "ssh"}}
+	snaps := map[string]*state.RemoteHostSnapshot{
+		"tower": {CanopyVersion: "0.22.0", LastSeen: time.Now()},
+	}
+	rows := BuildRows(hostsInput, snaps, "", true)
+	if rows[0].Status != StatusOnline {
+		t.Errorf("Status = %v, want StatusOnline (refreshing+snap means refresh is in flight, but cached state still wins)", rows[0].Status)
+	}
+}
+
+// TestSpinnerGlyph_FrameRotation locks the deterministic mapping
+// between frame index and Braille codepoint. The 10-frame cycle is
+// what makes the on-screen rotation feel smooth at 120ms cadence; any
+// regression that drops a frame would jitter the animation.
+func TestSpinnerGlyph_FrameRotation(t *testing.T) {
+	if got := spinnerGlyph(0); got != "⠋" {
+		t.Errorf("spinnerGlyph(0) = %q, want %q", got, "⠋")
+	}
+	if got := spinnerGlyph(9); got != "⠏" {
+		t.Errorf("spinnerGlyph(9) = %q, want %q", got, "⠏")
+	}
+	// Wrap-around: frame 10 returns to frame 0.
+	if spinnerGlyph(10) != spinnerGlyph(0) {
+		t.Errorf("frame wrap broken: spinnerGlyph(10) != spinnerGlyph(0)")
+	}
+	// Negative defensive guard: a wrapped int should still index safely.
+	if got := spinnerGlyph(-1); got != "⠏" {
+		t.Errorf("spinnerGlyph(-1) = %q, want %q (defensive wrap)", got, "⠏")
+	}
+}
+
+// TestRenderRow_LoadingShowsSpinnerGlyph asserts both render paths
+// (selected and non-selected) emit the spinner codepoint when the
+// row's status is StatusLoading. Pins both branches because the
+// selected-row path uses statusGlyphPlain rather than the styled
+// statusGlyph — easy to forget when adding a new Status.
+func TestRenderRow_LoadingShowsSpinnerGlyph(t *testing.T) {
+	r := Row{
+		Name:         "tower",
+		Status:       StatusLoading,
+		StatusDetail: "checking…",
+	}
+	for _, sel := range []bool{false, true} {
+		out := stripANSI(renderRow(r, 120, sel, 0))
+		// Frame 0 is ⠋ — both paths must emit it.
+		if !strings.Contains(out, "⠋") {
+			t.Errorf("loading row at frame 0 missing ⠋ (selected=%v): %q", sel, out)
+		}
+		if !strings.Contains(out, "checking") {
+			t.Errorf("loading row missing 'checking' detail (selected=%v): %q", sel, out)
+		}
+	}
+	// Frame 4 maps to ⠼ — verify the spinnerFrame param actually
+	// flows through to the render output (a regression where the
+	// param was wired but ignored would only show frame 0 forever).
+	r.Status = StatusLoading
+	out := stripANSI(renderRow(r, 120, false, 4))
+	if !strings.Contains(out, "⠼") {
+		t.Errorf("frame 4 glyph (⠼) missing in render output: %q", out)
 	}
 }
 

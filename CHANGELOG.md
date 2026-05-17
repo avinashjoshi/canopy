@@ -5,6 +5,30 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1.0] - 2026-05-16 — Hosts-tab first-load spinner + clearer upgrade errors
+
+Two remote-host papercuts the user hit on first dogfood after v0.21:
+
+The Hosts tab no longer renders every host as a neutral `· (never refreshed)` for the duration of the SSH fan-out at startup. Hosts without a cached snapshot now animate a Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, 120 ms cadence) until their per-host refresh result lands. The spinner stops itself once the fan-out settles — no leaked tick loop.
+
+`canopy upgrade` over SSH now produces a useful error when the source clone or install target isn't writable by the current user (the classic "previous install ran as root via sudo" trap). Instead of the misleading `there are local commits in the source clone` hint, the error names the actual cause and tells the user to `sudo chown -R $(whoami) …` the right directory. Same treatment for the in-TUI `U` flow. `make install` now pre-flights `$(BIN_DIR)` writability + `$(BIN_REAL)` ownership before `go build` would write a partial artifact, so the failure surfaces with actionable text immediately rather than mid-build.
+
+### Added
+
+- **Per-host loading spinner on the Hosts tab.** New `StatusLoading` enum + Braille frame animation while a remote refresh fan-out is in flight. Hosts with a cached snapshot keep their previous status; only never-refreshed hosts spin. A `hostsSpinnerActive` latch prevents stacked tick loops if `r` is pressed mid-refresh.
+- **Permission-denied detection in the upgrade error path.** New `isPermissionDeniedStderr` sniff with explicit denies for SSH/network forms (`(publickey)`, `(password)`, `(keyboard-interactive)`, `(none)`, `please try again`, `ssh:`) and a required filesystem signal (open/openat/mkdir/cannot/unable-to or a path fragment). Bias toward false negatives — chown is destructive, so steering a user toward it for unrelated failures is worse than missing the hint.
+- **Pure error-wrap helpers `wrapPullErr` / `wrapMakeErr`** factored out of `upgradeRunShell` / `upgradeRunShellStreaming`. Same prose, classification logic split into testable pure functions — both branches (permission-denied vs generic) pinned in unit tests across both verbosity levels (CLI vs streaming).
+- **Makefile `install` pre-flight.** Probes `$(BIN_DIR)` writability with a touch/rm dance, then refuses if `$(BIN_REAL)` exists owned by someone else. Both paths emit recovery instructions naming the exact directory.
+
+### Fixed
+
+- **Data race in `upgradeRunShellStreaming`'s shared output buffer.** `exec.Cmd` only serializes its stdout/stderr copy goroutines when `Stdout == Stderr` (interface equality); the previous code called `io.MultiWriter(...)` twice, producing two distinct values that raced on the shared `strings.Builder`. Fixed by building one tee writer per command and assigning it to both file descriptors. New `TestUpgradeRunShellStreaming_NoRaceOnSharedBuf` runs cleanly under `-race`.
+- **`make install` chown hint no longer hardcodes `~/.local/bin`.** `$(BIN_DIR)` honors `$PREFIX`; the prior wording misled users with `PREFIX=/opt/canopy` or distro-default install paths. Hint now points at the path mentioned in stderr.
+
+### Known concern (not yet fixed)
+
+- `m.remoteRefreshing = false` is currently written from goroutines in `update_remote.go` / `update_attach.go` outside the Bubbletea Update loop. The pre-existing race was effectively benign while only Update read the field; the new 120 ms spinner tick reads it more frequently and increases the window for `-race` to fire. Fix is a separate cleanup PR — let `remoteRowsLoadedMsg` be the sole owner of clearing the latch.
+
 ## [0.21.0.0] - 2026-05-15 — Clipboard bridge for remote workspaces
 
 The laptop's clipboard is now available inside any registered canopy host. Paste a screenshot you copied locally into Claude Code running on tower; copy text from a remote tmux session straight to the local Wayland clipboard; nvim's `y` yanks land on the laptop. None of it requires per-session setup once installed.
