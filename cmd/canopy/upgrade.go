@@ -476,21 +476,30 @@ var upgradeRunShellStreaming = func(ctx context.Context, srcDir string, w io.Wri
 	// Tee output into the caller's writer AND into a local buffer so the
 	// post-failure error message can surface a permission-denied hint
 	// without making the user scroll back through the streamed output.
-	// Buf size is whatever git/make emits — typical upgrades are a few
-	// hundred KB. We don't cap it; an upgrade producing megabytes of
-	// stderr is itself a signal worth seeing, not silenced.
+	//
+	// CRITICAL: build ONE io.Writer and assign it to both Stdout and
+	// Stderr. exec.Cmd's stdout/stderr goroutines are only serialized
+	// when `Stdout == Stderr` (interface equality); two distinct
+	// `io.MultiWriter(...)` calls produce different *multiWriter values,
+	// which would spawn two goroutines racing on the same
+	// strings.Builder. Single value + single goroutine = no race. The
+	// underlying Builder is unsafe for concurrent use; the safeBuffer
+	// the caller passes (`w`) IS safe, but the path through this buf
+	// must stay single-threaded by construction.
 	pullBuf := &strings.Builder{}
+	pullTee := io.MultiWriter(w, pullBuf)
 	pull := exec.CommandContext(ctx, "git", "-C", srcDir, "pull", "--ff-only")
-	pull.Stdout = io.MultiWriter(w, pullBuf)
-	pull.Stderr = io.MultiWriter(w, pullBuf)
+	pull.Stdout = pullTee
+	pull.Stderr = pullTee
 	if err := pull.Run(); err != nil {
 		return wrapPullErr(srcDir, err, pullBuf.String(), "", false)
 	}
 
 	makeBuf := &strings.Builder{}
+	makeTee := io.MultiWriter(w, makeBuf)
 	makeInstall := exec.CommandContext(ctx, "make", "-C", srcDir, "install")
-	makeInstall.Stdout = io.MultiWriter(w, makeBuf)
-	makeInstall.Stderr = io.MultiWriter(w, makeBuf)
+	makeInstall.Stdout = makeTee
+	makeInstall.Stderr = makeTee
 	if err := makeInstall.Run(); err != nil {
 		return wrapMakeErr(srcDir, err, makeBuf.String(), false)
 	}
@@ -575,27 +584,31 @@ func wrapPullErr(srcDir string, runErr error, stderr, stdout string, includeOutp
 }
 
 // wrapMakeErr is wrapPullErr's sibling for `make install` failures.
-// Same shape: permission-denied steers the hint toward chown on
-// ~/.local/bin, fallback keeps the existing "build failed" wording.
+// Same shape: permission-denied steers the hint toward chown,
+// fallback keeps the existing "build failed" wording.
+//
+// The hint references "the install target shown in stderr above"
+// rather than hardcoding ~/.local/bin — the Makefile's $(BIN_DIR)
+// honors $PREFIX, so a user who set PREFIX=/opt/canopy would get
+// misleading recovery instructions if we baked the path in.
 func wrapMakeErr(srcDir string, runErr error, stderr string, includeOutput bool) error {
 	if isPermissionDeniedStderr(stderr) {
 		if includeOutput {
 			return fmt.Errorf(
 				"make install failed in %s: %w\n  stderr: %s\n"+
-					"  Looks like ~/.local/bin (or another install target) isn't writable\n"+
-					"  by the current user. This usually means a previous install ran as\n"+
-					"  root via sudo, leaving binaries the current user can't replace.\n"+
-					"  Recover with:\n"+
-					"    sudo chown -R $(whoami) ~/.local/bin %s\n"+
+					"  Looks like the install target isn't writable by the current user.\n"+
+					"  This usually means a previous install ran as root via sudo,\n"+
+					"  leaving binaries the current user can't replace.\n"+
+					"  Recover by chowning the path shown in the stderr above, e.g.:\n"+
+					"    sudo chown $(whoami) <path-from-stderr>\n"+
 					"  Then re-run canopy upgrade.",
-				srcDir, runErr, stderr, srcDir)
+				srcDir, runErr, stderr)
 		}
 		return fmt.Errorf(
 			"make install failed in %s: %w\n  "+
-				"Hint: ~/.local/bin isn't writable by the current user "+
-				"(prior install likely ran as root). "+
-				"Fix with `sudo chown -R $(whoami) ~/.local/bin %s` and re-run.",
-			srcDir, runErr, srcDir)
+				"Hint: the install target isn't writable (prior install likely ran as root). "+
+				"Chown the path shown in the streamed output above, then re-run.",
+			srcDir, runErr)
 	}
 	if includeOutput {
 		return fmt.Errorf(
@@ -615,19 +628,52 @@ func wrapMakeErr(srcDir string, runErr error, stderr string, includeOutput bool)
 // haystack before Contains so "PERMISSION DENIED" from oddball locales
 // also matches.
 //
-// SSH auth failures take the form "Permission denied (publickey)" or
-// "Permission denied, please try again." — these are credential
-// problems, not ownership problems, and a chown hint would mislead the
-// user. We treat those as non-matches so the generic error message
-// (which doesn't direct the user to sudo chown the wrong thing) wins.
+// Bias: false NEGATIVES over false positives. The chown hint is
+// destructive (sudo + recursive ownership change); steering a user
+// toward it for an unrelated failure is far worse than missing the
+// hint for a real filesystem permission failure. Two filters apply:
+//
+//  1. Explicit deny: SSH/network forms of "Permission denied" must
+//     never trigger the hint. These include "(publickey)", "(password)",
+//     "(keyboard-interactive)", "(none)", "please try again", and any
+//     "ssh:" prefix (covers "ssh: connect to host …: Permission denied"
+//     from firewall blocks).
+//
+//  2. Filesystem-signal requirement: alongside the phrase, stderr must
+//     contain at least one filesystem-shaped token (an errno-attached
+//     syscall name, "cannot"/"unable to" git wording, or a path
+//     fragment). Without it, the cause is ambiguous and the generic
+//     error message (which doesn't push chown) is the safer default.
 func isPermissionDeniedStderr(stderr string) bool {
 	s := strings.ToLower(stderr)
 	if !strings.Contains(s, "permission denied") {
 		return false
 	}
-	if strings.Contains(s, "permission denied (publickey") ||
-		strings.Contains(s, "permission denied, please try again") {
-		return false
+	// Filter 1: explicit network/auth deny.
+	denyMarkers := []string{
+		"permission denied (publickey",
+		"permission denied (password",
+		"permission denied (keyboard-interactive",
+		"permission denied (none",
+		"permission denied, please try again",
+		"ssh:",
 	}
-	return true
+	for _, m := range denyMarkers {
+		if strings.Contains(s, m) {
+			return false
+		}
+	}
+	// Filter 2: filesystem-signal requirement. At least one of these
+	// must co-occur with "permission denied" for the hint to fire.
+	fsMarkers := []string{
+		"open ", "openat ", "mkdir ", "write ", "rename ", "unlink ",
+		"cannot ", "unable to ",
+		".git/", ".bin", ".canopy/", "/.local/bin", "/home/", "/root/", "/var/",
+	}
+	for _, m := range fsMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }

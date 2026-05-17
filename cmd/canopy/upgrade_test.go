@@ -717,13 +717,25 @@ func TestIsPermissionDeniedStderr(t *testing.T) {
 		{"unrelated git error", "fatal: not a git repository", false},
 		{"canonical lowercase", "open /home/avi/.local/bin/canopy.bin: permission denied", true},
 		{"capitalized", "open ~/.canopy/src/.git/FETCH_HEAD: Permission denied", true},
-		{"uppercase locale", "PERMISSION DENIED writing target", true},
 		{"merge conflict (must not match)", "error: Your local changes would be overwritten by merge.", false},
-		// SSH auth failures must NOT match: a chown hint would steer
-		// the user toward a destructive (and irrelevant) recovery.
-		// Real-world git pull stderr when the key isn't loaded.
-		{"ssh key auth fail with paren", "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.", false},
-		{"ssh password fail with comma", "Permission denied, please try again.\nPermission denied (publickey,password).", false},
+		// SSH/network forms of "Permission denied" MUST NOT match —
+		// a chown hint is destructive and unrelated to credential or
+		// network failures. Adversarial review (v0.22 ship) flagged
+		// over-matching as the dominant risk.
+		{"ssh key auth fail (publickey)", "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.", false},
+		{"ssh password fail (please try again)", "Permission denied, please try again.\nPermission denied (publickey,password).", false},
+		{"ssh password-only", "user@host: Permission denied (password).", false},
+		{"ssh keyboard-interactive", "Permission denied (keyboard-interactive).", false},
+		{"ssh no auth methods", "Permission denied (none).", false},
+		{"ssh firewall block", "ssh: connect to host github.com port 22: Permission denied\nfatal: Could not read from remote repository.", false},
+		// Filesystem-signal requirement: phrase alone isn't enough.
+		// "PERMISSION DENIED writing target" looks plausible but
+		// without a path or syscall token it could be anything.
+		{"bare phrase without fs marker", "PERMISSION DENIED writing target", false},
+		// Legitimate filesystem failures with the required markers.
+		{"go build open errno", "go: open /root/.local/bin/canopy.bin: permission denied", true},
+		{"git cannot open", "error: cannot open .git/FETCH_HEAD: Permission denied", true},
+		{"mkdir cannot create", "mkdir: cannot create directory '/var/foo': Permission denied", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -766,7 +778,7 @@ func TestWrapPullErr(t *testing.T) {
 		},
 		{
 			name:          "permission denied terse (streaming flow)",
-			stderr:        "Permission denied",
+			stderr:        "error: cannot open .git/FETCH_HEAD: Permission denied",
 			stdout:        "",
 			includeOutput: false,
 			wantContains:  []string{"sudo chown -R $(whoami)", "Hint:"},
@@ -813,6 +825,57 @@ func TestWrapPullErr(t *testing.T) {
 	}
 }
 
+// TestUpgradeRunShellStreaming_NoRaceOnSharedBuf is a regression test
+// for a P0 found in adversarial review: exec.Cmd serializes its
+// stdout/stderr copy goroutines only when Stdout == Stderr (interface
+// equality). The first version of this code called io.MultiWriter
+// twice, producing two distinct *multiWriter values, so two
+// goroutines wrote concurrently into the same strings.Builder — a
+// race that the race detector flagged immediately.
+//
+// This test exercises the streaming path with a command that emits
+// to both stdout and stderr at once (`sh -c` redirecting a loop).
+// Under `go test -race ./...` the race detector must stay quiet.
+// Without the fix (one MultiWriter assigned to both fields), the
+// shared strings.Builder write-write race fires.
+func TestUpgradeRunShellStreaming_NoRaceOnSharedBuf(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a shell — skipped in -short")
+	}
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// Stub git: write to both stdout and stderr concurrently so the
+	// race detector has something to bite on if both descriptors are
+	// teeing into a non-thread-safe Builder.
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll bin: %v", err)
+	}
+	fakeGit := filepath.Join(binDir, "git")
+	gitScript := "#!/bin/sh\nfor i in $(seq 1 50); do echo \"stdout line $i\"; echo \"stderr line $i\" 1>&2; done\nexit 1\n"
+	if err := os.WriteFile(fakeGit, []byte(gitScript), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+":"+oldPath)
+
+	var sink bytes.Buffer
+	err := upgradeRunShellStreaming(context.Background(), srcDir, &sink)
+	if err == nil {
+		t.Fatalf("expected error (fake git exits 1), got nil")
+	}
+	// Sanity: caller-side buffer received some output. If the
+	// MultiWriter wiring regressed to two writers, the race detector
+	// would have already failed the test; this assertion just
+	// confirms the writer is actually being driven.
+	if sink.Len() == 0 {
+		t.Errorf("caller-side writer received no output; streaming wire-up is broken")
+	}
+}
+
 // TestWrapMakeErr mirrors TestWrapPullErr for the make-install branch.
 // The chown hint should mention ~/.local/bin specifically (the bin
 // dir is the typical sudo-install collision point); the generic
@@ -829,18 +892,21 @@ func TestWrapMakeErr(t *testing.T) {
 		wantAbsent    []string
 	}{
 		{
+			// Use a non-default $(PREFIX) path so an "~/.local/bin"
+			// wantAbsent assertion catches any regression that
+			// hardcodes the default location back into the hint.
 			name:          "permission denied verbose",
-			stderr:        "go: open /root/.local/bin/canopy.bin: permission denied",
+			stderr:        "go: open /opt/canopy/bin/canopy.bin: permission denied",
 			includeOutput: true,
-			wantContains:  []string{"sudo chown -R $(whoami) ~/.local/bin", "root via sudo", "stderr: go: open"},
-			wantAbsent:    []string{"only the build failed"},
+			wantContains:  []string{"sudo chown $(whoami) <path-from-stderr>", "root via sudo", "stderr: go: open"},
+			wantAbsent:    []string{"only the build failed", "~/.local/bin"},
 		},
 		{
 			name:          "permission denied terse",
-			stderr:        "PERMISSION DENIED",
+			stderr:        "open /opt/canopy/bin/canopy.bin: permission denied",
 			includeOutput: false,
-			wantContains:  []string{"sudo chown -R $(whoami) ~/.local/bin", "Hint:"},
-			wantAbsent:    []string{"only the build failed", "stderr:"},
+			wantContains:  []string{"Hint:", "install target isn't writable"},
+			wantAbsent:    []string{"only the build failed", "stderr:", "~/.local/bin"},
 		},
 		{
 			name:          "generic verbose",
