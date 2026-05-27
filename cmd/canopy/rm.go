@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/avinashjoshi/canopy/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -32,6 +34,10 @@ var rmFlags struct {
 // moment. --force bypasses the check entirely (CI / scripted use);
 // --yes only skips the confirmation prompt and DOES run the safety
 // check (so scripts that pipe `yes` still get protection).
+//
+// --force also mirrors `rm -f`: a missing workspace is treated as
+// idempotent success ("already removed") rather than a hard error.
+// Strict mode (no --force) still errors out so typos surface.
 //
 // Edge: workspace in `orphaned` status (worktree dir gone) gracefully
 // degrades — the safety check warns it can't verify uncommitted state
@@ -74,6 +80,9 @@ func rmCmd() *cobra.Command {
 
 			ws, err := mgr.Find(ctx, name)
 			if err != nil {
+				if handled, herr := rmHandleFindErr(err, rmFlags.force, name, cmd.OutOrStdout()); handled {
+					return herr
+				}
 				return err
 			}
 
@@ -129,6 +138,33 @@ func rmCmd() *cobra.Command {
 	cmd.Flags().StringVar(&rmFlags.onHost, "on", "", "dispatch to remote canopy at <host or ssh-target> (v0.17.0)")
 	cmd.Flags().StringVar(&rmFlags.remoteCwd, "remote-cwd", "", "with --on: cd to <path> on the remote before invoking canopy")
 	return cmd
+}
+
+// rmHandleFindErr decides whether to swallow a Find error from `canopy rm`.
+// Mirrors `rm -f`: with --force, a missing workspace is the desired end
+// state (the user's intent is "make it gone"; it already is), so return
+// nil after emitting an informational line. Without --force, or for any
+// other error kind, the caller should bubble the original error up so
+// typos and unrelated failures still surface.
+//
+// Returns (handled, err): handled=true means the caller should return
+// err to short-circuit the remove flow; handled=false means the caller
+// should bubble the original error up.
+//
+// Load-bearing for the TUI force-delete path: the local TUI dispatches
+// `canopy rm <name> --yes --force` for remote rows, and when the remote
+// canopy has already lost the workspace (rm-via-other-channel since the
+// last host refresh), the user sees a scary "remote canopy rm failed:
+// exit status 1" line in their scrollback even though the post-dispatch
+// refresh would drop the stale row. With this helper the remote canopy
+// exits 0 cleanly, and the row disappears on the next refresh tick with
+// no noise.
+func rmHandleFindErr(err error, force bool, name string, out io.Writer) (handled bool, _ error) {
+	if force && errors.Is(err, workspace.ErrWorkspaceNotFound) {
+		fmt.Fprintf(out, "Workspace %q not found — already removed.\n", name)
+		return true, nil
+	}
+	return false, nil
 }
 
 // readYesNo reads one line from r (typically stdin) and reports whether
