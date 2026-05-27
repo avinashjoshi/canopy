@@ -1241,6 +1241,67 @@ func (m *Manager) Reconcile(ctx context.Context) ([]ReconcileChange, error) {
 			if w.ProjectRoot != m.Cfg.ProjectRoot {
 				continue
 			}
+
+			// Refresh branch from the worktree AND propagate the rename
+			// to tmux BEFORE observing status. observeStatus probes
+			// HasSession(w.TmuxSessionName()), which derives the name
+			// from w.Branch — so a stale w.Branch makes it probe the
+			// post-rename name against a pre-rename live session and
+			// flip ready→stopped. The downstream damage was switch.go
+			// reading "stopped" and calling Resurrect, which built a
+			// fresh session under the new name and orphaned the live
+			// one (claude --continue resumed in a new pane while the
+			// original kept running with no client). Bites remote
+			// workspaces hardest: when the user mosh-disconnects after
+			// `git branch -m`, no statusline tick fires SyncBranch on
+			// the remote, so Reconcile (called by `canopy switch --on
+			// host` reconnect) is the first chance to align state.
+			//
+			// Skip orphaned/setting_up rows for the same reasons
+			// SyncBranch and the old Reconcile body did: orphaned has
+			// no disk to read from, setting_up may not have a tmux
+			// session built yet. Skip pinned to match SyncBranch's
+			// pin gate (the user froze the label deliberately).
+			//
+			// Ordering matches SyncBranch's D6 decision (tmux first,
+			// state second). The state write here is the in-memory
+			// w.Branch mutation that the closure commits on return;
+			// on tmux-rename failure we revert w.Branch so state.json
+			// stays consistent with the actual session name and the
+			// next sync attempt can retry from a clean slate.
+			if w.Status != state.StatusOrphaned && w.Status != state.StatusSettingUp && !w.PinDisplayName {
+				oldBranch := w.Branch
+				oldSession := w.TmuxSessionName()
+				if refreshBranchFromWorktree(ctx, w) {
+					newSession := w.TmuxSessionName()
+					if oldSession != newSession {
+						if err := m.Tmux.Rename(ctx, oldSession, newSession, w.Branch); err != nil {
+							switch {
+							case errors.Is(err, tmux.ErrSessionNotFound):
+								// Session was killed externally —
+								// nothing to rename. Keep the branch
+								// update; next attach will Resurrect
+								// under the new name.
+								log.Warn("reconcile.tmux-session-gone",
+									"name", w.Name, "session", oldSession)
+							case errors.Is(err, tmux.ErrSessionNameInUse):
+								// Another workspace already holds the
+								// target session name. Revert so state
+								// stays in sync with the live tmux
+								// session; user can resolve manually.
+								log.Warn("reconcile.tmux-rename-collision",
+									"name", w.Name, "from", oldSession, "to", newSession)
+								w.Branch = oldBranch
+							default:
+								log.Warn("reconcile.tmux-rename-failed",
+									"name", w.Name, "from", oldSession, "to", newSession, "err", err)
+								w.Branch = oldBranch
+							}
+						}
+					}
+				}
+			}
+
 			newStatus, err := m.observeStatus(ctx, w)
 			if err != nil {
 				// Don't fail the whole reconcile on one bad row; log and skip.
@@ -1252,13 +1313,6 @@ func (m *Manager) Reconcile(ctx context.Context) ([]ReconcileChange, error) {
 					Name: w.Name, From: w.Status, To: newStatus,
 				})
 				w.Status = newStatus
-			}
-
-			// Refresh branch from the worktree. Shared with SyncBranch
-			// (the per-workspace path hit by the statusline tick) so
-			// detached-HEAD/empty/orphaned semantics live in one place.
-			if newStatus != state.StatusOrphaned {
-				refreshBranchFromWorktree(ctx, w)
 			}
 		}
 		return nil

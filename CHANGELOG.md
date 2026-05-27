@@ -5,6 +5,18 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.6.0] - 2026-05-27 — Reconnecting to a remote workspace after `git branch -m` no longer orphans the running agent
+
+Real failure: you're attached via mosh to a workspace on tower, your agent renames the branch on its first turn (`git branch -m fix-real-issue`), you close the laptop. Reopen and `canopy switch --on tower` reconnects. The tmux session that had Claude running in the agent pane appears to "die" and a fresh `claude --continue` starts in a new pane. Your in-flight conversation is interrupted.
+
+Root cause was in `Manager.Reconcile` (`internal/workspace/lifecycle.go`). The branch refresh updated `state.json`'s `Branch` field from `git rev-parse` but never renamed the live tmux session to match. `SyncBranch` does both atomically, but `SyncBranch` only fires from the statusline tick — which only runs when a tmux client is attached. On the remote, the moment the mosh client drops, no tick fires for that session. The next `canopy switch --on host` reconnect runs `Reconcile`, which writes `Branch=new` to state but leaves tmux at `canopy/old`. The next `observeStatus` probes `HasSession(canopy/new)` → false → status flips to `stopped` → `switch` calls `Resurrect` → a brand-new session is built under the new name with `claude --continue` resuming into it, while the original session with the live Claude is stranded with no client attached.
+
+Local workspaces hit this less often because the user is usually attached and the 15s statusline tick keeps state, branch, and tmux session aligned — so `Reconcile` sees the branch already in sync and the buggy path doesn't trigger.
+
+### Fixed
+
+- **`Reconcile` now renames the tmux session to match the branch on disk, before observing status.** `internal/workspace/lifecycle.go:1236` reorders the loop so the branch refresh + tmux rename happen ahead of `observeStatus`, mirroring `SyncBranch`'s D6 ordering (tmux first, state second). Three new error branches are handled distinctly: `ErrSessionNotFound` keeps the branch update (the next `Resurrect` will build under the new name), `ErrSessionNameInUse` reverts the branch update so state stays consistent with the still-live tmux session, and any other tmux error reverts and waits for the next sync. Pinned and `setting_up` workspaces are skipped to match `SyncBranch`'s gates. Four new regression tests in `internal/workspace/lifecycle_test.go` cover the happy path (in-place tmux rename + status stays `ready`), pinned-skip, `ErrSessionNotFound` (killed session, branch still updates), and `ErrSessionNameInUse` (collision, branch reverts, original session survives).
+
 ## [0.21.5.0] - 2026-05-27 — Spinner next to every remote host header + rename hint fires before the first commit
 
 Two visible UX gaps closed in one PR.
