@@ -240,7 +240,9 @@ func (m *Model) attachRemoteRow(row Row, shared bool) tea.Cmd {
 		if err != nil {
 			log.Warn("ui.attach-remote.failed", "host", row.Host, "name", row.Name, "err", err)
 		}
-		m.remoteRefreshing = false
+		// remoteRefreshing is cleared in the refreshAllMsg handler in
+		// Update — never from a tea.Cmd goroutine. Touching m here
+		// would race the View+spinner read path.
 		return refreshAllMsg{}
 	})
 }
