@@ -48,7 +48,7 @@ var (
 	brokenStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
 	orphanedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // orange
 	settingUpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))  // blue
-	mainStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("99"))  // violet (matches title)
+	mainStatusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")) // dim grey — main rows are informational, not actionable
 
 	aliveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // green ●
 	deadStyle  = subtleStyle                                          // dim ○

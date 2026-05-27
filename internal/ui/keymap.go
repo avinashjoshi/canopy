@@ -264,6 +264,19 @@ var listModeBindings = []Binding{
 		Action:    actionRetry,
 	},
 	{
+		// `e` toggles the "+ N idle projects" roll-up for the host the
+		// cursor is in. Idle = a project with no workspaces whose main
+		// row also isn't running; on a populated machine these crowd
+		// the screen. Collapsed by default; users expand per-host so
+		// stale remotes don't unroll alongside local. Available
+		// everywhere in workspace context, but a no-op (cheap) when
+		// the current host has nothing idle to toggle.
+		K:         key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "expand idle")),
+		Group:     "act",
+		Available: availableInWorkspaceContext,
+		Action:    actionToggleIdleExpand,
+	},
+	{
 		K:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 		Group:  "meta",
 		Action: actionRefresh,

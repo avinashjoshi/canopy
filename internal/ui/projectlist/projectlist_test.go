@@ -1495,8 +1495,9 @@ func TestRender_LoadingRowShowsSpinnerUnderHostHeader(t *testing.T) {
 	})
 	m.cursor = -1
 	out := m.View()
-	if !strings.Contains(out, "tower") {
-		t.Errorf("expected host header 'tower' in output; got:\n%s", out)
+	// Host names render uppercased inside the pill (v0.22 redesign).
+	if !strings.Contains(out, "TOWER") {
+		t.Errorf("expected host header 'TOWER' in output; got:\n%s", out)
 	}
 	if !strings.Contains(out, "loading…") {
 		t.Errorf("expected loading placeholder line; got:\n%s", out)
@@ -1568,8 +1569,9 @@ func TestSetLoadingHosts_HeaderRendersSpinner(t *testing.T) {
 	if !strings.Contains(out, spinnerFrames[0]) {
 		t.Errorf("expected spinner glyph %q in header when host is loading; got:\n%s", spinnerFrames[0], out)
 	}
-	if !strings.Contains(out, "tower") {
-		t.Errorf("expected host name 'tower' in header; got:\n%s", out)
+	// Host names render uppercased inside the pill (v0.22 redesign).
+	if !strings.Contains(out, "TOWER") {
+		t.Errorf("expected host name 'TOWER' in header; got:\n%s", out)
 	}
 }
 

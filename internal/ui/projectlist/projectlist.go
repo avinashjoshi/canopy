@@ -154,6 +154,17 @@ type Model struct {
 	// loaders are visible alongside cached rows, not only when the
 	// host has no rows yet.
 	loadingHosts map[string]bool
+
+	// idleExpanded tracks which hosts have their "idle projects"
+	// section unrolled. Default zero-value (nil map) means every host
+	// is collapsed — idle projects (no workspaces, main not running,
+	// see ClassifyIdle) hide behind a "+N idle projects · e expand"
+	// roll-up line at the bottom of each host's section. Pressing `e`
+	// while the cursor is in a host toggles its entry here. Toggled
+	// state is per-host, not per-process — opening a project tab then
+	// returning resets to collapsed; that's intentional, since the
+	// noisy idle list is exactly what we're hiding by default.
+	idleExpanded map[string]bool
 }
 
 // New constructs a Model with no rows. The parent typically follows up
@@ -183,22 +194,62 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		switch msg.String() {
 		case "up", "k":
 			if m.cursor > 0 {
-				m.cursor--
+				hidden, _ := ClassifyIdle(m.rows, m.idleExpanded)
+				if next := nextVisible(hidden, m.cursor-1, -1); !hidden[next] {
+					m.cursor = next
+				}
 			}
 			return m, nil
 
 		case "down", "j":
 			if m.cursor < len(m.rows)-1 {
-				m.cursor++
+				hidden, _ := ClassifyIdle(m.rows, m.idleExpanded)
+				if next := nextVisible(hidden, m.cursor+1, 1); !hidden[next] {
+					m.cursor = next
+				}
 			}
 			return m, nil
 
 		case "g", "home":
-			m.cursor = 0
+			if len(m.rows) > 0 {
+				hidden, _ := ClassifyIdle(m.rows, m.idleExpanded)
+				m.cursor = nextVisible(hidden, 0, 1)
+			}
 			return m, nil
 
 		case "G", "end":
-			m.cursor = max0(len(m.rows) - 1)
+			if len(m.rows) > 0 {
+				hidden, _ := ClassifyIdle(m.rows, m.idleExpanded)
+				m.cursor = nextVisible(hidden, len(m.rows)-1, -1)
+			}
+			return m, nil
+
+		case "e":
+			// Toggle the current host's idle roll-up. The host the
+			// cursor is in owns the toggle so users can independently
+			// expand local without unrolling every stale remote at
+			// once. No-op when the row list is empty (no host to
+			// target). When collapsing leaves the cursor stranded on
+			// a now-hidden idle row, advance to the next visible row
+			// so the highlight stays meaningful.
+			if len(m.rows) == 0 {
+				return m, nil
+			}
+			host := m.rows[m.cursor].Host
+			if m.idleExpanded == nil {
+				m.idleExpanded = map[string]bool{}
+			}
+			m.idleExpanded[host] = !m.idleExpanded[host]
+			hidden, _ := ClassifyIdle(m.rows, m.idleExpanded)
+			if hidden[m.cursor] {
+				fwd := nextVisible(hidden, m.cursor, 1)
+				if hidden[fwd] {
+					fwd = nextVisible(hidden, m.cursor, -1)
+				}
+				if !hidden[fwd] {
+					m.cursor = fwd
+				}
+			}
 			return m, nil
 
 		case "enter":
@@ -235,10 +286,26 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 // SetRows replaces the row data and clamps the cursor. Idempotent; safe
 // to call from inside the parent's Update on every refresh result.
+// When the clamped cursor lands on a hidden idle row (a fresh refresh
+// can reshuffle which rows are idle), step forward to the nearest
+// visible row so the highlight stays meaningful.
 func (m *Model) SetRows(rows []state.GlobalRow) {
 	m.rows = rows
 	if m.cursor >= len(m.rows) {
 		m.cursor = max0(len(m.rows) - 1)
+	}
+	if len(m.rows) == 0 {
+		return
+	}
+	hidden, _ := ClassifyIdle(m.rows, m.idleExpanded)
+	if hidden[m.cursor] {
+		fwd := nextVisible(hidden, m.cursor, 1)
+		if hidden[fwd] {
+			fwd = nextVisible(hidden, m.cursor, -1)
+		}
+		if !hidden[fwd] {
+			m.cursor = fwd
+		}
 	}
 }
 
@@ -351,6 +418,89 @@ func (m Model) CursorRow() (state.GlobalRow, bool) {
 		return state.GlobalRow{}, false
 	}
 	return m.rows[m.cursor], true
+}
+
+// ClassifyIdle decides which rows are "idle" — a project whose only row
+// is its synthetic (main) row, where main is not running and not in a
+// transitional state (broken/orphaned/setting_up). Idle projects make
+// up the bulk of the noise on the global workspaces tab (every project
+// canopy knows about contributes one row whether it's interesting or
+// not), so the default rendering rolls them up behind a one-line
+// "+N idle projects · e expand" hint per host.
+//
+// Returns:
+//
+//	hidden       — len(rows)-sized slice; hidden[i]=true means skip
+//	               rendering this row in the default (collapsed) view.
+//	               Only set when idleExpanded[r.Host] is false; expanding
+//	               a host unhides every idle row in it.
+//	idleByHost   — count of idle projects per host. The renderer uses
+//	               this to size the "+N idle" pill even when the host
+//	               is expanded (so the user knows what they unrolled).
+//
+// Exported so the parent's tests and the renderer share one definition
+// of "idle." Loading-placeholder rows (r.Loading=true) are never
+// classified idle — those carry a "we're still checking" signal, not
+// "nothing's here."
+func ClassifyIdle(rows []state.GlobalRow, idleExpanded map[string]bool) (hidden []bool, idleByHost map[string]int) {
+	hidden = make([]bool, len(rows))
+	idleByHost = map[string]int{}
+
+	// Pass 1: count non-loading rows per (host, project). Projects with
+	// >1 row (i.e. main + ≥1 workspace) are never idle — the workspaces
+	// themselves are the interesting content even if main is dormant.
+	// \x00 as a separator picks a byte that can't appear in either field.
+	rowsPerPair := map[string]int{}
+	for _, r := range rows {
+		if r.Loading {
+			continue
+		}
+		rowsPerPair[r.Host+"\x00"+r.Project]++
+	}
+
+	for i, r := range rows {
+		if r.Loading || !r.IsMain {
+			continue
+		}
+		if rowsPerPair[r.Host+"\x00"+r.Project] > 1 {
+			continue
+		}
+		if r.Alive {
+			continue
+		}
+		// Only the dormant statuses qualify. Empty status (zero value
+		// before reconcile) and StatusStopped both mean "nothing's
+		// running here." Broken/orphaned/setting_up are attention
+		// states — keep them visible.
+		if r.Status != "" && r.Status != state.StatusStopped {
+			continue
+		}
+		idleByHost[r.Host]++
+		if !idleExpanded[r.Host] {
+			hidden[i] = true
+		}
+	}
+	return hidden, idleByHost
+}
+
+// nextVisible walks the cursor over hidden idle rows. Starting at from
+// (inclusive) and stepping by delta (+1 or -1), returns the first index
+// where hidden[i] is false. Returns from unchanged if the walk falls
+// off the end without finding a visible row — caller decides what that
+// degenerate state means (in practice it can't happen: at least the
+// running workspaces stay visible, so the cursor always has somewhere
+// to land).
+func nextVisible(hidden []bool, from, delta int) int {
+	n := len(hidden)
+	if n == 0 || delta == 0 {
+		return from
+	}
+	for i := from; i >= 0 && i < n; i += delta {
+		if !hidden[i] {
+			return i
+		}
+	}
+	return from
 }
 
 // SetSize updates the rendering envelope. Parent forwards this from its
@@ -511,7 +661,14 @@ func (m Model) renderTable() (string, int) {
 	}
 
 	var b strings.Builder
-	prevHost := "" // tracked separately so host changes also reset the project header
+	// prevHost starts as a sentinel value that no real Host can equal
+	// (real values are either "" for local or a registered remote name)
+	// so the first iteration always enters the host-transition block.
+	// This is what makes LOCAL get its own pill at the top of the
+	// listing when remote hosts are also present — without it the
+	// loop sees `r.Host == "" == prevHost` and skips the header.
+	const prevHostUninit = "\x00uninit\x00"
+	prevHost := prevHostUninit
 	prevProject := ""
 	// lineCount tracks how many \n-separated lines we've emitted so far.
 	// We snapshot it when we emit the cursor row so View() can crop
@@ -532,13 +689,52 @@ func (m Model) renderTable() (string, int) {
 		}
 	}
 
+	// Idle classification + per-host roll-up. Computed once up front
+	// because the renderer skips hidden rows in the main loop AND
+	// emits a roll-up line at the bottom of each host's section.
+	hidden, idleByHost := ClassifyIdle(m.rows, m.idleExpanded)
+
+	// Width-tiered column drop, mirrors internal/ui/hosts.Render's D2
+	// policy. The memory cell ("530M 2%") is the first thing to go
+	// when the terminal narrows because it's the most superfluous
+	// signal — the user can attach to the workspace to see live
+	// resource use. m.width == 0 (pre-WindowSizeMsg) treats the
+	// terminal as wide so the very first paint doesn't drop columns
+	// it'll need a tick later.
+	showMem := m.width == 0 || m.width >= 100
+	emitIdleRollup := func(host string) {
+		n := idleByHost[host]
+		if n == 0 {
+			return
+		}
+		noun := "projects"
+		if n == 1 {
+			noun = "project"
+		}
+		hint := "e expand"
+		if m.idleExpanded[host] {
+			hint = "e collapse"
+		}
+		line := subtleHelper().Render(
+			fmt.Sprintf("  + %d idle %s  ·  %s", n, noun, hint),
+		)
+		b.WriteString(line)
+		b.WriteString("\n")
+		lineCount++
+	}
+
 	for i, r := range m.rows {
 		// New HOST section: blank separator + bolder flush-left header.
 		// Renders the host name only when we have at least one remote
 		// row in the listing (otherwise the listing looks like it
 		// always did pre-v0.17.0).
 		if r.Host != prevHost {
-			if prevHost != "" || (hasRemote && i > 0) {
+			// Flush previous host's idle roll-up before transitioning.
+			// Sentinel-guard: at i == 0 the "previous host" is the
+			// uninit sentinel, never a real one, so the roll-up call
+			// is a no-op (idleByHost[sentinel] is 0).
+			emitIdleRollup(prevHost)
+			if prevHost != prevHostUninit && (prevHost != "" || hasRemote) {
 				b.WriteString("\n")
 				lineCount++
 			}
@@ -547,7 +743,7 @@ func (m Model) renderTable() (string, int) {
 				if label == "" {
 					label = "local"
 				}
-				header := hostHeaderStyle().Render(label)
+				header := hostPill(label)
 				// v0.22 follow-up: append a spinner glyph for hosts
 				// whose refresh is in flight. Visible even when stale
 				// rows are still on screen from a previous refresh —
@@ -576,6 +772,16 @@ func (m Model) renderTable() (string, int) {
 			prevProject = "" // reset so the first project under this host gets a header
 		}
 
+		// Idle-row hiding sits between host transition (which emits
+		// the host pill above) and the per-row rendering. Skipping an
+		// idle row leaves prevProject untouched on purpose — the next
+		// visible row still gets its project header, even if that's
+		// several rows later. (idle rows are always alone in their
+		// project, so this can't desync project-header rendering.)
+		if hidden[i] {
+			continue
+		}
+
 		// Loading placeholder: skip the project-header machinery (these
 		// rows carry no project) and emit a single spinner line under
 		// the host header instead. Caret slot left blank so the row
@@ -598,16 +804,18 @@ func (m Model) renderTable() (string, int) {
 		}
 
 		// New project group within the current host: blank separator
-		// + flush-left header. Header sits at column 0 so it visually
-		// outdents from the rows below (which start at column 2 =
-		// caret + space) — gives the eye a clear "section / contents"
-		// hierarchy.
+		// + 2-space-indented header so projects read as subordinate
+		// to the host pill above. Workspace rows sit at the same
+		// col-2 indent (their caret slot is col 0); the bold-white
+		// project name + the row's presence glyph at the same column
+		// still tell apart by content, and the indentation cleanly
+		// signals "this header belongs under the host."
 		if r.Project != prevProject {
 			if prevProject != "" {
 				b.WriteString("\n")
 				lineCount++
 			}
-			b.WriteString(projectHeaderStyle().Render(r.Project))
+			b.WriteString("  " + projectHeaderStyle().Render(r.Project))
 			b.WriteString("\n")
 			lineCount++
 			prevProject = r.Project
@@ -648,7 +856,7 @@ func (m Model) renderTable() (string, int) {
 			// wrapped with the selection bg padded to terminal width.
 			// Non-selected rows pad with two spaces in the caret slot
 			// so columns stay put as the cursor moves.
-			plainContent := fmt.Sprintf("❯ %s%s %-*s  %s%-*s  %s%-*s  %*s  %*s",
+			plainContent := fmt.Sprintf("❯ %s%s %-*s  %s%-*s  %s%-*s  %*s",
 				presenceGlyph,
 				stripAnsi(badge),
 				colName, r.Name,
@@ -657,8 +865,10 @@ func (m Model) renderTable() (string, int) {
 				displayGlyph(r)+" ",
 				colStatus, statusText,
 				colPort, port,
-				colMem, memCell(r),
 			)
+			if showMem {
+				plainContent += fmt.Sprintf("  %*s", colMem, memCell(r))
+			}
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				plainContent += "  " + stripAnsi(hintBadges)
 			}
@@ -711,15 +921,17 @@ func (m Model) renderTable() (string, int) {
 			// Two-space caret slot (matches the `❯ ` width of the
 			// selected branch) so everything after stays put when the
 			// cursor moves between rows.
-			line = fmt.Sprintf("  %s%s %-*s  %s  %s  %*s  %s",
+			line = fmt.Sprintf("  %s%s %-*s  %s  %s  %*s",
 				styledPresence,
 				badge,
 				colName, r.Name,
 				branchDisplay,
 				statusCell,
 				colPort, port,
-				memCellStyled(r, colMem),
 			)
+			if showMem {
+				line += "  " + memCellStyled(r, colMem)
+			}
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				line += "  " + hintBadges
 			}
@@ -745,6 +957,10 @@ func (m Model) renderTable() (string, int) {
 		b.WriteString("\n")
 		lineCount++
 	}
+	// Flush the final host's idle roll-up. The in-loop emitter only
+	// fires on host transitions, so the last host's section never gets
+	// its roll-up otherwise.
+	emitIdleRollup(prevHost)
 	return b.String(), cursorLine
 }
 
@@ -1075,26 +1291,47 @@ func maxInt(a, b int) int {
 // parent (which would create a cycle since internal/ui imports
 // projectlist).
 
-// projectHeaderStyle is the project-name banner above each group. Bold +
-// pale-violet so the name stands out as a section header without competing
-// with the alive/dead badges below it.
+// projectHeaderStyle is the project-name banner above each group.
+// Bold-white (231) so the name stands out as a section header without
+// borrowing the violet that now belongs to the brand pill alone.
+// Demoted from pale-violet 99 in the v0.22 palette work that contracted
+// violet to brand-only — project headers, host banners (now pills), and
+// selection (now teal) each got their own distinct visual lane so the
+// eye can tell brand chrome, section heading, and cursor apart at a
+// glance.
 func projectHeaderStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color("99")).
+		Foreground(lipgloss.Color("231")).
 		Bold(true)
 }
 
-// hostHeaderStyle is the host-section banner above local and each remote
-// host's rows in v0.17.0+. Underline so it visually outdents from the
-// (already-bold) project headers below it — host > project > workspace
-// is the three-level hierarchy when remote hosts are present. Pale
-// violet matches the brand pill so the eye groups it with title chrome,
-// not with row content.
-func hostHeaderStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Foreground(lipgloss.Color("99")).
-		Bold(true).
-		Underline(true)
+// hostPill renders the host-section banner as a rounded pill matching
+// the top-bar scope pill (`global`). Same vocabulary so the eye reads
+// host banners as peer chrome to the brand/scope pills, not as a
+// separate hierarchy. ALL CAPS content because pills don't need bold
+// to anchor — the shape carries the weight — and caps separates host
+// names from project headers (sentence case) below.
+//
+// Glyph dependency: requires a Nerd Font for the powerline end-caps
+// (U+E0B6 left, U+E0B4 right). Without them the caps render as tofu
+// but the pill body still works. Same glyphs render.go's brand/scope
+// pills already use, so any terminal that renders the top bar correctly
+// will render these too.
+func hostPill(label string) string {
+	return roundedPillSubtleLocal(strings.ToUpper(label), "245", "237")
+}
+
+// roundedPillSubtleLocal duplicates render.roundedPillSubtle inside the
+// projectlist package. Duplicated rather than imported because
+// internal/ui imports projectlist; pulling render.go's pill helper
+// across would create a cycle. The two should stay byte-identical so
+// the chrome reads as one continuous visual system.
+func roundedPillSubtleLocal(content, fgColor, bgColor string) string {
+	cap := lipgloss.NewStyle().Foreground(lipgloss.Color(bgColor))
+	body := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(fgColor)).
+		Background(lipgloss.Color(bgColor))
+	return cap.Render("") + body.Render(content) + cap.Render("")
 }
 
 // stalePillStyle is the "⚠ stale Ns" pill appended to a host section
@@ -1205,13 +1442,14 @@ func currentMarkerStyle() lipgloss.Style {
 }
 
 func selectionStyle() lipgloss.Style {
-	// Soft dark-grey bg + bright white fg + bold. Lighter than the
-	// v0.7 bright-violet bg (62) which was too punchy. Bright white
-	// (231) for the fg so the inline `>` caret + row content read
-	// boldly against the grey bg — the eye snaps to the row without
-	// the bg color shouting.
+	// Teal bg (38) + bright white fg + bold. Picked over the previous
+	// dark-grey 237 to break a three-way collision: scopePillStyle and
+	// inactiveTabStyle in render.go both also live at bg=237, so a
+	// selected row sat at the same visual weight as the static chrome
+	// pills. Teal pulls the cursor distinctly forward without entering
+	// the violet brand-pill family.
 	return lipgloss.NewStyle().
-		Background(lipgloss.Color("237")).
+		Background(lipgloss.Color("38")).
 		Foreground(lipgloss.Color("231")).
 		Bold(true)
 }

@@ -129,6 +129,16 @@ func actionCursorBottom(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// actionToggleIdleExpand forwards `e` to projectlist's Update so it can
+// flip the current host's idle-rollup expansion. Thin wrapper — the
+// per-host bookkeeping lives in projectlist.Model.idleExpanded; the
+// parent just relays the key.
+func actionToggleIdleExpand(m *Model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	next, cmd := m.list.Update(msg)
+	m.list = next
+	return m, cmd
+}
+
 // actionSearchEntry enters fuzzy-search mode. Subsequent keystrokes are
 // captured into searchQuery via handleSearchKey (which the search-mode
 // bypass at the top of handleKey routes to).

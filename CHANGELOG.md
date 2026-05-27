@@ -5,6 +5,27 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.7.0] - 2026-05-27 — Workspaces tab redesign: idle projects collapse, host pills, violet contracts to brand-only
+
+Open `canopy` against a laptop that knows about a dozen projects and the global Workspaces tab spends most of its real estate telling you nothing. Each project canopy has ever seen contributes a `(main) not started 4X000 —` row whether you're working on it or not. The interesting rows — your two running workspaces with PR badges, the stopped one mid-rebase — get buried under 30 lines of chrome.
+
+The same palette compounded the problem. Pale violet was doing four jobs at once: the `canopy` brand pill, the active tab pill, every project header, and the synthetic `(main)` status. The eye couldn't tell brand from section header from cursor from row.
+
+This release reshapes the tab around what's actually happening on each host.
+
+### Changed
+
+- **Idle projects collapse behind a `+ N idle projects · e expand` roll-up, per host.** `internal/ui/projectlist/projectlist.go`'s new `ClassifyIdle` flags any project whose only row is a non-running `(main)` (status empty or stopped, not broken/orphaned/setting_up — those stay visible). The renderer skips hidden rows and emits a single dim line at the bottom of each host's section telling you how many were collapsed. Pressing `e` toggles the host the cursor is in, so you can unroll local without dragging every stale remote open at the same time. Cursor navigation (`j` / `k` / `g` / `G`) skips over hidden idle rows so `j` from the last running workspace doesn't land on something invisible. Loading placeholders, broken/orphaned mains, projects with even one workspace, and projects whose `(main)` is actively running are NEVER classified idle.
+- **Host sections render as rounded pills (`LOCAL`, `TOWER`, `PI`) matching the top-bar scope pill family.** The previous underlined-violet text was the same hue as the brand pill, so the eye couldn't separate top-bar chrome from in-listing section heads. Pills sit on gray-on-darker-gray (245/237 — same as the existing `global` scope pill) and uppercase their label so the shape carries the section-banner weight without competing with the violet brand chip above. A sentinel value for the host transition fixes a pre-existing bug where the local section never got a header when remote hosts also existed.
+- **Selection bg moves from dark grey 237 to teal 38.** The old grey collided with `inactiveTabStyle` and `scopePillStyle` (both bg 237), so the selected workspace row sat at the same visual weight as the static chrome pills around it. Teal pulls the cursor distinctly forward without entering the violet brand-pill family.
+- **Project headers demote from violet 99 to bold-white 231, indented two spaces under the host pill.** Violet is now brand-only — the brand pill, the active tab pill, and nothing else. Project headers became section heads inside the host's section, so the indent reinforces "this project belongs to this host." `mainStatusStyle` in `render.go` also moves from violet to dim grey 241 since `(main)` rows are informational, not actionable.
+- **Memory column drops at terminal width < 100.** Mirrors `hosts.Render`'s D2 tiered-drop policy: `530M 1%` is the most superfluous cell — the user can attach to see live resource use. `m.width == 0` (pre-WindowSizeMsg) treats the terminal as wide so the first paint doesn't drop a column it'll need a tick later.
+- **Help line auto-includes the new `e expand idle` chip.** Driven by `listModeBindings` in `internal/ui/keymap.go`; `actionToggleIdleExpand` in `internal/ui/update_tabs.go` is a thin wrapper that forwards the key to projectlist where the per-host expansion state lives.
+
+### Tests
+
+12 new tests in `internal/ui/projectlist/idle_test.go` cover the classifier (lone main, alive main, broken status, expanded host, loading placeholder, per-host independence), the renderer (collapse default, expand-on-e, no-rollup-when-zero-idle, cursor skips hidden, cursor jumps after expand, SetRows auto-advances off hidden), `hostPill` uppercasing, selection-bg and project-header-fg color regression guards via `lipgloss.Style` getters (so they pass without a TTY), and narrow-width column drop. One new test in `internal/ui/render_test.go` regression-guards `mainStatusStyle` against re-borrowing violet. Two existing tests updated to expect uppercased host names in the rendered output.
+
 ## [0.21.6.0] - 2026-05-27 — Reconnecting to a remote workspace after `git branch -m` no longer orphans the running agent
 
 Real failure: you're attached via mosh to a workspace on tower, your agent renames the branch on its first turn (`git branch -m fix-real-issue`), you close the laptop. Reopen and `canopy switch --on tower` reconnects. The tmux session that had Claude running in the agent pane appears to "die" and a fresh `claude --continue` starts in a new pane. Your in-flight conversation is interrupted.
