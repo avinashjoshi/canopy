@@ -308,6 +308,18 @@ type LsJSONWorkspace struct {
 	TmuxSession string `json:"tmux_session"`
 	Alive       bool   `json:"alive"`
 
+	// ProjectRoot is the canonical absolute path of this row's project
+	// on the host running canopy ls. Lets the laptop's refresher
+	// auto-register a (host, project) → path entry in hosts.json when
+	// it discovers a remote row for a project the laptop hasn't seen
+	// yet — fixes the "I added a project on tower but attaching its
+	// (main) row errors with 'project not registered for that host'"
+	// trap when the v0.20 CANOPY_INIT_RESULT_FILE round-trip failed
+	// (most commonly: remote canopy is pre-v0.20 so didn't write the
+	// file). Self-healing on every refresh tick. Older laptops ignore
+	// the field. v0.21.2.
+	ProjectRoot string `json:"project_root,omitempty"`
+
 	// MemRSS is the summed resident set size (bytes) across every pane
 	// in this row's tmux session. Zero for non-alive rows. Phase 1g.
 	MemRSS int64 `json:"mem_rss,omitempty"`
@@ -472,6 +484,7 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 			LastErrorHint: hintByKey[r.ProjectRoot+"|"+r.Name],
 			AgentState:    agentState,
 			Attached:      r.Attached,
+			ProjectRoot:   r.ProjectRoot,
 		})
 	}
 	enc := json.NewEncoder(out)
