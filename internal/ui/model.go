@@ -969,6 +969,20 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	// OnActivate. SetRows happens after each refresh.
 	m.list = projectlist.New(projectlist.Options{})
 	m.list.SetCurrent(currentWorkspaceRoot, currentWorkspace)
+
+	// Preload the host registry synchronously so the Workspaces tab can
+	// render host-loading placeholders on the very first frame — without
+	// this, m.hostList stays empty until the first SSH fan-out lands
+	// (~3s) and registered hosts are silently missing from the listing
+	// during that window. Failure is non-fatal: the refresh path still
+	// populates hostList from its own reg.List() result. v0.22.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if reg, err := host.NewRegistry(filepath.Join(home, ".canopy")); err == nil {
+			if hosts, err := reg.List(); err == nil {
+				m.hostList = hosts
+			}
+		}
+	}
 	return m
 }
 
@@ -1163,6 +1177,12 @@ func (m *Model) refresh() tea.Cmd {
 		// dispatch it so the refreshing-latch lifecycle is consistent.
 		m.remoteRefreshing = true
 		m.hostsSpinnerFrame = 0
+		// Push the loading-hosts set into projectlist so the workspaces
+		// tab can decorate each registered host's header with a spinner
+		// while we wait for SSH to return. Mirrors the Hosts tab's
+		// StatusLoading glyph so both surfaces signal "we're checking"
+		// in lockstep. v0.22.
+		m.pushLoadingHosts()
 		cmds = append(cmds, refreshRemoteCmd())
 		if !m.hostsSpinnerActive {
 			m.hostsSpinnerActive = true
@@ -1170,6 +1190,24 @@ func (m *Model) refresh() tea.Cmd {
 		}
 	}
 	return tea.Batch(cmds...)
+}
+
+// pushLoadingHosts recomputes which registered hosts are currently
+// being refreshed and pushes the set into projectlist. While
+// remoteRefreshing is true, every host in hostList is treated as
+// loading (consistent with the Hosts tab which also lights up every
+// host on refresh start). Otherwise the set is empty so headers
+// render plain. v0.22.
+func (m *Model) pushLoadingHosts() {
+	if !m.remoteRefreshing || len(m.hostList) == 0 {
+		m.list.SetLoadingHosts(nil)
+		return
+	}
+	loading := make(map[string]bool, len(m.hostList))
+	for _, h := range m.hostList {
+		loading[h.Name] = true
+	}
+	m.list.SetLoadingHosts(loading)
 }
 
 // refreshRemoteCmd returns a tea.Cmd that fans out `canopy ls --json`

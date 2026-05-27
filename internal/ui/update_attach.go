@@ -62,7 +62,7 @@ func (m *Model) handleConfirmAttachKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Manager.
 func (m *Model) attachSelected() (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
-	if !ok {
+	if !ok || row.Loading {
 		return m, nil
 	}
 

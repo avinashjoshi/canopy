@@ -19,7 +19,7 @@ import (
 // setup directly. Cross-project goes through managerForRow.
 func actionRetry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
-	if !ok {
+	if !ok || row.Loading {
 		return m, nil
 	}
 	if row.IsMain {

@@ -39,7 +39,7 @@ import (
 // `b` bare-attach action (nothing to skip past).
 func actionInspect(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
-	if !ok {
+	if !ok || row.Loading {
 		return m, nil
 	}
 	// v0.17.0: inspect probes the LOCAL tmux server for process tree,

@@ -366,7 +366,7 @@ func availableNewWorkspace(m *Model) bool {
 		return true
 	}
 	row, ok := m.list.CursorRow()
-	if !ok {
+	if !ok || row.Loading {
 		return false
 	}
 	// Remote row: `n` dispatches to `canopy new --on <host>`. Local row:

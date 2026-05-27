@@ -703,6 +703,75 @@ func TestFilteredRows_SearchFilter(t *testing.T) {
 	}
 }
 
+// TestFilteredRows_LoadingPlaceholdersForHostsWithoutRows: registered
+// hosts that have no rows in m.remoteRows must get a synthetic
+// Loading=true placeholder appended so the Workspaces tab renders the
+// host section header on first launch instead of hiding the host
+// entirely until SSH returns. Hosts that already have rows do not get
+// a placeholder (the real rows already carry the host).
+func TestFilteredRows_LoadingPlaceholdersForHostsWithoutRows(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.hostList = []host.Host{{Name: "tower"}, {Name: "jarvis"}}
+	m.remoteRows = []state.GlobalRow{
+		// jarvis has a row already — should NOT get a placeholder.
+		{Host: "jarvis", Project: "brain", Name: "(main)", IsMain: true},
+	}
+
+	got := m.filteredRows()
+
+	var towerLoading, jarvisLoading int
+	for _, r := range got {
+		if r.Loading && r.Host == "tower" {
+			towerLoading++
+		}
+		if r.Loading && r.Host == "jarvis" {
+			jarvisLoading++
+		}
+	}
+	if towerLoading != 1 {
+		t.Errorf("tower (no rows yet): want 1 loading placeholder; got %d", towerLoading)
+	}
+	if jarvisLoading != 0 {
+		t.Errorf("jarvis (has rows): want 0 loading placeholders; got %d", jarvisLoading)
+	}
+}
+
+// TestFilteredRows_NoLoadingPlaceholdersOnLocalTab: the Local tab
+// strips remote rows entirely, so loading placeholders (which only
+// matter for remote hosts) must not appear there either.
+func TestFilteredRows_NoLoadingPlaceholdersOnLocalTab(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabLocal
+	m.hostList = []host.Host{{Name: "tower"}}
+
+	got := m.filteredRows()
+	for _, r := range got {
+		if r.Loading {
+			t.Errorf("Local tab leaked Loading row: %+v", r)
+		}
+	}
+}
+
+// TestFilteredRows_NoLoadingPlaceholdersWhileSearching: an active
+// searchQuery means the user is hunting for a specific row by name —
+// placeholders carry no name/project/branch to match against, so
+// silencing them keeps the search result list tight instead of padded
+// with phantom "loading…" lines on every no-match query.
+func TestFilteredRows_NoLoadingPlaceholdersWhileSearching(t *testing.T) {
+	m := newTestModel(false)
+	m.tab = tabGlobal
+	m.hostList = []host.Host{{Name: "tower"}}
+	m.searchQuery = "anything"
+
+	got := m.filteredRows()
+	for _, r := range got {
+		if r.Loading {
+			t.Errorf("search query active leaked Loading row: %+v", r)
+		}
+	}
+}
+
 // TestActionDelete_StoresProjectRoot is the regression test for the C5
 // adversarial finding: cross-project delete must match by (Project, Name)
 // pair, not Name alone. Two projects each with a workspace named "foo"
@@ -3851,5 +3920,112 @@ func TestHandleConfirmHostSSHKey_NCancels(t *testing.T) {
 	}
 	if m.hostSSHName != "" || m.hostSSHTarget != "" {
 		t.Errorf("modal state not cleared after cancel: name=%q target=%q", m.hostSSHName, m.hostSSHTarget)
+	}
+}
+
+// TestPushLoadingHosts_ActiveRefreshFlagsEveryRegisteredHost: while
+// remoteRefreshing is true, every host in m.hostList must be marked
+// loading so the workspaces tab can decorate each section header
+// with a spinner. Mirrors the Hosts tab's "all hosts light up on
+// refresh start" semantics. v0.22.
+func TestPushLoadingHosts_ActiveRefreshFlagsEveryRegisteredHost(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{{Name: "tower"}, {Name: "jarvis"}}
+	m.remoteRefreshing = true
+
+	m.pushLoadingHosts()
+
+	for _, name := range []string{"tower", "jarvis"} {
+		if !m.list.LoadingHosts(name) {
+			t.Errorf("expected host %q flagged loading while remoteRefreshing=true", name)
+		}
+	}
+}
+
+// TestPushLoadingHosts_ClearsWhenNotRefreshing: once remoteRefreshing
+// flips false (refresh completed), the loading set must clear so
+// headers render plain. Regression target: spinner latching on
+// indefinitely after the fan-out returns.
+func TestPushLoadingHosts_ClearsWhenNotRefreshing(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{{Name: "tower"}}
+	m.remoteRefreshing = true
+	m.pushLoadingHosts() // primes the set
+
+	m.remoteRefreshing = false
+	m.pushLoadingHosts()
+
+	if m.list.LoadingHosts("tower") {
+		t.Errorf("expected tower NOT flagged loading after remoteRefreshing=false")
+	}
+}
+
+// TestPushLoadingHosts_NoHostsRegisteredNoOp: with hostList empty,
+// pushLoadingHosts must not crash or spuriously flag phantom hosts.
+// Defensive — covers the cold-start path before the host registry
+// preloads.
+func TestPushLoadingHosts_NoHostsRegisteredNoOp(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = nil
+	m.remoteRefreshing = true
+
+	m.pushLoadingHosts()
+
+	if m.list.LoadingHosts("tower") {
+		t.Errorf("phantom host flagged when registry empty")
+	}
+}
+
+// TestRefresh_PushesLoadingHostsOnStart wires the end-to-end:
+// calling refresh() with hosts registered must populate
+// projectlist's loadingHosts so the spinner shows up on the very
+// first frame after dispatch (without waiting for the next spinner
+// tick).
+func TestRefresh_PushesLoadingHostsOnStart(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{{Name: "tower"}}
+	m.remoteRefreshing = false
+
+	_ = m.refresh()
+
+	if !m.list.LoadingHosts("tower") {
+		t.Errorf("refresh() did not push loading state for registered host")
+	}
+}
+
+// TestActionRetry_LoadingRowIsNoop: R on a synthetic loading
+// placeholder must NOT dispatch `canopy retry --on <host> "" --force`
+// against the remote. Caught by the adversarial review: the
+// placeholder has Host=<hostname> and empty Name, so without this
+// guard the remote dispatch fires a malformed retry verb with
+// force=true. Mirrors the enter/o/d/K guards added to the rest of
+// the action handlers in v0.22.
+func TestActionRetry_LoadingRowIsNoop(t *testing.T) {
+	m := newTestModel(false)
+	m.setTestRows([]Row{{Host: "tower", Loading: true}})
+
+	_, cmd := actionRetry(m, teaKeyMsg{})
+	if cmd != nil {
+		t.Errorf("retry on Loading placeholder returned cmd %v; want nil (no-op)", cmd)
+	}
+}
+
+// TestUpdate_RemoteRowsLoadedClearsLoadingHosts: receiving
+// remoteRowsLoadedMsg (the result envelope) must clear the loading
+// set so the header spinner stops once data lands. Pairs with the
+// refresh-start path above.
+func TestUpdate_RemoteRowsLoadedClearsLoadingHosts(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{{Name: "tower"}}
+	m.remoteRefreshing = true
+	m.pushLoadingHosts() // primes loadingHosts so we can confirm it clears
+
+	if !m.list.LoadingHosts("tower") {
+		t.Fatalf("test pre-condition failed — tower not flagged before remoteRowsLoadedMsg")
+	}
+
+	_, _ = m.Update(remoteRowsLoadedMsg{})
+	if m.list.LoadingHosts("tower") {
+		t.Errorf("remoteRowsLoadedMsg did not clear loading flag for tower")
 	}
 }

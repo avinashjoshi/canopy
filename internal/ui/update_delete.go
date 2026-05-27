@@ -23,7 +23,7 @@ import (
 // path as the same-project case so the confirm modal copy is uniform.
 func actionDelete(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
-	if !ok {
+	if !ok || row.Loading {
 		return m, nil
 	}
 	if row.IsMain {

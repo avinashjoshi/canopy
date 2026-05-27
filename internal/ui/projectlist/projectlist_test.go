@@ -1482,3 +1482,163 @@ func TestRender_LocalHostHeaderNeverStale(t *testing.T) {
 		t.Errorf("local row with old LastSeen should not trigger stale UX, got:\n%s", out)
 	}
 }
+
+// TestRender_LoadingRowShowsSpinnerUnderHostHeader: synthetic Loading
+// rows must surface the host section header AND a spinner+"loading…"
+// placeholder line, so a registered host appears immediately on first
+// launch instead of being hidden until SSH returns.
+func TestRender_LoadingRowShowsSpinnerUnderHostHeader(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{Project: "p", Name: "local-ws", Branch: "b", Status: state.StatusReady, Alive: true, TmuxSession: "p/local"},
+		{Host: "tower", Loading: true},
+	})
+	m.cursor = -1
+	out := m.View()
+	if !strings.Contains(out, "tower") {
+		t.Errorf("expected host header 'tower' in output; got:\n%s", out)
+	}
+	if !strings.Contains(out, "loading…") {
+		t.Errorf("expected loading placeholder line; got:\n%s", out)
+	}
+}
+
+// TestRender_LoadingRowAnimatesWithSpinnerFrame: bumping the spinner
+// frame must cycle through the Braille rotation so the placeholder
+// reads as live progress instead of a stuck glyph. Drives the
+// SetSpinnerFrame plumbing from the parent's hostsSpinnerTickMsg.
+func TestRender_LoadingRowAnimatesWithSpinnerFrame(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{{Host: "tower", Loading: true}})
+	m.cursor = -1
+	m.SetSpinnerFrame(0)
+	frame0 := m.View()
+	m.SetSpinnerFrame(1)
+	frame1 := m.View()
+	if frame0 == frame1 {
+		t.Errorf("expected spinner glyph to change between frames 0 and 1; got identical output:\n%s", frame0)
+	}
+	if !strings.Contains(frame0, spinnerFrames[0]) {
+		t.Errorf("expected frame 0 to contain glyph %q; got:\n%s", spinnerFrames[0], frame0)
+	}
+	if !strings.Contains(frame1, spinnerFrames[1]) {
+		t.Errorf("expected frame 1 to contain glyph %q; got:\n%s", spinnerFrames[1], frame1)
+	}
+}
+
+// TestUpdate_EnterOnLoadingRowIsNoop: pressing enter on a synthetic
+// loading placeholder must NOT invoke onActivate (the row has no
+// workspace to attach to). Same posture for `o`.
+func TestUpdate_EnterOnLoadingRowIsNoop(t *testing.T) {
+	activateCalls := 0
+	goToCalls := 0
+	m := New(Options{
+		OnActivate:    func(state.GlobalRow) tea.Cmd { activateCalls++; return nil },
+		OnGoToProject: func(state.GlobalRow) tea.Cmd { goToCalls++; return nil },
+	})
+	m.SetRows([]state.GlobalRow{{Host: "tower", Loading: true}})
+	m.cursor = 0
+	if _, cmd := m.Update(key("enter")); cmd != nil {
+		t.Errorf("enter on Loading row should return nil cmd; got %v", cmd)
+	}
+	if activateCalls != 0 {
+		t.Errorf("enter on Loading row triggered onActivate %d times; want 0", activateCalls)
+	}
+	if _, cmd := m.Update(key("o")); cmd != nil {
+		t.Errorf("o on Loading row should return nil cmd; got %v", cmd)
+	}
+	if goToCalls != 0 {
+		t.Errorf("o on Loading row triggered onGoToProject %d times; want 0", goToCalls)
+	}
+}
+
+// TestSetLoadingHosts_HeaderRendersSpinner: when a host is in the
+// loadingHosts set, its section header must include a spinner glyph
+// alongside the host name so the user can see "we're checking" even
+// when stale rows from a previous refresh are still visible on
+// screen. v0.22.
+func TestSetLoadingHosts_HeaderRendersSpinner(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{Host: "tower", Project: "canopy", Name: "(main)", IsMain: true, Branch: "main"},
+	})
+	m.SetLoadingHosts(map[string]bool{"tower": true})
+	m.SetSpinnerFrame(0)
+	out := m.View()
+	if !strings.Contains(out, spinnerFrames[0]) {
+		t.Errorf("expected spinner glyph %q in header when host is loading; got:\n%s", spinnerFrames[0], out)
+	}
+	if !strings.Contains(out, "tower") {
+		t.Errorf("expected host name 'tower' in header; got:\n%s", out)
+	}
+}
+
+// TestSetLoadingHosts_EmptyOmitsSpinner: with no hosts marked loading,
+// host headers render plain (no spinner glyph). Regression guard
+// against the spinner latching on after a refresh completes.
+func TestSetLoadingHosts_EmptyOmitsSpinner(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{Host: "tower", Project: "canopy", Name: "(main)", IsMain: true, Branch: "main"},
+	})
+	m.SetLoadingHosts(nil)
+	m.SetSpinnerFrame(0)
+	out := m.View()
+	for _, glyph := range spinnerFrames {
+		if strings.Contains(out, glyph) {
+			t.Errorf("expected no spinner glyph in header when loadingHosts empty; found %q in:\n%s", glyph, out)
+		}
+	}
+}
+
+// TestSetLoadingHosts_LocalSectionUnaffected: loading-hosts decorates
+// only the remote-host headers. The local section header (Host=="",
+// labelled "local") must render plain even when the map is non-empty —
+// local rows aren't part of the SSH fan-out and shouldn't borrow its
+// spinner.
+func TestSetLoadingHosts_LocalSectionUnaffected(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		// At least one remote row so hasRemote=true (local header only
+		// appears when the listing includes a non-local row).
+		{Host: "", Project: "canopy", Name: "(main)", IsMain: true, Branch: "main"},
+		{Host: "tower", Project: "cravd", Name: "(main)", IsMain: true, Branch: "main"},
+	})
+	m.SetLoadingHosts(map[string]bool{"tower": true})
+	m.SetSpinnerFrame(0)
+	out := m.View()
+	// The "local" header sits before the "tower" header. The spinner
+	// should appear only on the tower side — assert by counting glyph
+	// occurrences (one per loading host).
+	glyph := spinnerFrames[0]
+	count := strings.Count(out, glyph)
+	if count != 1 {
+		t.Errorf("expected exactly one spinner in output (for tower); got %d occurrences of %q in:\n%s", count, glyph, out)
+	}
+}
+
+// TestSetLoadingHosts_HeaderSpinnerAnimatesWithFrame: bumping the
+// spinner frame must roll the header glyph through the rotation in
+// lockstep with the placeholder row spinner, so a host that has
+// cached rows shows the same animation as one with no rows yet.
+func TestSetLoadingHosts_HeaderSpinnerAnimatesWithFrame(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{Host: "tower", Project: "canopy", Name: "(main)", IsMain: true, Branch: "main"},
+	})
+	m.SetLoadingHosts(map[string]bool{"tower": true})
+
+	m.SetSpinnerFrame(0)
+	frame0 := m.View()
+	m.SetSpinnerFrame(1)
+	frame1 := m.View()
+	if frame0 == frame1 {
+		t.Errorf("header spinner did not change between frames 0 and 1; output:\n%s", frame0)
+	}
+	if !strings.Contains(frame0, spinnerFrames[0]) {
+		t.Errorf("frame 0 missing glyph %q; got:\n%s", spinnerFrames[0], frame0)
+	}
+	if !strings.Contains(frame1, spinnerFrames[1]) {
+		t.Errorf("frame 1 missing glyph %q; got:\n%s", spinnerFrames[1], frame1)
+	}
+}
