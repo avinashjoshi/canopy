@@ -5,6 +5,16 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.3.0] - 2026-05-26 — Idempotent `canopy rm --force` on stale rows
+
+Force-deleting a remote workspace row whose underlying workspace had already vanished on the remote no longer dumps a scary `remote canopy rm failed: exit status 1` into the user's scrollback. The remote canopy now exits cleanly with `Workspace "<name>" not found — already removed.`, mirroring Unix `rm -f` semantics, and the local TUI's post-dispatch refresh drops the stale row as it always did.
+
+The trap was a TUI flow: the local canopy refreshes remote rows on its own cadence by SSH'ing `canopy ls --json` against each registered host. If the user (or any other tool) removed a workspace on the remote between two refresh ticks, the local Global tab still showed the row. Pressing `d` + `F` on that row dispatched `canopy rm <name> --yes --force` over SSH; the remote's `mgr.Find` returned `ErrWorkspaceNotFound`; the SSH dispatch propagated `exit status 1`; the user saw the failure even though the next refresh tick would have dropped the row anyway. The user's stated intent ("make this row go away") was already satisfied — the error message just made it look broken.
+
+### Fixed
+
+- **`canopy rm <name> --force` is now idempotent for missing workspaces.** New `rmHandleFindErr` helper in `cmd/canopy/rm.go` swallows `workspace.ErrWorkspaceNotFound` when `--force` is set, prints `Workspace %q not found — already removed.`, and returns success. Strict mode (no `--force`) still errors out so CLI typos like `canopy rm fixx` still surface. Only `ErrWorkspaceNotFound` is swallowed — other Find failures (state.json I/O errors, etc.) still bubble up so the user sees the real cause. Unit tests cover all three branches of the helper.
+
 ## [0.21.2.0] - 2026-05-26 — Self-heal remote add-project registration
 
 The "I added a project on tower from the TUI but pressing Enter on its `(main)` row errors with `project not registered for that host`" trap is gone. Adding a project now tells you up front when the laptop couldn't auto-register it, and every refresh tick self-heals an unregistered remote project once the remote canopy is running this version.
