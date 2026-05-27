@@ -5,6 +5,16 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.4.0] - 2026-05-26 — Remote `canopy host upgrade` now finds `go` on mise/asdf hosts
+
+Triggering `canopy host upgrade <name>` from the TUI used to fail on any host where the Go toolchain was installed via a version manager (`mise`, `asdf`, hand-rolled `~/go/bin`). The remote SSH command ran under a non-interactive shell that skipped `~/.bash_profile` / `~/.profile`, so the shim path never landed on `PATH`, and `make install` died with `make: go: No such file or directory` after `git pull` had already succeeded. The TUI dumped the build error to the user and offered no recovery — the only fix was to SSH in manually and run `canopy upgrade` from an interactive shell.
+
+The remote SSH dispatch now mirrors the pattern `internal/host/refresh.go` has used since v0.17 — `bash -l` on the remote with the script piped via stdin. A login shell sources the user's profile, picks up any version-manager `PATH` extensions, and finds `go` where it actually lives. The explicit `export PATH="$HOME/.local/bin:$PATH"` in the remote command stays as belt-and-suspenders for hosts whose profile doesn't add `~/.local/bin`.
+
+### Fixed
+
+- **`canopy host upgrade` and `canopy host install` over SSH run under a login shell.** Extracted `newHostUpgradeSSHCmd` in `internal/ui/update_host_upgrade.go` builds the SSH subprocess with `bash -l` as the remote command and the script piped via stdin (NOT as an SSH argv, which would re-expose the word-splitting hazard `internal/host/refresh.go:209` already documents). Picks up `~/.bash_profile` / `~/.profile` `PATH` additions on the remote so version-managed toolchains like `mise` shims resolve. Unit tests in `internal/ui/update_host_upgrade_test.go` pin the `bash -l` invariant, the stdin-not-argv contract, and the non-interactive SSH `-o` set (ControlMaster/Persist + BatchMode + NumberOfPasswordPrompts).
+
 ## [0.21.3.0] - 2026-05-26 — Idempotent `canopy rm --force` on stale rows
 
 Force-deleting a remote workspace row whose underlying workspace had already vanished on the remote no longer dumps a scary `remote canopy rm failed: exit status 1` into the user's scrollback. The remote canopy now exits cleanly with `Workspace "<name>" not found — already removed.`, mirroring Unix `rm -f` semantics, and the local TUI's post-dispatch refresh drops the stale row as it always did.
