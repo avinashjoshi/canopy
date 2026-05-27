@@ -62,6 +62,18 @@ internal/config/               canopy.json walk-up discovery + load. ErrNotFound
 internal/settings/             ~/.canopy/config.json — per-machine settings
                                (today: just port plan). Default() applies when
                                the file is absent.
+internal/lifecycle/            Workspace-health hint detectors that feed the
+                               TUI's HINTS column (rename_suggested,
+                               stuck-state, ahead/behind, etc.). Pure
+                               functions over a workspace path, invoked
+                               from the statusline refresh tick. Tracked
+                               vs untracked file accounting lives in
+                               git_stats.go so detectors share one
+                               porcelain-parse helper. rename_suggested
+                               fires on either commits past origin/<default>
+                               OR tracked-file edits — untracked noise
+                               (build artifacts, setup byproducts) is
+                               excluded so the hint doesn't loop forever.
 internal/workspace/            ORCHESTRATION layer. Manager.{Create, Remove,
                                Resurrect, Reconcile, List, Find}. The thing
                                every CLI subcommand calls into. Composes git +

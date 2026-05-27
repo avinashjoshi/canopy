@@ -129,6 +129,8 @@ The tab lists every registered host with:
 
 On first load — before any host has a cached snapshot — never-refreshed hosts animate a Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, ~120 ms cadence) until their fan-out result lands, instead of showing a static `· (never refreshed)` for the full 3-second SSH window. Hosts with a cached snapshot keep their previous status. The tick loop stops itself once the fan-out settles (v0.21.1.0).
 
+The same spinner glyph now also decorates each remote host's section header on the **Workspaces tab** during a refresh — the Hosts tab spinner only covered hosts without cached rows yet, so re-refreshing a host that already had rows looked silent. Spinners on both tabs animate from the same frame counter and clear together when results land (v0.21.5.0).
+
 Verbs while on the tab:
 
 | Key | Action |

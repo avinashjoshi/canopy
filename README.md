@@ -103,7 +103,7 @@ The TUI's HINTS column surfaces problems before they bite. All inferred from `gi
 | `⚠ rebasing` / `merging` / `pick` / `detached` | git is mid-operation; finish or abort it before doing more |
 | `↑N ↓N *N` | N commits ahead of `origin/<default>`, N behind, N dirty files |
 | `⇡N` / `⇅` | N commits unpushed to your branch's upstream, or upstream has diverged |
-| `↗ rename-suggested` | branch name doesn't match the current work — try `canopy rename` |
+| `↗ rename-suggested` | branch is still on a namegen name (`bold-falcon`) but you've made progress — commits past `origin/<default>` OR tracked-file edits (untracked noise excluded). Try `canopy rename`. |
 | PR status | open / approved / merged / closed (via `gh pr view`, polled out of band) |
 
 Stuck-state badges (rebasing, merging, etc.) preempt the `↑N ↓N *N` numbers because those numbers reflect git's transient internal state during the operation.
