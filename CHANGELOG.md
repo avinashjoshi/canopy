@@ -5,6 +5,22 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.8.0] - 2026-05-27 — `m.remoteRefreshing` is exclusively owned by `Update`; CI gains `-race`
+
+Three post-action `tea.Cmd` callbacks — `execRemoteVerb` (remote rm/retry), `execRemoteKill`, and `attachOrSwitchWithOpts` — used to flip `m.remoteRefreshing = false` from their own goroutine right before returning `refreshAllMsg{}`. The flip was load-bearing: `refresh()`'s `if !m.remoteRefreshing` gate would otherwise skip the post-action remote fan-out, leaving the rm'd/killed row visible until the next 2s tick. But the same field is read from the 120ms `hostsSpinnerTickMsg` handler (shipped in v0.21.1) and from `View()`, both on the Bubbletea goroutine — observable as a data race under `go test -race ./internal/ui/...`. The v0.21.1 CHANGELOG flagged it as a "Known concern" without a follow-up landing; this PR is the follow-up.
+
+The fix collapses ownership: `Update`'s `refreshAllMsg` handler now clears the latch on the Bubbletea goroutine *before* re-dispatching `m.refresh()`, so the three callbacks no longer touch `m` at all. Every write to `remoteRefreshing` now lives in `Update` (or in `refresh()`, which `Update` calls synchronously). The spinner tick and View read it without contention.
+
+CI gains `go test -race ./...` on the unit-tests job so this class of bug surfaces in PR review instead of as silent corruption in production.
+
+### Fixed
+
+- **`remoteRefreshing` write-race with the hosts-tab spinner tick (v0.21.1 known concern).** `internal/ui/update_remote.go`'s `execRemoteVerb` and `execRemoteKill`, plus `internal/ui/update_attach.go`'s `attachOrSwitchWithOpts`, no longer mutate `m.remoteRefreshing` from their `tea.ExecProcess`/`tea.Cmd` goroutines; the latch is cleared in `internal/ui/update.go`'s `case refreshAllMsg` arm instead. New regression test `TestRefreshAllMsg_ClearsRemoteRefreshingBeforeDispatch` in `internal/ui/model_test.go` pins the ordering by checking that `hostsSpinnerFrame` resets to 0 after a `refreshAllMsg` dispatched while the latch was already held — only possible if `Update` clears the latch before `refresh()` runs its outer gate.
+
+### Changed
+
+- **`.github/workflows/test.yml` unit-tests job runs `go test -race ./...`.** Catches `Model`-field write races from background `tea.Cmd` goroutines in CI rather than relying on developers to remember `-race` locally.
+
 ## [0.21.7.0] - 2026-05-27 — Workspaces tab redesign: idle projects collapse, host pills, violet contracts to brand-only
 
 Open `canopy` against a laptop that knows about a dozen projects and the global Workspaces tab spends most of its real estate telling you nothing. Each project canopy has ever seen contributes a `(main) not started 4X000 —` row whether you're working on it or not. The interesting rows — your two running workspaces with PR badges, the stopped one mid-rebase — get buried under 30 lines of chrome.

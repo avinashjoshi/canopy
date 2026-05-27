@@ -536,6 +536,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Trigger a full local+remote refresh. Emitted by tea.Cmds (e.g.
 		// post-remote-rm) that need to invalidate the cached remote rows
 		// too — refreshCmd alone only updates local. v0.17 Phase 1h.
+		//
+		// Clear remoteRefreshing first. The post-action callbacks that
+		// emit refreshAllMsg used to flip this latch themselves from a
+		// goroutine, racing the 120ms hostsSpinnerTick read on the
+		// Bubbletea goroutine (-race observable since v0.21.1). Doing
+		// it here means every write to remoteRefreshing now lives on
+		// the Update goroutine — the spinner tick + View can read it
+		// without a race window.
+		m.remoteRefreshing = false
 		return m, m.refresh()
 
 	case addProjectCloneDoneMsg:

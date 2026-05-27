@@ -25,7 +25,11 @@ jobs:
         run: go vet ./...
 
       - name: go test
-        run: go test ./...
+        # -race is on so concurrent writes to Model fields from
+        # tea.Cmd goroutines surface in CI instead of as silent
+        # corruption. The v0.21.7 fix collapsed the last known
+        # offenders; this gate keeps regressions out.
+        run: go test -race ./...
 
   e2e:
     name: E2E tests (real tmux + git)
