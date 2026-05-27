@@ -5,6 +5,22 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.2.0] - 2026-05-26 — Self-heal remote add-project registration
+
+The "I added a project on tower from the TUI but pressing Enter on its `(main)` row errors with `project not registered for that host`" trap is gone. Adding a project now tells you up front when the laptop couldn't auto-register it, and every refresh tick self-heals an unregistered remote project once the remote canopy is running this version.
+
+The trap had two compounding pieces. First, when the laptop dispatched `canopy init` over SSH it relied on a `CANOPY_INIT_RESULT_FILE` round-trip to learn the canonical project path on the remote and write it into `hosts.json` — but if the remote canopy was pre-v0.20, the env var did nothing, the result file came back empty, the warning went only to `~/.canopy/log/canopy.log`, and the user saw a green "Added" toast. Meanwhile `canopy ls --json` on the remote happily reported the new project's row, so the row showed up in the Global tab and pressing Enter on its `(main)` blew up — with a recovery hint that pointed at a flag (`--host`) the CLI never accepted.
+
+### Added
+
+- **`project_root` field in `canopy ls --json` wire output.** New per-row string carrying the canonical absolute path of the row's project on the host emitting the JSON. Additive — pre-v0.21.2 laptops parse and ignore. Lets the laptop's refresher discover `(host, project) → path` pairs without an extra SSH round-trip per refresh.
+- **`autoRegisterRemoteOrphans` self-healing pass in `refreshRemoteCmd`.** Every refresh tick walks the per-host `canopy ls --json` results, picks up any `(host, project)` pair where the remote sent a `project_root` but the laptop's `hosts.json` doesn't have the registration, validates the path against the same safety contract the v0.20 result-file channel uses (absolute, UTF-8, no control characters, ≤1 KiB), and writes it through `reg.AddProject`. Dedupes across multiple workspaces of the same project; skips errored hosts; no-ops when the remote is too old to send the field. Idempotent.
+- **Surfaced auto-register warnings in the Add Project toast.** `registerRemoteAddProject` now returns the failure reason instead of swallowing it into a log line. When set, the success toast carries a `⚠ <reason>` follow-up line with the literal manual-recovery command (`canopy project add <name> <path> --on <host>`), and the toast window stretches from 3 s to 8 s so the user can copy it.
+
+### Fixed
+
+- **Wrong CLI flag in the "project not registered" attach error.** The hint at `update_attach.go:211` said `canopy project add --host tower <path>`, but `canopy project add` has only ever accepted `--on`. Copy-pasting the hint produced `unknown flag --host`. Now emits `canopy project add <project> <remote-path> --on <host>` with the project name in the right slot.
+
 ## [0.21.1.0] - 2026-05-16 — Hosts-tab first-load spinner + clearer upgrade errors
 
 Two remote-host papercuts the user hit on first dogfood after v0.21:

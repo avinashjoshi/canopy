@@ -17,6 +17,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1293,8 +1294,93 @@ func refreshRemoteCmd() tea.Cmd {
 			}
 		}
 
+		// Self-heal the "remote has the project but laptop never
+		// registered it" trap (most commonly: the v0.20 add-project
+		// flow's CANOPY_INIT_RESULT_FILE round-trip failed because
+		// the remote canopy was pre-v0.20). autoRegisterRemoteOrphans
+		// returns the possibly-updated hosts slice.
+		hosts = autoRegisterRemoteOrphans(reg, hosts, results)
+
 		return remoteRowsLoadedMsg{rows: rows, snaps: snaps, hosts: hosts}
 	}
+}
+
+// autoRegisterRemoteOrphans walks the per-host refresh `results` for
+// (host, project) pairs where the remote emitted a project_root field
+// but the laptop's hosts.json snapshot doesn't have the registration
+// yet. Validates each path, writes registered orphans into `reg`, and
+// returns the possibly-updated host list (reloaded from disk only if
+// at least one orphan registered cleanly — keeps the no-op case zero
+// I/O). Idempotent: pre-v0.21.2 remotes leave ProjectRoot empty so
+// nothing is touched.
+//
+// Bounded by design:
+//   - skips projects the laptop already has — won't churn hosts.json
+//     in steady state
+//   - validates project_root against the same path-safety contract as
+//     the v0.20 add-project result-file channel, so a compromised or
+//     buggy remote can't poison the registry
+//   - dedups across multiple workspaces of the same project (a project
+//     with N workspaces shows up N times in r.Workspaces but only
+//     needs one registration)
+func autoRegisterRemoteOrphans(reg *host.Registry, hosts []host.Host, results []host.Result) []host.Host {
+	registered := make(map[string]map[string]struct{}, len(hosts))
+	for _, h := range hosts {
+		projs := make(map[string]struct{}, len(h.Projects))
+		for name := range h.Projects {
+			projs[name] = struct{}{}
+		}
+		registered[h.Name] = projs
+	}
+	type orphanKey struct{ host, project string }
+	orphans := make(map[orphanKey]string)
+	for _, r := range results {
+		if r.Err != nil {
+			continue
+		}
+		for _, w := range r.Workspaces {
+			if w.ProjectRoot == "" {
+				continue
+			}
+			projs, ok := registered[r.HostName]
+			if !ok {
+				continue
+			}
+			if _, already := projs[w.Project]; already {
+				continue
+			}
+			key := orphanKey{host: r.HostName, project: w.Project}
+			if _, queued := orphans[key]; queued {
+				continue
+			}
+			orphans[key] = w.ProjectRoot
+		}
+	}
+	registeredAny := false
+	for key, path := range orphans {
+		if err := validateRemoteResultPath(path); err != nil {
+			log.Warn("ui.refresh.remote.orphan-path-invalid",
+				"host", key.host, "project", key.project, "path", path, "err", err)
+			continue
+		}
+		if err := reg.AddProject(key.host, key.project, path); err != nil {
+			if errors.Is(err, host.ErrProjectExists) {
+				continue
+			}
+			log.Warn("ui.refresh.remote.orphan-register-failed",
+				"host", key.host, "project", key.project, "path", path, "err", err)
+			continue
+		}
+		registeredAny = true
+		log.Info("ui.refresh.remote.orphan-registered",
+			"host", key.host, "project", key.project, "path", path)
+	}
+	if registeredAny {
+		if updated, err := reg.List(); err == nil {
+			return updated
+		}
+	}
+	return hosts
 }
 
 // tmuxLoadAdapter wraps *tmux.Client to satisfy state.LoadProbe. The

@@ -107,6 +107,17 @@ type RemoteWorkspace struct {
 	// modal work uniformly across local and remote rows. v0.19
 	// remote-status-observability.
 	Attached bool `json:"attached,omitempty"`
+
+	// ProjectRoot is the canonical absolute path of this row's project
+	// on the remote. Used by the laptop's refresher to auto-register
+	// (host, project) pairs in hosts.json when it sees a remote row
+	// for a project the laptop hadn't registered yet — self-heals the
+	// "project not registered for that host" attach error when v0.20's
+	// CANOPY_INIT_RESULT_FILE round-trip failed (or the user added the
+	// project on the remote outside of `canopy init --on <host>`).
+	// Empty when the remote canopy is pre-v0.21.2 — laptop falls back
+	// to its old behavior (error on attach). v0.21.2.
+	ProjectRoot string `json:"project_root,omitempty"`
 }
 
 // remoteLsResponse mirrors LsJSONOutput on the cmd/canopy side. Kept

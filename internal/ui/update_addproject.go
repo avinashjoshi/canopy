@@ -394,11 +394,14 @@ func (m *Model) handleAddProjectRemoteDone(msg addProjectRemoteDoneMsg) (tea.Mod
 		m.addProjectInput.Focus()
 		return m, textinputBlink()
 	}
-	// Fetch the remote-side result file and AddProject locally. If
-	// this step fails we still toast success — the project IS
-	// initialized on the remote — but we warn the user via a logged
-	// message so they know to register manually before `canopy new`.
-	registerRemoteAddProject(msg.hostName, msg.sshTarget, msg.resultFile)
+	// Fetch the remote-side result file and AddProject locally. The
+	// project IS initialized on the remote even when this fails (e.g.
+	// the remote canopy is pre-v0.20 and didn't write the result file);
+	// surface the failure so the user can manually register before
+	// trying to attach — otherwise the row appears in the Global tab
+	// via `canopy ls --json` on the remote, but attaching to (main)
+	// fails with "project not registered for that host".
+	regWarning := registerRemoteAddProject(msg.hostName, msg.sshTarget, msg.resultFile)
 
 	// Derive a friendly name for the toast. Best-effort: the URL
 	// basename is what the remote canopy clones into.
@@ -406,18 +409,19 @@ func (m *Model) handleAddProjectRemoteDone(msg addProjectRemoteDoneMsg) (tea.Mod
 	if base, derr := canopyinit.DeriveBasename(msg.rawURL); derr == nil {
 		name = base + " on " + msg.hostName
 	}
-	return m, m.showAddProjectToast(name, msg.hostName)
+	return m, m.showAddProjectToast(name, msg.hostName, regWarning)
 }
 
 // registerRemoteAddProject fetches the canonical project root from
 // the remote-side result file (written by canopy init when
 // CANOPY_INIT_RESULT_FILE was set) and registers it in the laptop's
-// hosts.json. Best-effort — failures are logged but don't bubble up.
-// The project is still successfully initialized on the remote;
-// missing auto-registration just means the user has to run
-// `canopy project add <name> <path> --on <host>` manually before
-// `canopy new --on <host>` works.
-func registerRemoteAddProject(hostName, sshTarget, resultFile string) {
+// hosts.json. Returns "" on success or an actionable warning string
+// the caller surfaces in the form when the laptop couldn't
+// auto-register. The project is still successfully initialized on
+// the remote in every failure path — the warning just tells the
+// user they need to manually register before `canopy new --on
+// <host>` (or attaching to (main) from the Global tab) will work.
+func registerRemoteAddProject(hostName, sshTarget, resultFile string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -429,14 +433,14 @@ func registerRemoteAddProject(hostName, sshTarget, resultFile string) {
 	out, err := fetch.Output()
 	if err != nil {
 		log.Warn("ui.addproject.fetch-result-failed", "host", hostName, "err", err)
-		return
+		return fmt.Sprintf("couldn't fetch remote init result from %s (%v) — register manually: canopy project add <name> <remote-path> --on %s", hostName, err, hostName)
 	}
 	canonicalRoot := strings.TrimSpace(string(out))
 	if canonicalRoot == "" {
 		log.Warn("ui.addproject.remote-result-empty",
 			"host", hostName,
 			"hint", "remote canopy may be pre-v0.20 — upgrade with `canopy host upgrade`")
-		return
+		return fmt.Sprintf("remote %s didn't return a project path (canopy on %s may be pre-v0.20). Upgrade with `canopy host upgrade %s`, then register: canopy project add <name> <remote-path> --on %s", hostName, hostName, hostName, hostName)
 	}
 	// The remote could be compromised, on an older canopy, or the
 	// temp file could have been raced. Validate before writing into
@@ -446,30 +450,33 @@ func registerRemoteAddProject(hostName, sshTarget, resultFile string) {
 			"host", hostName,
 			"err", err,
 			"hint", "remote returned path that failed safety checks; not auto-registering")
-		return
+		return fmt.Sprintf("remote %s returned an invalid project path (%v) — register manually: canopy project add <name> <remote-path> --on %s", hostName, err, hostName)
 	}
 
 	projectName := filepath.Base(canonicalRoot)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Warn("ui.addproject.home-failed", "err", err)
-		return
+		return fmt.Sprintf("couldn't resolve laptop home dir (%v) — register manually: canopy project add %s %s --on %s", err, projectName, canonicalRoot, hostName)
 	}
 	reg, err := host.NewRegistry(filepath.Join(home, ".canopy"))
 	if err != nil {
 		log.Warn("ui.addproject.registry-failed", "err", err)
-		return
+		return fmt.Sprintf("couldn't open laptop host registry (%v) — register manually: canopy project add %s %s --on %s", err, projectName, canonicalRoot, hostName)
 	}
 	if err := reg.AddProject(hostName, projectName, canonicalRoot); err != nil {
 		// ErrProjectExists is fine — idempotent re-run.
-		if !errors.Is(err, host.ErrProjectExists) {
-			log.Warn("ui.addproject.local-register-failed",
-				"host", hostName,
-				"project", projectName,
-				"path", canonicalRoot,
-				"err", err)
+		if errors.Is(err, host.ErrProjectExists) {
+			return ""
 		}
+		log.Warn("ui.addproject.local-register-failed",
+			"host", hostName,
+			"project", projectName,
+			"path", canonicalRoot,
+			"err", err)
+		return fmt.Sprintf("couldn't register %s on %s locally (%v) — try manually: canopy project add %s %s --on %s", projectName, hostName, err, projectName, canonicalRoot, hostName)
 	}
+	return ""
 }
 
 // shellQuoteUI is the ui-package twin of cmd/canopy.shellQuote in
@@ -540,7 +547,7 @@ func (m *Model) submitAddProjectPath(path string) (tea.Model, tea.Cmd) {
 		m.addProjectError = "✗ " + err.Error()
 		return m, nil
 	}
-	return m, m.showAddProjectToast(filepath.Base(abs), abs)
+	return m, m.showAddProjectToast(filepath.Base(abs), abs, "")
 }
 
 // submitAddProjectURL runs all pre-clone checks (basename collision,
@@ -612,7 +619,7 @@ func (m *Model) submitAddProjectURL(rawURL string) (tea.Model, tea.Cmd) {
 			m.addProjectError = "✗ " + err.Error()
 			return m, nil
 		}
-		return m, m.showAddProjectToast(filepath.Base(dest), dest)
+		return m, m.showAddProjectToast(filepath.Base(dest), dest, "")
 	}
 
 	// Build the git clone command. inherit env so SSH agent / git
@@ -652,7 +659,7 @@ func (m *Model) handleAddProjectCloneDone(msg addProjectCloneDoneMsg) (tea.Model
 		m.addProjectInput.Focus()
 		return m, textinputBlink()
 	}
-	return m, m.showAddProjectToast(filepath.Base(msg.dest), msg.dest)
+	return m, m.showAddProjectToast(filepath.Base(msg.dest), msg.dest, "")
 }
 
 // addProjectToastExpireMsg fires when a success toast's display window
@@ -660,16 +667,26 @@ func (m *Model) handleAddProjectCloneDone(msg addProjectCloneDoneMsg) (tea.Model
 type addProjectToastExpireMsg struct{}
 
 // showAddProjectToast sets the success line and schedules an auto-close
-// after 3 seconds (decision #14). Returns a Cmd batch: a refresh so
-// the new project appears in the list, and a tick that emits
-// addProjectToastExpireMsg.
-func (m *Model) showAddProjectToast(name, path string) tea.Cmd {
-	m.addProjectToast = fmt.Sprintf("✓ Added %s at %s", name, path)
+// after 3 seconds (decision #14). When warning is non-empty, the line
+// is rendered as a follow-up ⚠ note and the auto-close timer extends
+// to 8 seconds so the user has time to read the manual-recovery
+// command. Returns a Cmd batch: a refresh so the new project appears
+// in the list, and a tick that emits addProjectToastExpireMsg.
+func (m *Model) showAddProjectToast(name, path, warning string) tea.Cmd {
+	if warning == "" {
+		m.addProjectToast = fmt.Sprintf("✓ Added %s at %s", name, path)
+	} else {
+		m.addProjectToast = fmt.Sprintf("✓ Added %s at %s\n  ⚠ %s", name, path, warning)
+	}
 	m.addProjectError = ""
-	m.addProjectToastFor = time.Now().Add(3 * time.Second)
+	d := 3 * time.Second
+	if warning != "" {
+		d = 8 * time.Second
+	}
+	m.addProjectToastFor = time.Now().Add(d)
 	return tea.Batch(
 		func() tea.Msg { return refreshAllMsg{} },
-		tea.Tick(3*time.Second, func(time.Time) tea.Msg { return addProjectToastExpireMsg{} }),
+		tea.Tick(d, func(time.Time) tea.Msg { return addProjectToastExpireMsg{} }),
 	)
 }
 

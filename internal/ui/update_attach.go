@@ -208,7 +208,7 @@ func (m *Model) attachRemoteRow(row Row, shared bool) tea.Cmd {
 	// Refuse rather than silently mis-attach.
 	if row.IsMain && cwd == "" {
 		return func() tea.Msg {
-			return errMsg{err: fmt.Errorf("can't attach to %s on %s: project not registered for that host (run `canopy project add --host %s <path>`)", row.Project, row.Host, row.Host)}
+			return errMsg{err: fmt.Errorf("can't attach to %s on %s: project not registered for that host (run `canopy project add %s <remote-path> --on %s`)", row.Project, row.Host, row.Project, row.Host)}
 		}
 	}
 	if cwd != "" {
