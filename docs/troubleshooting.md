@@ -218,6 +218,12 @@ canopy upgrade
 
 Pre-v0.21.1.0 misclassified this as `there are local commits in the source clone` and steered users toward `git reset`, which never helped. If you see the old wording, your host is still on the prior version — `S` (canopy use release) then `U` again should now produce the clearer error. `make install` also pre-flights `$(BIN_DIR)` writability and `$(BIN_REAL)` ownership before `go build`, so the diagnosis surfaces immediately rather than mid-build.
 
+### `canopy upgrade` (or in-TUI `U`) fails on a host with `make: go: No such file or directory`
+
+`git pull` succeeded, then `make install` couldn't find `go`. Almost always means the host's Go toolchain lives behind `mise` / `asdf` activation that's wired through `~/.bashrc`, and the non-interactive `bash -l` we run over SSH skips `~/.bashrc` (Arch/Omarchy and Ubuntu defaults both bail out of bashrc when `$-` doesn't contain `i`). v0.21.4.0 introduced `bash -l`; v0.21.7.0 fixed it properly by prepending a shell snippet to every remote canopy command that adds `~/.local/bin`, `/usr/local/go/bin`, and `~/go/bin` to PATH first, then runs `eval "$(mise activate bash)"` if mise is present, then sources `~/.asdf/asdf.sh` if asdf is present. Upgrade your laptop canopy to v0.21.7.0+ — the next `U` against the same host should succeed.
+
+If you're still stuck after upgrading the laptop, the Go binary is either missing entirely on the remote (install Go), or installed somewhere outside the four locations above (symlink it into `~/.local/bin` or add to mise/asdf).
+
 ### Hosts tab renders `· (never refreshed)` for every host on first load
 
 Pre-v0.21.1.0 behavior. The Hosts tab now shows a Braille spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, ~120 ms cadence) per host while the initial SSH fan-out is in flight; hosts with a cached snapshot keep their previous status, only never-refreshed hosts spin. Upgrade your laptop canopy.
