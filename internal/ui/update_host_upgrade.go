@@ -115,14 +115,12 @@ func hostUpgradeTickCmd(buf *safeBuffer) tea.Cmd {
 }
 
 // hostUpgradeStartCmd kicks off the SSH subprocess on a background
-// goroutine. The shell command is a single-arg string because SSH
-// joins all argv after the target with spaces; multi-arg
-// `bash -l -c <script>` ends up word-split on the remote shell (see
-// internal/host/refresh.go for the long-form explanation).
+// goroutine. See newHostUpgradeSSHCmd for the argv/stdin shape and
+// the login-shell rationale.
 //
-// remoteCmd is the literal command to send over SSH — caller is
-// responsible for non-interactivity (e.g., passing --yes). The local
-// confirm modal already gave the user a chance to back out.
+// remoteCmd is the literal script to feed to the remote shell —
+// caller is responsible for non-interactivity (e.g., passing --yes).
+// The local confirm modal already gave the user a chance to back out.
 //
 // CombinedOutput-style streaming: both stdout and stderr feed into
 // the same safeBuffer so the user sees the full picture inline. The
@@ -139,15 +137,7 @@ func hostUpgradeStartCmd(sshTarget, remoteCmd string) tea.Cmd {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan hostUpgradeShellDoneMsg, 1)
 		go func() {
-			cmd := exec.CommandContext(ctx, "ssh",
-				"-o", "ControlMaster=auto",
-				"-o", "ControlPath="+filepath.Join(os.Getenv("HOME"), ".canopy", "ssh-%C.sock"),
-				"-o", "ControlPersist=300",
-				"-o", "BatchMode=yes",
-				"-o", "NumberOfPasswordPrompts=0",
-				sshTarget,
-				remoteCmd,
-			)
+			cmd := newHostUpgradeSSHCmd(ctx, sshTarget, remoteCmd)
 			cmd.Stdout = buf
 			cmd.Stderr = buf
 			err := cmd.Run()
@@ -157,16 +147,54 @@ func hostUpgradeStartCmd(sshTarget, remoteCmd string) tea.Cmd {
 	}
 }
 
+// newHostUpgradeSSHCmd builds the SSH subprocess for an upgrade /
+// install / use-release run on a remote host. Two invariants make
+// this function load-bearing:
+//
+//  1. The remote shell is `bash -l` (a LOGIN shell). Login shells
+//     source ~/.bash_profile / ~/.profile, which is where version
+//     managers like mise and asdf inject the toolchain PATH. Without
+//     -l, a non-interactive SSH-command shell inherits the bare
+//     default PATH; `make install` then runs `go build` and dies
+//     with `make: go: No such file or directory` on every host where
+//     Go is version-managed. (This is the regression that motivated
+//     extracting this helper — see git log.)
+//
+//  2. The remote script travels via stdin, NOT as an SSH argv. SSH
+//     joins all post-target argv with spaces and re-parses on the
+//     remote shell; that silently word-splits `bash -lc <script>`
+//     into garbage. Piping the script as bytes to `bash -l` sidesteps
+//     the quoting/word-splitting trap entirely. internal/host/refresh.go
+//     already uses this pattern for the same reason.
+func newHostUpgradeSSHCmd(ctx context.Context, sshTarget, remoteCmd string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "ssh",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath="+filepath.Join(os.Getenv("HOME"), ".canopy", "ssh-%C.sock"),
+		"-o", "ControlPersist=300",
+		"-o", "BatchMode=yes",
+		"-o", "NumberOfPasswordPrompts=0",
+		sshTarget,
+		"bash", "-l",
+	)
+	cmd.Stdin = strings.NewReader(remoteCmd + "\n")
+	return cmd
+}
+
 // hostUpgradeWaitDoneCmd blocks on the done channel and emits the
 // completion msg.
 func hostUpgradeWaitDoneCmd(done <-chan hostUpgradeShellDoneMsg) tea.Cmd {
 	return func() tea.Msg { return <-done }
 }
 
-// PATH-prepending in remote commands matches refresh.go: ~/.local/bin
-// (where the curl-installer puts canopy) isn't on the PATH for
-// non-interactive SSH on Arch/Debian (.bashrc is interactive-guarded).
-// Each remoteCmd below sets it explicitly.
+// PATH-prepending in remote commands is belt-and-suspenders alongside
+// the login shell newHostUpgradeSSHCmd runs the script under. `bash -l`
+// sources ~/.bash_profile / ~/.profile (and on many setups ~/.bashrc
+// indirectly), which is the canonical place for ~/.local/bin and
+// version-manager shims like mise. The explicit `export PATH=…` here
+// guarantees ~/.local/bin (where the curl-installer puts canopy) is on
+// PATH even for users whose profile doesn't add it — without it, the
+// remote `canopy` invocation would fall through to "command not found"
+// on a host that has a bare profile.
 
 const (
 	// remoteUpgradeCmd: pull + reinstall, non-interactive. --yes is
