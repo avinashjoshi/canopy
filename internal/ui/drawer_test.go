@@ -215,6 +215,29 @@ func TestHandleDrawerKey_BWorksForMainRow(t *testing.T) {
 	}
 }
 
+// TestActionInspect_LoadingRowIsNoop: i on a synthetic loading
+// placeholder must NOT open the drawer or surface a misleading
+// "remote inspect isn't supported" message — the placeholder has
+// no workspace identity (empty Name, no TmuxSession) and any of
+// those error paths would be UX noise. Mirrors the enter/o/d/K/R
+// guards across the rest of the action handlers. v0.22.
+func TestActionInspect_LoadingRowIsNoop(t *testing.T) {
+	m := newTestModel(false)
+	m.setTestRows([]Row{{Host: "tower", Loading: true}})
+
+	model, cmd := actionInspect(m, teaKeyMsg{})
+	mm := model.(*Model)
+	if mm.mode == drawerMode {
+		t.Errorf("inspect on Loading placeholder opened drawer; want no-op")
+	}
+	if mm.err != nil {
+		t.Errorf("inspect on Loading placeholder set err = %v; want nil (silent no-op)", mm.err)
+	}
+	if cmd != nil {
+		t.Errorf("inspect on Loading placeholder returned cmd %v; want nil", cmd)
+	}
+}
+
 // TestActionInspect_OpensDrawer: i on a workspace row enters drawerMode
 // and snapshots the row.
 func TestActionInspect_OpensDrawer(t *testing.T) {

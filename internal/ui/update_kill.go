@@ -25,7 +25,7 @@ import (
 // Cancel-by-default is still the safe posture in the confirm modal.
 func actionKill(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	row, ok := m.list.CursorRow()
-	if !ok {
+	if !ok || row.Loading {
 		return m, nil
 	}
 	if !row.Alive {

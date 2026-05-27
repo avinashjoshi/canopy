@@ -112,6 +112,101 @@ func TestDetectRenameSuggested_CommitsAndAutoName(t *testing.T) {
 	}
 }
 
+// TestDetectRenameSuggested_TrackedDirtyOnly: branch matches namegen
+// pattern, NO commits past main, but a TRACKED file has unstaged
+// modifications — hint fires. Regression guard for the
+// "agent gathered intent, started editing, but never committed → no
+// rename hint → no resume-briefing nudge → workspace stays on
+// namegen name forever" loop. Untracked files don't qualify (see
+// the next test) so this exercise stages a real tracked-file edit.
+func TestDetectRenameSuggested_TrackedDirtyOnly(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "fair-comet")
+
+	// Commit a file first so it becomes tracked, then dirty it.
+	tracked := filepath.Join(wt, "README.md")
+	if err := os.WriteFile(tracked, []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", wt, "add", "README.md").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", wt,
+		"commit", "-m", "seed").CombinedOutput(); err != nil {
+		t.Fatalf("commit seed: %v\n%s", err, out)
+	}
+	// Reset origin/main to this commit so commitCount stays 0; we want
+	// to exercise the dirty-only branch, not the commits-past-main one.
+	if out, err := exec.Command("git", "-C", source, "update-ref",
+		"refs/remotes/origin/main", "fair-comet").CombinedOutput(); err != nil {
+		t.Fatalf("update-ref: %v\n%s", err, out)
+	}
+	// Now dirty the tracked file.
+	if err := os.WriteFile(tracked, []byte("changed\n"), 0o644); err != nil {
+		t.Fatalf("dirty tracked file: %v", err)
+	}
+
+	ws := makeWorkspace("fair-comet", "fair-comet", wt, source)
+	got := detectRenameSuggested(context.Background(), ws)
+	if got == nil {
+		t.Fatal("expected hint when tracked file is dirty; got nil")
+	}
+	if got.Kind != "rename_suggested" {
+		t.Errorf("Kind = %q; want rename_suggested", got.Kind)
+	}
+	if !strings.Contains(got.Message, "uncommitted") {
+		t.Errorf("message should mention 'uncommitted'; got %q", got.Message)
+	}
+}
+
+// TestDetectRenameSuggested_UntrackedOnlyReturnsNil: a worktree
+// dirtied ONLY by untracked files (build artifacts, log files,
+// scripts.setup byproducts) does NOT fire the rename hint. The
+// resume-briefing re-nudge depends on tracked-file edits as the
+// "intent gathered" signal; counting untracked noise would spam
+// the hint forever in workspaces with chatty tooling.
+func TestDetectRenameSuggested_UntrackedOnlyReturnsNil(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "fair-comet")
+
+	// Untracked file only — no tracked changes, no commits.
+	stray := filepath.Join(wt, "setup.log")
+	if err := os.WriteFile(stray, []byte("scratch"), 0o644); err != nil {
+		t.Fatalf("write stray: %v", err)
+	}
+
+	ws := makeWorkspace("fair-comet", "fair-comet", wt, source)
+	got := detectRenameSuggested(context.Background(), ws)
+	if got != nil {
+		t.Errorf("expected nil hint with untracked-only changes; got %+v", got)
+	}
+}
+
+// TestDetectRenameSuggested_TrulyCleanReturnsNil: branch matches
+// namegen pattern but ZERO progress of any kind (no commits past
+// main, no dirty files). No hint — the fresh-launch briefing's
+// rename directive is the right venue for that case; surfacing
+// the hint with no actionable signal would be noisy.
+func TestDetectRenameSuggested_TrulyCleanReturnsNil(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	source := setupSourceRepo(t)
+	wt := setupWorkspace(t, source, "fair-comet")
+
+	ws := makeWorkspace("fair-comet", "fair-comet", wt, source)
+	got := detectRenameSuggested(context.Background(), ws)
+	if got != nil {
+		t.Errorf("expected nil hint with no work yet; got %+v", got)
+	}
+}
+
 // TestDetectRenameSuggested_AlreadyRenamed: user already ran git
 // branch -m, so currentBranch != ws.Name → no hint.
 func TestDetectRenameSuggested_AlreadyRenamed(t *testing.T) {

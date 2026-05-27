@@ -59,6 +59,10 @@ internal/agent/         Agent launcher metadata (claude / codex / aider) and
                         canonical role strings (RoleForType → `agent:<launcher>`).
 internal/hooks/         Script execution via exec.CommandContext + CANOPY_* env.
 internal/state/         JSON registry of workspaces. Single mutable. flock-protected.
+internal/lifecycle/     Workspace-health hint detectors (rename_suggested, etc.).
+                        Pure functions over a workspace path; consumed by the
+                        statusline refresh tick. Untracked-file noise is
+                        explicitly excluded from "intent gathered" signals.
 internal/workspace/     Orchestration: Create / Remove / Resurrect / Reconcile.
 internal/clog/          slog setup (named `clog` to avoid stdlib `log` collision).
 internal/ui/            Bubbletea Model/Update/View + lipgloss.

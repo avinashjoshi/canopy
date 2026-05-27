@@ -210,6 +210,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.hostsSpinnerFrame++
+		// Mirror the frame into projectlist so the Workspaces tab's
+		// host-loading placeholders animate in lockstep with the Hosts
+		// tab. v0.22.
+		m.list.SetSpinnerFrame(m.hostsSpinnerFrame)
 		return m, hostsSpinnerTickCmd()
 
 	case remoteRowsLoadedMsg:
@@ -231,6 +235,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.snaps != nil {
 			m.remoteSnaps = msg.snaps
 		}
+		// Clear the per-host loading spinner: refresh is done, headers
+		// render plain. Without this the spinner would latch on
+		// indefinitely after the fan-out returned. v0.22.
+		m.pushLoadingHosts()
 		m.list.SetRows(m.filteredRows())
 		return m, nil
 
@@ -764,7 +772,7 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// newTargetHost to dispatch `canopy new --on <host>` instead of
 	// the local createCmd. PR/Issue/Branch options are hidden in the
 	// picker for remote targets (they need remote gh integration).
-	if row, ok := m.list.CursorRow(); ok && row.Host != "" {
+	if row, ok := m.list.CursorRow(); ok && row.Host != "" && !row.Loading {
 		m.newTargetHost = row.Host
 		m.newTargetRemoteCwd = m.remoteCwdForRow(row.Host, row.Project)
 		m.newTargetName = row.Project
@@ -1005,6 +1013,33 @@ func (m *Model) filteredRows() []state.GlobalRow {
 			continue
 		}
 		out = append(out, r)
+	}
+
+	// v0.22: append synthetic loading placeholders for registered hosts
+	// that have no rows in m.remoteRows yet. Without these, the
+	// Workspaces tab silently hides every registered host until SSH
+	// returns — disconcerting on first launch when the user knows
+	// they've registered hosts but sees no trace of them. Only fires on
+	// the Global tab (Local tab excludes remote rows entirely) and
+	// while search isn't active (placeholders carry no metadata to
+	// match against; rendering one on every search miss would be
+	// noise).
+	if m.tab != tabLocal && m.searchQuery == "" {
+		hostsWithRows := map[string]bool{}
+		for _, r := range m.remoteRows {
+			if r.Host != "" {
+				hostsWithRows[r.Host] = true
+			}
+		}
+		for _, h := range m.hostList {
+			if hostsWithRows[h.Name] {
+				continue
+			}
+			out = append(out, state.GlobalRow{
+				Host:    h.Name,
+				Loading: true,
+			})
+		}
 	}
 	return out
 }

@@ -13,8 +13,11 @@ import (
 
 // detectRenameSuggested returns a Hint when:
 //
-//  1. The workspace has at least one commit past its base branch (i.e.,
-//     the user has made progress).
+//  1. The workspace has at least one commit past its base branch OR
+//     uncommitted changes in the worktree (i.e., the agent has made
+//     progress — uncommitted work counts because the user-visible
+//     complaint is "I gathered intent, started working, but the branch
+//     name is still namegen because nothing got committed yet").
 //  2. The current branch name still matches the workspace name (i.e.,
 //     it's still the auto-generated namegen pattern, e.g. "ancient-hornet"
 //     and the user hasn't done `git branch -m feat/oauth` yet).
@@ -25,9 +28,17 @@ import (
 //
 // Returns nil when:
 //   - branch was already renamed (current branch != ws.Name)
-//   - no commits past main yet (no work done)
+//   - no commits AND no uncommitted changes yet (truly fresh — the
+//     fresh-launch briefing already nudged rename; nothing more to add)
 //   - git command fails (treat as "no hint" — never block UI on a
 //     diagnostic failure)
+//
+// The uncommitted-only branch matters because it lets the resume-launch
+// delta briefing re-nudge the agent that never renamed on the first
+// turn. Without it, a workspace that picked up work without a commit
+// past main would silently stay on its namegen name forever — the
+// resume briefing only re-emits hints that fire, so the rename
+// directive only ever showed up in the FRESH briefing once.
 func detectRenameSuggested(ctx context.Context, ws state.Workspace) *state.Hint {
 	if ws.Path == "" {
 		return nil
@@ -55,17 +66,40 @@ func detectRenameSuggested(ctx context.Context, ws state.Workspace) *state.Hint 
 		return nil
 	}
 
-	// Step 3: count commits past the source repo's default branch. If
-	// zero, no progress has been made yet — don't suggest renaming
-	// until there's something to name.
+	// Step 3: detect progress. Either commits past main OR tracked-file
+	// modifications count — see the function doc for why
+	// uncommitted-only is in scope.
+	//
+	// Untracked files are EXCLUDED on purpose: build artifacts, log
+	// files, IDE caches, and `scripts.setup` byproducts routinely
+	// appear as untracked noise the agent has no intention of
+	// committing. Counting them would spam the rename hint forever for
+	// workspaces with chatty tooling, defeating the resume-briefing
+	// re-nudge this loosening was meant to enable. "Intent gathered"
+	// signals as edits to tracked files (modified/added/renamed/deleted
+	// against HEAD), not whatever a tool drops into the worktree.
 	commitCount := gitCommitsPastDefault(ctx, ws.Path)
-	if commitCount == 0 {
+	dirtyCount := gitTrackedDirtyCount(ctx, ws.Path)
+	if commitCount == 0 && dirtyCount == 0 {
 		return nil
+	}
+
+	// Message phrasing reflects what kind of progress was found.
+	// "N commit(s)" reads as concrete work-units; "N uncommitted
+	// file(s)" reads as in-flight work. Mixed cases prefer the
+	// commit framing because commits are more durable signal than
+	// dirty files.
+	var msg string
+	switch {
+	case commitCount > 0:
+		msg = fmt.Sprintf("branch '%s' has %d commit(s) past main; rename to reflect intent", ws.Name, commitCount)
+	default:
+		msg = fmt.Sprintf("branch '%s' has %d uncommitted file(s); rename to reflect intent", ws.Name, dirtyCount)
 	}
 
 	return &state.Hint{
 		Kind:       "rename_suggested",
-		Message:    fmt.Sprintf("branch '%s' has %d commit(s) past main; rename to reflect intent", ws.Name, commitCount),
+		Message:    msg,
 		Action:     "git branch -m <intent-name>",
 		DetectedAt: time.Now(),
 	}

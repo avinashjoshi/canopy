@@ -153,6 +153,14 @@ type GlobalRow struct {
 	// when SSH has dropped and they're looking at last-known data.
 	// v0.19 remote-status-observability.
 	LastSeen time.Time
+
+	// Loading marks this row as a synthetic placeholder for a
+	// registered remote host whose first refresh hasn't returned data
+	// yet. Carries only Host; the renderer substitutes a spinner +
+	// "loading…" line in place of the normal row body so the user sees
+	// the host appear immediately instead of having the section stay
+	// invisible until SSH completes. v0.22.
+	Loading bool
 }
 
 // BuildGlobalRows is the single source of truth for the cross-project

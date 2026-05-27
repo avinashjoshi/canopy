@@ -136,6 +136,24 @@ type Model struct {
 	// session is missing from agentStates are interpreted as "no agent
 	// pane in this workspace" and rendered with the No-AI glyph.
 	agentPolled bool
+
+	// spinnerFrame indexes the Braille rotation rendered next to
+	// Loading=true placeholder rows (registered hosts whose first
+	// refresh hasn't returned yet). Parent advances it via
+	// SetSpinnerFrame on every hostsSpinnerTickMsg so the animation
+	// keeps time with the Hosts tab. v0.22.
+	spinnerFrame int
+
+	// loadingHosts is the set of remote-host names whose refresh is
+	// in flight. The renderer appends a spinner glyph to the host
+	// section header for any host in this set so the workspaces tab
+	// signals "we're checking" — visible even when stale rows from a
+	// previous refresh are still showing under the header. Parent
+	// updates via SetLoadingHosts on every refresh dispatch +
+	// completion. v0.22 follow-up to the placeholder-row mechanism so
+	// loaders are visible alongside cached rows, not only when the
+	// host has no rows yet.
+	loadingHosts map[string]bool
 }
 
 // New constructs a Model with no rows. The parent typically follows up
@@ -187,6 +205,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if len(m.rows) == 0 || m.onActivate == nil {
 				return m, nil
 			}
+			if m.rows[m.cursor].Loading {
+				return m, nil
+			}
 			return m, m.onActivate(m.rows[m.cursor])
 
 		case "o":
@@ -195,6 +216,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			// status, so users have an escape hatch from broken/stopped
 			// rows that would otherwise just show a hint.
 			if len(m.rows) == 0 || m.onGoToProject == nil {
+				return m, nil
+			}
+			if m.rows[m.cursor].Loading {
 				return m, nil
 			}
 			return m, m.onGoToProject(m.rows[m.cursor])
@@ -262,6 +286,37 @@ func (m *Model) UpdateRowHints(project, name string, hints []state.Hint) {
 func (m *Model) SetAgentStates(states map[string]agent.State, polled bool) {
 	m.agentStates = states
 	m.agentPolled = polled
+}
+
+// SetSpinnerFrame pushes the current animation frame for Loading
+// placeholder rows. The renderer reads it via spinnerGlyph; parent
+// advances it on every hostsSpinnerTickMsg while a remote fan-out is
+// in flight (and holds it steady otherwise). v0.22.
+func (m *Model) SetSpinnerFrame(frame int) {
+	m.spinnerFrame = frame
+}
+
+// SetLoadingHosts pushes the set of hostnames whose refresh is in
+// flight. The renderer appends a spinner glyph next to each matching
+// host section header. Pass nil/empty when no remote refresh is
+// outstanding so existing headers render without animation.
+//
+// Distinct from the Loading=true placeholder row mechanism: that one
+// inserts synthetic rows for hosts with NO data yet, while this one
+// decorates the header for hosts whose existing data is being
+// re-checked. Both can fire at once — a host with no rows on first
+// launch gets both the header spinner and the placeholder row. v0.22.
+func (m *Model) SetLoadingHosts(hosts map[string]bool) {
+	m.loadingHosts = hosts
+}
+
+// LoadingHosts returns whether the named host is currently flagged as
+// loading. Exposed for parent-package tests that drive
+// SetLoadingHosts indirectly (via the model's pushLoadingHosts
+// helper) and want to assert the wire-up without scraping rendered
+// output.
+func (m Model) LoadingHosts(name string) bool {
+	return m.loadingHosts[name]
 }
 
 func (m *Model) SetCurrent(projectRoot, name string) {
@@ -493,6 +548,17 @@ func (m Model) renderTable() (string, int) {
 					label = "local"
 				}
 				header := hostHeaderStyle().Render(label)
+				// v0.22 follow-up: append a spinner glyph for hosts
+				// whose refresh is in flight. Visible even when stale
+				// rows are still on screen from a previous refresh —
+				// the placeholder-row mechanism only fires for hosts
+				// with zero rows, so without this the workspaces tab
+				// silently hides the "we're checking" signal once the
+				// host has any cached data. Local rows (Host=="") and
+				// hosts not currently being refreshed render unchanged.
+				if r.Host != "" && m.loadingHosts[r.Host] {
+					header += "  " + loadingRowStyle().Render(spinnerGlyph(m.spinnerFrame))
+				}
 				// v0.19 remote-status-observability: when this host's
 				// most-recent refresh is older than staleThreshold, append
 				// a "⚠ stale Ns" pill so the user knows the rows below
@@ -508,6 +574,27 @@ func (m Model) renderTable() (string, int) {
 			}
 			prevHost = r.Host
 			prevProject = "" // reset so the first project under this host gets a header
+		}
+
+		// Loading placeholder: skip the project-header machinery (these
+		// rows carry no project) and emit a single spinner line under
+		// the host header instead. Caret slot left blank so the row
+		// indents the same as a workspace row. v0.22.
+		if r.Loading {
+			loadingLine := loadingRowStyle().Render(
+				"  " + spinnerGlyph(m.spinnerFrame) + "  loading…",
+			)
+			if i == m.cursor {
+				cursorLine = lineCount
+			}
+			b.WriteString(loadingLine)
+			b.WriteString("\n")
+			lineCount++
+			// Reset prevProject so the next real row under this host
+			// re-emits its project header rather than colliding with
+			// the previous host's last project name.
+			prevProject = ""
+			continue
 		}
 
 		// New project group within the current host: blank separator
@@ -1079,6 +1166,30 @@ func pushStateStyle() lipgloss.Style {
 // hintPRStyle: cyan — informational, not urgent.
 func hintPRStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+}
+
+// spinnerFrames mirrors hosts.spinnerFrames — duplicated here so the
+// projectlist package stays free of the cyclic import that pulling in
+// hosts would create (hosts already imports state; ui imports both).
+// Same Braille rotation read at the same cadence, so the two surfaces
+// animate in lockstep.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func spinnerGlyph(frame int) string {
+	n := len(spinnerFrames)
+	idx := frame % n
+	if idx < 0 {
+		idx += n
+	}
+	return spinnerFrames[idx]
+}
+
+// loadingRowStyle is the cyan styling for the "⠋ loading…" placeholder
+// shown under a registered host whose first refresh hasn't landed yet.
+// Same hue as the Hosts tab's StatusLoading glyph so the two surfaces
+// share a "we're checking" vocabulary. v0.22.
+func loadingRowStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("87"))
 }
 
 func subtleHelper() lipgloss.Style {
