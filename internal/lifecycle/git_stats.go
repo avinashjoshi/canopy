@@ -128,3 +128,29 @@ func gitDirtyFileCount(ctx context.Context, path string) int {
 	}
 	return strings.Count(trimmed, "\n") + 1
 }
+
+// gitTrackedDirtyCount is gitDirtyFileCount minus untracked entries.
+// Used by detectRenameSuggested where untracked files are noise (build
+// artifacts, scripts.setup byproducts, IDE caches) rather than signal
+// that the agent has started intentful work. Porcelain encodes
+// untracked entries as `?? <path>`; everything else is staged or
+// unstaged against the index.
+func gitTrackedDirtyCount(ctx context.Context, path string) int {
+	cmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	trimmed := strings.TrimRight(string(out), "\n")
+	if trimmed == "" {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(trimmed, "\n") {
+		if strings.HasPrefix(line, "?? ") {
+			continue
+		}
+		count++
+	}
+	return count
+}
