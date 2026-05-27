@@ -639,6 +639,219 @@ func TestReconcile_RefreshesBranchAfterRename(t *testing.T) {
 	}
 }
 
+// TestReconcile_RenamesTmuxSessionAfterBranchRename is the regression
+// test for the "rename kills remote tmux" bug. The branch refresh in
+// Reconcile used to update state.json without renaming the tmux
+// session, so the next observeStatus probe would look for canopy/<new>
+// against a still-canopy/<old> session, flip status to stopped, and
+// the subsequent switch would Resurrect a fresh session — orphaning the
+// running agent (claude --continue resumes into a new pane while the
+// original keeps running with no client). Hit remote workspaces hardest
+// because their statusline-driven SyncBranch only fires while attached;
+// disconnecting after `git branch -m` meant Reconcile (via switch's
+// reconnect path) was the first chance to align state.
+//
+// Asserts: after a worktree-level `git branch -m`, Reconcile renames
+// the live tmux session in place so observeStatus, attach, and the
+// next reconcile all see the post-rename name.
+func TestReconcile_RenamesTmuxSessionAfterBranchRename(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(ctx, "auto-falcon", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	oldSession := ws.TmuxSessionName()
+	if alive, err := mgr.Tmux.HasSession(ctx, oldSession); err != nil || !alive {
+		t.Fatalf("pre-rename: session %q not alive (alive=%v err=%v)", oldSession, alive, err)
+	}
+
+	renameOut, err := exec.Command("git", "-C", ws.Path, "branch", "-m", "fix-real-bug").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch -m: %v\n%s", err, renameOut)
+	}
+
+	if _, err := mgr.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got, err := mgr.Find(ctx, "auto-falcon")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if got.Branch != "fix-real-bug" {
+		t.Fatalf("Branch = %q; want %q", got.Branch, "fix-real-bug")
+	}
+	newSession := got.TmuxSessionName()
+	if newSession == oldSession {
+		t.Fatalf("session name unchanged (%q) — branch rename should have produced a new session name", newSession)
+	}
+
+	if alive, err := mgr.Tmux.HasSession(ctx, newSession); err != nil {
+		t.Fatalf("HasSession(new=%q): %v", newSession, err)
+	} else if !alive {
+		t.Errorf("post-Reconcile: new session %q not alive — Reconcile didn't rename the tmux session", newSession)
+	}
+	if alive, err := mgr.Tmux.HasSession(ctx, oldSession); err != nil {
+		t.Fatalf("HasSession(old=%q): %v", oldSession, err)
+	} else if alive {
+		t.Errorf("post-Reconcile: old session %q still alive — rename should be in-place, not a duplicate", oldSession)
+	}
+
+	// Status must reflect the post-rename reality. If observeStatus ran
+	// against the stale name, it would have flipped to stopped here and
+	// switch would Resurrect — the original failure mode. Asserting
+	// ready proves the new order (rename first, observe second) holds.
+	if got.Status != state.StatusReady {
+		t.Errorf("Status = %q; want %q (observeStatus must probe post-rename session name)", got.Status, state.StatusReady)
+	}
+}
+
+// TestReconcile_SkipsPinnedWorkspaces: pinned workspaces opt out of
+// branch auto-tracking (see SyncBranch's pin gate). Reconcile must
+// agree — otherwise a `canopy rename --pin` user would see their
+// frozen label clobbered on the next switch-triggered reconcile,
+// silently undoing the pin.
+func TestReconcile_SkipsPinnedWorkspaces(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(ctx, "pinned-row", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	originalBranch := ws.Branch
+	originalSession := ws.TmuxSessionName()
+
+	if err := mgr.SetPin(ctx, "pinned-row", true); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+
+	renameOut, err := exec.Command("git", "-C", ws.Path, "branch", "-m", "drifted").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch -m: %v\n%s", err, renameOut)
+	}
+
+	if _, err := mgr.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got, err := mgr.Find(ctx, "pinned-row")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if got.Branch != originalBranch {
+		t.Errorf("Branch = %q; want %q (pinned workspace must not auto-track)", got.Branch, originalBranch)
+	}
+	if alive, err := mgr.Tmux.HasSession(ctx, originalSession); err != nil || !alive {
+		t.Errorf("pinned session %q should still be alive under original name (alive=%v err=%v)", originalSession, alive, err)
+	}
+}
+
+// TestReconcile_KeepsBranchUpdateWhenSessionKilledExternally covers the
+// ErrSessionNotFound branch in Reconcile's tmux-rename block. When the
+// session was killed externally (user ran `tmux kill-session`, OOM
+// killer, etc.) but the branch was renamed on disk, the rename can't
+// happen — but we still want state.Branch to track the worktree's
+// actual branch so the next Resurrect builds a session with the
+// correct name. Reverting the branch would leave state.json pointing
+// at a stale branch name that no longer exists.
+func TestReconcile_KeepsBranchUpdateWhenSessionKilledExternally(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(ctx, "orphan-test", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	oldSession := ws.TmuxSessionName()
+
+	if err := mgr.Tmux.Kill(ctx, oldSession); err != nil {
+		t.Fatalf("Kill (setup): %v", err)
+	}
+
+	renameOut, err := exec.Command("git", "-C", ws.Path, "branch", "-m", "new-branch-name").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch -m: %v\n%s", err, renameOut)
+	}
+
+	if _, err := mgr.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got, err := mgr.Find(ctx, "orphan-test")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if got.Branch != "new-branch-name" {
+		t.Errorf("Branch = %q; want %q (branch update should persist even when tmux session was killed)", got.Branch, "new-branch-name")
+	}
+	if got.Status != state.StatusStopped {
+		t.Errorf("Status = %q; want %q (killed session should observe as stopped)", got.Status, state.StatusStopped)
+	}
+}
+
+// TestReconcile_RevertsBranchOnTmuxNameCollision covers the
+// ErrSessionNameInUse branch. When the rename target tmux session name
+// is already taken (another workspace's session, or a stray manual
+// `tmux new -s` that happens to match), the rename fails and we revert
+// the branch update — keeping state.Branch in sync with the still-live
+// original session. Without the revert, state.Branch would point at a
+// name the user can't resolve and the next attach would Resurrect a
+// duplicate.
+//
+// Setup mimics the real failure mode: rename the branch on disk, then
+// pre-create the destination tmux session by hand so Reconcile's
+// rename hits ErrSessionNameInUse.
+func TestReconcile_RevertsBranchOnTmuxNameCollision(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(ctx, "ws-a", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	originalBranch := ws.Branch
+	originalSession := ws.TmuxSessionName()
+
+	const collidingBranch = "collides"
+	renameOut, err := exec.Command("git", "-C", ws.Path, "branch", "-m", collidingBranch).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch -m: %v\n%s", err, renameOut)
+	}
+
+	// Pre-create the destination session by hand so Rename collides.
+	// Use the same TmuxSessionName format the renamer computes.
+	collidingSession := ws.ProjectBasename() + state.SessionSeparator + collidingBranch
+	if _, err := mgr.Tmux.Create(ctx, collidingSession, ws.Path, "", nil...); err != nil {
+		t.Fatalf("setup colliding session %q: %v", collidingSession, err)
+	}
+
+	if _, err := mgr.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got, err := mgr.Find(ctx, "ws-a")
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if got.Branch != originalBranch {
+		t.Errorf("Branch = %q; want %q (collision should revert the branch update)", got.Branch, originalBranch)
+	}
+	if alive, err := mgr.Tmux.HasSession(ctx, originalSession); err != nil || !alive {
+		t.Errorf("original session %q must remain alive (alive=%v err=%v)", originalSession, alive, err)
+	}
+}
+
 // TestBareAttach_CreatesDebugSession: BareAttach on a workspace
 // creates a -debug-suffixed tmux session at the workspace path with
 // CANOPY_* env vars set, but does NOT rerun scripts.setup. Subsumes
