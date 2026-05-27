@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/avinashjoshi/canopy/internal/state"
 )
 
@@ -172,5 +174,24 @@ func TestRenderVersionPill_devWinsOverUpgrade(t *testing.T) {
 	}
 	if strings.Contains(pill, "⇑") {
 		t.Errorf("DEV pill must NOT show upgrade arrow; got %q", pill)
+	}
+}
+
+// TestMainStatusStyle_DemotedFromViolet: in the v0.22 palette contraction
+// "main" status rows (the synthetic per-project row, not an attachable
+// workspace) lost their pale-violet fg because main rows are
+// informational, not actionable — they shouldn't borrow the brand-pill
+// color. Regression guard. Sibling to TestProjectHeaderStyle_NotViolet
+// in projectlist.
+func TestMainStatusStyle_DemotedFromViolet(t *testing.T) {
+	fg, ok := mainStatusStyle.GetForeground().(lipgloss.Color)
+	if !ok {
+		t.Fatalf("mainStatusStyle fg is not a lipgloss.Color; got %T", mainStatusStyle.GetForeground())
+	}
+	if string(fg) == "99" {
+		t.Errorf("mainStatusStyle fg should NOT be violet (99) — main rows are informational")
+	}
+	if string(fg) != "241" {
+		t.Errorf("mainStatusStyle fg: got %q, want \"241\" (dim grey)", string(fg))
 	}
 }
