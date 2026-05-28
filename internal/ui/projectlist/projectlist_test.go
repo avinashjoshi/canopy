@@ -856,6 +856,9 @@ func TestRender_MainStatusText(t *testing.T) {
 		m.SetRows([]state.GlobalRow{
 			{Project: "p", IsMain: true, Name: "(main)", Branch: "main", Status: "main", Alive: tc.alive},
 		})
+		// Lone non-running main rows are now classified idle and collapsed
+		// by default; expand the local host so the row's status text renders.
+		m.idleExpanded = map[string]bool{"": true}
 		m.cursor = -1
 		out := m.View()
 		if !strings.Contains(out, tc.want) {
@@ -924,6 +927,8 @@ func TestRender_MainRowBranchInGray(t *testing.T) {
 			Status: "main",
 		},
 	})
+	// Lone non-running main rows are idle by default — expand to render.
+	m.idleExpanded = map[string]bool{"": true}
 	m.cursor = -1 // off-row so the non-selected styling path fires
 	out := m.View()
 

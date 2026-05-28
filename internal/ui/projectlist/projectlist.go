@@ -468,11 +468,13 @@ func ClassifyIdle(rows []state.GlobalRow, idleExpanded map[string]bool) (hidden 
 		if r.Alive {
 			continue
 		}
-		// Only the dormant statuses qualify. Empty status (zero value
-		// before reconcile) and StatusStopped both mean "nothing's
-		// running here." Broken/orphaned/setting_up are attention
-		// states — keep them visible.
-		if r.Status != "" && r.Status != state.StatusStopped {
+		// Only the dormant statuses qualify. Empty status, StatusStopped,
+		// and the literal "main" string (stamped by BuildGlobalRows on
+		// every synthetic main row) all mean "nothing's running here" —
+		// the !Alive check above already excluded running mains.
+		// Broken/orphaned/setting_up are attention states — keep them
+		// visible.
+		if r.Status != "" && r.Status != state.StatusStopped && r.Status != "main" {
 			continue
 		}
 		idleByHost[r.Host]++
@@ -715,6 +717,12 @@ func (m Model) renderTable() (string, int) {
 		if m.idleExpanded[host] {
 			hint = "e collapse"
 		}
+		// Blank line above the roll-up so it doesn't glue to the last
+		// project's last workspace row. Cheap visual breath; the host
+		// transition / end-of-loop separators around this call still
+		// fire, giving the roll-up its own band.
+		b.WriteString("\n")
+		lineCount++
 		line := subtleHelper().Render(
 			fmt.Sprintf("  + %d idle %s  ·  %s", n, noun, hint),
 		)

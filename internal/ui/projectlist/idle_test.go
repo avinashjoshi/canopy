@@ -40,6 +40,19 @@ func TestClassifyIdle(t *testing.T) {
 			wantIdle:   map[string]int{"": 1},
 		},
 		{
+			// Regression: state.BuildGlobalRows stamps Status:"main" on
+			// every synthetic main row (listing.go:268). Pre-fix, the
+			// classifier's filter rejected anything that wasn't ""/stopped,
+			// so production rows never matched and the collapse feature
+			// was inert. This case locks the production row shape.
+			name: "lone main row, status=\"main\" (production shape) → idle and hidden",
+			rows: []state.GlobalRow{
+				{Project: "chrome-tab-close-guard", Name: "(main)", IsMain: true, Status: "main"},
+			},
+			wantHidden: []bool{true},
+			wantIdle:   map[string]int{"": 1},
+		},
+		{
 			name: "main row with workspaces → not idle",
 			rows: []state.GlobalRow{
 				{Project: "cravd", Name: "(main)", IsMain: true},
@@ -137,6 +150,33 @@ func TestRender_IdleRollupCollapsedByDefault(t *testing.T) {
 	}
 	if !strings.Contains(out, "fair-comet") {
 		t.Errorf("non-idle workspace 'fair-comet' should still render; got:\n%s", out)
+	}
+}
+
+// TestRender_IdleRollupHasBlankLineAbove: the roll-up line must have a
+// blank line above it so it doesn't visually glue to the last project's
+// last workspace row. Regression for the "too close" complaint when the
+// fix that finally classified production main rows as idle landed.
+func TestRender_IdleRollupHasBlankLineAbove(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{Project: "cravd", Name: "fair-comet", Status: state.StatusReady, Alive: true},
+		{Project: "brain", Name: "(main)", IsMain: true, Status: "main"},
+	})
+	out := stripStyle(m.View())
+	lines := strings.Split(out, "\n")
+	var rollupIdx = -1
+	for i, ln := range lines {
+		if strings.Contains(ln, "idle project") {
+			rollupIdx = i
+			break
+		}
+	}
+	if rollupIdx <= 0 {
+		t.Fatalf("roll-up line not found or at top; got:\n%s", out)
+	}
+	if strings.TrimSpace(lines[rollupIdx-1]) != "" {
+		t.Errorf("expected blank line immediately above roll-up; got %q (full:\n%s)", lines[rollupIdx-1], out)
 	}
 }
 
