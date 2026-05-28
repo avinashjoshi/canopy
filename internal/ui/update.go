@@ -777,10 +777,11 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.openAddHostForm()
 	}
 	// v0.17 Phase 1k: on a remote row, open the SAME TUI picker as
-	// local rows — Fresh + Prompt submit handlers branch on
-	// newTargetHost to dispatch `canopy new --on <host>` instead of
-	// the local createCmd. PR/Issue/Branch options are hidden in the
-	// picker for remote targets (they need remote gh integration).
+	// local rows — all submit handlers branch on newTargetHost to
+	// dispatch `canopy new --on <host>` instead of the local createCmd.
+	// v0.21 added PR/Issue/Branch parity: their loaders SSH `gh` and
+	// `git` against the remote project cwd so the picker populates the
+	// same lists as local.
 	if row, ok := m.list.CursorRow(); ok && row.Host != "" && !row.Loading {
 		m.newTargetHost = row.Host
 		m.newTargetRemoteCwd = m.remoteCwdForRow(row.Host, row.Project)

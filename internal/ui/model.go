@@ -299,14 +299,16 @@ type Model struct {
 	newTargetRoot string // ProjectRoot of the target project
 	newTargetName string // display name (Cfg.Project) for the chip + headers
 
-	// newTargetHost + newTargetRemoteCwd: v0.17 Phase 1k. When the user
-	// presses n on a REMOTE row, the picker opens with these set
-	// (newTargetMgr stays nil — there's no local Manager for a project
-	// that lives on tower). Submit handlers branch on newTargetHost
-	// being non-empty to dispatch `canopy new --on <host> --remote-cwd
-	// <path>` as a subprocess (captured to safeBuffer like createCmd).
-	// PR/Issue/Branch picker options are hidden when newTargetHost is
-	// set — those need remote `gh` integration we don't have yet.
+	// newTargetHost + newTargetRemoteCwd: v0.17 Phase 1k introduced the
+	// remote-row branch; v0.21 brought PR/Issue/Branch to parity. When
+	// the user presses n on a REMOTE row, the picker opens with these
+	// set (newTargetMgr stays nil — there's no local Manager for a
+	// project that lives on tower). Submit handlers branch on
+	// newTargetHost being non-empty to dispatch `canopy new --on <host>
+	// --remote-cwd <path>` as a subprocess (captured to safeBuffer like
+	// createCmd). Loaders for PR/Issue/Branch SSH `gh` / `git` on the
+	// host inside the remote project cwd so the picker populates the
+	// same lists the local flow does.
 	newTargetHost      string
 	newTargetRemoteCwd string
 

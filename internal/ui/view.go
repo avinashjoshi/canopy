@@ -775,14 +775,6 @@ func (m *Model) renderNewPicker() string {
 	b.WriteString("  How do you want to start?\n\n")
 
 	options := newPickerOptions
-	if m.newTargetHost != "" {
-		// Remote target: only Fresh + Prompt are wired through
-		// remoteCreateCmd. PR/Issue/Branch need a local gh that knows
-		// the remote project's GitHub repo, which we don't have. Hide
-		// them rather than show options that error on submit. v0.17
-		// Phase 1k.
-		options = newPickerOptions[:2]
-	}
 	for i, opt := range options {
 		// Cursor caret matches the main workspace list's "❯ " — same
 		// glyph across every screen so the eye reads "here's what's

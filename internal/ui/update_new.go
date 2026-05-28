@@ -67,43 +67,31 @@ func (m *Model) handleNewPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// 'f' is an alias if the user thinks "fresh".
 		return m.openNewFresh(), textinputBlink()
 	case "p":
-		// PR/Issue/Branch picker variants need a local Manager + gh
-		// against the project's repo — neither is available for a
-		// remote target. v0.17 Phase 1k hides those options from the
-		// remote picker and ignores the shortcut letters here.
-		if m.newTargetHost != "" {
-			return m, nil
-		}
+		// PR/Issue/Branch variants work for both local and remote
+		// targets — remote loaders SSH to the host's gh / git in the
+		// project cwd, and submit handlers dispatch through
+		// remoteCreateCmd so the remote canopy resolves the source.
+		// v0.21 (parity with local).
 		return m, m.openNewPR()
 	case "i":
-		if m.newTargetHost != "" {
-			return m, nil
-		}
 		return m, m.openNewIssue()
 	case "b":
-		if m.newTargetHost != "" {
-			return m, nil
-		}
 		return m, m.openNewBranch()
 	case "t":
 		// 't' for "task" — see newPickerOptions for the letter-choice
 		// rationale (no good mnemonic for "prompt", and `p` is taken).
 		return m.openNewPrompt()
 
-	// Arrow nav for keyboard-discovery users. Remote picker has only
-	// Fresh + Prompt (PR/Issue/Branch hidden), so bound the cursor
-	// at 1 instead of newPickerOptionCount-1.
+	// Arrow nav for keyboard-discovery users. Cursor bounded by the
+	// full picker option count for both local and remote targets
+	// (PR/Issue/Branch are reachable for remote as of v0.21).
 	case "up", "k":
 		if m.newPickerCursor > 0 {
 			m.newPickerCursor--
 		}
 		return m, nil
 	case "down", "j":
-		maxIdx := newPickerOptionCount - 1
-		if m.newTargetHost != "" {
-			maxIdx = 1
-		}
-		if m.newPickerCursor < maxIdx {
+		if m.newPickerCursor < newPickerOptionCount-1 {
 			m.newPickerCursor++
 		}
 		return m, nil
@@ -233,6 +221,10 @@ func (m *Model) handleNewPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // openNewPR transitions to the PR picker sub-modal and kicks off the
 // async loader. The loader returns prListLoadedMsg; until it arrives,
 // the renderer shows a "Loading PRs..." state.
+//
+// For a remote target the loader SSHes `gh pr list` on the host inside
+// the remote project cwd (v0.21 parity). For local it shells gh
+// directly against newTargetRoot as before.
 func (m *Model) openNewPR() tea.Cmd {
 	m.mode = newPRMode
 	m.listInput.Reset()
@@ -242,7 +234,26 @@ func (m *Model) openNewPR() tea.Cmd {
 	m.newLoading = true
 	m.newLoadErr = nil
 	m.newPRs = nil
-	return tea.Batch(textinputBlink(), loadPRsCmd(m.newTargetRoot))
+	return tea.Batch(textinputBlink(), m.loadPRsForTarget())
+}
+
+// loadPRsForTarget picks the local or remote loader based on whether
+// the current new-workspace target is remote. Returns a tea.Cmd that
+// emits prListLoadedMsg either way so the receiving Update handler
+// doesn't need to branch on host. Falls back to a synchronous
+// errored loader when the SSH target can't be resolved (host vanished
+// from registry mid-flow) — the picker surfaces the error inline.
+func (m *Model) loadPRsForTarget() tea.Cmd {
+	if m.newTargetHost == "" {
+		return loadPRsCmd(m.newTargetRoot)
+	}
+	target, err := m.resolveHostForExec(m.newTargetHost)
+	if err != nil {
+		return func() tea.Msg {
+			return prListLoadedMsg{err: err}
+		}
+	}
+	return loadPRsRemoteCmd(target, m.newTargetRemoteCwd)
 }
 
 // prListLoadedMsg carries the result of an async ghx.ListPRs call.
@@ -259,6 +270,16 @@ type prListLoadedMsg struct {
 func loadPRsCmd(projectRoot string) tea.Cmd {
 	return func() tea.Msg {
 		prs, err := ghx.ListPRs(context.Background(), projectRoot, 20)
+		return prListLoadedMsg{prs: prs, err: err}
+	}
+}
+
+// loadPRsRemoteCmd is the remote-host analog of loadPRsCmd. SSHes
+// `gh pr list` on sshTarget inside remoteCwd. Same prListLoadedMsg
+// payload so the picker render path is identical to the local case.
+func loadPRsRemoteCmd(sshTarget, remoteCwd string) tea.Cmd {
+	return func() tea.Msg {
+		prs, err := ghx.RemoteListPRs(context.Background(), sshTarget, remoteCwd, 20)
 		return prListLoadedMsg{prs: prs, err: err}
 	}
 }
@@ -326,8 +347,10 @@ func (m *Model) handleNewPRKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // submitNewPR is the shared "go fetch this PR and create the
 // workspace" path used by both enter-with-number and enter-on-row.
-// Flips to busyMode and dispatches the existing createCmd; the
-// resolver does the gh + git fetch in the goroutine.
+// Flips to busyMode and dispatches the appropriate create command:
+// local createCmd for an in-process Manager, or remoteCreateCmd which
+// spawns `canopy new --on <host> --pr <num>` so the remote canopy
+// resolves the PR via its own gh + git (v0.21 parity).
 func (m *Model) submitNewPR(num int) (tea.Model, tea.Cmd) {
 	spec := workspace.SourceSpec{PR: num}
 	m.busyOp = busyOpCreate
@@ -337,11 +360,16 @@ func (m *Model) submitNewPR(num int) (tea.Model, tea.Cmd) {
 	m.busyErr = nil
 	m.mode = busyMode
 	m.listInput.Blur()
+	if m.newTargetHost != "" {
+		return m, remoteCreateCmd(m.canopyBinPath(), m.newTargetHost, m.newTargetRemoteCwd, "", spec, "")
+	}
 	return m, createCmd(m.newTargetMgr, "", spec)
 }
 
 // openNewIssue is the issue-picker analog of openNewPR. Same shape,
 // different data type: ghx.IssueSummary instead of PRSummary.
+//
+// Routes to the remote loader for remote targets (v0.21 parity).
 func (m *Model) openNewIssue() tea.Cmd {
 	m.mode = newIssueMode
 	m.listInput.Reset()
@@ -351,7 +379,21 @@ func (m *Model) openNewIssue() tea.Cmd {
 	m.newLoading = true
 	m.newLoadErr = nil
 	m.newIssues = nil
-	return tea.Batch(textinputBlink(), loadIssuesCmd(m.newTargetRoot))
+	return tea.Batch(textinputBlink(), m.loadIssuesForTarget())
+}
+
+// loadIssuesForTarget mirrors loadPRsForTarget for issues.
+func (m *Model) loadIssuesForTarget() tea.Cmd {
+	if m.newTargetHost == "" {
+		return loadIssuesCmd(m.newTargetRoot)
+	}
+	target, err := m.resolveHostForExec(m.newTargetHost)
+	if err != nil {
+		return func() tea.Msg {
+			return issueListLoadedMsg{err: err}
+		}
+	}
+	return loadIssuesRemoteCmd(target, m.newTargetRemoteCwd)
 }
 
 // issueListLoadedMsg is the issue analog of prListLoadedMsg.
@@ -364,6 +406,14 @@ type issueListLoadedMsg struct {
 func loadIssuesCmd(projectRoot string) tea.Cmd {
 	return func() tea.Msg {
 		issues, err := ghx.ListIssues(context.Background(), projectRoot, 20)
+		return issueListLoadedMsg{issues: issues, err: err}
+	}
+}
+
+// loadIssuesRemoteCmd is the remote-host analog of loadIssuesCmd.
+func loadIssuesRemoteCmd(sshTarget, remoteCwd string) tea.Cmd {
+	return func() tea.Msg {
+		issues, err := ghx.RemoteListIssues(context.Background(), sshTarget, remoteCwd, 20)
 		return issueListLoadedMsg{issues: issues, err: err}
 	}
 }
@@ -411,7 +461,8 @@ func (m *Model) handleNewIssueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // submitNewIssue is the shared "go fetch this issue and create the
-// workspace" path. Same shape as submitNewPR.
+// workspace" path. Same shape as submitNewPR — routes through
+// remoteCreateCmd for a remote target.
 func (m *Model) submitNewIssue(num int) (tea.Model, tea.Cmd) {
 	spec := workspace.SourceSpec{Issue: num}
 	m.busyOp = busyOpCreate
@@ -421,6 +472,9 @@ func (m *Model) submitNewIssue(num int) (tea.Model, tea.Cmd) {
 	m.busyErr = nil
 	m.mode = busyMode
 	m.listInput.Blur()
+	if m.newTargetHost != "" {
+		return m, remoteCreateCmd(m.canopyBinPath(), m.newTargetHost, m.newTargetRemoteCwd, "", spec, "")
+	}
 	return m, createCmd(m.newTargetMgr, "", spec)
 }
 
@@ -428,6 +482,8 @@ func (m *Model) submitNewIssue(num int) (tea.Model, tea.Cmd) {
 // `git for-each-ref` is fast enough that we can load synchronously
 // in the open path. Loading state is kept for parity with PR/issue
 // pickers and to handle the (rare) slow-disk case.
+//
+// Routes to the remote loader for remote targets (v0.21 parity).
 func (m *Model) openNewBranch() tea.Cmd {
 	m.mode = newBranchMode
 	m.listInput.Reset()
@@ -437,7 +493,21 @@ func (m *Model) openNewBranch() tea.Cmd {
 	m.newLoading = true
 	m.newLoadErr = nil
 	m.newBranches = nil
-	return tea.Batch(textinputBlink(), loadBranchesCmd(m.newTargetRoot))
+	return tea.Batch(textinputBlink(), m.loadBranchesForTarget())
+}
+
+// loadBranchesForTarget mirrors loadPRsForTarget for branches.
+func (m *Model) loadBranchesForTarget() tea.Cmd {
+	if m.newTargetHost == "" {
+		return loadBranchesCmd(m.newTargetRoot)
+	}
+	target, err := m.resolveHostForExec(m.newTargetHost)
+	if err != nil {
+		return func() tea.Msg {
+			return branchListLoadedMsg{err: err}
+		}
+	}
+	return loadBranchesRemoteCmd(target, m.newTargetRemoteCwd)
 }
 
 // branchListLoadedMsg carries the result of an async git
@@ -454,6 +524,14 @@ type branchListLoadedMsg struct {
 func loadBranchesCmd(projectRoot string) tea.Cmd {
 	return func() tea.Msg {
 		branches, err := git.ListBranches(context.Background(), projectRoot)
+		return branchListLoadedMsg{branches: branches, err: err}
+	}
+}
+
+// loadBranchesRemoteCmd is the remote-host analog of loadBranchesCmd.
+func loadBranchesRemoteCmd(sshTarget, remoteCwd string) tea.Cmd {
+	return func() tea.Msg {
+		branches, err := git.RemoteListBranches(context.Background(), sshTarget, remoteCwd)
 		return branchListLoadedMsg{branches: branches, err: err}
 	}
 }
@@ -526,7 +604,8 @@ func (m *Model) handleNewBranchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // submitNewBranch flips to busyMode with a SourceSpec for the
 // chosen branch. Allows the SourceSpec to carry AllowLocal for
-// local-only branches.
+// local-only branches. Routes through remoteCreateCmd for a remote
+// target (v0.21 parity).
 func (m *Model) submitNewBranch(spec workspace.SourceSpec) (tea.Model, tea.Cmd) {
 	m.busyOp = busyOpCreate
 	m.busyTitle = newBusyTitle("", spec)
@@ -535,6 +614,9 @@ func (m *Model) submitNewBranch(spec workspace.SourceSpec) (tea.Model, tea.Cmd) 
 	m.busyErr = nil
 	m.mode = busyMode
 	m.listInput.Blur()
+	if m.newTargetHost != "" {
+		return m, remoteCreateCmd(m.canopyBinPath(), m.newTargetHost, m.newTargetRemoteCwd, "", spec, "")
+	}
 	return m, createCmd(m.newTargetMgr, "", spec)
 }
 

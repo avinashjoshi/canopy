@@ -439,32 +439,54 @@ func TestActionNewWorkspace_RemoteRowOpensPicker(t *testing.T) {
 	}
 }
 
-// TestNewPicker_RemoteSkipsPRIssueBranchShortcuts: when the picker is
-// open against a remote target, the p/i/b shortcut keys (PR / Issue /
-// Branch) are no-ops because those variants need a local gh against
-// the remote project's repo. Hidden options shouldn't be reachable.
-func TestNewPicker_RemoteSkipsPRIssueBranchShortcuts(t *testing.T) {
+// TestNewPicker_RemoteReachesPRIssueBranchShortcuts: v0.21 parity —
+// p/i/b shortcuts (PR / Issue / Branch) now open the corresponding
+// sub-modal for remote targets too. Loaders SSH `gh` / `git` on the
+// host inside the remote project cwd; submit handlers dispatch through
+// remoteCreateCmd so the remote canopy resolves the source. Previously
+// these options were hidden for remote (v0.17 Phase 1k); flipping the
+// gate is what the parity work undoes.
+func TestNewPicker_RemoteReachesPRIssueBranchShortcuts(t *testing.T) {
+	tests := []struct {
+		key      string
+		wantMode viewMode
+	}{
+		{"p", newPRMode},
+		{"i", newIssueMode},
+		{"b", newBranchMode},
+	}
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			m := newTestModel(false)
+			m.mode = newPickerMode
+			m.newTargetHost = "tower"
+			m.newTargetRemoteCwd = "/home/avi/Work/cravd"
+			m.hostList = []host.Host{
+				{Name: "tower", SSHTarget: "u@t", Type: "ssh"},
+			}
+			_, _ = m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+			if m.mode != tc.wantMode {
+				t.Errorf("remote picker: key %q mode = %v; want %v", tc.key, m.mode, tc.wantMode)
+			}
+		})
+	}
+}
+
+// TestNewPicker_RemoteCursorReachesAllOptions: arrow nav on the remote
+// picker spans all 5 options (Fresh, Prompt, PR, Issue, Branch),
+// matching local. Before v0.21 parity the cursor was bounded to 1 to
+// match the hidden-options slice.
+func TestNewPicker_RemoteCursorReachesAllOptions(t *testing.T) {
 	m := newTestModel(false)
 	m.mode = newPickerMode
 	m.newTargetHost = "tower"
 
-	// p, i, b should NOT change mode (would otherwise open the PR /
-	// Issue / Branch sub-modal).
-	for _, k := range []string{"p", "i", "b"} {
-		m.mode = newPickerMode
-		_, _ = m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
-		if m.mode != newPickerMode {
-			t.Errorf("remote picker: key %q changed mode to %v; want stays newPickerMode", k, m.mode)
-		}
-	}
-
-	// Down arrow should NOT advance past index 1 (Fresh + Prompt only).
 	m.newPickerCursor = 0
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		_, _ = m.handleNewPickerKey(tea.KeyMsg{Type: tea.KeyDown})
 	}
-	if m.newPickerCursor > 1 {
-		t.Errorf("remote picker: cursor = %d after 5 down presses; want bounded to 1", m.newPickerCursor)
+	if want := newPickerOptionCount - 1; m.newPickerCursor != want {
+		t.Errorf("remote picker: cursor = %d after 10 down presses; want %d", m.newPickerCursor, want)
 	}
 }
 
@@ -2045,6 +2067,166 @@ func TestNewPR_LoadedMsgPopulatesList(t *testing.T) {
 	if len(m.newPRs) != 1 || m.newPRs[0].Number != 42 {
 		t.Errorf("newPRs not populated; got %+v", m.newPRs)
 	}
+}
+
+// TestSubmitNewPR_RemoteRoutesThroughRemoteCreateCmd: when the new-
+// workspace target is a remote host, submitNewPR must dispatch via
+// remoteCreateCmd (spawning `canopy new --on <host> --pr <num>`)
+// instead of createCmd which would try to use the nil newTargetMgr.
+// Before v0.21 PR/Issue/Branch were hidden for remote — now they
+// route end-to-end. The cmd is returned but not executed; we sanity-
+// check that busy state flips and a cmd is produced (would crash
+// if hitting the nil-mgr createCmd path).
+func TestSubmitNewPR_RemoteRoutesThroughRemoteCreateCmd(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newPRMode
+	m.newTargetHost = "tower"
+	m.newTargetRemoteCwd = "/home/avi/Work/cravd"
+	m.newTargetMgr = nil // remote: no local Manager
+
+	model, cmd := m.submitNewPR(42)
+	got := model.(*Model)
+	if got.mode != busyMode {
+		t.Errorf("mode after submit = %v; want busyMode", got.mode)
+	}
+	if cmd == nil {
+		t.Fatal("remote submitNewPR returned nil cmd; want remoteCreateCmd")
+	}
+	if !strings.Contains(got.busyTitle, "PR #42") {
+		t.Errorf("busyTitle = %q; want mention of PR #42", got.busyTitle)
+	}
+}
+
+// TestSubmitNewIssue_RemoteRoutesThroughRemoteCreateCmd: same as the
+// PR variant for issues. submitNewIssue must not call createCmd with
+// a nil Manager when the target is remote.
+func TestSubmitNewIssue_RemoteRoutesThroughRemoteCreateCmd(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newIssueMode
+	m.newTargetHost = "tower"
+	m.newTargetRemoteCwd = "/home/avi/Work/cravd"
+	m.newTargetMgr = nil
+
+	model, cmd := m.submitNewIssue(17)
+	got := model.(*Model)
+	if got.mode != busyMode {
+		t.Errorf("mode after submit = %v; want busyMode", got.mode)
+	}
+	if cmd == nil {
+		t.Fatal("remote submitNewIssue returned nil cmd; want remoteCreateCmd")
+	}
+	if !strings.Contains(got.busyTitle, "issue #17") {
+		t.Errorf("busyTitle = %q; want mention of issue #17", got.busyTitle)
+	}
+}
+
+// TestSubmitNewBranch_RemoteRoutesThroughRemoteCreateCmd: same for
+// the branch picker — the chosen ref must reach the remote canopy
+// via --branch.
+func TestSubmitNewBranch_RemoteRoutesThroughRemoteCreateCmd(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = newBranchMode
+	m.newTargetHost = "tower"
+	m.newTargetRemoteCwd = "/home/avi/Work/cravd"
+	m.newTargetMgr = nil
+
+	spec := workspace.SourceSpec{Branch: "feat/oauth"}
+	model, cmd := m.submitNewBranch(spec)
+	got := model.(*Model)
+	if got.mode != busyMode {
+		t.Errorf("mode after submit = %v; want busyMode", got.mode)
+	}
+	if cmd == nil {
+		t.Fatal("remote submitNewBranch returned nil cmd; want remoteCreateCmd")
+	}
+	if !strings.Contains(got.busyTitle, "feat/oauth") {
+		t.Errorf("busyTitle = %q; want mention of branch feat/oauth", got.busyTitle)
+	}
+}
+
+// TestLoadPRsForTarget_HostMissingFromRegistrySurfacesError: if the
+// remote host vanished from the registry snapshot between picker open
+// and loader dispatch, the loader returns a prListLoadedMsg with the
+// error rather than panic'ing on an empty SSH target. The picker
+// surfaces the error inline as "host not found in registry snapshot".
+func TestLoadPRsForTarget_HostMissingFromRegistrySurfacesError(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetHost = "tower"
+	m.newTargetRemoteCwd = "/home/avi/Work/cravd"
+	m.hostList = nil // registry empty — host not resolvable
+
+	cmd := m.loadPRsForTarget()
+	if cmd == nil {
+		t.Fatal("loadPRsForTarget returned nil cmd")
+	}
+	msg := cmd()
+	loaded, ok := msg.(prListLoadedMsg)
+	if !ok {
+		t.Fatalf("got msg type %T; want prListLoadedMsg", msg)
+	}
+	if loaded.err == nil {
+		t.Errorf("loaded.err should be non-nil when host missing")
+	}
+}
+
+// TestLoadIssuesForTarget_HostMissingFromRegistrySurfacesError: same
+// host-missing fallback as loadPRsForTarget, for the issue loader.
+func TestLoadIssuesForTarget_HostMissingFromRegistrySurfacesError(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetHost = "tower"
+	m.newTargetRemoteCwd = "/home/avi/Work/cravd"
+	m.hostList = nil
+
+	cmd := m.loadIssuesForTarget()
+	if cmd == nil {
+		t.Fatal("loadIssuesForTarget returned nil cmd")
+	}
+	loaded, ok := cmd().(issueListLoadedMsg)
+	if !ok {
+		t.Fatalf("got msg type %T; want issueListLoadedMsg", cmd())
+	}
+	if loaded.err == nil {
+		t.Errorf("loaded.err should be non-nil when host missing")
+	}
+}
+
+// TestLoadBranchesForTarget_HostMissingFromRegistrySurfacesError: same
+// host-missing fallback for the branch loader.
+func TestLoadBranchesForTarget_HostMissingFromRegistrySurfacesError(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetHost = "tower"
+	m.newTargetRemoteCwd = "/home/avi/Work/cravd"
+	m.hostList = nil
+
+	cmd := m.loadBranchesForTarget()
+	if cmd == nil {
+		t.Fatal("loadBranchesForTarget returned nil cmd")
+	}
+	loaded, ok := cmd().(branchListLoadedMsg)
+	if !ok {
+		t.Fatalf("got msg type %T; want branchListLoadedMsg", cmd())
+	}
+	if loaded.err == nil {
+		t.Errorf("loaded.err should be non-nil when host missing")
+	}
+}
+
+// TestLoadPRsForTarget_LocalUsesLocalLoader: when newTargetHost is
+// empty, loadPRsForTarget falls through to loadPRsCmd (no SSH lookup).
+// Sanity check that the dispatch hasn't broken the local path while
+// adding the remote one.
+func TestLoadPRsForTarget_LocalUsesLocalLoader(t *testing.T) {
+	m := newTestModel(false)
+	m.newTargetHost = ""
+	m.newTargetRoot = t.TempDir() // gh will fail here, but the cmd is fine
+
+	cmd := m.loadPRsForTarget()
+	if cmd == nil {
+		t.Fatal("loadPRsForTarget(local) returned nil cmd")
+	}
+	// Don't execute — the goroutine would try gh. Just confirm the
+	// cmd was constructed without going through the SSH-resolve path
+	// (which would fail with an empty hostList).
 }
 
 // TestNewPR_LoadedMsgWithError: error in the loader surfaces as
