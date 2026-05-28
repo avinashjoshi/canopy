@@ -5,6 +5,18 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.13.0] - 2026-05-28 — `canopy rm` not-found error tells you why
+
+The terse `Error: workspace.Find(noble-lichen): workspace: not found` from `canopy rm` left users — especially when it surfaced through the SSH dispatch on a remote host — with no signal about *why* the workspace was missing. Typo? Stale TUI row? Wrong project on the remote? Same five words for all three.
+
+`cmd/canopy/rm.go` now enriches the not-found path through a new `rmEnrichNotFound`. The replacement error names the project the lookup ran against, lists the workspaces that ARE registered there (catches typos and stale TUI rows in the same line — the user sees the truth), surfaces any other project on this host that has a workspace by the same name (the cwd-into-wrong-project mismatch that's especially common in remote dispatch), and points at `--force` as the silent-success escape hatch. The shortcut from `rmHandleFindErr` still wins when `--force` is set, so the TUI's force-delete-on-stale-row path stays quiet.
+
+The lookup is best-effort: `mgr.List` and `mgr.Store.Load` failures degrade to the shorter form rather than masking the underlying not-found signal, so a busted state store can't make this path noisier than the original. Tests in `cmd/canopy/rm_test.go` cover the four shapes — siblings listed, empty project, cross-project hint present, no cross-project false positive.
+
+### Fixed
+
+- **`canopy rm <name>` now explains itself when the workspace isn't there.** The error names the project, lists the workspaces it *did* find there, flags a same-named workspace under another project root if one exists, and suggests `--force` for "already gone" cases. Most useful through remote SSH dispatch — `Dispatching to … Error: workspace.Find(X): workspace: not found` used to be the whole diagnostic; now the user sees the remote's actual workspace list right there in their terminal.
+
 ## [0.21.12.0] - 2026-05-28 — Idle collapse expands remote hosts; slow remote `ls --json` no longer marks the connection bad
 
 Two TUI bugs that both stemmed from the same blind spot: per-host nuance falling over the moment a host's only rows were ones the user couldn't see or reach.

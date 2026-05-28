@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/avinashjoshi/canopy/internal/config"
+	"github.com/avinashjoshi/canopy/internal/state"
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
@@ -67,5 +71,117 @@ func TestRmHandleFindErr_ForceOnOtherErrors(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("out = %q; want empty (no message for non-not-found)", out.String())
+	}
+}
+
+// newTestManager builds a Manager backed by a fresh state.Store in a
+// temp dir, suitable for read-side tests like rmEnrichNotFound. It
+// intentionally skips workspace.New (which runs migration + tmux init)
+// so tests stay hermetic and fast.
+func newTestManager(t *testing.T, project, projectRoot string) *workspace.Manager {
+	t.Helper()
+	home := t.TempDir()
+	store, err := state.NewStore(filepath.Join(home, ".canopy"))
+	if err != nil {
+		t.Fatalf("state.NewStore: %v", err)
+	}
+	return &workspace.Manager{
+		Cfg:        &config.Config{Project: project, ProjectRoot: projectRoot},
+		Store:      store,
+		CanopyHome: filepath.Join(home, ".canopy"),
+	}
+}
+
+// addWorkspace seeds a workspace row into the store. Tests use it to
+// arrange the state.json side of the world before calling rmEnrichNotFound.
+func addWorkspace(t *testing.T, mgr *workspace.Manager, projectRoot, name string) {
+	t.Helper()
+	err := mgr.Store.WithLock(func(s *state.State) error {
+		return s.Add(state.Workspace{ProjectRoot: projectRoot, Name: name, Status: state.StatusReady})
+	})
+	if err != nil {
+		t.Fatalf("seed workspace %s/%s: %v", projectRoot, name, err)
+	}
+}
+
+// TestRmEnrichNotFound_ListsSiblings is the happy path: the named
+// workspace doesn't exist, but two sibling workspaces do. The error
+// should name them so the user spots a typo (or notices their TUI
+// list was stale).
+func TestRmEnrichNotFound_ListsSiblings(t *testing.T) {
+	mgr := newTestManager(t, "canopy", "/home/u/Work/canopy")
+	addWorkspace(t, mgr, "/home/u/Work/canopy", "alpha-fox")
+	addWorkspace(t, mgr, "/home/u/Work/canopy", "bravo-jay")
+
+	err := rmEnrichNotFound(context.Background(), mgr, "noble-lichen")
+	msg := err.Error()
+
+	if !strings.Contains(msg, `workspace "noble-lichen" not found in project "canopy"`) {
+		t.Errorf("missing project-qualified target name in %q", msg)
+	}
+	if !strings.Contains(msg, "/home/u/Work/canopy") {
+		t.Errorf("missing project root in %q", msg)
+	}
+	if !strings.Contains(msg, "alpha-fox") || !strings.Contains(msg, "bravo-jay") {
+		t.Errorf("missing sibling workspace names in %q", msg)
+	}
+	if !strings.Contains(msg, "--force") {
+		t.Errorf("missing --force hint in %q", msg)
+	}
+	if !strings.Contains(msg, "stale") {
+		t.Errorf("missing stale-list hint in %q", msg)
+	}
+}
+
+// TestRmEnrichNotFound_EmptyProject covers the "fresh project, nothing
+// here to delete" case — the user should see an explicit "no
+// workspaces are registered" line instead of a confusing "Workspaces
+// here: " with nothing after the colon.
+func TestRmEnrichNotFound_EmptyProject(t *testing.T) {
+	mgr := newTestManager(t, "canopy", "/home/u/Work/canopy")
+
+	err := rmEnrichNotFound(context.Background(), mgr, "noble-lichen")
+	msg := err.Error()
+
+	if !strings.Contains(msg, "No workspaces are registered") {
+		t.Errorf("missing empty-project sentence in %q", msg)
+	}
+	if strings.Contains(msg, "Workspaces here:") {
+		t.Errorf("should not list workspaces when there are none: %q", msg)
+	}
+}
+
+// TestRmEnrichNotFound_CrossProjectHint covers the "user is in the
+// wrong project root" case. A workspace with the requested name lives
+// under a different project on this host. The error should surface
+// the other project's root so the user can cd there.
+func TestRmEnrichNotFound_CrossProjectHint(t *testing.T) {
+	mgr := newTestManager(t, "canopy", "/home/u/Work/canopy")
+	addWorkspace(t, mgr, "/home/u/Work/other", "noble-lichen")
+
+	err := rmEnrichNotFound(context.Background(), mgr, "noble-lichen")
+	msg := err.Error()
+
+	if !strings.Contains(msg, "/home/u/Work/other") {
+		t.Errorf("missing other-project root in %q", msg)
+	}
+	if !strings.Contains(msg, "registered under") {
+		t.Errorf("missing cross-project hint phrasing in %q", msg)
+	}
+}
+
+// TestRmEnrichNotFound_NoCrossProjectFalsePositive: when no other
+// project has a workspace by this name, we must NOT emit the
+// "registered under" line. Otherwise the user chases a phantom.
+func TestRmEnrichNotFound_NoCrossProjectFalsePositive(t *testing.T) {
+	mgr := newTestManager(t, "canopy", "/home/u/Work/canopy")
+	addWorkspace(t, mgr, "/home/u/Work/canopy", "alpha-fox")
+	addWorkspace(t, mgr, "/home/u/Work/other", "totally-different")
+
+	err := rmEnrichNotFound(context.Background(), mgr, "noble-lichen")
+	msg := err.Error()
+
+	if strings.Contains(msg, "registered under") {
+		t.Errorf("false-positive cross-project hint in %q", msg)
 	}
 }
