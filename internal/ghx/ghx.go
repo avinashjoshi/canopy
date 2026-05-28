@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/host"
 )
 
 var log = clog.Pkg("ghx")
@@ -176,6 +177,110 @@ func ListPRs(ctx context.Context, projectRoot string, limit int) ([]PRSummary, e
 	listCacheMu.Unlock()
 
 	return prs, nil
+}
+
+// RemoteListPRs is the SSH analog of ListPRs: runs `gh pr list` on a
+// remote host inside `remoteCwd` and parses the same JSON. Used by the
+// new-workspace TUI picker against a remote-row target where the local
+// gh client has no knowledge of the remote project's repo.
+//
+// sshTarget is the literal ssh argument (e.g. "user@host" or a Host
+// alias); remoteCwd is the absolute project path on the remote.
+// Returns an empty slice (not an error) when the remote repo has no
+// open PRs. Errors include the remote stderr when available so the
+// picker can surface "gh not installed on tower" rather than a
+// generic "exit 1".
+//
+// Cache key includes sshTarget + remoteCwd so two hosts (or two
+// projects on the same host) don't share a list.
+func RemoteListPRs(ctx context.Context, sshTarget, remoteCwd string, limit int) ([]PRSummary, error) {
+	if sshTarget == "" || remoteCwd == "" {
+		return nil, fmt.Errorf("RemoteListPRs: sshTarget and remoteCwd required")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	cacheKey := "pr|remote|" + sshTarget + "|" + remoteCwd
+	listCacheMu.Lock()
+	if e, ok := listCacheMap[cacheKey]; ok && time.Since(e.at) < listCacheTTL {
+		out := append([]PRSummary(nil), e.prs...)
+		listCacheMu.Unlock()
+		return out, nil
+	}
+	listCacheMu.Unlock()
+
+	remoteCmd := fmt.Sprintf("cd %s && gh pr list --state open --limit %d --json number,title,author,headRefName",
+		host.ShellSingleQuote(remoteCwd), limit)
+	out, err := runSSHCapture(ctx, sshTarget, remoteCmd)
+	if err != nil {
+		log.Debug("ghx.RemoteListPRs.failed", "target", sshTarget, "cwd", remoteCwd, "err", err)
+		return nil, fmt.Errorf("RemoteListPRs: %w", err)
+	}
+	var prs []PRSummary
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, fmt.Errorf("RemoteListPRs: parse: %w", err)
+	}
+
+	listCacheMu.Lock()
+	listCacheMap[cacheKey] = listCacheEntry{prs: prs, at: time.Now()}
+	listCacheMu.Unlock()
+
+	return prs, nil
+}
+
+// RemoteListIssues is the SSH analog of ListIssues. Same shape and
+// caching policy as RemoteListPRs.
+func RemoteListIssues(ctx context.Context, sshTarget, remoteCwd string, limit int) ([]IssueSummary, error) {
+	if sshTarget == "" || remoteCwd == "" {
+		return nil, fmt.Errorf("RemoteListIssues: sshTarget and remoteCwd required")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	cacheKey := "issue|remote|" + sshTarget + "|" + remoteCwd
+	listCacheMu.Lock()
+	if e, ok := listCacheMap[cacheKey]; ok && time.Since(e.at) < listCacheTTL {
+		out := append([]IssueSummary(nil), e.issues...)
+		listCacheMu.Unlock()
+		return out, nil
+	}
+	listCacheMu.Unlock()
+
+	remoteCmd := fmt.Sprintf("cd %s && gh issue list --state open --limit %d --json number,title,author",
+		host.ShellSingleQuote(remoteCwd), limit)
+	out, err := runSSHCapture(ctx, sshTarget, remoteCmd)
+	if err != nil {
+		log.Debug("ghx.RemoteListIssues.failed", "target", sshTarget, "cwd", remoteCwd, "err", err)
+		return nil, fmt.Errorf("RemoteListIssues: %w", err)
+	}
+	var issues []IssueSummary
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("RemoteListIssues: parse: %w", err)
+	}
+
+	listCacheMu.Lock()
+	listCacheMap[cacheKey] = listCacheEntry{issues: issues, at: time.Now()}
+	listCacheMu.Unlock()
+
+	return issues, nil
+}
+
+// runSSHCapture runs a remote command via host.SSHRunUserBatch and
+// returns stdout bytes. Stderr is captured into the error so the
+// caller surfaces remote gh's own message ("gh: command not found",
+// "could not find pull request") instead of a generic exit.
+func runSSHCapture(ctx context.Context, sshTarget, remoteCmd string) ([]byte, error) {
+	cmd := host.SSHRunUserBatch(ctx, sshTarget, remoteCmd)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("ssh %s: %s", sshTarget, strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, fmt.Errorf("ssh %s: %w", sshTarget, err)
+	}
+	return out, nil
 }
 
 // ListIssues returns up to `limit` open issues. Same shape and

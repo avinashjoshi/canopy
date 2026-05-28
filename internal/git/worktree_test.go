@@ -242,6 +242,28 @@ func TestRefExists(t *testing.T) {
 	}
 }
 
+// TestRemoteListBranches_RejectsEmptyInputs: ssh target and remoteCwd
+// are mandatory — bounce upfront so a malformed invocation never reaches
+// ssh. The TUI loader surfaces the resulting error inline.
+func TestRemoteListBranches_RejectsEmptyInputs(t *testing.T) {
+	tests := []struct {
+		name              string
+		target, remoteCwd string
+	}{
+		{"empty target", "", "/home/avi/Work/cravd"},
+		{"empty cwd", "u@t", ""},
+		{"both empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := canopygit.RemoteListBranches(context.Background(), tc.target, tc.remoteCwd)
+			if err == nil {
+				t.Fatalf("expected error for %s; got nil", tc.name)
+			}
+		})
+	}
+}
+
 // newScratchRepo creates a brand-new git repo in a temp dir with one empty
 // initial commit (worktree-add requires at least one commit to know what
 // HEAD points at). Returns the absolute path. Cleanup is automatic via t.TempDir.

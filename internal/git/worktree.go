@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
+	"github.com/avinashjoshi/canopy/internal/host"
 )
 
 var log = clog.Pkg("git")
@@ -178,6 +179,51 @@ func ListBranches(ctx context.Context, repoRoot string) ([]string, error) {
 		}
 		// Skip HEAD pointers ("origin/HEAD") — they're aliases, not
 		// real branches the user wants to check out.
+		if strings.HasSuffix(line, "/HEAD") {
+			continue
+		}
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		branches = append(branches, line)
+	}
+	sort.Strings(branches)
+	return branches, nil
+}
+
+// RemoteListBranches is the SSH analog of ListBranches: runs the same
+// `for-each-ref` command on a remote host inside `remoteCwd`. Output
+// shape matches ListBranches (bare locals + "origin/<name>" remotes,
+// dedup'd, sorted) so callers can swap between local and remote without
+// branching on result shape.
+//
+// sshTarget is the literal ssh argument; remoteCwd is the absolute
+// project path on the remote. Best-effort: errors include the remote
+// stderr so the picker can surface "not a git repository on tower"
+// rather than a generic failure.
+func RemoteListBranches(ctx context.Context, sshTarget, remoteCwd string) ([]string, error) {
+	if sshTarget == "" || remoteCwd == "" {
+		return nil, fmt.Errorf("RemoteListBranches: sshTarget and remoteCwd required")
+	}
+	remoteCmd := fmt.Sprintf("git -C %s for-each-ref --format=%%(refname:short) refs/heads/ refs/remotes/origin/",
+		host.ShellSingleQuote(remoteCwd))
+	cmd := host.SSHRunUserBatch(ctx, sshTarget, remoteCmd)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("git.RemoteListBranches: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, fmt.Errorf("git.RemoteListBranches: %w", err)
+	}
+
+	seen := map[string]bool{}
+	branches := make([]string, 0, 32)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 		if strings.HasSuffix(line, "/HEAD") {
 			continue
 		}
