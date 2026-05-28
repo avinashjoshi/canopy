@@ -5,6 +5,28 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.11.0] - 2026-05-27 — Idle-collapse roll-up actually fires now (the v0.21.7.0 feature was inert in production)
+
+v0.21.7.0 shipped a "+ N idle projects · e expand" collapse for projects whose only row was a non-running `(main)` — the whole point of the redesign. It never fired. Open the workspaces tab against a host with a dozen registered-but-untouched projects and every single `(main) not started` row was still on screen, exactly as before.
+
+`ClassifyIdle` in `internal/ui/projectlist/projectlist.go` filtered eligible rows on `Status == ""` or `Status == StatusStopped`. The unit tests passed because the fixtures used those exact shapes. Production main rows don't: `state.BuildGlobalRows` (`internal/state/listing.go:268`) stamps every synthetic main row with the literal string `"main"` — neither empty nor `stopped`. The classifier bailed on every real row; `idleByHost` was always empty; nothing ever got hidden. Textbook test-fixture-doesn't-match-production gap. The fix extends the filter to accept `Status == "main"` alongside the previous two values (the `!Alive` check above it still gates running mains, so semantics for the original cases are unchanged).
+
+Polish landed in the same ship: the roll-up line was rendering directly under the previous host's last workspace row with no separation. Added a leading blank line inside `emitIdleRollup` so it gets its own band between the project list and the host transition / end-of-listing.
+
+### Fixed
+
+- **`ClassifyIdle` now classifies the row shape `BuildGlobalRows` actually produces.** The filter that decides "is this main row dormant?" accepts `Status == "main"` in addition to `""` and `StatusStopped`. `BuildGlobalRows` is the single producer of `GlobalRow` values across both CLI (`canopy ls --all`) and TUI, and it stamps `Status: "main"` on every synthetic main row regardless of liveness; the `r.Alive` check earlier in the classifier already excludes running mains, so the new branch only catches the not-running case the test fixtures were modeling all along. Net effect: a host with N untouched projects now collapses to one `+ N idle projects · e expand` line; pressing `e` flips it open with `e collapse`. The original v0.21.7.0 j/k/g/G nav and `e` toggle all work — they were always wired correctly, the data just never reached them.
+
+- **Idle roll-up renders with a blank line above it.** `emitIdleRollup` writes a leading `\n` (and bumps `lineCount` to keep cursor visibility honest) before the `+ N idle …` text. In the end-of-host path it separates the roll-up from the last workspace row; in the host-transition path it pairs with the existing trailing separator so the roll-up sits in its own band. No conditional — the early-return on `n == 0` already prevents emitting the spacer when there's nothing to roll up.
+
+### Tests
+
+- **`internal/ui/projectlist/idle_test.go` adds the production row shape to the `ClassifyIdle` table.** New case `lone main row, status="main" (production shape) → idle and hidden` mirrors what `BuildGlobalRows` stamps; the case lives next to the existing empty/stopped cases so a future change has to consciously reject all three equivalent dormant shapes. Locks the production-row contract the original tests never exercised.
+
+- **`TestRender_IdleRollupHasBlankLineAbove` regression-guards the spacer.** Builds a model with one alive workspace row + one production-shape main row, splits `View()` on `\n`, finds the index of the roll-up line, and asserts the line immediately above it is whitespace-only. Pure rendered-output check — no style-stripping needed because the assertion is structural.
+
+- **Two existing `projectlist_test.go` tests opt into expanded mode.** `TestRender_MainStatusText` and `TestRender_MainRowBranchInGray` set up exactly the lone-non-running-main shape that the fix now correctly classifies idle, so they would render an empty band without an expansion override. Each gains a single `m.idleExpanded = map[string]bool{"": true}` line before `View()` so the row still appears for the assertion. Their original intent (status-text rendering, branch-icon rendering for the main row) is preserved — they're just no longer accidentally riding the misclassification.
+
 ## [0.21.10.0] - 2026-05-28 — New-workspace picker on remote rows: PR / Issue / Branch reach parity with local
 
 Press `n` on a remote row and the picker now offers all five start variants — Fresh, Prompt, PR, Issue, Branch — same as local. Before this, only Fresh and Prompt were wired through `canopy new --on <host>`; the picker hid the other three because the loaders (`gh pr list`, `gh issue list`, `git for-each-ref`) ran with `cmd.Dir = projectRoot`, and a remote-row target has no local project root — its repo lives on tower. The fix lets the picker SSH `gh` and `git` against the project cwd *on the remote host*, then forwards the chosen `--pr` / `--issue` / `--branch` flag through the existing `remoteCreateCmd` dispatch.
