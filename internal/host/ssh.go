@@ -163,6 +163,47 @@ func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd 
 	return exec.CommandContext(ctx, "ssh", sshArgs...)
 }
 
+// ShellSingleQuote wraps s in single quotes for safe embedding inside
+// a shell command body. Embedded single quotes are escaped via the
+// standard `'\''` trick (close-quote, escaped-quote, re-open-quote)
+// so paths containing apostrophes still parse correctly.
+//
+// Exported so callers building remote shell commands for SSHRunUserBatch
+// don't have to redo this each site. Pure function; no side effects.
+func ShellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// SSHRunUserBatch is the non-interactive sibling of SSHRunUser: runs
+// the given remote command under `bash -lc` (login shell, full $PATH)
+// but with BatchMode=yes and no remote pty allocation. Suitable for
+// background TUI loaders that must never block on a password prompt
+// or hang a goroutine on /dev/tty.
+//
+// Same outer-quote-then-unwrap mechanism as SSHRunUser so multi-word
+// remoteCmd strings reach the remote shell as one bash -lc argument.
+// Reuses the ControlMaster socket so the SSHCmd handshake cost is paid
+// once per (user, host) tuple across the canopy session.
+func SSHRunUserBatch(ctx context.Context, target string, remoteCmd string) *exec.Cmd {
+	socketPath := filepath.Join(canopyHome(), "ssh-%C.sock")
+	withPath := `export PATH="$HOME/.local/bin:$PATH"; ` + remoteCmd
+	quoted := "'" + strings.ReplaceAll(withPath, "'", `'\''`) + "'"
+	sshArgs := []string{
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + socketPath,
+		"-o", "ControlPersist=300",
+		"-o", "ConnectTimeout=5",
+		"-o", "ServerAliveInterval=30",
+		"-o", "ServerAliveCountMax=3",
+		"-o", "BatchMode=yes",
+		"-o", "NumberOfPasswordPrompts=0",
+		target,
+		"bash", "-lc", quoted,
+	}
+	log.Debug("ssh.run-user-batch", "target", target, "remote_cmd", remoteCmd)
+	return exec.CommandContext(ctx, "ssh", sshArgs...)
+}
+
 // sshCmdInternal is the shared implementation. Splits on the batch
 // flag, otherwise identical options.
 func sshCmdInternal(ctx context.Context, target string, batch bool, args ...string) *exec.Cmd {

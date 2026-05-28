@@ -45,6 +45,38 @@ func TestFetchIssue_GHMissing_ReturnsErrUnavailable(t *testing.T) {
 	}
 }
 
+// TestRemoteListPRs_RejectsEmptyInputs: both sshTarget and remoteCwd
+// are mandatory — without them we'd build a malformed ssh invocation
+// and surface a confusing error. Bounce upfront with an explicit
+// "required" message so the caller (TUI loader) can render an inline
+// hint instead of letting it fail at exec time.
+func TestRemoteListPRs_RejectsEmptyInputs(t *testing.T) {
+	tests := []struct {
+		name              string
+		target, remoteCwd string
+	}{
+		{"empty target", "", "/home/avi/Work/cravd"},
+		{"empty cwd", "u@t", ""},
+		{"both empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := RemoteListPRs(context.Background(), tc.target, tc.remoteCwd, 20)
+			if err == nil {
+				t.Fatalf("expected error for %s; got nil", tc.name)
+			}
+		})
+	}
+}
+
+// TestRemoteListIssues_RejectsEmptyInputs: same shape as the PR test.
+func TestRemoteListIssues_RejectsEmptyInputs(t *testing.T) {
+	_, err := RemoteListIssues(context.Background(), "", "", 20)
+	if err == nil {
+		t.Errorf("RemoteListIssues with empty inputs: expected error; got nil")
+	}
+}
+
 // TestFetchPR_NotFound_ReturnsErrNotFound: gh exits non-zero when a
 // PR doesn't exist. We can't reliably hit a "not found" path in unit
 // tests without a real repo + gh auth, so this is a smoke test that

@@ -201,6 +201,57 @@ func TestSSHRunUser_LoginShellAndPTY(t *testing.T) {
 	mustContainPair(t, args, "-o", "ControlMaster=auto")
 }
 
+// TestSSHRunUserBatch_BatchModeAndNoPTY: the non-interactive sibling
+// of SSHRunUser. Must set BatchMode=yes (no password prompts) and
+// NumberOfPasswordPrompts=0 (belt-and-suspenders), and must NOT
+// allocate a pty (-t absent) because background TUI loaders have no
+// real terminal to attach to. Otherwise mirrors SSHRunUser's
+// login-shell + outer-quote behavior.
+func TestSSHRunUserBatch_BatchModeAndNoPTY(t *testing.T) {
+	cmd := SSHRunUserBatch(context.Background(), "avi@tower", "gh pr list --state open --limit 20")
+	args := cmd.Args
+	mustContainPair(t, args, "-o", "BatchMode=yes")
+	mustContainPair(t, args, "-o", "NumberOfPasswordPrompts=0")
+	mustContainPair(t, args, "-o", "ControlMaster=auto")
+	if indexOf(args, "-t") >= 0 {
+		t.Errorf("SSHRunUserBatch must NOT allocate a pty (no -t flag); got %v", args)
+	}
+	// bash -lc must still wrap the user command.
+	bashIdx := indexOf(args, "bash")
+	if bashIdx < 0 {
+		t.Fatalf("bash not in args: %v", args)
+	}
+	if args[bashIdx+1] != "-lc" {
+		t.Errorf("expected -lc after bash; got %q", args[bashIdx+1])
+	}
+	got := args[bashIdx+2]
+	if got[0] != '\'' || got[len(got)-1] != '\'' {
+		t.Errorf("remote cmd not outer-quoted; got %q", got)
+	}
+	if !strings.Contains(got, "gh pr list --state open --limit 20") {
+		t.Errorf("remote cmd missing user command; got %q", got)
+	}
+}
+
+// TestShellSingleQuote_EscapesInnerQuotes: paths and args with embedded
+// single quotes still parse correctly after the standard close-quote/
+// escape/re-open trick.
+func TestShellSingleQuote_EscapesInnerQuotes(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"plain", "'plain'"},
+		{"/home/avi/Work", "'/home/avi/Work'"},
+		{"it's", `'it'\''s'`},
+		{"", "''"},
+	}
+	for _, tc := range tests {
+		if got := ShellSingleQuote(tc.in); got != tc.want {
+			t.Errorf("ShellSingleQuote(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestCanopyHome_NonEmpty ensures the helper never returns an empty
 // string (which would produce an invalid ControlPath like `ssh-%C.sock`
 // in the cwd).

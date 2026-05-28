@@ -136,7 +136,7 @@ Verbs while on the tab:
 | Key | Action |
 |---|---|
 | `enter` | Open host detail drawer (ssh-target, projects, last-error) |
-| `n` | Open the in-TUI add-workspace picker (Fresh + Prompt; PR/Issue/Branch hidden because they need remote `gh`) |
+| `n` | Open the in-TUI add-workspace picker (Fresh / Prompt / PR / Issue / Branch — full parity with local; loaders SSH `gh pr list`, `gh issue list`, and `git for-each-ref` against the remote project cwd) |
 | `s` | Open an interactive `ssh` shell on the host (y/N confirm first; canopy refreshes when you `exit`) |
 | `U` | Run `canopy upgrade --yes` on the host; output streams into the TUI |
 | `S` | Run `canopy use release` on the host (recovery if it's running a DEV binary that refuses `upgrade`) |
@@ -175,7 +175,6 @@ Hosts that are behind your laptop's canopy show a yellow `⇑` next to their ver
 
 ## Limitations and gotchas
 
-- **No remote PR / issue picker.** `canopy new --on <host> --pr 123` is not implemented; `gh` lives on the remote and the laptop doesn't currently shell into it for previews. Use `--branch` instead, or `ssh <host>` and run `canopy new --pr 123` directly.
 - **Agent must be installed on the remote.** Canopy can't ship `claude` for you. The remote needs `claude` (or whatever `scripts.agent` points at) on PATH.
 - **mosh ports.** Mosh uses UDP ports 60000–61000 by default. If you're behind a firewall, either open the range or set `MOSH_TITLE_NOPREFIX=1` and use the ssh fallback.
 - **Single-laptop assumption.** The host registry is laptop-local. If you want the same registry on a second machine, copy `~/.canopy/hosts.json` over.

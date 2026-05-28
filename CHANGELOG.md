@@ -5,6 +5,34 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.10.0] - 2026-05-28 — New-workspace picker on remote rows: PR / Issue / Branch reach parity with local
+
+Press `n` on a remote row and the picker now offers all five start variants — Fresh, Prompt, PR, Issue, Branch — same as local. Before this, only Fresh and Prompt were wired through `canopy new --on <host>`; the picker hid the other three because the loaders (`gh pr list`, `gh issue list`, `git for-each-ref`) ran with `cmd.Dir = projectRoot`, and a remote-row target has no local project root — its repo lives on tower. The fix lets the picker SSH `gh` and `git` against the project cwd *on the remote host*, then forwards the chosen `--pr` / `--issue` / `--branch` flag through the existing `remoteCreateCmd` dispatch.
+
+### Added
+
+- **`internal/host/ssh.go` gains `SSHRunUserBatch` and exports `ShellSingleQuote`.** `SSHRunUserBatch` is the non-interactive sibling of `SSHRunUser`: same `bash -lc` login-shell + outer-single-quote-wrap mechanism so multi-word commands reach the remote shell as one argument, but with `BatchMode=yes` + `NumberOfPasswordPrompts=0` and no remote pty so background TUI loaders never block on a password prompt or hang a goroutine on `/dev/tty`. `ShellSingleQuote` is the standard close-quote/escape/re-open trick (`'foo'\''bar'` for `foo'bar`), exported so the new ghx + git remote helpers escape `remoteCwd` consistently without each redoing the dance.
+
+- **`internal/ghx/ghx.go` gains `RemoteListPRs` and `RemoteListIssues`.** Same JSON shape, same 60s `listCacheMap`, but cache keys are prefixed `pr|remote|<sshTarget>|<remoteCwd>` (and likewise for issues) so two hosts — or two projects on the same host — never share a list. Errors capture remote stderr so the picker surfaces "gh: command not found on tower" instead of a generic exit. Empty `sshTarget` or `remoteCwd` is rejected up front so a malformed dispatch never reaches `ssh`.
+
+- **`internal/git/worktree.go` gains `RemoteListBranches`.** SSHes the same `git for-each-ref` command on the remote, then runs the identical dedup / HEAD-filter / sort pipeline as `ListBranches` so callers can swap local and remote without branching on result shape.
+
+### Changed
+
+- **`internal/ui/update_new.go` routes p / i / b through the SSH loaders for remote targets.** `openNewPR` / `openNewIssue` / `openNewBranch` now delegate loader construction to new `loadPRsForTarget` / `loadIssuesForTarget` / `loadBranchesForTarget` helpers that branch on `m.newTargetHost`. The remote variant resolves the SSH target via the existing `resolveHostForExec(m.hostList)` snapshot, then dispatches `loadPRsRemoteCmd` / `loadIssuesRemoteCmd` / `loadBranchesRemoteCmd`. A registry miss (host vanished mid-flow) returns the loaded-msg with an error rather than panicking on an empty target. `submitNewPR` / `submitNewIssue` / `submitNewBranch` flip the same way: when `newTargetHost` is set, they call `remoteCreateCmd(canopyBin, host, remoteCwd, "", spec, "")` so the remote canopy resolves the source via its own gh + git.
+
+- **`handleNewPickerKey` removes the early-returns on `p` / `i` / `b` for remote, and the cursor-bound is back to `newPickerOptionCount-1` for both targets.** Previously p/i/b were no-ops for remote and the cursor stopped at index 1 to match the hidden-option slice. Both gates are gone — the picker is structurally identical for local and remote.
+
+- **`internal/ui/view.go` drops the `options = newPickerOptions[:2]` slice for remote.** The picker renders all five options for any target.
+
+### Tests
+
+- **`internal/host/ssh_test.go` adds `TestSSHRunUserBatch_BatchModeAndNoPTY` and `TestShellSingleQuote_EscapesInnerQuotes`.** The first asserts the flag shape — `BatchMode=yes`, `NumberOfPasswordPrompts=0`, `ControlMaster=auto` present; no `-t`; `bash -lc` with outer-quoted body. The second is a table over plain, path, embedded-quote, and empty inputs.
+
+- **`internal/ghx/ghx_test.go` + `internal/git/worktree_test.go` add `RemoteList*_RejectsEmptyInputs`.** Three-case table for branches (empty target, empty cwd, both empty); the ghx tests cover the same shape for PRs and issues. The upfront rejection means a malformed dispatch never reaches the `ssh` binary.
+
+- **`internal/ui/model_test.go` flips `TestNewPicker_RemoteSkipsPRIssueBranchShortcuts` into `TestNewPicker_RemoteReachesPRIssueBranchShortcuts`** (table-driven assertion that `p`, `i`, `b` open `newPRMode`, `newIssueMode`, `newBranchMode` for a remote target). Adds `TestNewPicker_RemoteCursorReachesAllOptions` for the cursor-bound regression. Adds `TestSubmitNewPR_RemoteRoutesThroughRemoteCreateCmd` (plus issue and branch variants) — these would crash on `createCmd(nil-mgr, ...)` if the dispatch regressed. Adds `TestLoadPRsForTarget_HostMissingFromRegistrySurfacesError` (plus issue and branch variants) — registry-snapshot miss returns the loaded-msg with `err != nil` rather than panicking. Adds `TestLoadPRsForTarget_LocalUsesLocalLoader` so the local path stays exercised after the dispatch helper was introduced.
+
 ## [0.21.9.0] - 2026-05-27 — Remote `canopy host upgrade` finds `go` on hosts where mise/asdf is wired through `~/.bashrc`
 
 The v0.21.4.0 fix wrapped the SSH command in `bash -l` so the remote shell sourced `~/.bash_profile` / `~/.profile`. That solved half the population. The other half — including every Omarchy/Arch box, every Ubuntu default install, and every host whose mise/asdf activation lives in `~/.bashrc` — still failed with `make: go: No such file or directory` after `git pull` succeeded, because a *non-interactive* login shell never sources `~/.bashrc`.
