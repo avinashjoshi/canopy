@@ -5,6 +5,18 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.14.0] - 2026-05-28 — TUI remote dispatch pins the row's project (no more `(fallback)`)
+
+When the TUI dispatched a remote `canopy rm` or `canopy retry` for a row on tower, it ran `canopy <verb> --on <host> <name> --yes` from the laptop user's cwd. If the laptop's cwd wasn't inside a registered project (the bare-`canopy`-from-`~` case), `cmd/canopy/host_resolve.go`'s `resolveOnForSwitch` fell back to "first project on this host" and rendered the dispatch source as `registry:tower/<project> (fallback)`. That fallback is benign when the host has one project; on a multi-project host it could silently land an rm or retry in the wrong project entirely.
+
+The TUI already knows the (host, project) pair for every remote row (`row.Host` + `row.Project`), and the in-memory host registry (`m.hostList[].Projects`) already maps `(host, project) → remote path` from `~/.canopy/hosts.json`. The pieces were just never wired into the dispatch. `internal/ui/update_remote.go` gains a `remoteCwdArg` helper that returns `["--remote-cwd", <path>]` when the registry knows the path and `nil` otherwise. `update_delete.go` (the `y`/`F` confirm path) and `update_retry.go` (`R` on remote rows) thread it through `execRemoteVerb`. When the registry doesn't know the path the dispatch stays in its legacy shape — we don't want to guess at a remote cwd, because a guessed path that doesn't exist trips `buildRemoteScript`'s `[ ! -d <path> ]` exit-7 pre-check and produces a worse diagnostic than the fallback did.
+
+This doesn't change the remote-side error for "workspace not found" — that's covered by the v0.21.13.0 enriched diagnostic that ships in this same PR. The two fixes compose: the dispatcher lands the verb in the right project (this), and when it still can't find the workspace there the remote canopy explains why (v0.21.13.0).
+
+### Fixed
+
+- **`rm`/`retry` dispatched from the TUI for a remote row now pin `--remote-cwd` to the row's project.** Eliminates the `(fallback)` annotation in the dispatch source line for any (host, project) the laptop has registered (the common case), and removes a real correctness risk on multi-project hosts where the fallback could land a verb in the wrong project. Helper `remoteCwdArg` in `internal/ui/update_remote.go` is the single source of truth — call sites just `append(args, m.remoteCwdArg(host, project)...)`. Tests pin both branches: pinned-when-known, and silent nil-when-unknown so the dispatch stays in its legacy shape rather than guessing.
+
 ## [0.21.13.0] - 2026-05-28 — `canopy rm` not-found error tells you why
 
 The terse `Error: workspace.Find(noble-lichen): workspace: not found` from `canopy rm` left users — especially when it surfaced through the SSH dispatch on a remote host — with no signal about *why* the workspace was missing. Typo? Stale TUI row? Wrong project on the remote? Same five words for all three.

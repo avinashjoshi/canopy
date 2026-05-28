@@ -3716,6 +3716,50 @@ func TestRemoteCwdForRow_ResolvesFromRegistry(t *testing.T) {
 	}
 }
 
+// TestRemoteCwdArg_PinsKnownProject: when the host registry knows
+// (host, project), the remote-dispatch path appends --remote-cwd so
+// cmd/canopy's resolveOnForSwitch never enters its "first project on
+// host" fallback. That fallback prints the scary `(registry:tower/X
+// (fallback))` line in the dispatch source AND can land a verb in
+// the wrong project on multi-project hosts. Regression for the
+// user-reported example where a remote rm dispatch showed
+// "(fallback)" even though the row's project was known.
+func TestRemoteCwdArg_PinsKnownProject(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh",
+			Projects: map[string]string{"canopy": "/home/cassy/Work/canopy"}},
+	}
+
+	got := m.remoteCwdArg("tower", "canopy")
+	want := []string{"--remote-cwd", "/home/cassy/Work/canopy"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("remoteCwdArg(tower, canopy) = %v; want %v", got, want)
+	}
+}
+
+// TestRemoteCwdArg_UnknownProjectReturnsNil: when the registry doesn't
+// know the (host, project) path, return nil so the dispatch stays in
+// the legacy shape. Falling back is correct behavior here — the user
+// just gets the older (worse) diagnostic if the workspace is missing.
+// Pinning to a guessed path would be worse: we'd risk dispatching to
+// a path that doesn't exist on the remote and tripping the cwd
+// pre-check in buildRemoteScript.
+func TestRemoteCwdArg_UnknownProjectReturnsNil(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "u@t", Type: "ssh",
+			Projects: map[string]string{"canopy": "/home/cassy/Work/canopy"}},
+	}
+
+	if got := m.remoteCwdArg("tower", "unknown-project"); got != nil {
+		t.Errorf("remoteCwdArg(tower, unknown-project) = %v; want nil", got)
+	}
+	if got := m.remoteCwdArg("unknown-host", "canopy"); got != nil {
+		t.Errorf("remoteCwdArg(unknown-host, canopy) = %v; want nil", got)
+	}
+}
+
 // TestHandleConfirmAttachKey_NCancels: cancel-by-default — anything
 // other than y/Y/Enter returns to listMode without attaching.
 func TestHandleConfirmAttachKey_NCancels(t *testing.T) {
