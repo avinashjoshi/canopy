@@ -3,17 +3,21 @@ package ui
 import (
 	"context"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 // TestNewHostUpgradeSSHCmd_RunsLoginShell pins the load-bearing invariant
 // that the remote shell is `bash -l`. Login shells source ~/.bash_profile
-// / ~/.profile, which is where mise/asdf/etc inject the toolchain PATH.
-// Without -l, non-interactive SSH inherits a bare default PATH and
-// `make install` can't find `go` — the regression that motivated this
-// helper (reported as `canopy upgrade on tower: make: go: No such file
-// or directory`).
+// / ~/.profile, which is one of two places version managers inject the
+// toolchain PATH (the other is ~/.bashrc, handled separately by
+// remoteEnvPrep's direct mise/asdf activation). Without -l, non-
+// interactive SSH inherits a bare default PATH and `make install` can't
+// find `go` — the regression that first motivated this helper (reported
+// as `canopy upgrade on tower: make: go: No such file or directory`).
 func TestNewHostUpgradeSSHCmd_RunsLoginShell(t *testing.T) {
 	cmd := newHostUpgradeSSHCmd(context.Background(), "avi@tower", "exec canopy upgrade --yes")
 	if len(cmd.Args) < 3 {
@@ -35,8 +39,8 @@ func TestNewHostUpgradeSSHCmd_RunsLoginShell(t *testing.T) {
 // script travels via stdin, NOT as an SSH argv. SSH would otherwise
 // word-split anything past the target through the remote shell, which
 // mangles multi-token scripts like the install.sh curl|wget fallback
-// and the `export PATH=…; exec canopy upgrade --yes` chain. This is
-// the same pattern internal/host/refresh.go uses.
+// and the remoteEnvPrep chain. This is the same pattern
+// internal/host/refresh.go uses.
 func TestNewHostUpgradeSSHCmd_PipesScriptViaStdin(t *testing.T) {
 	script := `export PATH="$HOME/.local/bin:$PATH"; exec canopy upgrade --yes`
 	cmd := newHostUpgradeSSHCmd(context.Background(), "avi@tower", script)
@@ -87,4 +91,225 @@ func TestNewHostUpgradeSSHCmd_PreservesSSHControlOpts(t *testing.T) {
 			t.Errorf("ssh argv missing %q; got %s", want, joined)
 		}
 	}
+}
+
+// TestRemoteEnvPrep_Fragments pins the load-bearing strings in the
+// shell snippet we prepend to every remote canopy command. Each
+// fragment maps to a documented layer of remoteEnvPrep's strategy; a
+// regression here would silently undo the fix for hosts whose Go
+// toolchain lives behind a non-interactive-bailing ~/.bashrc.
+func TestRemoteEnvPrep_Fragments(t *testing.T) {
+	for _, want := range []string{
+		// Layer 1: mise direct activation. `command -v` finds mise
+		// regardless of bashrc, then `eval $(mise activate bash)`
+		// produces the same PATH/shim exports omarchy/default/bash/init
+		// emits when sourced interactively.
+		`command -v mise`,
+		`mise activate bash`,
+		// Layer 2: asdf direct activation via its canonical hook.
+		`"$HOME/.asdf/asdf.sh"`,
+		// Layer 3: static toolchain spots as belt-and-suspenders.
+		`"$HOME/.local/bin"`,
+		`"/usr/local/go/bin"`,
+		`"$HOME/go/bin"`,
+		// Dedupe pattern (case glob over a colon-padded $PATH) so a
+		// path already on PATH isn't re-prepended on every invocation.
+		`case ":$PATH:"`,
+		// Errors are swallowed so a broken version-manager install
+		// doesn't turn a recoverable upgrade into a hard failure.
+		`|| true`,
+	} {
+		if !strings.Contains(remoteEnvPrep, want) {
+			t.Errorf("remoteEnvPrep missing fragment %q\n  got: %s", want, remoteEnvPrep)
+		}
+	}
+}
+
+// TestRemoteCmds_ChainEnvPrep pins that both remote call sites prefix
+// the prep snippet. Without it, the remote `canopy upgrade` inherits
+// a bare PATH and fails at `make install` with "go: No such file or
+// directory" — the bug this fix exists to prevent.
+func TestRemoteCmds_ChainEnvPrep(t *testing.T) {
+	for name, cmd := range map[string]string{
+		"remoteUpgradeCmd":    remoteUpgradeCmd,
+		"remoteUseReleaseCmd": remoteUseReleaseCmd,
+	} {
+		if !strings.HasPrefix(cmd, remoteEnvPrep+";") {
+			t.Errorf("%s must start with remoteEnvPrep followed by `;`; got %q", name, cmd)
+		}
+	}
+}
+
+// TestRemoteEnvPrep_RunsUnderBash exercises the prep snippet end-to-end
+// against a real bash subprocess so the shell syntax (case-glob dedupe,
+// `||` error swallowing, mise/asdf conditionals) doesn't silently rot.
+// HOME is overridden to a temp dir so the test never reads the
+// developer's real ~/.asdf/asdf.sh; PATH starts bare so PATH-prepending
+// can be observed.
+//
+// We can't write to /usr/local/go/bin from a unit test, so the dedupe
+// loop's positive branch is exercised via $HOME/go/bin (materialized
+// below) — that asserts the loop runs end-to-end on at least one
+// canonical spot without simulating an absolute path we don't own.
+func TestRemoteEnvPrep_RunsUnderBash(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on PATH; remoteEnvPrep is shell-targeted")
+	}
+
+	home := t.TempDir()
+	goBin := filepath.Join(home, "go", "bin")
+	if err := os.MkdirAll(goBin, 0o755); err != nil {
+		t.Fatalf("mkdir go/bin: %v", err)
+	}
+
+	// Append a probe that echoes the augmented PATH AFTER the prep
+	// finishes. The prep ships bit-for-bit identical; we only suffix
+	// the probe.
+	script := remoteEnvPrep + `; echo "PROBE_PATH=$PATH"`
+	cmd := exec.Command("bash", "-l")
+	cmd.Stdin = strings.NewReader(script + "\n")
+	cmd.Env = []string{
+		"HOME=" + home,
+		// Bare PATH that doesn't contain any of the prep's target dirs
+		// — so any prepend can be observed in PROBE_PATH.
+		"PATH=/usr/bin:/bin",
+		"TERM=dumb",
+	}
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash run failed: %v\noutput:\n%s", err, out)
+	}
+	probe := extractLineForTest(string(out), "PROBE_PATH=")
+	if probe == "" {
+		t.Fatalf("PROBE_PATH line missing from output:\n%s", string(out))
+	}
+	if !strings.Contains(probe, goBin) {
+		t.Errorf("PROBE_PATH missing %q\n  probe: %s", goBin, probe)
+	}
+}
+
+// TestRemoteEnvPrep_DedupesPath verifies the case-glob dedupe loop
+// doesn't accumulate duplicate entries when a target path is already
+// on PATH. Without dedupe, every invocation would push another copy
+// onto PATH — slow growth, but real on long-lived SSH multiplex
+// sessions hitting upgrade repeatedly.
+func TestRemoteEnvPrep_DedupesPath(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on PATH; remoteEnvPrep is shell-targeted")
+	}
+
+	home := t.TempDir()
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	script := remoteEnvPrep + `; echo "PROBE_PATH=$PATH"`
+	cmd := exec.Command("bash", "-l")
+	cmd.Stdin = strings.NewReader(script + "\n")
+	cmd.Env = []string{
+		"HOME=" + home,
+		// Pre-populate PATH with ~/.local/bin — the dedupe should
+		// notice it's already present and not prepend a second copy.
+		"PATH=" + localBin + ":/usr/bin:/bin",
+		"TERM=dumb",
+	}
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash run failed: %v\noutput:\n%s", err, out)
+	}
+	probe := extractLineForTest(string(out), "PROBE_PATH=")
+	count := strings.Count(probe, localBin)
+	if count != 1 {
+		t.Errorf("expected %q to appear exactly once in PROBE_PATH; got %d\n  probe: %s", localBin, count, probe)
+	}
+}
+
+// TestRemoteEnvPrep_ActivatesMiseInUserLocalBin is the regression
+// test for an ordering bug an adversarial review caught pre-ship.
+//
+// The canonical mise installer (`curl https://mise.run | sh`) drops
+// the mise binary at $HOME/.local/bin/mise. On a non-interactive
+// `bash -l` (what we get over SSH), ~/.bashrc bails before adding
+// ~/.local/bin to PATH — so if `command -v mise` ran *before* the
+// static path enumeration, it would not find mise and silently skip
+// activation. The shim dir would never be prepended and `make
+// install` would die with "go: No such file or directory" — exactly
+// reproducing the v0.21.4.0 regression remoteEnvPrep exists to fix.
+//
+// The fix is the ordering: static-paths loop runs first (which puts
+// ~/.local/bin on PATH), THEN `command -v mise` runs (now finds it),
+// THEN `mise activate bash` exports the shim path. This test pins
+// that contract by:
+//
+//  1. Stubbing a `mise` binary at $HOME/.local/bin/mise that, when
+//     called as `mise activate bash`, emits an export referencing a
+//     uniquely-named fake shim dir.
+//  2. Starting bash with PATH=/usr/bin:/bin (no ~/.local/bin).
+//  3. Asserting the fake shim dir lands in PROBE_PATH — which can
+//     only happen if mise activation actually ran.
+//
+// If a future refactor reorders the snippet to put `command -v mise`
+// before the static loop, this test fails because the stub mise
+// binary is unreachable at activation time.
+func TestRemoteEnvPrep_ActivatesMiseInUserLocalBin(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available on PATH; remoteEnvPrep is shell-targeted")
+	}
+
+	home := t.TempDir()
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatalf("mkdir .local/bin: %v", err)
+	}
+	// Unique per-test sentinel so a stale fixture from another test
+	// can't make this one pass spuriously.
+	shimDir := filepath.Join(home, "fake-mise-shims-regression")
+	miseStub := "#!/bin/bash\n" +
+		`[ "$1" = "activate" ] && printf 'export PATH="%s:$PATH"\n' "` + shimDir + `"` + "\n"
+	if err := os.WriteFile(filepath.Join(localBin, "mise"), []byte(miseStub), 0o755); err != nil {
+		t.Fatalf("write mise stub: %v", err)
+	}
+
+	script := remoteEnvPrep + `; echo "PROBE_PATH=$PATH"`
+	cmd := exec.Command("bash", "-l")
+	cmd.Stdin = strings.NewReader(script + "\n")
+	cmd.Env = []string{
+		"HOME=" + home,
+		// Critical: ~/.local/bin is NOT on initial PATH. The static
+		// loop must add it before `command -v mise` runs.
+		"PATH=/usr/bin:/bin",
+		"TERM=dumb",
+	}
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash run failed: %v\noutput:\n%s", err, out)
+	}
+	probe := extractLineForTest(string(out), "PROBE_PATH=")
+	if probe == "" {
+		t.Fatalf("PROBE_PATH line missing from output:\n%s", string(out))
+	}
+	if !strings.Contains(probe, shimDir) {
+		t.Errorf("mise activation didn't run — shim dir %q missing from PROBE_PATH\n"+
+			"  probe: %s\n"+
+			"  This means the snippet's `command -v mise` ran before the static\n"+
+			"  ~/.local/bin prepend, reproducing the ordering bug. Check the order\n"+
+			"  of statements in remoteEnvPrep.", shimDir, probe)
+	}
+}
+
+// extractLineForTest returns the first line in `text` that starts with
+// `prefix` (or empty if none). Used to scope substring assertions to
+// the probe line, keeping bashrc body output and shell noise out of the
+// match window.
+func extractLineForTest(text, prefix string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
 }

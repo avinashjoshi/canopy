@@ -5,6 +5,23 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.9.0] - 2026-05-27 — Remote `canopy host upgrade` finds `go` on hosts where mise/asdf is wired through `~/.bashrc`
+
+The v0.21.4.0 fix wrapped the SSH command in `bash -l` so the remote shell sourced `~/.bash_profile` / `~/.profile`. That solved half the population. The other half — including every Omarchy/Arch box, every Ubuntu default install, and every host whose mise/asdf activation lives in `~/.bashrc` — still failed with `make: go: No such file or directory` after `git pull` succeeded, because a *non-interactive* login shell never sources `~/.bashrc`.
+
+The guard at the top of those bashrc files takes one of three forms:
+
+```bash
+[[ $- != *i* ]] && return            # Arch/Omarchy default
+[ -z "$PS1" ] && return              # legacy
+case $- in *i*) ;; *) return;; esac  # Ubuntu default
+```
+
+All three bail when `$-` doesn't contain `i`, which is exactly what `bash -l` produces over SSH stdin. The PS1 trick fixes case 2 but misses cases 1 and 3; `bash -li` fixes all three but spews `bash: no job control in this shell` into the TUI's captured output every run, which would look like an upgrade failure.
+
+### Fixed
+
+- **`canopy host upgrade` / `canopy host use release` now activate `mise` / `asdf` directly, bypassing bashrc — and in the right order.** `internal/ui/update_host_upgrade.go` introduces `remoteEnvPrep`, a shell snippet prepended to every remote canopy command. It prepends `~/.local/bin`, `/usr/local/go/bin`, `~/go/bin` to PATH first (case-glob deduped), then runs `eval "$(mise activate bash)"` when `command -v mise` finds the binary, then sources `~/.asdf/asdf.sh` when present. The ordering is load-bearing: an earlier draft put the `command -v mise` check before the static prepend, which silently broke hosts where mise was installed via the canonical `curl https://mise.run | sh` (binary at `~/.local/bin/mise`) — the check fired with PATH=`/usr/bin:/bin` (because `bash -l` non-interactive skips `~/.bashrc`), missed mise, never activated the shim, and reproduced the original `make: go: No such file or directory` failure on the next `canopy host upgrade`. An adversarial review caught this pre-merge; a regression test (`TestRemoteEnvPrep_ActivatesMiseInUserLocalBin`) stubs `mise` at `$HOME/.local/bin/mise` with PATH stripped down to `/usr/bin:/bin` and asserts the shim dir appears on PATH only after activation — locking the ordering contract. Activation errors are swallowed (`|| true`, `2>/dev/null`) so a broken version-manager install doesn't escalate a recoverable upgrade into a hard failure. Five tests in total: fragment invariants, both call sites chain the prep, end-to-end bash exercise of the static fallback, dedupe-doesn't-double-append, and the ordering regression test.
 ## [0.21.8.0] - 2026-05-27 — `m.remoteRefreshing` is exclusively owned by `Update`; CI gains `-race`
 
 Three post-action `tea.Cmd` callbacks — `execRemoteVerb` (remote rm/retry), `execRemoteKill`, and `attachOrSwitchWithOpts` — used to flip `m.remoteRefreshing = false` from their own goroutine right before returning `refreshAllMsg{}`. The flip was load-bearing: `refresh()`'s `if !m.remoteRefreshing` gate would otherwise skip the post-action remote fan-out, leaving the rm'd/killed row visible until the next 2s tick. But the same field is read from the 120ms `hostsSpinnerTickMsg` handler (shipped in v0.21.1) and from `View()`, both on the Bubbletea goroutine — observable as a data race under `go test -race ./internal/ui/...`. The v0.21.1 CHANGELOG flagged it as a "Known concern" without a follow-up landing; this PR is the follow-up.

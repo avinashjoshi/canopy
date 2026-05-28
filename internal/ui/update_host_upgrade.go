@@ -186,26 +186,67 @@ func hostUpgradeWaitDoneCmd(done <-chan hostUpgradeShellDoneMsg) tea.Cmd {
 	return func() tea.Msg { return <-done }
 }
 
-// PATH-prepending in remote commands is belt-and-suspenders alongside
-// the login shell newHostUpgradeSSHCmd runs the script under. `bash -l`
-// sources ~/.bash_profile / ~/.profile (and on many setups ~/.bashrc
-// indirectly), which is the canonical place for ~/.local/bin and
-// version-manager shims like mise. The explicit `export PATH=…` here
-// guarantees ~/.local/bin (where the curl-installer puts canopy) is on
-// PATH even for users whose profile doesn't add it — without it, the
-// remote `canopy` invocation would fall through to "command not found"
-// on a host that has a bare profile.
+// remoteEnvPrep is the shell snippet we prepend to every remote canopy
+// command so the toolchain is on PATH before `canopy upgrade` shells out
+// to `make install`. `bash -l` (see newHostUpgradeSSHCmd) sources
+// ~/.bash_profile / ~/.profile, which is enough on setups that put
+// toolchain init there — but a large share of users have a ~/.bashrc
+// that opens with one of:
+//
+//	[[ $- != *i* ]] && return            # Arch/Omarchy default
+//	[ -z "$PS1" ] && return              # legacy
+//	case $- in *i*) ;; *) return;; esac  # Ubuntu default
+//
+// All three guards bail under a non-interactive shell, so a `bash -l`
+// (login but not interactive) skips bashrc entirely — and that's where
+// mise / asdf / nvm typically inject their PATH activation. The
+// v0.21.4.0 fix that added `-l` solved the login-file half of the
+// population; the other half ended up exactly where we started:
+// `make install` → `make: go: No such file or directory`.
+//
+// Rather than fight the guards (e.g., `bash -li` works but spews
+// `bash: no job control in this shell` on every run into the TUI's
+// captured output), we activate the common version managers directly.
+// Ordering matters here — the static path enumeration runs FIRST so
+// version-manager binaries are reachable before we try to invoke them:
+//
+//  1. Static toolchain spots are prepended first: ~/.local/bin (where
+//     `curl mise.run | sh` and canopy's own installer put their
+//     binaries), /usr/local/go/bin (the official Go tarball), ~/go/bin
+//     (where `go install` places third-party binaries). The PATH-dedupe
+//     `case` avoids accumulating duplicates across repeated invocations
+//     (long-lived SSH multiplex sessions hit this).
+//
+//     This step's load-bearing job is to make `mise` itself findable.
+//     If we ran the `command -v mise` check first, hosts with mise at
+//     ~/.local/bin/mise (the canonical install path) but no `~/.local/bin`
+//     on the non-interactive `bash -l` PATH would silently skip mise
+//     activation — leaving go off PATH and reproducing the v0.21.4.0
+//     regression. The static prepend has to come before the activation.
+//
+//  2. `mise activate bash` — emits the same PATH/shim exports that
+//     omarchy/default/bash/init runs interactively. Now reachable
+//     because step 1 put ~/.local/bin on PATH.
+//
+//  3. `~/.asdf/asdf.sh` — asdf's canonical activation hook. The
+//     `[ -f ]` guard keeps this a no-op on hosts without asdf.
+//
+// All activation errors are swallowed (`|| true` + `2>/dev/null`) so a
+// broken version-manager install on the remote doesn't turn a
+// recoverable upgrade into a hard failure — the static path fallback
+// from step 1 still gives us a fighting chance to find `go`.
+const remoteEnvPrep = `for d in "$HOME/.local/bin" "/usr/local/go/bin" "$HOME/go/bin"; do [ -d "$d" ] && case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH";; esac; done; export PATH; command -v mise >/dev/null 2>&1 && eval "$(mise activate bash 2>/dev/null)" 2>/dev/null || true; [ -f "$HOME/.asdf/asdf.sh" ] && . "$HOME/.asdf/asdf.sh" 2>/dev/null || true`
 
 const (
 	// remoteUpgradeCmd: pull + reinstall, non-interactive. --yes is
 	// required because the local TUI confirm already happened; running
 	// the remote's own y/n prompt would hang the SSH on a closed stdin.
-	remoteUpgradeCmd = `export PATH="$HOME/.local/bin:$PATH"; exec canopy upgrade --yes`
+	remoteUpgradeCmd = remoteEnvPrep + `; exec canopy upgrade --yes`
 
 	// remoteUseReleaseCmd: flip the host's `canopy` symlink back to
 	// the released binary. Idempotent — if the host is already on
 	// release, the command prints a confirmation and exits 0.
-	remoteUseReleaseCmd = `export PATH="$HOME/.local/bin:$PATH"; exec canopy use release`
+	remoteUseReleaseCmd = remoteEnvPrep + `; exec canopy use release`
 )
 
 // actionHostUpgrade is the U-key handler on the Hosts tab. Captures
