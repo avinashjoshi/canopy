@@ -198,7 +198,7 @@ The TUI's **Remote hosts** tab shows every registered host with a live version, 
 From there:
 
 - `enter` opens a detail drawer with SSH target, projects, last-error
-- `n` opens the in-TUI add-workspace picker (Fresh / Prompt; PR / Issue / Branch are hidden because they need remote `gh`)
+- `n` opens the in-TUI add-workspace picker (Fresh / Prompt / PR / Issue / Branch — parity with local; PR/Issue/Branch loaders SSH `gh` and `git for-each-ref` against the remote project cwd)
 - `s` drops you into an interactive `ssh` shell on the host (y/N gate first, refreshes when you `exit`)
 - `U` runs `canopy upgrade --yes` on the remote, streaming output to the TUI
 - `S` runs `canopy use release` on the remote (recovery path for hosts running a DEV binary)
