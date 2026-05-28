@@ -5,6 +5,30 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.14.0] - 2026-05-28 — TUI remote dispatch pins the row's project (no more `(fallback)`)
+
+When the TUI dispatched a remote `canopy rm` or `canopy retry` for a row on tower, it ran `canopy <verb> --on <host> <name> --yes` from the laptop user's cwd. If the laptop's cwd wasn't inside a registered project (the bare-`canopy`-from-`~` case), `cmd/canopy/host_resolve.go`'s `resolveOnForSwitch` fell back to "first project on this host" and rendered the dispatch source as `registry:tower/<project> (fallback)`. That fallback is benign when the host has one project; on a multi-project host it could silently land an rm or retry in the wrong project entirely.
+
+The TUI already knows the (host, project) pair for every remote row (`row.Host` + `row.Project`), and the in-memory host registry (`m.hostList[].Projects`) already maps `(host, project) → remote path` from `~/.canopy/hosts.json`. The pieces were just never wired into the dispatch. `internal/ui/update_remote.go` gains a `remoteCwdArg` helper that returns `["--remote-cwd", <path>]` when the registry knows the path and `nil` otherwise. `update_delete.go` (the `y`/`F` confirm path) and `update_retry.go` (`R` on remote rows) thread it through `execRemoteVerb`. When the registry doesn't know the path the dispatch stays in its legacy shape — we don't want to guess at a remote cwd, because a guessed path that doesn't exist trips `buildRemoteScript`'s `[ ! -d <path> ]` exit-7 pre-check and produces a worse diagnostic than the fallback did.
+
+This doesn't change the remote-side error for "workspace not found" — that's covered by the v0.21.13.0 enriched diagnostic that ships in this same PR. The two fixes compose: the dispatcher lands the verb in the right project (this), and when it still can't find the workspace there the remote canopy explains why (v0.21.13.0).
+
+### Fixed
+
+- **`rm`/`retry` dispatched from the TUI for a remote row now pin `--remote-cwd` to the row's project.** Eliminates the `(fallback)` annotation in the dispatch source line for any (host, project) the laptop has registered (the common case), and removes a real correctness risk on multi-project hosts where the fallback could land a verb in the wrong project. Helper `remoteCwdArg` in `internal/ui/update_remote.go` is the single source of truth — call sites just `append(args, m.remoteCwdArg(host, project)...)`. Tests pin both branches: pinned-when-known, and silent nil-when-unknown so the dispatch stays in its legacy shape rather than guessing.
+
+## [0.21.13.0] - 2026-05-28 — `canopy rm` not-found error tells you why
+
+The terse `Error: workspace.Find(noble-lichen): workspace: not found` from `canopy rm` left users — especially when it surfaced through the SSH dispatch on a remote host — with no signal about *why* the workspace was missing. Typo? Stale TUI row? Wrong project on the remote? Same five words for all three.
+
+`cmd/canopy/rm.go` now enriches the not-found path through a new `rmEnrichNotFound`. The replacement error names the project the lookup ran against, lists the workspaces that ARE registered there (catches typos and stale TUI rows in the same line — the user sees the truth), surfaces any other project on this host that has a workspace by the same name (the cwd-into-wrong-project mismatch that's especially common in remote dispatch), and points at `--force` as the silent-success escape hatch. The shortcut from `rmHandleFindErr` still wins when `--force` is set, so the TUI's force-delete-on-stale-row path stays quiet.
+
+The lookup is best-effort: `mgr.List` and `mgr.Store.Load` failures degrade to the shorter form rather than masking the underlying not-found signal, so a busted state store can't make this path noisier than the original. Tests in `cmd/canopy/rm_test.go` cover the four shapes — siblings listed, empty project, cross-project hint present, no cross-project false positive.
+
+### Fixed
+
+- **`canopy rm <name>` now explains itself when the workspace isn't there.** The error names the project, lists the workspaces it *did* find there, flags a same-named workspace under another project root if one exists, and suggests `--force` for "already gone" cases. Most useful through remote SSH dispatch — `Dispatching to … Error: workspace.Find(X): workspace: not found` used to be the whole diagnostic; now the user sees the remote's actual workspace list right there in their terminal.
+
 ## [0.21.12.0] - 2026-05-28 — Idle collapse expands remote hosts; slow remote `ls --json` no longer marks the connection bad
 
 Two TUI bugs that both stemmed from the same blind spot: per-host nuance falling over the moment a host's only rows were ones the user couldn't see or reach.

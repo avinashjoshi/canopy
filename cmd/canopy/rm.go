@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/avinashjoshi/canopy/internal/workspace"
@@ -82,6 +84,9 @@ func rmCmd() *cobra.Command {
 			if err != nil {
 				if handled, herr := rmHandleFindErr(err, rmFlags.force, name, cmd.OutOrStdout()); handled {
 					return herr
+				}
+				if errors.Is(err, workspace.ErrWorkspaceNotFound) {
+					return rmEnrichNotFound(ctx, mgr, name)
 				}
 				return err
 			}
@@ -165,6 +170,60 @@ func rmHandleFindErr(err error, force bool, name string, out io.Writer) (handled
 		return true, nil
 	}
 	return false, nil
+}
+
+// rmEnrichNotFound replaces the terse `workspace.Find(X): workspace: not
+// found` with a diagnostic that answers the three questions a user staring
+// at the bare error actually has:
+//
+//  1. What workspaces ARE in this project? (Surfaces typos and stale TUI
+//     rows in the same line — the user sees the truth.)
+//  2. Does a workspace by this name exist in another project on this host?
+//     (Common when the TUI on the laptop dispatched into the wrong remote
+//     project via cwd, or after a manual cd.)
+//  3. How do I make this succeed when I know the workspace is already
+//     gone? (Point at --force, which mirrors `rm -f` semantics.)
+//
+// The error is built best-effort: store/list failures degrade to the
+// shorter form rather than masking the original not-found signal. This
+// is a user-facing error, not a typed sentinel — callers that need to
+// branch on "workspace not found" still have access via errors.Is on
+// the underlying ErrWorkspaceNotFound at the Find site.
+func rmEnrichNotFound(ctx context.Context, mgr *workspace.Manager, name string) error {
+	var lines []string
+	lines = append(lines, fmt.Sprintf("workspace %q not found in project %q (%s).",
+		name, mgr.Cfg.Project, mgr.Cfg.ProjectRoot))
+
+	if list, listErr := mgr.List(ctx); listErr == nil {
+		if len(list) == 0 {
+			lines = append(lines, "No workspaces are registered in this project.")
+		} else {
+			names := make([]string, 0, len(list))
+			for _, w := range list {
+				names = append(names, w.Name)
+			}
+			sort.Strings(names)
+			lines = append(lines, "Workspaces here: "+strings.Join(names, ", ")+".")
+		}
+	}
+
+	if st, sErr := mgr.Store.Load(); sErr == nil {
+		var elsewhere []string
+		for _, w := range st.Workspaces {
+			if w.Name == name && w.ProjectRoot != mgr.Cfg.ProjectRoot {
+				elsewhere = append(elsewhere, w.ProjectRoot)
+			}
+		}
+		if len(elsewhere) > 0 {
+			sort.Strings(elsewhere)
+			lines = append(lines, fmt.Sprintf(
+				"A workspace named %q is registered under: %s. Run `canopy rm` from that project's root (or pass --on with the right host/project).",
+				name, strings.Join(elsewhere, ", ")))
+		}
+	}
+
+	lines = append(lines, "If the TUI showed this workspace, its list may be stale — refresh the host and try again, or re-run with --force to make a missing workspace a silent success.")
+	return errors.New(strings.Join(lines, "\n"))
 }
 
 // readYesNo reads one line from r (typically stdin) and reports whether

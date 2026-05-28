@@ -101,6 +101,22 @@ func (m *Model) remoteCwdForRow(hostName, projectName string) string {
 	return ""
 }
 
+// remoteCwdArg returns the `--remote-cwd <path>` suffix to thread into
+// a remote canopy dispatch, or nil when the host registry doesn't know
+// the path. Pinning the project keeps cmd/canopy's resolveOnForSwitch
+// out of its "first project on host" fallback (the path that prints
+// `(fallback)` in the dispatch source line) so a verb dispatched for a
+// workspace under project A can't accidentally land in project B on a
+// multi-project host. Returning nil leaves the caller in the legacy
+// shape (no flag appended) — that's still correct for hosts the
+// registry hasn't fully mapped yet; only the diagnostic gets worse.
+func (m *Model) remoteCwdArg(hostName, projectName string) []string {
+	if path := m.remoteCwdForRow(hostName, projectName); path != "" {
+		return []string{"--remote-cwd", path}
+	}
+	return nil
+}
+
 // execRemoteKill kills a workspace's tmux session on a remote host by
 // SSHing `tmux kill-session -t <session>` directly. Doesn't go through
 // canopy on the remote because there's no `canopy kill` verb — kill is

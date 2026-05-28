@@ -1348,7 +1348,7 @@ func (m *Model) renderConfirmDelete() string {
 	// work" — so always surface F as an alternative path here so the
 	// user can pre-decide "force regardless" instead of dispatching a
 	// `y` that fails. v0.17 Phase 1l polish.
-	if _, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
+	if _, _, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
 		b.WriteString("  ")
 		b.WriteString(brokenStyle.Render("y"))
 		b.WriteString(" to remove (refuses on hanging work)  ·  ")
