@@ -65,7 +65,9 @@ func (m *Model) execRemoteVerb(hostName, verb string, args []string, force bool)
 		// Refresh BOTH local and remote so the row updates / disappears
 		// as appropriate. The remote-rows fan-out is what reflects the
 		// rm/retry side effect we just dispatched. v0.17 Phase 1h.
-		m.remoteRefreshing = false
+		// The refreshAllMsg handler in Update clears remoteRefreshing
+		// on the Bubbletea goroutine before re-dispatching refresh, so
+		// we deliberately don't touch m from this exec callback.
 		return refreshAllMsg{}
 	})
 }
@@ -130,7 +132,9 @@ func (m *Model) execRemoteKill(hostName, sessionName string) tea.Cmd {
 		if err != nil {
 			log.Warn("ui.remote-kill.failed", "host", hostName, "session", sessionName, "err", err, "out", string(out))
 		}
-		m.remoteRefreshing = false
+		// remoteRefreshing is cleared in the refreshAllMsg handler in
+		// Update — never from a tea.Cmd goroutine. Touching m here
+		// would race the View+spinner read path.
 		return refreshAllMsg{}
 	}
 }

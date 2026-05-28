@@ -5,7 +5,7 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.21.7.0] - 2026-05-27 — Remote `canopy host upgrade` finds `go` on hosts where mise/asdf is wired through `~/.bashrc`
+## [0.21.9.0] - 2026-05-27 — Remote `canopy host upgrade` finds `go` on hosts where mise/asdf is wired through `~/.bashrc`
 
 The v0.21.4.0 fix wrapped the SSH command in `bash -l` so the remote shell sourced `~/.bash_profile` / `~/.profile`. That solved half the population. The other half — including every Omarchy/Arch box, every Ubuntu default install, and every host whose mise/asdf activation lives in `~/.bashrc` — still failed with `make: go: No such file or directory` after `git pull` succeeded, because a *non-interactive* login shell never sources `~/.bashrc`.
 
@@ -22,6 +22,42 @@ All three bail when `$-` doesn't contain `i`, which is exactly what `bash -l` pr
 ### Fixed
 
 - **`canopy host upgrade` / `canopy host use release` now activate `mise` / `asdf` directly, bypassing bashrc — and in the right order.** `internal/ui/update_host_upgrade.go` introduces `remoteEnvPrep`, a shell snippet prepended to every remote canopy command. It prepends `~/.local/bin`, `/usr/local/go/bin`, `~/go/bin` to PATH first (case-glob deduped), then runs `eval "$(mise activate bash)"` when `command -v mise` finds the binary, then sources `~/.asdf/asdf.sh` when present. The ordering is load-bearing: an earlier draft put the `command -v mise` check before the static prepend, which silently broke hosts where mise was installed via the canonical `curl https://mise.run | sh` (binary at `~/.local/bin/mise`) — the check fired with PATH=`/usr/bin:/bin` (because `bash -l` non-interactive skips `~/.bashrc`), missed mise, never activated the shim, and reproduced the original `make: go: No such file or directory` failure on the next `canopy host upgrade`. An adversarial review caught this pre-merge; a regression test (`TestRemoteEnvPrep_ActivatesMiseInUserLocalBin`) stubs `mise` at `$HOME/.local/bin/mise` with PATH stripped down to `/usr/bin:/bin` and asserts the shim dir appears on PATH only after activation — locking the ordering contract. Activation errors are swallowed (`|| true`, `2>/dev/null`) so a broken version-manager install doesn't escalate a recoverable upgrade into a hard failure. Five tests in total: fragment invariants, both call sites chain the prep, end-to-end bash exercise of the static fallback, dedupe-doesn't-double-append, and the ordering regression test.
+## [0.21.8.0] - 2026-05-27 — `m.remoteRefreshing` is exclusively owned by `Update`; CI gains `-race`
+
+Three post-action `tea.Cmd` callbacks — `execRemoteVerb` (remote rm/retry), `execRemoteKill`, and `attachOrSwitchWithOpts` — used to flip `m.remoteRefreshing = false` from their own goroutine right before returning `refreshAllMsg{}`. The flip was load-bearing: `refresh()`'s `if !m.remoteRefreshing` gate would otherwise skip the post-action remote fan-out, leaving the rm'd/killed row visible until the next 2s tick. But the same field is read from the 120ms `hostsSpinnerTickMsg` handler (shipped in v0.21.1) and from `View()`, both on the Bubbletea goroutine — observable as a data race under `go test -race ./internal/ui/...`. The v0.21.1 CHANGELOG flagged it as a "Known concern" without a follow-up landing; this PR is the follow-up.
+
+The fix collapses ownership: `Update`'s `refreshAllMsg` handler now clears the latch on the Bubbletea goroutine *before* re-dispatching `m.refresh()`, so the three callbacks no longer touch `m` at all. Every write to `remoteRefreshing` now lives in `Update` (or in `refresh()`, which `Update` calls synchronously). The spinner tick and View read it without contention.
+
+CI gains `go test -race ./...` on the unit-tests job so this class of bug surfaces in PR review instead of as silent corruption in production.
+
+### Fixed
+
+- **`remoteRefreshing` write-race with the hosts-tab spinner tick (v0.21.1 known concern).** `internal/ui/update_remote.go`'s `execRemoteVerb` and `execRemoteKill`, plus `internal/ui/update_attach.go`'s `attachOrSwitchWithOpts`, no longer mutate `m.remoteRefreshing` from their `tea.ExecProcess`/`tea.Cmd` goroutines; the latch is cleared in `internal/ui/update.go`'s `case refreshAllMsg` arm instead. New regression test `TestRefreshAllMsg_ClearsRemoteRefreshingBeforeDispatch` in `internal/ui/model_test.go` pins the ordering by checking that `hostsSpinnerFrame` resets to 0 after a `refreshAllMsg` dispatched while the latch was already held — only possible if `Update` clears the latch before `refresh()` runs its outer gate.
+
+### Changed
+
+- **`.github/workflows/test.yml` unit-tests job runs `go test -race ./...`.** Catches `Model`-field write races from background `tea.Cmd` goroutines in CI rather than relying on developers to remember `-race` locally.
+
+## [0.21.7.0] - 2026-05-27 — Workspaces tab redesign: idle projects collapse, host pills, violet contracts to brand-only
+
+Open `canopy` against a laptop that knows about a dozen projects and the global Workspaces tab spends most of its real estate telling you nothing. Each project canopy has ever seen contributes a `(main) not started 4X000 —` row whether you're working on it or not. The interesting rows — your two running workspaces with PR badges, the stopped one mid-rebase — get buried under 30 lines of chrome.
+
+The same palette compounded the problem. Pale violet was doing four jobs at once: the `canopy` brand pill, the active tab pill, every project header, and the synthetic `(main)` status. The eye couldn't tell brand from section header from cursor from row.
+
+This release reshapes the tab around what's actually happening on each host.
+
+### Changed
+
+- **Idle projects collapse behind a `+ N idle projects · e expand` roll-up, per host.** `internal/ui/projectlist/projectlist.go`'s new `ClassifyIdle` flags any project whose only row is a non-running `(main)` (status empty or stopped, not broken/orphaned/setting_up — those stay visible). The renderer skips hidden rows and emits a single dim line at the bottom of each host's section telling you how many were collapsed. Pressing `e` toggles the host the cursor is in, so you can unroll local without dragging every stale remote open at the same time. Cursor navigation (`j` / `k` / `g` / `G`) skips over hidden idle rows so `j` from the last running workspace doesn't land on something invisible. Loading placeholders, broken/orphaned mains, projects with even one workspace, and projects whose `(main)` is actively running are NEVER classified idle.
+- **Host sections render as rounded pills (`LOCAL`, `TOWER`, `PI`) matching the top-bar scope pill family.** The previous underlined-violet text was the same hue as the brand pill, so the eye couldn't separate top-bar chrome from in-listing section heads. Pills sit on gray-on-darker-gray (245/237 — same as the existing `global` scope pill) and uppercase their label so the shape carries the section-banner weight without competing with the violet brand chip above. A sentinel value for the host transition fixes a pre-existing bug where the local section never got a header when remote hosts also existed.
+- **Selection bg moves from dark grey 237 to teal 38.** The old grey collided with `inactiveTabStyle` and `scopePillStyle` (both bg 237), so the selected workspace row sat at the same visual weight as the static chrome pills around it. Teal pulls the cursor distinctly forward without entering the violet brand-pill family.
+- **Project headers demote from violet 99 to bold-white 231, indented two spaces under the host pill.** Violet is now brand-only — the brand pill, the active tab pill, and nothing else. Project headers became section heads inside the host's section, so the indent reinforces "this project belongs to this host." `mainStatusStyle` in `render.go` also moves from violet to dim grey 241 since `(main)` rows are informational, not actionable.
+- **Memory column drops at terminal width < 100.** Mirrors `hosts.Render`'s D2 tiered-drop policy: `530M 1%` is the most superfluous cell — the user can attach to see live resource use. `m.width == 0` (pre-WindowSizeMsg) treats the terminal as wide so the first paint doesn't drop a column it'll need a tick later.
+- **Help line auto-includes the new `e expand idle` chip.** Driven by `listModeBindings` in `internal/ui/keymap.go`; `actionToggleIdleExpand` in `internal/ui/update_tabs.go` is a thin wrapper that forwards the key to projectlist where the per-host expansion state lives.
+
+### Tests
+
+12 new tests in `internal/ui/projectlist/idle_test.go` cover the classifier (lone main, alive main, broken status, expanded host, loading placeholder, per-host independence), the renderer (collapse default, expand-on-e, no-rollup-when-zero-idle, cursor skips hidden, cursor jumps after expand, SetRows auto-advances off hidden), `hostPill` uppercasing, selection-bg and project-header-fg color regression guards via `lipgloss.Style` getters (so they pass without a TTY), and narrow-width column drop. One new test in `internal/ui/render_test.go` regression-guards `mainStatusStyle` against re-borrowing violet. Two existing tests updated to expect uppercased host names in the rendered output.
 
 ## [0.21.6.0] - 2026-05-27 — Reconnecting to a remote workspace after `git branch -m` no longer orphans the running agent
 

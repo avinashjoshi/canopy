@@ -3684,6 +3684,42 @@ func TestRefresh_DoesNotDoubleDispatchSpinnerTick(t *testing.T) {
 	}
 }
 
+// TestRefreshAllMsg_ClearsRemoteRefreshingBeforeDispatch is the
+// regression test for the pre-fix race where post-remote-action tea.Cmd
+// closures (execRemoteVerb / execRemoteKill / attachOrSwitchWithOpts)
+// wrote `m.remoteRefreshing = false` from the goroutine they ran in,
+// to free refresh()'s `!remoteRefreshing` gate so the post-action
+// refresh would actually dispatch the remote fan-out. That goroutine
+// write raced the 120ms hostsSpinnerTick read on the Bubbletea
+// goroutine (-race observable since v0.21.1's spinner addition).
+//
+// Post-fix: the closures don't touch m at all; the refreshAllMsg
+// handler in Update clears the latch on the Bubbletea goroutine
+// BEFORE calling refresh(). The behavioral proxy: starting from
+// remoteRefreshing=true (as if a previous fan-out was still latched
+// when the post-action callback fires), refreshAllMsg must reset the
+// hostsSpinnerFrame to 0 — refresh()'s outer guard only resets the
+// frame when it sees the latch cleared. If Update DIDN'T clear first,
+// refresh() would see latch=true and skip the reset.
+func TestRefreshAllMsg_ClearsRemoteRefreshingBeforeDispatch(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "u@t", Type: "ssh"}}
+	m.remoteRefreshing = true // simulate "latch still held by prior fan-out"
+	m.hostsSpinnerActive = true
+	m.hostsSpinnerFrame = 5 // sentinel: a clean refresh dispatch resets to 0
+
+	_, _ = m.Update(refreshAllMsg{})
+
+	if m.hostsSpinnerFrame != 0 {
+		t.Errorf("hostsSpinnerFrame = %d, want 0 — refreshAllMsg did not clear remoteRefreshing before calling refresh(); the post-action fan-out was a no-op", m.hostsSpinnerFrame)
+	}
+	// And the latch should be true again because refresh() relatches it
+	// for the new in-flight remote dispatch.
+	if !m.remoteRefreshing {
+		t.Errorf("remoteRefreshing = false after refreshAllMsg; refresh() failed to relatch the new dispatch")
+	}
+}
+
 // TestErrMsg_SetsErrAndStaysIdle: an errMsg delivered to Update sets
 // m.err and returns no follow-up cmd (no refresh, no retry).
 func TestErrMsg_SetsErrAndStaysIdle(t *testing.T) {
