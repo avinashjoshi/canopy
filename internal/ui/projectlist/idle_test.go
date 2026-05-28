@@ -203,6 +203,44 @@ func TestRender_IdleRollupExpandsOnE(t *testing.T) {
 	}
 }
 
+// TestRender_IdleRollupExpandsRemoteEvenFromLocalRow pins the v0.21.11+
+// lockstep `e` semantics: pressing `e` while the cursor is on a local
+// row must also expand a remote host whose only rows are idle (and
+// therefore hidden, so the cursor cannot land on them). Pre-fix this
+// was the user-visible "idle projects only expands local, not remote"
+// bug — per-host independence had no way to toggle a host that lacked
+// a visible cursor target.
+func TestRender_IdleRollupExpandsRemoteEvenFromLocalRow(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		// Local: a visible workspace so the cursor has somewhere to
+		// land, plus an idle main so local has its own roll-up.
+		{Project: "cravd", Name: "fair-comet", Status: state.StatusReady, Alive: true},
+		{Project: "brain", Name: "(main)", IsMain: true, Branch: "master"},
+		// Tower: an idle-only host. With per-host independence the
+		// cursor could never reach this row to toggle it.
+		{Host: "tower", Project: "canopy", Name: "(main)", IsMain: true, Status: "main"},
+	})
+	next, _ := m.Update(key("e"))
+	out := stripStyle(next.View())
+	if !strings.Contains(out, "brain") {
+		t.Errorf("after `e`, local idle project 'brain' should be visible; got:\n%s", out)
+	}
+	if !strings.Contains(out, "canopy") {
+		t.Errorf("after `e`, tower idle project 'canopy' should be visible; got:\n%s", out)
+	}
+	// Press again: both should collapse together. Lockstep means the
+	// second `e` collapses whatever the first `e` expanded.
+	next2, _ := next.Update(key("e"))
+	out2 := stripStyle(next2.View())
+	if strings.Contains(out2, "brain") {
+		t.Errorf("after second `e`, local 'brain' should be hidden; got:\n%s", out2)
+	}
+	if strings.Contains(out2, "canopy") {
+		t.Errorf("after second `e`, tower 'canopy' should be hidden; got:\n%s", out2)
+	}
+}
+
 // TestRender_NoIdleNoRollupLine: when no project meets the idle
 // criteria, the renderer must not emit a roll-up line at all.
 // Regression guard against accidentally emitting "+ 0 idle projects".

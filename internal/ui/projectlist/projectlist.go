@@ -225,21 +225,39 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 
 		case "e":
-			// Toggle the current host's idle roll-up. The host the
-			// cursor is in owns the toggle so users can independently
-			// expand local without unrolling every stale remote at
-			// once. No-op when the row list is empty (no host to
-			// target). When collapsing leaves the cursor stranded on
-			// a now-hidden idle row, advance to the next visible row
+			// Toggle idle roll-up across every host that has idle
+			// rows, in lockstep. Per-host independence (only toggle
+			// the cursor's host) was the original design, but it
+			// left users with no way to expand a remote whose ONLY
+			// rows were idle — those rows are hidden by default, so
+			// the cursor could never land on them, so `e` only ever
+			// toggled local. Lockstep semantics: if any host with
+			// idle is currently expanded, collapse all; else expand
+			// all. No-op when the row list is empty or no host has
+			// idle. When collapsing leaves the cursor stranded on a
+			// now-hidden idle row, advance to the next visible row
 			// so the highlight stays meaningful.
 			if len(m.rows) == 0 {
 				return m, nil
 			}
-			host := m.rows[m.cursor].Host
 			if m.idleExpanded == nil {
 				m.idleExpanded = map[string]bool{}
 			}
-			m.idleExpanded[host] = !m.idleExpanded[host]
+			_, idleByHost := ClassifyIdle(m.rows, m.idleExpanded)
+			if len(idleByHost) == 0 {
+				return m, nil
+			}
+			anyExpanded := false
+			for h := range idleByHost {
+				if m.idleExpanded[h] {
+					anyExpanded = true
+					break
+				}
+			}
+			target := !anyExpanded
+			for h := range idleByHost {
+				m.idleExpanded[h] = target
+			}
 			hidden, _ := ClassifyIdle(m.rows, m.idleExpanded)
 			if hidden[m.cursor] {
 				fwd := nextVisible(hidden, m.cursor, 1)

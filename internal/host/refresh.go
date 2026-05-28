@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -20,7 +21,7 @@ import (
 //	     ▼
 //	Refresher.Tick(ctx, hosts) ──fan-out──┐
 //	     ▲                                │
-//	     │ join (3s deadline)             │ per-host
+//	     │ join (8s deadline)             │ per-host
 //	     │                                │ goroutine
 //	     │                                ▼
 //	     │                          ssh tower canopy ls --json
@@ -30,12 +31,25 @@ import (
 //	     map[host]Result
 //
 // One slow/offline host can't freeze the TUI: each goroutine has its
-// own context.WithTimeout(3s), they all join via a sync.WaitGroup, and
+// own context.WithTimeout, they all join via a sync.WaitGroup, and
 // the Tick caller sees a Result for every host (with a non-nil Err for
 // the ones that timed out / failed). This is the D8 decision from
 // /plan-eng-review.
+//
+// Deadline sizing: the first refresh per session has to do a cold SSH
+// handshake (no ControlMaster socket yet), and SSHCmd sets
+// ConnectTimeout=5 on its own, leaving very little wall-clock for the
+// remote `canopy ls --json` to actually run. The original 3s budget
+// reliably timed out on hosts over WAN/Tailscale even when the host
+// was perfectly healthy — and the resulting "signal: killed" error
+// didn't include the word "timeout", so BuildRows classified it as
+// StatusBroken ("✗" red) instead of StatusOffline ("○" gray), making
+// a healthy-but-slow host look like canopy was crashing on the remote.
+// 8s gives the cold SSH handshake room to land its ControlMaster
+// socket; from that tick onward, the warm path is sub-second on
+// LAN/Tailscale.
 type Refresher struct {
-	// Timeout is per-host, default 3 * time.Second. Caller may override
+	// Timeout is per-host, default 8 * time.Second. Caller may override
 	// for slower networks (mobile tether, congested wifi) or for tests.
 	Timeout time.Duration
 }
@@ -132,7 +146,7 @@ type remoteLsResponse struct {
 
 // Tick runs one refresh pass across all `hosts`, returning a slice of
 // Results — one per host, in the same order as the input. Blocks until
-// every host has either returned or timed out (3s deadline by default,
+// every host has either returned or timed out (8s deadline by default,
 // bounded so the TUI tick stays snappy regardless of network state).
 //
 // Callers (model.go) wrap this in a tea.Cmd so it runs off the UI
@@ -150,7 +164,7 @@ func (r *Refresher) Tick(ctx context.Context, hosts []Host) []Result {
 	}
 	timeout := r.Timeout
 	if timeout == 0 {
-		timeout = 3 * time.Second
+		timeout = 8 * time.Second
 	}
 	results := make([]Result, len(hosts))
 	var wg sync.WaitGroup
@@ -214,6 +228,20 @@ exec canopy ls --json --all
 	cmd.Stdin = strings.NewReader(script)
 
 	if err := cmd.Run(); err != nil {
+		// Wall-clock timeout is its own classification. exec kills the
+		// SSH child with SIGKILL when the context deadline fires, so
+		// cmd.Run returns "signal: killed" — a string that does NOT
+		// contain the word "timeout" and would fall through the
+		// hosts.BuildRows error-classifier into the StatusBroken
+		// catchall (the "✗ red" pill, suggesting the remote canopy is
+		// crashing). It isn't; it's just slow. Emit a "timeout"
+		// keyword the classifier can match so the host shows offline
+		// (○ gray) and the workspaces tab keeps using cached rows.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			res.Err = fmt.Errorf("ssh %s canopy ls --json: timeout after %s", h.Name, timeout)
+			log.Debug("host.refresh.timeout", "host", h.Name, "timeout", timeout)
+			return res
+		}
 		// Don't include full stderr in the wrapped error — keeps the
 		// per-row error pill in the TUI readable. Caller can pull
 		// detailed diagnostics from the canopy log.

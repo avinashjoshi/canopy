@@ -391,6 +391,72 @@ func TestBuildRows_LoadingIgnoredOnceSnapshotExists(t *testing.T) {
 	}
 }
 
+// TestBuildRows_ErrorClassification pins each branch of the LastError
+// → Status switch in BuildRows. The original "wall-clock timeout looks
+// like a broken remote" bug was a missing classifier case: refresh.go
+// returned "ssh tower canopy ls --json: signal: killed" when ctx
+// deadline-exceeded killed the child, and the substring matcher in
+// BuildRows didn't recognize it as a timeout. v0.21.12+ refresh.go
+// emits an explicit "timeout after Xs" message; this test locks the
+// contract on the consuming side.
+func TestBuildRows_ErrorClassification(t *testing.T) {
+	cases := []struct {
+		name       string
+		lastError  string
+		wantStatus Status
+		wantDetail string
+	}{
+		{
+			name:       "timeout error → Offline (not Broken)",
+			lastError:  "ssh tower canopy ls --json: timeout after 8s",
+			wantStatus: StatusOffline,
+			wantDetail: "unreachable",
+		},
+		{
+			name:       "connection refused → Offline",
+			lastError:  "ssh tower: Connection refused",
+			wantStatus: StatusOffline,
+			wantDetail: "unreachable",
+		},
+		{
+			name:       "permission denied → AuthFailed",
+			lastError:  "Permission denied (publickey)",
+			wantStatus: StatusAuthFailed,
+			wantDetail: "key auth not set up",
+		},
+		{
+			name:       "canopy not found → Broken",
+			lastError:  "bash: canopy: not found",
+			wantStatus: StatusBroken,
+			wantDetail: "canopy not installed on remote",
+		},
+		{
+			name:       "anything else → Broken (catchall)",
+			lastError:  "totally unexpected garbage",
+			wantStatus: StatusBroken,
+			wantDetail: "totally unexpected garbage",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hosts := []host.Host{{Name: "tower", SSHTarget: "avi@tower", Type: "ssh"}}
+			snaps := map[string]*state.RemoteHostSnapshot{
+				"tower": {LastError: tc.lastError, LastSeen: time.Now()},
+			}
+			rows := BuildRows(hosts, snaps, "", false)
+			if len(rows) != 1 {
+				t.Fatalf("BuildRows returned %d rows, want 1", len(rows))
+			}
+			if rows[0].Status != tc.wantStatus {
+				t.Errorf("Status = %v, want %v", rows[0].Status, tc.wantStatus)
+			}
+			if rows[0].StatusDetail != tc.wantDetail {
+				t.Errorf("StatusDetail = %q, want %q", rows[0].StatusDetail, tc.wantDetail)
+			}
+		})
+	}
+}
+
 // TestSpinnerGlyph_FrameRotation locks the deterministic mapping
 // between frame index and Braille codepoint. The 10-frame cycle is
 // what makes the on-screen rotation feel smooth at 120ms cadence; any
