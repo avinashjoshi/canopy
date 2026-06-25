@@ -5,6 +5,18 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.15.0] - 2026-06-25 — `canopy new "two words"` no longer fatals on `git worktree add`
+
+Typing a workspace name with a space in the TUI new-workspace box (e.g. `testing codex`) failed creation outright: `fatal: 'testing codex' is not a valid branch name`. canopy sanitized the name correctly for the on-disk path (`testing codex` → `testing-codex`) but passed the raw, space-bearing name straight to `git worktree add -b` as the branch. Git accepts slashes in refs (`feature/oauth`) but rejects spaces, colons, `..`, `~`, and friends — so any name git considers invalid broke creation.
+
+The root cause was a stale assumption baked into `internal/git/worktree.go`'s `Sanitize` doc comment: "the git branch keeps its original name; only the filesystem and tmux derivatives get sanitized." That held only while users supplied valid git branch names. `internal/workspace/lifecycle.go`'s `Create` derived the default branch with a bare `branch := name` and handed it to `git.Add` a few lines later — the unsanitized name leaked into the git command.
+
+The fix sanitizes the branch too, but only on the fallback path: `branch := git.Sanitize(name)` when no explicit `--branch` was supplied. An explicit `canopy new x --branch feature/y` is still passed to git verbatim — the caller knows what they want and `feature/y` is a valid ref that `Sanitize` would have mangled to `feature-y`. This also realigns a latent inconsistency: the on-disk path basename was *already* `git.Sanitize(name)`, so for any space-bearing name the branch and the path had silently diverged. Now `branch == path basename == tmux session` hold together (the v0 "four names match" invariant) for every input.
+
+### Fixed
+
+- **`canopy new <name with spaces>` (and any name git rejects as a ref) now creates cleanly.** The default branch name — the one derived from the workspace name when no `--branch` is given — runs through `git.Sanitize`, so `testing codex` becomes branch `testing-codex` and `git worktree add -b` succeeds. Explicit `--branch` values are untouched (slashed refs like `feature/oauth` survive intact). Tests in `internal/workspace/lifecycle_test.go` pin both branches of the conditional (sanitized fallback, preserved explicit branch) plus idempotency on an already-valid name; `internal/git/worktree_test.go` gains interior-space, padded-space, and tilde edge cases.
+
 ## [0.21.14.0] - 2026-05-28 — TUI remote dispatch pins the row's project (no more `(fallback)`)
 
 When the TUI dispatched a remote `canopy rm` or `canopy retry` for a row on tower, it ran `canopy <verb> --on <host> <name> --yes` from the laptop user's cwd. If the laptop's cwd wasn't inside a registered project (the bare-`canopy`-from-`~` case), `cmd/canopy/host_resolve.go`'s `resolveOnForSwitch` fell back to "first project on this host" and rendered the dispatch source as `registry:tower/<project> (fallback)`. That fallback is benign when the host has one project; on a multi-project host it could silently land an rm or retry in the wrong project entirely.
