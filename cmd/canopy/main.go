@@ -116,6 +116,7 @@ func main() {
 	root.AddCommand(mainCmd())
 	root.AddCommand(retryCmd())
 	root.AddCommand(newRenameCmd())
+	root.AddCommand(newSetOwnerCmd()) // v0.22: mark workspaces as mine vs reviewing
 	// popup + popup-inner removed in v0.8 (TUI unification): tmux
 	// invokes `canopy` directly via display-popup -E with
 	// CANOPY_IN_POPUP=1 in the env. See cmd/canopy/install_tmux.go.

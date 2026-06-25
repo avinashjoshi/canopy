@@ -96,6 +96,14 @@ type RemoteWorkspaceRow struct {
 	// client attached during the last successful refresh, even when
 	// the host is currently offline. v0.19 remote-status-observability.
 	Attached bool `json:"attached,omitempty"`
+
+	// Owner + SourceKind mirror LsJSONWorkspace / host.RemoteWorkspace
+	// so the owner pill renders on remote rows from the on-disk cache
+	// when the host is offline or before the first refresh completes.
+	// Without these, a restart would drop the pill on stale remote
+	// review rows. v0.22 distinguish-my-workspaces.
+	Owner      string `json:"owner,omitempty"`
+	SourceKind string `json:"source_kind,omitempty"`
 }
 
 const remotesCacheVersion = 1

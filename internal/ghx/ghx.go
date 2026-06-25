@@ -53,6 +53,13 @@ type PR struct {
 	HeadRepositoryOwner struct {
 		Login string `json:"login"`
 	} `json:"headRepositoryOwner"`
+	// Author is the PR author's login. Present for both same-repo and
+	// cross-repo PRs (unlike HeadRepositoryOwner, which is fork-only).
+	// Canopy stamps this onto Workspace.Owner at creation so a workspace
+	// spun up to review someone's PR is visibly marked as theirs.
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
 }
 
 // Issue is the subset of issue fields canopy uses. Same shape rules
@@ -82,7 +89,7 @@ func FetchPR(ctx context.Context, projectRoot string, num int) (*PR, error) {
 		return nil, ErrUnavailable
 	}
 	out, err := runGH(ctx, projectRoot, "pr", "view", strconv.Itoa(num),
-		"--json", "number,title,body,headRefName,baseRefName,isCrossRepository,headRepositoryOwner")
+		"--json", "number,title,body,headRefName,baseRefName,isCrossRepository,headRepositoryOwner,author")
 	if err != nil {
 		log.Debug("ghx.FetchPR.failed", "num", num, "err", err)
 		return nil, fmt.Errorf("FetchPR(%d): %w", num, ErrNotFound)

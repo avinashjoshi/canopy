@@ -132,6 +132,14 @@ type RemoteWorkspace struct {
 	// Empty when the remote canopy is pre-v0.21.2 — laptop falls back
 	// to its old behavior (error on attach). v0.21.2.
 	ProjectRoot string `json:"project_root,omitempty"`
+
+	// Owner + SourceKind mirror LsJSONWorkspace so the laptop can render
+	// the owner pill ("mine" vs "reviewing") on remote rows. SourceKind
+	// carries the legacy fallback signal. Pre-owner remotes omit both;
+	// the laptop then renders the remote row as mine. v0.22
+	// distinguish-my-workspaces.
+	Owner      string `json:"owner,omitempty"`
+	SourceKind string `json:"source_kind,omitempty"`
 }
 
 // remoteLsResponse mirrors LsJSONOutput on the cmd/canopy side. Kept

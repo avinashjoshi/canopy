@@ -132,11 +132,11 @@ func TestLsJSONOutput_ClipboardBridgeOmitWhenEmpty(t *testing.T) {
 }
 
 func TestLsJSONSchemaVersion_BumpedForClipboardBridge(t *testing.T) {
-	// Schema version must bump when the wire format changes. Lane C.3
-	// brings it to 4. If someone reverts the field without reverting
-	// the schema bump (or vice versa), this test catches the drift.
-	if lsJSONSchemaVersion != 5 {
-		t.Errorf("lsJSONSchemaVersion = %d, want 5 (v0.19 added attached + motion-aware agent_state; v0.20 added clipboard_bridge)", lsJSONSchemaVersion)
+	// Schema version must bump when the wire format changes. If someone
+	// reverts a field without reverting the schema bump (or vice versa),
+	// this test catches the drift. v0.22 added owner + source_kind → 6.
+	if lsJSONSchemaVersion != 6 {
+		t.Errorf("lsJSONSchemaVersion = %d, want 6 (v0.20 added clipboard_bridge; v0.22 added owner + source_kind)", lsJSONSchemaVersion)
 	}
 }
 
