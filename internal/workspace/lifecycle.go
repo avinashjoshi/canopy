@@ -313,7 +313,16 @@ func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, s
 		// Branch defaults to the workspace name (the v0 "branch ==
 		// name" rule). canopy new --pr / --branch override this so the
 		// local branch matches the PR head or the user-supplied name.
-		branch := name
+		//
+		// When the branch falls back to name, sanitize it: a raw name
+		// like "testing codex" is a fine workspace label but not a valid
+		// git ref (git rejects spaces, colons, "..", "~", etc.), and
+		// passing it raw to `git worktree add -b` fails. Sanitizing keeps
+		// branch == safeName == path basename == tmux session in sync (the
+		// v0 "four names match" invariant). An explicit --branch is trusted
+		// as-is: the caller may legitimately want "feature/oauth", which is
+		// valid git but would be mangled to "feature-oauth" by Sanitize.
+		branch := git.Sanitize(name)
 		if opts.Branch != "" {
 			branch = opts.Branch
 		}

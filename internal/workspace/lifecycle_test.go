@@ -183,6 +183,87 @@ func TestCreate_GeneratesNameWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestCreate_SanitizesBranchNameWhenNoExplicitBranch is the regression
+// test for the "raw name with a space leaks into git worktree add -b"
+// bug. A workspace name like "testing codex" is a fine human label but
+// not a valid git ref — git rejects spaces. Before the fix, Create
+// passed the raw name to `git worktree add -b 'testing codex'`, which
+// fatals with "not a valid branch name". Sanitizing the default branch
+// keeps branch == path basename == tmux session in sync AND produces a
+// ref git accepts.
+func TestCreate_SanitizesBranchNameWhenNoExplicitBranch(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(context.Background(), "testing codex", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create with spaced name: %v\nstderr: %s", err, stderr.String())
+	}
+	if ws.Status != state.StatusReady {
+		t.Errorf("status = %q; want ready", ws.Status)
+	}
+	if ws.Branch != "testing-codex" {
+		t.Errorf("Branch = %q; want %q (space should be sanitized to hyphen)", ws.Branch, "testing-codex")
+	}
+	// Branch, on-disk basename, and tmux session must all agree.
+	if got := filepath.Base(ws.Path); got != "testing-codex" {
+		t.Errorf("path basename = %q; want %q (must match sanitized branch)", got, "testing-codex")
+	}
+	// The branch git actually created must be the sanitized one.
+	out, err := exec.Command("git", "-C", ws.Path, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "testing-codex" {
+		t.Errorf("git branch = %q; want %q", got, "testing-codex")
+	}
+}
+
+// TestCreate_PreservesExplicitBranchName verifies the other side of the
+// conditional: when the caller supplies an explicit --branch, canopy
+// passes it to git AS-IS and does NOT sanitize it. "feature/y" is a
+// valid git ref (slashes are legal in refs) and the caller knows what
+// they want — mangling it to "feature-y" would be wrong.
+func TestCreate_PreservesExplicitBranchName(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(context.Background(), "x", workspace.CreateOptions{Branch: "feature/y"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create with explicit branch: %v\nstderr: %s", err, stderr.String())
+	}
+	if ws.Branch != "feature/y" {
+		t.Errorf("Branch = %q; want %q (explicit --branch must not be sanitized)", ws.Branch, "feature/y")
+	}
+	out, err := exec.Command("git", "-C", ws.Path, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "feature/y" {
+		t.Errorf("git branch = %q; want %q", got, "feature/y")
+	}
+}
+
+// TestCreate_AlreadyValidNameUnchanged guards against over-sanitizing:
+// a name that's already a valid ref must pass through untouched
+// (Sanitize is idempotent on safe input). Without this, a regression
+// that mangled hyphenated names would slip by the spaced-name test.
+func TestCreate_AlreadyValidNameUnchanged(t *testing.T) {
+	requireGitAndTmux(t)
+	mgr, _ := fixture(t)
+
+	var stdout, stderr bytes.Buffer
+	ws, err := mgr.Create(context.Background(), "already-valid", workspace.CreateOptions{}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Create: %v\nstderr: %s", err, stderr.String())
+	}
+	if ws.Branch != "already-valid" {
+		t.Errorf("Branch = %q; want %q (valid name must be unchanged)", ws.Branch, "already-valid")
+	}
+}
+
 // TestCreate_AlreadyExists verifies the idempotency table: Create on an
 // existing workspace name returns ErrWorkspaceExists.
 func TestCreate_AlreadyExists(t *testing.T) {

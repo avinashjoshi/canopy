@@ -54,6 +54,16 @@ func TestSanitize(t *testing.T) {
 		{"empty", "", ""},
 		{"runs collapse to single hyphen", "a///b", "a-b"},
 		{"emoji and punctuation", "feat: 🚀 launch!", "feat-launch"},
+		// Branch-name fallback cases: a raw workspace name that git would
+		// reject as a ref must come out as a valid ref. These mirror the
+		// inputs that broke `git worktree add -b` before the workspace
+		// layer started sanitizing the default branch name.
+		{"interior space", "a b", "a-b"},
+		{"interior spaces collapse", "testing codex", "testing-codex"},
+		{"padded interior space", "  hi  ", "hi"},
+		{"multiple interior spaces", "a   b   c", "a-b-c"},
+		{"tilde rejected by git", "feat~1", "feat-1"},
+		{"valid name idempotent", "already-valid", "already-valid"},
 	}
 
 	for _, tc := range cases {
