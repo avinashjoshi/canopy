@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -665,6 +666,8 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleAddHostFormKey(msg)
 	case addProjectFormMode:
 		return m.handleAddProjectFormKey(msg)
+	case ownerFormMode:
+		return m.handleOwnerFormKey(msg)
 	case settingsFormMode:
 		return m.handleSettingsFormKey(msg)
 	case hostDetailMode:
@@ -1006,6 +1009,7 @@ func (m *Model) filteredRows() []state.GlobalRow {
 	combined = append(combined, m.remoteRows...)
 
 	out := make([]state.GlobalRow, 0, len(combined))
+	hiddenByReview := 0
 	for _, r := range combined {
 		// Local tab filtering applies only to local rows. Remote rows
 		// never have a ProjectRoot that matches the current local
@@ -1022,8 +1026,24 @@ func (m *Model) filteredRows() []state.GlobalRow {
 		if m.searchQuery != "" && !rowMatchesQuery(r, m.searchQuery) {
 			continue
 		}
+		// `m` filter: hide rows the user is only reviewing, so the list
+		// collapses to their own work. Main rows are never review rows
+		// and stay; loading placeholders are appended later, unaffected.
+		if m.hideReviewing && !r.IsMain && r.IsReviewing() {
+			hiddenByReview++
+			continue
+		}
 		out = append(out, r)
 	}
+	m.reviewHiddenCount = hiddenByReview
+
+	// Within each (host, project) section, float the user's own rows
+	// above the ones they're reviewing. Sections are already contiguous
+	// in `out` (BuildGlobalRows groups locals by project; remote rows
+	// arrive host-grouped), so a per-group stable sort preserves the
+	// host/project grouping that the renderer's prevHost transitions
+	// rely on. v0.22 distinguish-my-workspaces.
+	sortRowsMineFirst(out)
 
 	// v0.22: append synthetic loading placeholders for registered hosts
 	// that have no rows in m.remoteRows yet. Without these, the
@@ -1052,6 +1072,38 @@ func (m *Model) filteredRows() []state.GlobalRow {
 		}
 	}
 	return out
+}
+
+// sortRowsMineFirst reorders rows so that, within each contiguous
+// (Host, ProjectRoot) section, the user's own workspaces sort above the
+// ones they're reviewing. The synthetic main row stays pinned to the top
+// of its section; otherwise the sort is stable, so existing relative
+// order (creation order, etc.) is preserved within each ownership band.
+//
+// It walks contiguous same-section runs and stable-sorts each in place
+// rather than sorting the whole slice, so the host/project grouping the
+// renderer depends on (prevHost / prevProject transitions) is never
+// broken — even if two sections happened to share a sort key.
+func sortRowsMineFirst(rows []state.GlobalRow) {
+	i := 0
+	for i < len(rows) {
+		j := i
+		for j < len(rows) && rows[j].Host == rows[i].Host && rows[j].ProjectRoot == rows[i].ProjectRoot {
+			j++
+		}
+		grp := rows[i:j]
+		sort.SliceStable(grp, func(a, b int) bool {
+			if grp[a].IsMain != grp[b].IsMain {
+				return grp[a].IsMain // main row pinned to the top of its section
+			}
+			ra, rb := grp[a].IsReviewing(), grp[b].IsReviewing()
+			if ra != rb {
+				return !ra // mine (not reviewing) sorts before reviewing
+			}
+			return false // otherwise keep original order (stable)
+		})
+		i = j
+	}
 }
 
 // rowMatchesQuery returns true if the lowercased query is a subsequence

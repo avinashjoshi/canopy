@@ -258,6 +258,23 @@ var listModeBindings = []Binding{
 		Action:    actionInspect,
 	},
 	{
+		// `o` opens the owner-edit modal: mark the cursor workspace as
+		// someone else's to review (renders an @login pill) or clear
+		// it back to yours. v0.22 distinguish-my-workspaces.
+		K:         key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "owner")),
+		Group:     "act",
+		Available: availableInWorkspaceContext,
+		Action:    actionSetOwner,
+	},
+	{
+		// `m` toggles "show only mine" — hides rows you're reviewing
+		// so the list collapses to your own work. v0.22.
+		K:         key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mine only")),
+		Group:     "view",
+		Available: availableInWorkspaceContext,
+		Action:    actionToggleReviewFilter,
+	},
+	{
 		K:         key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "retry")),
 		Group:     "act",
 		Available: availableInWorkspaceContext,

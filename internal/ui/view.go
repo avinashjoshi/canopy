@@ -50,6 +50,8 @@ func (m *Model) View() string {
 		return m.renderAddHostForm()
 	case addProjectFormMode:
 		return m.renderAddProjectForm()
+	case ownerFormMode:
+		return m.renderOwnerForm()
 	case settingsFormMode:
 		return m.renderSettingsForm()
 	case hostDetailMode:
@@ -144,6 +146,21 @@ func (m *Model) View() string {
 		// rows, hint badges per row, selected row highlighted.
 		b.WriteString(m.list.View())
 		b.WriteString("\n")
+		// "Mine only" filter banner: make it unmistakable that the list
+		// is filtered so a hidden review row never reads as missing data.
+		// Amber (214) — the same "heads up, this isn't the full picture"
+		// color the stale-host pill uses. v0.22.
+		if m.hideReviewing {
+			msg := "● mine only — press m to show all"
+			if m.reviewHiddenCount == 1 {
+				msg = "● mine only · 1 reviewing hidden — press m to show all"
+			} else if m.reviewHiddenCount > 1 {
+				msg = fmt.Sprintf("● mine only · %d reviewing hidden — press m to show all", m.reviewHiddenCount)
+			}
+			b.WriteString("  ")
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true).Render(msg))
+			b.WriteString("\n\n")
+		}
 		if hint := m.selectedHint(); hint != "" {
 			b.WriteString("  ")
 			b.WriteString(brokenStyle.Render("hint:"))

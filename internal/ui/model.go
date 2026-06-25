@@ -176,6 +176,12 @@ const (
 	// edit (decision #18 in v0.20-add-project.md). Reachable from
 	// the Global tab via `a`; same flow drives the splash screen.
 	addProjectFormMode
+	// ownerFormMode is the single-textinput modal for editing a
+	// workspace's owner (the `o` keybind). Enter sets the typed login;
+	// ctrl+d clears back to "mine"; Esc cancels. Submit dispatches to
+	// Manager.SetOwner for local rows or `canopy set-owner --on <host>`
+	// for remote rows. v0.22 distinguish-my-workspaces.
+	ownerFormMode
 )
 
 // inNewFlow reports whether the current mode is any step of the
@@ -474,6 +480,25 @@ type Model struct {
 	// Add Project form and the new-workspace flow can coexist without
 	// fighting over textinput state.
 	addProjectInput textinput.Model
+
+	// Owner-edit form (ownerFormMode, `o` keybind). ownerInput holds the
+	// login the user types; ownerError renders an inline rejection (e.g.
+	// empty submit); ownerTarget is the row being edited so submit knows
+	// the name + whether to dispatch locally or to a remote host. v0.22.
+	ownerInput  textinput.Model
+	ownerError  string
+	ownerTarget Row
+
+	// hideReviewing, when true, drops rows the user is only reviewing
+	// (someone else's work) from the list so it collapses to their own
+	// workspaces. Toggled by the `m` keybind. v0.22.
+	hideReviewing bool
+
+	// reviewHiddenCount is how many rows the hideReviewing filter
+	// dropped on the last projection. Surfaced as a banner below the
+	// list so a hidden row reads as "filtered", not "missing data".
+	// Recomputed every filteredRows() call. v0.22.
+	reviewHiddenCount int
 
 	// addProjectError renders below the input in errorStyle when
 	// validation or the orchestrator returns an error. Cleared on the
@@ -897,6 +922,14 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	api.CharLimit = 1024
 	api.Width = 60
 
+	// ownerInput backs the owner-edit form (`o`). A GitHub login or a
+	// person's name; capped well above GitHub's 39-char login limit to
+	// allow free-form names.
+	owi := textinput.New()
+	owi.Placeholder = "github login or name"
+	owi.CharLimit = 64
+	owi.Width = 40
+
 	// Multi-line textarea: Enter inserts newline, Ctrl+S submits
 	// (intercepted by handleNewPromptKey before this widget sees the
 	// key — see internal/ui/update.go). CharLimit 8KB caps the
@@ -955,6 +988,7 @@ func NewUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 		listInput:            li,
 		targetInput:          tgti,
 		addProjectInput:      api,
+		ownerInput:           owi,
 		promptInput:          pi,
 		mode:                 listMode,
 		inPopup:              os.Getenv("CANOPY_IN_POPUP") == "1",
@@ -1284,6 +1318,8 @@ func refreshRemoteCmd() tea.Cmd {
 					LastErrorHint: w.LastErrorHint,
 					AgentState:    w.AgentState,
 					Attached:      w.Attached,
+					Owner:         w.Owner,
+					SourceKind:    w.SourceKind,
 				})
 				rows = append(rows, state.GlobalRow{
 					Host:    r.HostName,
@@ -1308,6 +1344,8 @@ func refreshRemoteCmd() tea.Cmd {
 					LastErrorHint: w.LastErrorHint,
 					AgentState:    w.AgentState,
 					Attached:      w.Attached,
+					Owner:         w.Owner,
+					SourceKind:    w.SourceKind,
 					// LastSeen carries the host's most-recent successful
 					// refresh timestamp onto every remote row from that
 					// host. The TUI renderer compares it against time.Now

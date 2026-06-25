@@ -1649,3 +1649,32 @@ func TestSetLoadingHosts_HeaderSpinnerAnimatesWithFrame(t *testing.T) {
 		t.Errorf("frame 1 missing glyph %q; got:\n%s", spinnerFrames[1], frame1)
 	}
 }
+
+// TestRender_OwnerPill: a row the user is reviewing renders its owner
+// pill ("@login" or "REVIEW"), and a row the user owns renders no pill.
+// Catches the pill leaking onto every row or never appearing.
+func TestRender_OwnerPill(t *testing.T) {
+	m := New(Options{})
+	m.SetRows([]state.GlobalRow{
+		{Project: "p", ProjectRoot: "/p", Name: "mine", Branch: "b", Status: state.StatusReady},
+		{Project: "p", ProjectRoot: "/p", Name: "review-known", Branch: "b", Status: state.StatusReady, Owner: "octocat"},
+		{Project: "p", ProjectRoot: "/p", Name: "review-legacy", Branch: "b", Status: state.StatusReady, SourceKind: "pr"},
+	})
+	m.SetSize(120, 20)
+	out := m.View()
+
+	if !strings.Contains(out, "@octocat") {
+		t.Errorf("known-author review row missing @octocat pill:\n%s", out)
+	}
+	if !strings.Contains(out, "REVIEW") {
+		t.Errorf("legacy pr review row missing REVIEW pill:\n%s", out)
+	}
+	// The "mine" row carries no owner signal, so the only @ / REVIEW
+	// tokens come from the two review rows — exactly one each.
+	if got := strings.Count(out, "@octocat"); got != 1 {
+		t.Errorf("@octocat count = %d; want 1 (no leak onto own rows)", got)
+	}
+	if got := strings.Count(out, "REVIEW"); got != 1 {
+		t.Errorf("REVIEW count = %d; want 1", got)
+	}
+}

@@ -895,6 +895,12 @@ func (m Model) renderTable() (string, int) {
 			if showMem {
 				plainContent += fmt.Sprintf("  %*s", colMem, memCell(r))
 			}
+			// Owner pill is high priority — it never drops on narrow widths
+			// (it's the whole point of the feature). On the selected row we
+			// render the plain label; the selection bg supplies the chrome.
+			if op := r.OwnerPill(); op != "" {
+				plainContent += "  " + op
+			}
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				plainContent += "  " + stripAnsi(hintBadges)
 			}
@@ -957,6 +963,11 @@ func (m Model) renderTable() (string, int) {
 			)
 			if showMem {
 				line += "  " + memCellStyled(r, colMem)
+			}
+			// Owner pill (styled). High priority: never dropped on narrow
+			// widths. Only renders for rows the user is reviewing.
+			if op := r.OwnerPill(); op != "" {
+				line += "  " + ownerPill(op)
 			}
 			if hintBadges := RenderHintBadges(r.Hints); hintBadges != "" {
 				line += "  " + hintBadges
@@ -1345,6 +1356,20 @@ func projectHeaderStyle() lipgloss.Style {
 // will render these too.
 func hostPill(label string) string {
 	return roundedPillSubtleLocal(strings.ToUpper(label), "245", "237")
+}
+
+// ownerPill renders the "this row is someone else's to review" marker —
+// "@login" when the reviewee is known, "REVIEW" for a legacy pr-sourced
+// row whose author wasn't captured (see state.OwnerPillLabel). Cyan
+// foreground so it reads as "info, not yours" and stays distinct from
+// the amber stale pill, green/red status, gray host pill, and violet
+// brand pill. The label text — not the color — is the primary signal, so
+// it survives colorblindness and color-less terminals. Content is NOT
+// upper-cased: "@octocat" should read as a login, and the shape already
+// carries the weight. Own rows render no pill at all (subtraction — the
+// quiet common case stays quiet).
+func ownerPill(label string) string {
+	return roundedPillSubtleLocal(label, "51", "237")
 }
 
 // roundedPillSubtleLocal duplicates render.roundedPillSubtle inside the
