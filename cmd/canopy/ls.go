@@ -357,6 +357,15 @@ type LsJSONWorkspace struct {
 	// this field, remote rows always rendered as detached and the
 	// modal never fired for them. v0.19 remote-status-observability.
 	Attached bool `json:"attached,omitempty"`
+
+	// Owner + SourceKind let the laptop render the owner pill ("mine"
+	// vs "reviewing") on remote rows without a second round-trip.
+	// SourceKind is needed for the legacy fallback (pr-sourced row whose
+	// author wasn't captured → REVIEW pill). Additive; pre-owner remotes
+	// omit both and the laptop renders the row as mine, same as a local
+	// legacy row. v0.22 distinguish-my-workspaces.
+	Owner      string `json:"owner,omitempty"`
+	SourceKind string `json:"source_kind,omitempty"`
 }
 
 // canopyVersionInfo is what `canopy ls --json` reports under
@@ -379,7 +388,7 @@ func init() {
 	}
 }
 
-const lsJSONSchemaVersion = 5 // v0.19: + attached, agent_state now motion-aware. v0.20: + clipboard_bridge
+const lsJSONSchemaVersion = 6 // v0.19: + attached, agent_state now motion-aware. v0.20: + clipboard_bridge. v0.22: + owner, source_kind
 
 func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 	store, err := openStateReadOnly()
@@ -485,6 +494,8 @@ func lsGlobalJSON(ctx context.Context, out io.Writer) error {
 			AgentState:    agentState,
 			Attached:      r.Attached,
 			ProjectRoot:   r.ProjectRoot,
+			Owner:         r.Owner,
+			SourceKind:    r.SourceKind,
 		})
 	}
 	enc := json.NewEncoder(out)

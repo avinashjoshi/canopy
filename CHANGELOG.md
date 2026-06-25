@@ -5,7 +5,21 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.21.15.0] - 2026-06-25 — `canopy new "two words"` no longer fatals on `git worktree add`
+## [0.21.16.0] - 2026-06-25 — tell "my work" from "a PR I'm reviewing" at a glance
+
+The Workspaces tab gave no signal for the one distinction that matters when you run many parallel worktrees: which rows are your own feature work, and which are checkouts of someone else's PR you pulled in to review. They looked identical. This adds an owner concept that marks the review rows and leaves your own quiet.
+
+The whole feature rides on one observation: you never spin up a fresh worktree from your *own* PR — you already have the workspace you built it in. So `canopy new --pr <n>` *is* the "I'm reviewing this" signal. The data model is a single `Owner` field on the workspace row with three render states. Empty derives from `SourceKind`: a `pr`-sourced row reads as a review (generic `REVIEW` pill), everything else reads as yours (no pill). A captured login renders an `@login` pill. A reserved self-marker (written by clearing) reads as yours and overrides the `pr` fallback — for the case where you took over a PR workspace as your own. It's additive with `omitempty`, so existing `state.json` rows need no migration: they read back as yours, or as a legacy `REVIEW` row if they were `pr`-sourced, with zero network calls at render time (no `gh auth whoami`, ever).
+
+PR-sourced workspaces auto-stamp the PR author at creation — `ghx.FetchPR` now requests the `author` field it wasn't fetching before, so `canopy new --pr 1293` lands with an `@kaushgem` pill and no manual step. For everything else there's a manual override: `o` opens a modal to set or clear the owner (⌃d clears, Esc cancels, empty submit is rejected so you can't fat-finger a wipe), and `canopy set-owner <ws> <login>|--clear` does the same from the CLI. Remote rows dispatch the verb over SSH the way `rm`/`retry` already do, pinned to the row's project. Within each host/project section, your own rows sort above the ones you're reviewing, and `m` toggles a "mine only" filter that collapses the list to your work — with an amber `N reviewing hidden` banner so a filtered row never reads as missing data.
+
+`Owner` + `SourceKind` thread through every wire struct the row pipeline touches — `GlobalRow`, `LsJSONWorkspace`, `host.RemoteWorkspace`, and the on-disk `RemoteWorkspaceRow` cache — so the pill renders on remote review rows too. A drift-guard test round-trips a value through all of them, because this repo hand-duplicates wire fields and a missed one would compile while silently dropping the owner on the wire.
+
+### Added
+
+- **Owner pill distinguishes review rows from your own work.** `@login` for a known author, generic `REVIEW` for a legacy `pr`-sourced row whose author wasn't captured, nothing for your own rows. Cyan, with the text (not just the color) carrying the meaning so it survives colorblindness and color-less terminals. PR-sourced workspaces stamp the author automatically at creation.
+- **`o` owner-edit modal + `canopy set-owner` CLI verb.** Set a login, or `--clear`/⌃d back to yours. Works on local rows and dispatches over SSH for remote rows (`--on <host>`, project-pinned). Owner is a freeform label — a login or a person's name — trimmed, `@`-stripped, length-capped, and validated against control chars and the reserved marker.
+- **`m` "mine only" filter + within-section sort.** Owned rows float above review rows in each section; `m` hides review rows entirely and shows an amber `N reviewing hidden — press m to show all` banner so the filtered state is never silent. Tests pin the three-state derive logic, normalization, creation stamping, set/clear, the wire drift guard, the sort, the filter + hidden-count, and the pill render.
 
 Typing a workspace name with a space in the TUI new-workspace box (e.g. `testing codex`) failed creation outright: `fatal: 'testing codex' is not a valid branch name`. canopy sanitized the name correctly for the on-disk path (`testing codex` → `testing-codex`) but passed the raw, space-bearing name straight to `git worktree add -b` as the branch. Git accepts slashes in refs (`feature/oauth`) but rejects spaces, colons, `..`, `~`, and friends — so any name git considers invalid broke creation.
 

@@ -233,6 +233,24 @@ func (m *Manager) SetPin(ctx context.Context, name string, pinned bool) error {
 	})
 }
 
+// SetOwner sets a workspace's Owner field under flock. Mirrors SetPin:
+// a surgical single-field locked read-modify-write. Pass a normalized
+// login (see state.NormalizeOwner) to mark the row as someone else's to
+// review, or state.OwnerSelfMarker to clear it back to "mine" (which
+// overrides the SourceKind="pr" legacy fallback). Passing "" resets to
+// the derive-from-SourceKind default. Callers (CLI verb, TUI keybind)
+// own the normalize/validate step; this method just persists.
+func (m *Manager) SetOwner(ctx context.Context, name, owner string) error {
+	return m.Store.WithLock(func(s *state.State) error {
+		w, err := s.Find(m.Cfg.ProjectRoot, name)
+		if err != nil {
+			return fmt.Errorf("workspace.SetOwner(%s): %w", name, ErrWorkspaceNotFound)
+		}
+		w.Owner = owner
+		return nil
+	})
+}
+
 // tmuxSessionNameFor produces the canonical "<project>/<branch>" tmux
 // session name with both pieces sanitized for tmux's target syntax.
 // Mirrors state.Workspace.TmuxSessionName so rename and create can't

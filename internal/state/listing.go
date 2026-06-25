@@ -161,6 +161,28 @@ type GlobalRow struct {
 	// the host appear immediately instead of having the section stay
 	// invisible until SSH completes. v0.22.
 	Loading bool
+
+	// Owner + SourceKind drive the owner pill ("mine" vs "reviewing")
+	// and the within-section sort. Both are mirrored from the workspace
+	// row (local) or the remote ls --json wire (remote). SourceKind is
+	// carried here only so the renderer can apply the legacy "pr-sourced
+	// row with no captured owner → REVIEW pill" fallback without a
+	// second lookup. See state.OwnerIsReviewing / state.OwnerPillLabel.
+	Owner      string
+	SourceKind string
+}
+
+// IsReviewing reports whether this row is work the user is reviewing
+// (someone else's) rather than their own. Thin wrapper over
+// OwnerIsReviewing so renderers/sorters can call row.IsReviewing().
+func (r GlobalRow) IsReviewing() bool {
+	return OwnerIsReviewing(r.Owner, r.SourceKind)
+}
+
+// OwnerPill returns the owner pill text for this row, or "" for the
+// user's own rows (no pill). Thin wrapper over OwnerPillLabel.
+func (r GlobalRow) OwnerPill() string {
+	return OwnerPillLabel(r.Owner, r.SourceKind)
 }
 
 // BuildGlobalRows is the single source of truth for the cross-project
@@ -291,6 +313,8 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 				Alive:         alive,
 				Attached:      attached[session],
 				LastErrorHint: w.LastErrorHint,
+				Owner:         w.Owner,
+				SourceKind:    w.SourceKind,
 			})
 		}
 	}

@@ -183,6 +183,7 @@ func (m *Manager) resolvePR(ctx context.Context, num int) (CreateOptions, string
 			Branch:        ref,
 			StartPoint:    ref,
 			CreateBranch:  false,
+			Owner:         pr.Author.Login,
 		}, name, nil
 	}
 
@@ -200,6 +201,7 @@ func (m *Manager) resolvePR(ctx context.Context, num int) (CreateOptions, string
 			Branch:        branch,
 			StartPoint:    branch,
 			CreateBranch:  false,
+			Owner:         pr.Author.Login,
 		}, name, nil
 	}
 	return CreateOptions{
@@ -208,6 +210,7 @@ func (m *Manager) resolvePR(ctx context.Context, num int) (CreateOptions, string
 		Branch:        branch,
 		StartPoint:    originRef,
 		CreateBranch:  true,
+		Owner:         pr.Author.Login,
 	}, name, nil
 }
 

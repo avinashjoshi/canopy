@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -189,6 +190,98 @@ type Workspace struct {
 	// tick (or `canopy rename`) re-syncs the labels to whatever branch
 	// the worktree is currently on.
 	PinDisplayName bool `json:"pin_display_name,omitempty"`
+
+	// Owner distinguishes "my own work" from "a workspace where I'm
+	// reviewing someone else's work" in the Workspaces tab. It's a
+	// single field with three meaningful render states (see
+	// OwnerIsReviewing / OwnerPillLabel):
+	//
+	//   ""             → derive from SourceKind. Non-pr rows read as
+	//                    mine (no pill); pr-sourced rows read as a
+	//                    legacy "review" row (creating a workspace FROM
+	//                    a PR is itself the "I'm reviewing this" signal).
+	//   "<login>"      → reviewing that person's work; renders @login.
+	//   OwnerSelfMarker→ explicitly cleared to "mine" (overrides the
+	//                    SourceKind fallback so a pr row you took over
+	//                    stops showing the pill). Renders no pill.
+	//
+	// Stamped at creation from the PR author for SourceKind=="pr";
+	// empty for fresh/issue/branch. Editable after the fact via
+	// `canopy set-owner` / the `o` keybind. omitempty keeps legacy
+	// rows (no `owner` key) reading back as "" — i.e. mine, or a legacy
+	// review row if pr-sourced — with no schema migration.
+	Owner string `json:"owner,omitempty"`
+}
+
+// OwnerSelfMarker is the reserved value Owner holds when the user has
+// explicitly cleared a workspace back to "mine". It is deliberately not
+// a legal GitHub login or a value NormalizeOwner will accept from user
+// input (leading "(" is stripped/rejected), so it can never collide with
+// a real owner the user types.
+const OwnerSelfMarker = "(me)"
+
+// ownerMaxLen caps a rendered/stored owner label. 39 is GitHub's max
+// login length; a little headroom covers free-form names the user may
+// type instead of a login.
+const ownerMaxLen = 48
+
+// OwnerIsReviewing reports whether a row represents work the user is
+// reviewing (someone else's) rather than their own. See Workspace.Owner
+// for the three-state model. sourceKind is the row's SourceKind, used
+// for the legacy fallback when owner is unset.
+func OwnerIsReviewing(owner, sourceKind string) bool {
+	switch {
+	case owner == OwnerSelfMarker:
+		return false // explicitly mine
+	case owner != "":
+		return true // a foreign login is set
+	default:
+		return sourceKind == "pr" // legacy: pr-sourced, author not captured
+	}
+}
+
+// OwnerPillLabel returns the text for the row's owner pill, or "" when
+// no pill should render (the row is the user's own). "@login" names the
+// reviewee; "REVIEW" marks a legacy pr-sourced row whose author was
+// never captured.
+func OwnerPillLabel(owner, sourceKind string) string {
+	switch {
+	case owner == OwnerSelfMarker:
+		return ""
+	case owner != "":
+		return "@" + owner
+	case sourceKind == "pr":
+		return "REVIEW"
+	default:
+		return ""
+	}
+}
+
+// NormalizeOwner cleans user-entered owner text into the value stored in
+// Owner. It trims surrounding space, strips a leading "@" (users type
+// "@octocat"), rejects control characters and the reserved self-marker,
+// and caps length. An empty result after trimming is reported via ok=false
+// so callers can reject an empty submit rather than silently clearing —
+// clearing is a separate, explicit action (SetOwner with OwnerSelfMarker).
+func NormalizeOwner(in string) (owner string, ok bool) {
+	s := strings.TrimSpace(in)
+	s = strings.TrimPrefix(s, "@")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return "", false // control char
+		}
+	}
+	if s == OwnerSelfMarker {
+		return "", false // can't type the reserved marker
+	}
+	if len(s) > ownerMaxLen {
+		s = s[:ownerMaxLen]
+	}
+	return s, true
 }
 
 // ProjectBasename returns the project's basename (e.g., "canopy" for
