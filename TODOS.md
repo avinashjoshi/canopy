@@ -2798,3 +2798,35 @@ Implementation sketch:
 **Depends on / blocked by:** v0.20 land.
 
 ---
+
+## 📋 OPEN (P3) — "Hard refresh" a workspace: re-run all detectors + re-detect Owner (added 2026-06-25)
+
+**What:** A single "hard refresh" action (keybind + CLI verb) that re-runs every `internal/lifecycle/` detector for a workspace (`rename_suggested`, `shipped`, `pr_status`, ...) AND re-detects `Owner` from the workspace's `SourceKind`. The first concrete consumer is Owner re-detection.
+
+**Why:** The v1 Owner feature (PR #distinguish-my-workspaces) ships `set` + `--clear` only. Re-detecting ownership (recompute what detection would say, e.g. restore the PR author after a manual override, or pick up an owner on a row created before the feature) was deferred because, with a single `Owner string` field, re-detect for a PR row needs to recover the PR number and re-call `gh` — reintroducing a network dependency the display path is deliberately free of. A user-initiated "hard refresh" is the right home for that network call: it's explicit, not on the render tick, and it batches with re-running the other detectors that already recompute on demand.
+
+**Pros:** One obvious "recompute everything about this row" action instead of N per-signal commands. Owner re-detect gets a natural, network-OK home. Symmetric with how hints are already recomputed every refresh — this just makes a forceful, on-demand version.
+
+**Cons:** Needs a clear contract for what "re-detect Owner" does to a *manually set* owner (overwrite vs preserve — probably prompt or preserve-unless-confirmed). For PR rows, requires recovering the PR number (store it structurally, or parse from name/SourceContext — name-parsing is fragile if the user renamed). Remote rows need the verb dispatched over SSH like the other remote mutations.
+
+**Context:** Surfaced in /plan-ceo-review + /plan-eng-review for `distinguish-my-workspaces` (2026-06). The Owner data model was deliberately kept to a single field (no `OwnerAuto` shadow field) on the user's call, which is what pushes re-detect into this future feature rather than a two-field offline restore. If hard-refresh proves worth it, reconsider whether storing the PR number (or the originally-detected owner) at creation is the cleaner enabler.
+
+**Depends on / blocked by:** v1 Owner field landing first (this builds on it).
+
+---
+
+## 📋 OPEN (P3) — Search/filter by Owner (added 2026-06-25)
+
+**What:** Extend the Workspaces-tab search to match the `Owner` field, so typing an owner name filters to the rows you're reviewing for that person.
+
+**Why:** Once `@owner` / `review` pills exist, users will expect to type an owner and find those rows. Today search matches name/project/branch only, so the pill is visible but not filterable.
+
+**Pros:** Closes the loop on the owner feature — see review rows AND jump to them. Cheap (one more field in the existing search predicate).
+
+**Cons:** Minor: decide whether a bare `Owner==""` (mine) is matchable by a keyword like "mine", and whether the generic legacy "review" pill (SourceKind fallback, no login) should match "review".
+
+**Context:** Surfaced by the codex outside-voice pass in the `distinguish-my-workspaces` eng review (2026-06). Search predicate lives in the TUI list filter (internal/ui / projectlist).
+
+**Depends on / blocked by:** v1 Owner field landing first.
+
+---
