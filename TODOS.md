@@ -12,6 +12,18 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## 📋 OPEN (P3) — `git.Sanitize` doesn't strip git-invalid dot sequences (added 2026-06-25)
+
+**What:** `Sanitize`'s character class is `[^A-Za-z0-9._-]+`, so dots survive (intentionally — `v1.2.3` is a valid branch). But git rejects a few dot patterns that Sanitize passes straight through: a ref can't contain `..`, can't end in `.`, and can't end in `.lock`. So `canopy new "a..b"` (no `--branch`) still produces an invalid ref `a..b` and `git worktree add -b` fails — the same class of bug as the spaces case fixed in PR `fix-branch-name-sanitize`, just rarer.
+
+**Why deferred:** The spaces case (`testing codex`) is the real-world report; dot-sequence names are unusual. The fix that landed sanitizes the default branch name, which covers the common path. Closing the dot gap means extending Sanitize itself (collapse `..`→`.` or `-`, trim trailing `.`/`.lock`), which touches every caller (filesystem + tmux derivatives too) and wants its own test pass.
+
+**Fix sketch:** In `internal/git/worktree.go` `Sanitize`, after the existing collapse: replace runs of `.` with a single `.` (or hyphen), then `strings.TrimRight(s, ".")`, then strip a trailing `.lock`. Extend `TestSanitize` with `"a..b"`, `"trailing."`, `"x.lock"`. Consider whether the tmux/path derivatives want dots gone entirely (tmux already forbids dots — `tmux.SafeName` handles that separately, so this is branch-ref-specific).
+
+**Found while:** writing the spaced-name fix. The branch-derivation block in `internal/workspace/lifecycle.go` Create now runs `git.Sanitize` over the fallback name, which is why the gap is reachable from `canopy new`.
+
+---
+
 ## ✅ SHIPPED — `canopy host add` connectivity probe + ssh-copy-id offer (v0.17.0.0, PR #40)
 
 Avi added `pi` as a host without SSH key auth set up. The TUI refresh fails fast (correct — BatchMode), but there's no help bridging the user from "I just registered this host" to "wait, I need keys." Add a connectivity probe to `canopy host add`:

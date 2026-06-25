@@ -425,9 +425,12 @@ var sanitizeRe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 //	  spaced           -> spaced
 //	//                 -> ""        (callers must check for empty)
 //
-// Sanitize never collapses to a name that would conflict with the original
-// in canopy's state — the git branch keeps its original (possibly slashed)
-// name; only the filesystem and tmux derivatives get sanitized.
+// Callers use Sanitize for the filesystem and tmux derivatives of a name.
+// The workspace layer also runs it over the default branch name (the one
+// derived from the workspace name when no explicit --branch is supplied) so
+// the branch stays a valid git ref and in sync with the path/tmux names. An
+// explicit --branch is passed to git as-is and is NOT sanitized here — a
+// slashed ref like "feature/oauth" is valid git and must survive intact.
 func Sanitize(branch string) string {
 	s := strings.TrimSpace(branch)
 	s = sanitizeRe.ReplaceAllString(s, "-")
