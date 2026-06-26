@@ -5,6 +5,18 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.17.0] - 2026-06-25 — remote hosts stop splitting each project into two headers
+
+On the Workspaces tab, a remote host like TOWER could show a project twice: first a lone `(main)` row under one `canopy` header, then the project's real workspaces under a second `canopy` header further down. Every project on the host did it, so the list read as twice as many projects as you have.
+
+The cause was a key mismatch between two pieces of the row pipeline. The renderer groups its project headers by the project's basename (`Project`), but the within-section sort grouped its runs by the canonical path (`ProjectRoot`). Remote rows carry an empty `ProjectRoot` — the field is `omitempty` and older hosts' `canopy ls --json` never sent it — so the sort collapsed an entire host into one run and pinned every project's `(main)` row to the top, ahead of all the workspaces. The renderer then emitted a fresh header each time the basename changed, producing the doubled headers.
+
+The fix groups the sort on the same key the renderer uses (`Host` + `Project`). The two can no longer disagree, and because `Project` is always populated on both local and remote rows, every host in a mixed-version fleet groups correctly — not just the ones running a new enough `canopy`.
+
+### Fixed
+
+- **Remote-host project headers no longer split into a `(main)`-only row plus a separate workspaces block.** Each project on a remote host renders once, with its `(main)` row pinned at the top of its own group, matching how local projects already render.
+
 ## [0.21.16.0] - 2026-06-25 — tell "my work" from "a PR I'm reviewing" at a glance
 
 The Workspaces tab gave no signal for the one distinction that matters when you run many parallel worktrees: which rows are your own feature work, and which are checkouts of someone else's PR you pulled in to review. They looked identical. This adds an owner concept that marks the review rows and leaves your own quiet.
