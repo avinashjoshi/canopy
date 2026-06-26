@@ -16,11 +16,43 @@ import (
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
 
+// stubAgentBinaries creates no-op executables for "claude" and "codex"
+// in a temp dir prepended to PATH for the duration of the test. The
+// codex review P1 #3 fix (agent_swap.go step 2) calls
+// launcher.VerifyInstalled (= exec.LookPath) BEFORE any tmux/state
+// mutation. CI runners don't have @openai/codex installed; without
+// these stubs every swap test fails at the launcher check. The stubs
+// are read-only sentinels — actual launching of the agent pane in
+// these tests already hits agentFallbackShell when the binary is
+// truly missing in normal runs, but VerifyInstalled doesn't care
+// what the binary does, only that LookPath finds it.
+//
+// Why per-test PATH stub (vs. installing in CI): the test models the
+// CONTRACT — "swap fails fast when codex isn't on PATH" — without
+// requiring CI to ship a real codex. A separate test could pin the
+// VerifyInstalled-rejects-missing-launcher contract by NOT stubbing.
+func stubAgentBinaries(t *testing.T, names ...string) {
+	t.Helper()
+	stubDir := t.TempDir()
+	for _, name := range names {
+		path := filepath.Join(stubDir, name)
+		// Minimal POSIX stub: exec a shell that immediately exits 0.
+		// tmux respawn-pane with -K keeps the pane open afterward, so
+		// the pane survives long enough for LookupAllPanes to find it.
+		body := "#!/bin/sh\nexec /bin/sh\n"
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatalf("write stub %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // fixtureWithAgents is fixture(), but the canopy.json declares
 // `agents: ["claude", "codex"]` so SwapAgent's allowlist gate has both
 // real launchers available. claude is the default (first entry).
 func fixtureWithAgents(t *testing.T) (*workspace.Manager, func()) {
 	t.Helper()
+	stubAgentBinaries(t, "claude", "codex")
 	mgr, cleanup := fixture(t)
 	// Overwrite canopy.json with one that declares agents. fixture()
 	// already wrote a minimal one without an agents block.
