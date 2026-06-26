@@ -93,6 +93,38 @@ func TestNormalize_StripsFooter(t *testing.T) {
 	}
 }
 
+// TestNormalize_StripsCodexInputChevron pins the ultrareview bug_006
+// regression: the inputLine regex was hardcoded to claude's ❯ (U+276F)
+// and ignored codex's › (U+203A). Typing into an idle codex pane
+// flipped the normalized hash on every keystroke, and Detector.Observe
+// returned StateThinking from its motion check before any idle marker
+// matching ran. The TUI badge said ⚡ Thinking while the user was
+// actively composing.
+func TestNormalize_StripsCodexInputChevron(t *testing.T) {
+	// Two captures: empty codex prompt, then "what does this do?"
+	// typed in. After normalize() they must hash to the same thing
+	// (i.e. the chevron line is stripped) so the activity detector
+	// doesn't lie about codex being mid-thought.
+	empty := "boxed banner\n› \nfooter"
+	typed := "boxed banner\n› what does this do?\nfooter"
+	a, b := normalize(empty), normalize(typed)
+	if a != b {
+		t.Errorf("normalize() didn't strip codex › input line; "+
+			"the badge will flip to Thinking while typing.\n  empty: %q\n  typed: %q", a, b)
+	}
+}
+
+// TestNormalize_StripsClaudeInputChevron: same regression shape for
+// claude's ❯, to defend against an over-eager rewrite of the regex.
+func TestNormalize_StripsClaudeInputChevron(t *testing.T) {
+	empty := "claude header\n❯ \nfooter"
+	typed := "claude header\n❯ what does this do?\nfooter"
+	a, b := normalize(empty), normalize(typed)
+	if a != b {
+		t.Errorf("normalize() didn't strip claude ❯ input line.\n  empty: %q\n  typed: %q", a, b)
+	}
+}
+
 func TestNormalize_StableAcrossCosmeticChanges(t *testing.T) {
 	// The same logical content with cosmetic-only differences must
 	// normalize to the same string. This is the load-bearing property

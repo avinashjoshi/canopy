@@ -149,10 +149,17 @@ func TestCodexClassifier_AgainstRealFixtures(t *testing.T) {
 			// Awaiting dialog: ClassifyOneShot returns AwaitingInput
 			// even though the banner at the top of the pane also
 			// matches an idle marker — awaiting beats idle in order.
+			//
+			// IsRendering returns TRUE here: codex's UI is still up,
+			// the approval dialog IS the codex UI in a different mode.
+			// Pre-ultrareview-bug_008, this was wantRender:false because
+			// the old bottomLines(12) implementation only saw the dialog
+			// at the bottom and missed the banner at the top — a bug
+			// that was bug-compatible with the test, not a feature.
 			fixture:    "codex_awaiting_input.txt",
 			wantState:  StateAwaitingInput,
 			wantTrust:  false,
-			wantRender: false, // approval dialog takes over bottom 12 lines
+			wantRender: true,
 		},
 	}
 	for _, tc := range cases {
@@ -204,5 +211,70 @@ func readFixture(t *testing.T, name string) string {
 		t.Fatalf("read fixture %s: %v", path, err)
 	}
 	return strings.TrimRight(string(data), "\n")
+}
+
+// readFixtureRaw loads internal/agent/testdata/<name> WITHOUT trimming
+// trailing blank rows. Used by the production-shape regression tests
+// (codex IsRendering, etc.) that need to model what tmux capture-pane
+// actually returns: the visible pane verbatim, with blank rows that
+// the agent hasn't drawn into preserved at the bottom.
+//
+// Origin: ultrareview bug_008 (2026-06-26). The codex classifier's
+// IsRendering passed the unit tests only because readFixture stripped
+// trailing blanks before classification; production left them in and
+// the markers (top-of-pane in codex's UI) were never reached.
+func readFixtureRaw(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join("testdata", name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// TestCodexClassifier_IsRendering_HandlesRawPaneContent pins the
+// production shape: codex's idle markers live at the TOP of the
+// visible pane, but tmux capture-pane preserves trailing blank rows
+// at the bottom. IsRendering must trim those trailing blanks before
+// matching so the top-of-pane markers stay reachable.
+//
+// Without the trim, a 50-row pane with codex in rows 1-15 and 35
+// blank rows below would never match any codex marker — IsRendering
+// returns false and the `--prompt` flow's Phase 1/2/3 gates all time
+// out. (ultrareview bug_008, 2026-06-26.)
+func TestCodexClassifier_IsRendering_HandlesRawPaneContent(t *testing.T) {
+	// readFixtureRaw preserves the trailing blank rows that the actual
+	// codex_idle.txt fixture has.
+	raw := readFixtureRaw(t, "codex_idle.txt")
+
+	// Sanity: the raw fixture really does end with blank rows, OR we
+	// don't actually exercise the regression. If a future capture is
+	// re-taken without trailing blanks, this test fails loudly so we
+	// know to re-create the production shape.
+	if !strings.HasSuffix(raw, "\n\n") {
+		t.Fatalf("raw codex_idle fixture lacks trailing blank rows " +
+			"(it ends with %q); the IsRendering regression depends on that shape — " +
+			"recapture the fixture from a real codex pane to restore it",
+			raw[max(0, len(raw)-30):])
+	}
+
+	c := ClassifierFor("codex")
+	if !c.IsRendering(raw) {
+		t.Errorf("codex IsRendering returned false on raw fixture with " +
+			"trailing blank rows; the trim-before-match guard isn't holding")
+	}
+}
+
+// TestCodexClassifier_IsRendering_RejectsNonCodexPane: a pane showing
+// a shell (no codex markers) must NOT be classified as rendering codex.
+// Defends against the over-eager "match anywhere" fix without losing
+// the codex case.
+func TestCodexClassifier_IsRendering_RejectsNonCodexPane(t *testing.T) {
+	shellContent := "user@host:~$ ls\nREADME.md  src/  tests/\nuser@host:~$ "
+	c := ClassifierFor("codex")
+	if c.IsRendering(shellContent) {
+		t.Error("codex IsRendering matched a plain shell pane (no codex markers)")
+	}
 }
 

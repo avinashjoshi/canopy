@@ -330,12 +330,24 @@ var spinnerLine = regexp.MustCompile(
 // pattern matching against claudeIdleMarkers.
 var footerLine = regexp.MustCompile(`⏵⏵ auto mode on|· /effort`)
 
-// inputLine matches claude's input-prompt line. Anything after the
-// chevron is what the user is typing — character-by-character changes
-// would otherwise flip the hash and mis-classify "user typing" as
-// "claude thinking." Stripping handles the load-bearing UX bug where
-// the badge said ⚡ Thinking while you were actively composing.
-var inputLine = regexp.MustCompile(`(?m)^\s*❯`)
+// inputLine matches the input-prompt line of any agent TUI we
+// classify. Anything after the chevron is what the user is typing —
+// character-by-character changes would otherwise flip the hash and
+// mis-classify "user typing" as "agent thinking." Stripping handles
+// the load-bearing UX bug where the badge said ⚡ Thinking while you
+// were actively composing.
+//
+// The character class covers both chevrons we currently see:
+//
+//   - ❯ (U+276F HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT) — claude
+//   - › (U+203A SINGLE RIGHT-POINTING ANGLE QUOTATION MARK)        — codex
+//
+// 2026-06-26 (ultrareview bug_006): the original regex was hardcoded
+// to claude's ❯, so typing into idle codex flipped the normalized
+// hash on every keystroke and Detector.Observe returned StateThinking
+// at confidence 9 from the motion check, before any marker matching.
+// Adding codex's › fixes the badge regression.
+var inputLine = regexp.MustCompile(`(?m)^\s*[❯›]`)
 
 // claudeAwaitingPatterns are claude-TUI markers that mean a user
 // action is required RIGHT NOW. Empty-input cursor is intentionally

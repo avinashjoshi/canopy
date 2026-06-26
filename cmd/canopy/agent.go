@@ -85,6 +85,16 @@ func agentSwapCmd() *cobra.Command {
 				return err
 			}
 
+			// Capture the CURRENT agent BEFORE SwapAgent runs.
+			// SwapAgent's returned *Workspace has CurrentAgent already
+			// mutated to newType (Step 5 in agent_swap.go), so we can't
+			// derive the "from" agent for the success message after the
+			// fact. (ultrareview bug_002, 2026-06-26.)
+			oldType, err := currentAgentForWorkspace(ctx, mgr, name)
+			if err != nil {
+				return fmt.Errorf("canopy agent swap: look up current agent: %w", err)
+			}
+
 			ws, err := mgr.SwapAgent(ctx, name, newType)
 			if err != nil {
 				// Pretty-print known sentinels so the user gets clean
@@ -104,7 +114,7 @@ func agentSwapCmd() *cobra.Command {
 				"Swapped %s → %s in workspace %q.\n"+
 					"The new agent has been spawned in the same pane geometry.\n"+
 					"Run `canopy switch %s` to attach if you're not already there.\n",
-				ws.CurrentAgent, newType, ws.Name, ws.Name)
+				oldType, ws.CurrentAgent, ws.Name, ws.Name)
 			return nil
 		},
 	}
@@ -148,6 +158,31 @@ func findWorkspaceFromCwd(ctx context.Context, mgr *workspace.Manager, cwd strin
 	return "", fmt.Errorf(
 		"canopy agent swap: cwd %q is not inside any registered workspace; cd into a workspace first or run `canopy ls` to see them",
 		cwd)
+}
+
+// currentAgentForWorkspace returns the named workspace's CurrentAgent
+// as currently persisted in state.json. Used by the swap CLI to render
+// the "from" half of the success message — must be read BEFORE
+// SwapAgent runs, because SwapAgent mutates the row in place.
+//
+// Falls back to the project's default agent (canopy.json `agents[0]`,
+// then legacy `agent.type`, then "claude") when the row hasn't been
+// migrated yet — same fallback shape that workspace.currentAgent uses
+// internally. (ultrareview bug_002, 2026-06-26.)
+func currentAgentForWorkspace(ctx context.Context, mgr *workspace.Manager, name string) (string, error) {
+	rows, err := mgr.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range rows {
+		if r.Name == name && r.ProjectRoot == mgr.Cfg.ProjectRoot {
+			if r.CurrentAgent != "" {
+				return r.CurrentAgent, nil
+			}
+			return mgr.Cfg.DefaultAgent(), nil
+		}
+	}
+	return "", fmt.Errorf("workspace %q not found in this project", name)
 }
 
 // isInsideWorkspace reports whether `rel` (output of filepath.Rel(wsPath, cwd))

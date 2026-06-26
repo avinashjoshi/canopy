@@ -90,15 +90,26 @@ func TestBuildBriefing_ResumeNoHintsReturnsEmpty(t *testing.T) {
 // is > 0. Without the per-agent gate, codex spawned with delta-or-empty
 // context on its first appearance — invisible to humans but
 // catastrophic for the new agent's onboarding.
+//
+// 2026-06-26 update: this test originally set ws.CurrentAgent = "claude"
+// (the OLD agent), but ultrareview bug_001 caught that production
+// behavior is different. SwapAgent mutates CurrentAgent to newType
+// (e.g. "codex") in Step 5 BEFORE Step 6 calls BuildBriefing. So the
+// fixture now models the production sequence by setting CurrentAgent
+// to the NEW agent and adding an explicit AgentLaunches[newType]=0
+// entry — mirroring SwapAgent's Step 5 initialization. Without that
+// init, launchCountFor's `agentType == CurrentAgent` fallback returns
+// the legacy AgentLaunchCount (3 from claude) → BuildBriefing returns
+// empty → codex spawns with no context.
 func TestBuildBriefing_SwapToNewAgent_GetsFreshBriefing(t *testing.T) {
 	ws := fixtureWorkspace()
-	// Workspace has been running claude for a while. Legacy global
-	// counter says 3 launches, per-agent says claude=3, codex=0.
-	ws.CurrentAgent = "claude"
+	// Production sequence: claude ran 3 times, then SwapAgent flipped
+	// CurrentAgent to codex and ensured AgentLaunches[codex] == 0.
+	ws.CurrentAgent = "codex"
 	ws.AgentLaunchCount = 3
-	ws.AgentLaunches = map[string]int{"claude": 3}
+	ws.AgentLaunches = map[string]int{"claude": 3, "codex": 0}
 
-	// Now we're spawning codex for the first time in this workspace.
+	// Now BuildBriefing is called for the codex spawn.
 	out := BuildBriefing(ws, fixtureConfig(), nil, "codex")
 
 	// Must be the FULL briefing — codex needs the workspace context.
@@ -111,6 +122,36 @@ func TestBuildBriefing_SwapToNewAgent_GetsFreshBriefing(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("swap-to-codex first launch should get FULL briefing; missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestBuildBriefing_SwapToNewAgent_RegressionWithoutZeroInit reproduces
+// the ultrareview bug_001 failure shape: CurrentAgent already mutated
+// to the new agent BUT AgentLaunches[newType] missing from the map.
+// This is what the production code looked like before SwapAgent
+// initialized AgentLaunches[newType]=0 in Step 5. The expected
+// behavior is to still get the FULL fresh briefing — but the old
+// code returned "" because launchCountFor's fallback found
+// agentType == CurrentAgent and returned the legacy total.
+//
+// The fix is in agent_swap.go (Step 5 init), not in launchCountFor.
+// This test pins that BuildBriefing's contract — given the production
+// fixture shape — still produces the right output even if a caller
+// forgot to init the per-agent counter.
+func TestBuildBriefing_SwapToNewAgent_BareSwapStillFresh(t *testing.T) {
+	ws := fixtureWorkspace()
+	ws.CurrentAgent = "codex"
+	ws.AgentLaunchCount = 3
+	ws.AgentLaunches = map[string]int{"claude": 3} // codex absent
+
+	out := BuildBriefing(ws, fixtureConfig(), nil, "codex")
+
+	// Currently FAILS without the agent_swap.go init fix.
+	// Documents the load-bearing contract from the SwapAgent side.
+	if !strings.Contains(out, "# Canopy workspace context") {
+		t.Errorf("BuildBriefing for never-launched agent should still " +
+			"be FULL; agent_swap.go Step 5 init is the production fix.\n" +
+			"Without that init this test documents the failure shape.")
 	}
 }
 

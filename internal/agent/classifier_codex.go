@@ -1,6 +1,9 @@
 package agent
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // codexClassifier is the Classifier implementation for the codex
 // launcher (the `codex` CLI from OpenAI's Codex project, NOT the
@@ -73,18 +76,33 @@ var codexAwaitingPatterns = []*regexp.Regexp{
 func (codexClassifier) IdleMarkers() []*regexp.Regexp     { return codexIdleMarkers }
 func (codexClassifier) AwaitingMarkers() []*regexp.Regexp { return codexAwaitingPatterns }
 
-// codexRenderingMarkers is the subset of idle markers used for the
-// Phase-3 settle check. Same patterns as IdleMarkers; codex's UI
-// doesn't have a separate "rendering but not idle" footer the way
-// claude's `⏵⏵ auto mode on` distinguishes mode states.
+// IsRendering is the Phase-3 settle gate for codex panes. Codex's
+// idle markers live in the TOP portion of the visible pane (boxed
+// banner at rows 1-6, footer at row ~15) — unlike claude, whose input
+// chevron + auto-mode footer sit at the bottom. So we can't use the
+// bottomLines helper claude uses; we match against the full visible
+// content, after trimming trailing blank rows.
 //
-// Matched against the bottom 12 lines (same bottomLines helper as
-// claude) so stale banner in scrollback doesn't pass the check after
-// codex crashes back to a shell.
+// Why trim before matching: tmux `capture-pane -p` returns the
+// VISIBLE pane verbatim, including blank rows that codex hasn't drawn
+// into. A typical 50-row pane with codex content in rows 1-15 has 35
+// trailing blanks. Without the trim, bottomLines(content, 12) would
+// return 12 blank lines and the markers would never match — which is
+// exactly the bug ultrareview caught 2026-06-26 (bug_008). The unit
+// test masked it because `readFixture` strips trailing blanks before
+// classification, so the test saw the trimmed shape while production
+// saw the raw shape.
+//
+// Why no scrollback-false-positive concern: CapturePane uses `-p`
+// without `-S`, so we only see the VISIBLE pane. A crashed-to-shell
+// codex doesn't show its banner anywhere in the visible area — the
+// banner is gone the moment the codex process exits, replaced by
+// whatever the shell renders.
 func (codexClassifier) IsRendering(content string) bool {
-	tail := bottomLines(content, 12)
+	// Strip trailing blank rows the visible pane preserves.
+	trimmed := strings.TrimRight(content, "\n\t ")
 	for _, p := range codexIdleMarkers {
-		if p.MatchString(tail) {
+		if p.MatchString(trimmed) {
 			return true
 		}
 	}

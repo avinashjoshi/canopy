@@ -168,6 +168,17 @@ func (m *Manager) SwapAgent(ctx context.Context, name, newType string) (*state.W
 	// agentPaneCmd (which reads ws.CurrentAgent via currentAgent) sees
 	// the new value when we call it. Persisted under WithLock for the
 	// usual race-safety against concurrent state mutations.
+	//
+	// Initialize AgentLaunches[newType] to 0 if absent. This is
+	// load-bearing for the briefing path: BuildBriefing's
+	// `launchCountFor` (briefing.go) returns the legacy total
+	// AgentLaunchCount whenever AgentLaunches[agentType] is missing AND
+	// agentType matches ws.CurrentAgent — a migration-window fallback
+	// that breaks the first-swap case once we mutate CurrentAgent to
+	// newType but haven't yet recorded that newType has zero prior
+	// launches. Without the explicit zero, BuildBriefing returns ""
+	// for the first swap and the new agent spawns with no workspace
+	// context. (ultrareview bug_001, 2026-06-26.)
 	var updated state.Workspace
 	err = m.Store.WithLock(func(s *state.State) error {
 		row, ferr := s.Find(m.Cfg.ProjectRoot, name)
@@ -175,6 +186,12 @@ func (m *Manager) SwapAgent(ctx context.Context, name, newType string) (*state.W
 			return ferr
 		}
 		row.CurrentAgent = newType
+		if row.AgentLaunches == nil {
+			row.AgentLaunches = map[string]int{}
+		}
+		if _, ok := row.AgentLaunches[newType]; !ok {
+			row.AgentLaunches[newType] = 0
+		}
 		updated = *row
 		return nil
 	})

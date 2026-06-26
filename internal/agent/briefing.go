@@ -52,20 +52,34 @@ func BuildBriefing(ws state.Workspace, cfg *config.Config, hints []state.Hint, a
 	return buildDelta(hints)
 }
 
-// launchCountFor returns the per-agent launch counter for agentType,
-// falling back to ws.AgentLaunchCount when the per-agent map is missing
-// AND the named agent matches ws.CurrentAgent. That last clause covers
-// the brief window between state-file load and the lifecycle migration
-// (lifecycle.go's Load populates AgentLaunches from AgentLaunchCount on
-// first read, but during state-file rewrites or concurrent reads we may
-// still see the pre-migration shape). Without the fallback, an old
-// workspace's first post-upgrade launch would re-show the fresh briefing
-// — annoying but not wrong, since fresh is a strict superset of delta.
+// launchCountFor returns the per-agent launch counter for agentType.
+//
+// Returns 0 (fresh briefing) in two cases:
+//   - AgentLaunches[agentType] is recorded as 0.
+//   - AgentLaunches is non-nil but the key is missing — the workspace
+//     has been migrated to the per-agent map, so a missing entry IS a
+//     true zero, not pre-migration ambiguity.
+//
+// Falls back to the legacy global AgentLaunchCount only when
+// AgentLaunches is nil entirely (genuine pre-v0.22 row that hasn't
+// been touched by the migration in lifecycle.Load yet) AND the queried
+// agent matches ws.CurrentAgent (the legacy total only describes the
+// current agent's launches under the pre-v0.22 single-agent assumption).
+//
+// 2026-06-26 (ultrareview bug_001): the original implementation
+// fell back to the legacy total whenever the per-agent KEY was
+// missing, even on a populated AgentLaunches map. That broke
+// SwapAgent's first-swap case: Step 5 mutated CurrentAgent to newType
+// before BuildBriefing ran, so `agentType == CurrentAgent` matched
+// and the fallback returned the prior agent's launch count → empty
+// briefing for the new agent. The narrower fallback below is robust
+// even if a caller forgets to seed AgentLaunches[newType]=0; the
+// caller-side fix lives in agent_swap.go Step 5 as defense in depth.
 func launchCountFor(ws state.Workspace, agentType string) int {
 	if n, ok := ws.AgentLaunches[agentType]; ok {
 		return n
 	}
-	if agentType == ws.CurrentAgent {
+	if ws.AgentLaunches == nil && agentType == ws.CurrentAgent {
 		return ws.AgentLaunchCount
 	}
 	return 0
