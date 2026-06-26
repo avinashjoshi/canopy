@@ -5,7 +5,43 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.21.16.0] - 2026-06-25 — tell "my work" from "a PR I'm reviewing" at a glance
+## [0.22.0.0] - 2026-06-25 — agent layer v1: codex parity, swap on the fly, second-opinion popup
+
+Canopy used to assume one agent per project: claude, period. Codex existed only as a known string. v0.22 turns "the agent" into a first-class field on every workspace and gives the user three new operating modes: pick a non-default agent at workspace creation, swap the running agent without losing per-agent conversation history, and pop open a second-opinion popup that bills against a different agent for a single throwaway question.
+
+The model change is small but load-bearing. `state.Workspace` grows `CurrentAgent` (the launcher this workspace is currently running) and `AgentLaunches` (a per-agent launch counter). Both are `omitempty`, so pre-v0.22 state files read back unchanged; the workspace manager populates them lazily on first read by promoting the legacy global `AgentLaunchCount` onto whichever agent matches `CurrentAgent`. `canopy.json` learns an `agents: [...]` array (the allowlist a project advertises); the legacy `agent: { type: ... }` block is still honored as a single-agent fallback. The config loader preserves unknown keys via a raw-JSON-map shim so an out-of-band edit doesn't get truncated on the next save.
+
+`canopy new --agent <type>` picks the launcher at creation; remote dispatch forwards the flag. `canopy agent swap <type>` (from cwd) and the TUI's `A` keybind (from any workspace row) replace the running agent pane with a fresh pane of the new launcher, preserving byte-precise tmux geometry via `capture-pane`/`select-layout`. The first swap to a new agent gets the FULL fresh briefing — even when claude has already run in the workspace — because the fresh/resume decision is now keyed on the per-agent counter, not the legacy global one. Subsequent swaps back to a previously-used agent hit Resume (claude's `--continue`, codex's `resume --last`), so swap-and-swap-back restores the prior conversation as the design promised.
+
+`canopy ask <agent> [--file path|prompt]` is a one-shot non-interactive invocation: send a prompt to the target launcher, get the answer, exit. The TUI's `Q` keybind opens a picker + textarea, writes the question to `~/.canopy/tmp/ask-*.md`, and spawns `canopy ask` inside a `tmux display-popup`. The popup stays open after the answer renders (a `read -r _` prompt at the end of the body) so fast answers don't vanish before the user can read them, and the temp-file path is passed as a positional shell argument (`bash -c '...' _ '<path>'`) so a `$HOME` with spaces or shell metacharacters survives.
+
+Codex CLI flag drift broke the inline-prompt approach. As of `codex-cli 0.142.2` the `--instructions` flag is gone — the only way to deliver content at launch is the positional `[PROMPT]` argument (codex treats it as the user's first turn). Resume now uses `codex resume --last` (added between 0.140 and 0.142). The argv assembly's strip-on-empty-briefing logic now correctly distinguishes a flag NAME (pop) from a flag VALUE (keep), so `codex resume --last --ask-for-approval on-request` survives an empty briefing without losing the `on-request` value.
+
+### Added
+
+- **`canopy agent swap <type>` (CLI) and `A` (TUI) swap the running agent.** Kills the agent pane, persists `CurrentAgent`, respawns the new launcher via `tmux split-window` off the IDE pane, and restores the original window layout byte-for-byte. Allowed-but-not-installed agents refuse cleanly without tearing down the running pane (codex review P1 #3 caught this); the new pane always splits off the IDE regardless of which pane the user's focus was on (P1 #4). `cwd`-walk-up routes the CLI to the right workspace, including from dot-prefixed subdirectories like `.github`/`.config`/`.gstack` (P2 #3).
+- **`canopy ask <agent> [--file path | prompt]` one-shot popup.** Dispatches a single non-interactive question. TUI `Q` writes the question to `~/.canopy/tmp/ask-*.md` (atomic tmpfile + rename + startup sweep backstop) and spawns the popup. The bash body wraps with `; read -r _` so the popup stays open after the answer renders; tmpPath is passed as a positional shell argument so a `$HOME` with spaces, `$`, or `'` survives (P2 #4).
+- **Per-agent launch counter `AgentLaunches map[string]int`.** Tracks fresh-vs-resume independently per launcher in each workspace. First-time spawn of a new agent gets the FULL fresh briefing even when another agent ran first; subsequent spawns of the same agent resume its prior conversation. Migrated lazily from the legacy `AgentLaunchCount` (mapped onto `CurrentAgent` on first read) so old state files are forward-compatible.
+- **`agents: [...]` allowlist in `canopy.json`.** First entry is the project default; legacy `agent.type` block still honored. Unknown launcher types fail fast with a clear error before any tmux/state mutation. `canopy new --agent <type>` validates against the allowlist. Picking an unlisted launcher in the swap/ask picker silently auto-adds it to the allowlist — preserving the legacy single-agent shape and the implicit-claude default (codex review P1 #5).
+- **Agent classifier framework (`internal/agent/classifier*.go`).** Per-launcher pane-state detectors (idle / awaiting input / responding) for claude, codex, opencode, aider. Table-driven tests against fixture pane content in `internal/agent/testdata/`. Drives the TUI's agent-pane state badge.
+- **`internal/tmux/layout.go` capture/restore helpers.** Wraps `tmux display-message '#{window_layout}'` + `select-layout <serialized>` so swap operations preserve geometry across kill-pane + split-window.
+
+### Changed
+
+- **`BuildBriefing` keys fresh-vs-resume on the per-agent counter.** Signature now takes `agentType`. Reads `ws.AgentLaunches[agentType]` (with legacy `AgentLaunchCount` fallback when the agent matches `ws.CurrentAgent`). Pins the regression that codex review caught (P1 #1): swap-to-codex on a workspace where claude has run no longer dropped onto the delta path with empty context.
+- **`PlanLaunch` strip-on-empty mirrors `BuildArgv`'s guard.** Only pops the preceding arg when it starts with `-`. Codex's post-0.142.2 argv (`... --ask-for-approval on-request {{briefing}}`) survives the empty-briefing branch without losing `on-request`. Same guard as `BuildArgv` — they had drifted, and only `BuildArgv` had the fix (codex review P1 #2).
+- **codex launcher uses `resume --last` and positional `[PROMPT]`.** `--instructions` was dropped in `codex-cli 0.142.2`; the new shape works against current codex. `--ask-for-approval on-request` is set explicitly so canopy's `AwaitingMarkers` classifier can render the ✋ badge consistently with claude.
+- **`canopy.json` loader preserves unknown keys.** Round-trips a raw JSON map through Load/Save so future schema fields don't get truncated by an old version, and project-local edits the user makes between runs survive `AddAgentToCanopyJSON`'s auto-add path.
+- **Remote dispatch forwards `--agent`.** `cmd/canopy/new.go`'s `dispatchNewToRemote` appends `--agent <value>` to `canopyArgs` (codex review P2 #6).
+
+### Fixed
+
+- **`canopy agent swap` from `.github`/`.config`/`.gstack` cwd no longer false-rejects.** The cwd-walk-up's "inside-workspace" check now uses `!strings.HasPrefix(rel, "..")` instead of `rel[0] != '.'`, so a dot-prefixed subdirectory of the workspace correctly resolves. Table-driven test in `cmd/canopy/agent_test.go` pins 10 cases (codex review P2 #3).
+- **Agent swap validates launcher install BEFORE tearing down the agent pane.** Previously an allowed-in-`canopy.json`-but-not-on-PATH agent killed the running pane before failing. Now `agent.Resolve` + `launcher.VerifyInstalled` run as Step 2, ahead of any tmux/state mutation (codex review P1 #3).
+- **Agent swap splits the new pane off the IDE, not the active pane.** `SelectPane(idePaneID)` before `SplitPane` so the geometry restore doesn't have to rescue a wrong-pane split (codex review P1 #4).
+- **`canopy ask` for a launcher with no `Exec` mode wired errors before touching `canopy.json`.** `ResolveExec` check moved ahead of `AddAgentToCanopyJSON` so picking opencode (Exec=nil today) no longer leaves a config side-effect on the way to the error (codex review P2 #7).
+
+
 
 The Workspaces tab gave no signal for the one distinction that matters when you run many parallel worktrees: which rows are your own feature work, and which are checkouts of someone else's PR you pulled in to review. They looked identical. This adds an owner concept that marks the review rows and leaves your own quiet.
 

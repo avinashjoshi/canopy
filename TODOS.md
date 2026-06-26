@@ -12,6 +12,40 @@ Each entry is self-contained for someone (you, future-Claude, or another AI agen
 
 ---
 
+## 📋 OPEN (P2) — opencode launcher: wire `Resume` argv and `Exec` mode (added 2026-06-25, deferred from v0.22.0.0)
+
+**What:** `internal/agent/launchers.go` ships opencode with empty `Resume: []string{}` and `Exec: nil`. Result: opencode workspaces always launch FRESH (no resume verb), and `canopy ask opencode <prompt>` errors out cleanly with `ErrLauncherNoExec` instead of running the one-shot.
+
+**Why deferred:** Couldn't dogfood the right flags. The opencode binary on the dogfood machine on 2026-06-25 fails to start with `Could not resolve npm bin for opencode-ai`. The other launchers' Resume/Exec argv shapes were verified by running them; doing the same for opencode without a working install would be guessing.
+
+**Fix sketch:**
+1. Get opencode running on a test machine (`npm install -g opencode-ai` or whatever fixes the bin resolution).
+2. Confirm the resume flag/verb opencode supports today. claude uses `--continue`, codex uses `resume --last`, aider uses `--restore-chat-history`; opencode probably has one. Document at the top of the launcher entry with a "verified <date>" comment, matching the existing convention.
+3. Set `Resume` and `Exec` in `defaultLaunchers["opencode"]`. Add `PlanLaunch` tests pinning the resume argv shape (mirror `TestPlanLaunch_CodexResume*`).
+4. Remove the `Exec: nil` and update `cmd/canopy/ask.go`'s opencode-no-exec branch (no `ErrLauncherNoExec` path needed anymore).
+
+**Where to look:** `internal/agent/launchers.go:221-233` (the opencode entry, with the explanatory comment), `cmd/canopy/ask.go` (the `ResolveExec` check that surfaces `ErrLauncherNoExec`), `internal/agent/launchers_test.go` (the codex tests as the shape template).
+
+---
+
+## 📋 OPEN (P3) — codex per-session-ID resume for precise per-cwd continuity (added 2026-06-25, deferred from v0.22.0.0)
+
+**What:** codex Resume currently uses `codex resume --last`, which picks the GLOBAL most-recent codex session — not the one for this workspace's cwd. If the user runs codex in another directory between two canopy-driven codex launches in this workspace, `--last` grabs the wrong conversation.
+
+**Why deferred:** Lower-impact than the v0.22 swap/ask features; same caveat that claude's `--continue` has (also global-most-recent). The user-visible incident requires running codex outside canopy between two canopy launches AND noticing the resumed conversation is the wrong one. Both unusual, both recoverable.
+
+**Fix sketch:**
+1. Parse `codex` session listing (CLI shape TBD — `codex sessions list --json` or similar; verify against the installed version).
+2. After each `canopy`-driven codex launch, capture the session UUID (codex prints/persists it; need to figure out the durable lookup).
+3. Persist `last_codex_session_id` per workspace in `state.Workspace`.
+4. Change codex `Resume` argv to `resume <UUID>` when the UUID is known; fall back to `resume --last` when unset (first launch + workspaces from before this lands).
+
+**Why this is a behind-the-scenes fix:** No user-facing API change. The Resume verb is internal-only; the user always sees "the conversation I had in this workspace" either way — this just makes it correct under the cross-workspace contention case.
+
+**Where to look:** `internal/agent/launchers.go:181-220` (codex launcher entry, ResumeArgs `["resume", "--last", ...]`), `internal/state/state.go` (the Workspace struct where `LastCodexSessionID` would land), `internal/agent/launchers_test.go` (`TestPlanLaunch_CodexResume*` as the assertion template).
+
+---
+
 ## 📋 OPEN (P3) — `git.Sanitize` doesn't strip git-invalid dot sequences (added 2026-06-25)
 
 **What:** `Sanitize`'s character class is `[^A-Za-z0-9._-]+`, so dots survive (intentionally — `v1.2.3` is a valid branch). But git rejects a few dot patterns that Sanitize passes straight through: a ref can't contain `..`, can't end in `.`, and can't end in `.lock`. So `canopy new "a..b"` (no `--branch`) still produces an invalid ref `a..b` and `git worktree add -b` fails — the same class of bug as the spaces case fixed in PR `fix-branch-name-sanitize`, just rarer.
@@ -292,7 +326,15 @@ Defer post-v0.1; this is polish that depends on the BYO flow first feeling solid
 
 ---
 
-## 📋 OPEN — v0.16.x — Extend `--prompt` / background workspaces to codex + opencode (added 2026-05-11)
+## 🔄 PARTIAL — v0.16.x — Extend `--prompt` / background workspaces to codex + opencode (added 2026-05-11, codex parity shipped v0.22.0.0)
+
+**Status:** Wave 1 (codex classifier + agent-state badge parity) shipped in v0.22.0.0. The `Classifier` interface lives in `internal/agent/classifier.go`; `classifier_codex.go` has a real implementation (`IsRendering` and `IsTrustDialog` keyed on codex's pane markers, table-driven tests against fixtures in `internal/agent/testdata/`); `classifier_opencode.go` and `classifier_aider.go` are stubbed `false`. Remaining work:
+
+- **opencode classifier** — needs fixture content + marker patterns. Blocked on opencode binary being broken on the dogfood machine (`Could not resolve npm bin for opencode-ai` 2026-06-25). Pick up when the install works.
+- **aider classifier** — `--yes-always` interactive flow is a prompt-injection concern; defer until someone asks.
+- **`SendInitialPrompt(paneID, text) error` per launcher** — `--prompt`/`--prompt-file` delivery is still claude-only. The `Classifier` framework is in place to dispatch by launcher; the actual paste-into-pane handler isn't.
+
+Below is the original 2026-05-11 entry, preserved for the architectural context:
 
 v0.16.1 shipped `canopy new --prompt`/`--prompt-file` + the agent-state badge column, but the prompt-delivery flow is claude-only. The agent registry in `internal/agent/launchers.go` already understands codex / opencode / aider as launcher types — the gap is in the kickoff path:
 
