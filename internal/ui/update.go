@@ -1087,20 +1087,25 @@ func (m *Model) filteredRows() []state.GlobalRow {
 }
 
 // sortRowsMineFirst reorders rows so that, within each contiguous
-// (Host, ProjectRoot) section, the user's own workspaces sort above the
-// ones they're reviewing. The synthetic main row stays pinned to the top
-// of its section; otherwise the sort is stable, so existing relative
-// order (creation order, etc.) is preserved within each ownership band.
+// (Host, Project) section, the user's own workspaces sort above the ones
+// they're reviewing. The synthetic main row stays pinned to the top of
+// its section; otherwise the sort is stable, so existing relative order
+// (creation order, etc.) is preserved within each ownership band.
 //
-// It walks contiguous same-section runs and stable-sorts each in place
-// rather than sorting the whole slice, so the host/project grouping the
-// renderer depends on (prevHost / prevProject transitions) is never
-// broken — even if two sections happened to share a sort key.
+// The section key is (Host, Project) — the SAME key the renderer groups
+// headers on (projectlist.go: prevHost / prevProject transitions). They
+// must match: if the sort grouped on a key the renderer doesn't (e.g.
+// ProjectRoot, which is omitempty and absent on older remotes' ls --json),
+// a whole host can collapse into one run, yanking every project's (main)
+// row above the workspaces and splitting each project into a "(main)-only"
+// header plus a separate workspaces header. Project (basename) is always
+// populated on both local and remote rows, so it groups every fleet
+// version identically to the renderer.
 func sortRowsMineFirst(rows []state.GlobalRow) {
 	i := 0
 	for i < len(rows) {
 		j := i
-		for j < len(rows) && rows[j].Host == rows[i].Host && rows[j].ProjectRoot == rows[i].ProjectRoot {
+		for j < len(rows) && rows[j].Host == rows[i].Host && rows[j].Project == rows[i].Project {
 			j++
 		}
 		grp := rows[i:j]
