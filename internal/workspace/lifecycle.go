@@ -130,6 +130,18 @@ func New(cfg *config.Config) (*Manager, error) {
 	if err := m.migrateAndGuard(); err != nil {
 		return nil, err
 	}
+	// v0.22: populate CurrentAgent on any pre-v0.22 row for THIS
+	// project. Cross-project rows get migrated when their own Manager
+	// constructs (canopy is usually invoked per project; the Global tab
+	// in the TUI iterates Managers per project too). Eager-on-construct
+	// means the first canopy ls / canopy switch / canopy new after the
+	// upgrade converges all of this project's rows in one flock-
+	// protected pass. Best-effort: failures are logged, not surfaced —
+	// the workspace still functions, just with the v0.22 field empty
+	// (downstream code falls back to Cfg.DefaultAgent()).
+	if err := m.migrateCurrentAgents(); err != nil {
+		log.Warn("workspace.migrate-current-agents", "err", err.Error())
+	}
 	return m, nil
 }
 
@@ -156,6 +168,67 @@ func (m *Manager) migrateAndGuard() error {
 				"%w: %q (basename %q) collides with already-registered project at %q. "+
 					"Rename one of the directories so basenames are unique, then retry.",
 				ErrBasenameCollision, m.Cfg.ProjectRoot, m.Cfg.Project, other)
+		}
+		return nil
+	})
+}
+
+// migrateCurrentAgents fills the v0.22 state.Workspace.CurrentAgent
+// field on any row for THIS Manager's project that's missing it. Runs
+// once per Manager construction, under the state lock. Source
+// precedence matches the eng-review D9 contract:
+//
+//  1. Cfg.Agents[0] — the new canonical allowlist's first entry
+//  2. Cfg.Agent.Type — legacy single-agent block (handled by config
+//     validate() as the same value as Cfg.Agents[0], but defensive)
+//  3. "claude" — last-resort default for the rare case where neither
+//     is set on a Cfg constructed outside Load (test code)
+//
+// Cross-project rows in the shared state.json are left alone: this
+// Manager only has the right Cfg for its own project. Their migration
+// happens when their own project's Manager constructs.
+//
+// Idempotent: rows that already have CurrentAgent set are skipped. The
+// flock-protected Save fires unconditionally because WithLock always
+// saves on a clean fn return — that's a tiny cost (the JSON is already
+// what we'd write) and matches the existing migrate / reconcile
+// pattern in this package.
+func (m *Manager) migrateCurrentAgents() error {
+	defaultAgent := m.Cfg.DefaultAgent()
+	if defaultAgent == "" {
+		defaultAgent = "claude"
+	}
+	return m.Store.WithLock(func(s *state.State) error {
+		migratedCurrent := 0
+		migratedLaunches := 0
+		for i := range s.Workspaces {
+			w := &s.Workspaces[i]
+			if w.ProjectRoot != m.Cfg.ProjectRoot {
+				continue
+			}
+			if w.CurrentAgent == "" {
+				w.CurrentAgent = defaultAgent
+				migratedCurrent++
+			}
+			// v0.22+: populate AgentLaunches from the legacy total
+			// counter under the "all prior launches were CurrentAgent"
+			// assumption — which was strictly true before swap
+			// existed. Only fires when AgentLaunches is nil (never
+			// migrated); subsequent runs leave it alone.
+			if w.AgentLaunches == nil {
+				w.AgentLaunches = map[string]int{}
+				if w.CurrentAgent != "" && w.AgentLaunchCount > 0 {
+					w.AgentLaunches[w.CurrentAgent] = w.AgentLaunchCount
+				}
+				migratedLaunches++
+			}
+		}
+		if migratedCurrent > 0 || migratedLaunches > 0 {
+			log.Info("workspace.current-agent.migrated",
+				"project", m.Cfg.Project,
+				"current_rows", migratedCurrent,
+				"launches_rows", migratedLaunches,
+				"default_agent", defaultAgent)
 		}
 		return nil
 	})
@@ -225,6 +298,18 @@ type CreateOptions struct {
 	// to review); empty for fresh/issue/branch (the workspace is mine).
 	// See state.Workspace.Owner for the render semantics.
 	Owner string
+
+	// Agent is the launcher type this workspace should run when it
+	// boots. v0.22 `canopy new --agent <type>` sets this. Empty value
+	// means "use the project's default" — Create falls back to
+	// Cfg.DefaultAgent() (Cfg.Agents[0] or "claude").
+	//
+	// Validation happens at the CLI layer (cmd/canopy/new.go) via
+	// Cfg.AllowsAgent before Create is called; Create itself trusts
+	// the caller, since internal call sites may legitimately compose
+	// options with values that don't match the project's current
+	// allowlist (e.g. tests that exercise migration paths).
+	Agent string
 }
 
 // Create runs the full workspace setup lifecycle. name may be empty to
@@ -351,6 +436,18 @@ func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, s
 			sourceKind = "fresh"
 		}
 
+		// Snapshot the workspace's launcher: opts.Agent if the caller
+		// supplied one (--agent on the CLI), else the project's default.
+		// Empty fallback to "claude" is defensive; Cfg.DefaultAgent()
+		// already guarantees non-empty for a Cfg that went through Load.
+		chosenAgent := opts.Agent
+		if chosenAgent == "" {
+			chosenAgent = m.Cfg.DefaultAgent()
+		}
+		if chosenAgent == "" {
+			chosenAgent = "claude"
+		}
+
 		ws = state.Workspace{
 			ProjectRoot:       m.Cfg.ProjectRoot, // v2 authoritative key (basename derived via ProjectBasename())
 			Name:              name,
@@ -363,6 +460,7 @@ func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, s
 			SourceContext:     opts.SourceContext,
 			NameAutoGenerated: nameWasEmpty,
 			Owner:             opts.Owner,
+			CurrentAgent:      chosenAgent,
 		}
 		return s.Add(ws)
 	})
@@ -398,6 +496,7 @@ func (m *Manager) Create(ctx context.Context, name string, opts CreateOptions, s
 		row.Status = state.StatusReady
 		row.LastError = ""
 		row.AgentLaunchCount++
+		bumpAgentLaunches(row, currentAgent(row, m.Cfg))
 		ws = *row
 		return nil
 	})
@@ -696,7 +795,7 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 	if err != nil {
 		return err
 	}
-	if err := m.Tmux.SetRole(ctx, agentPane, agent.RoleForType(m.Cfg.Agent.Type)); err != nil {
+	if err := m.Tmux.SetRole(ctx, agentPane, agent.RoleForType(currentAgent(ws, m.Cfg))); err != nil {
 		return fmt.Errorf("workspace.buildSession: tag agent pane: %w", err)
 	}
 	// Land the active pane on the agent pane — that's the thing the
@@ -733,8 +832,32 @@ func (m *Manager) buildSession(ctx context.Context, ws *state.Workspace) error {
 // state changes between this call and the agent actually launching are
 // not reflected — that's acceptable; the agent gets a fresh briefing
 // on every relaunch.
+// currentAgent returns the launcher type to spawn for this workspace.
+//
+// Precedence:
+//   1. ws.CurrentAgent — the v0.22 per-workspace snapshot. The Manager's
+//      migrateCurrentAgents pass on New() populates this for any pre-
+//      v0.22 row, so production calls almost always take this branch.
+//   2. cfg.DefaultAgent() — fallback for the brief window between row
+//      creation and the first Save (in-memory workspace.Create returns
+//      a *state.Workspace that hasn't been persisted yet) and for test
+//      code that constructs a *state.Workspace literal without going
+//      through the migration.
+//
+// Never returns empty: cfg.DefaultAgent() falls back to "claude" when
+// the config has no Agents and no Agent.Type.
+func currentAgent(ws *state.Workspace, cfg *config.Config) string {
+	if ws != nil && ws.CurrentAgent != "" {
+		return ws.CurrentAgent
+	}
+	if cfg != nil {
+		return cfg.DefaultAgent()
+	}
+	return "claude"
+}
+
 func (m *Manager) agentPaneCmd(ws *state.Workspace, resume bool) (string, error) {
-	launcher, err := agent.Resolve(m.Cfg.Agent.Type)
+	launcher, err := agent.Resolve(currentAgent(ws, m.Cfg))
 	if err != nil {
 		// Typo in canopy.json's agent.type — fail loud. This is a
 		// config error, not an environment gap; we don't want to
@@ -763,7 +886,7 @@ func (m *Manager) agentPaneCmd(ws *state.Workspace, resume bool) (string, error)
 	// TUI refresh will pick it up.
 	hints := lifecycle.RunFast(context.Background(), *ws)
 
-	briefing := agent.BuildBriefing(*ws, m.Cfg, hints)
+	briefing := agent.BuildBriefing(*ws, m.Cfg, hints, currentAgent(ws, m.Cfg))
 
 	// Write briefing to a temp file. Empty briefing → empty path → the
 	// launcher drops the flag entirely (handled in PlanLaunch).
@@ -1021,7 +1144,7 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 	if err != nil {
 		return nil, err
 	}
-	if err := m.Tmux.SetRole(ctx, agentPane, agent.RoleForType(m.Cfg.Agent.Type)); err != nil {
+	if err := m.Tmux.SetRole(ctx, agentPane, agent.RoleForType(currentAgent(&wsCopy, m.Cfg))); err != nil {
 		return nil, fmt.Errorf("workspace.Resurrect: tag agent pane: %w", err)
 	}
 	// Land active pane on the agent — same rationale as buildSession.
@@ -1041,6 +1164,7 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		row.Status = state.StatusReady
 		row.LastError = ""
 		row.AgentLaunchCount++
+		bumpAgentLaunches(row, currentAgent(&wsCopy, m.Cfg))
 		wsCopy = *row
 		return nil
 	})
@@ -1048,6 +1172,24 @@ func (m *Manager) Resurrect(ctx context.Context, name string) (*state.Workspace,
 		return nil, err
 	}
 	return &wsCopy, nil
+}
+
+// bumpAgentLaunches increments the per-agent launch counter in
+// state.Workspace.AgentLaunches. Lazily initializes the map; safe
+// to call on any row regardless of migration state. v0.22.
+//
+// Used by buildSession, Resurrect, and SwapAgent — every site where
+// canopy actually spawns an agent process. The counter is read by
+// SwapAgent to decide Resume vs Fresh (count>0 → Resume; count==0
+// → Fresh, since the agent has no prior session in this workspace).
+func bumpAgentLaunches(row *state.Workspace, agentName string) {
+	if row == nil || agentName == "" {
+		return
+	}
+	if row.AgentLaunches == nil {
+		row.AgentLaunches = map[string]int{}
+	}
+	row.AgentLaunches[agentName]++
 }
 
 // BareAttach returns a tmux session name to attach to for a "diagnostic"

@@ -146,6 +146,26 @@ type Workspace struct {
 	// store; same shape as Port.
 	AgentLaunchCount int `json:"agent_launch_count,omitempty"`
 
+	// AgentLaunches tracks per-agent launch counts in this workspace.
+	// Keyed by launcher type (e.g., "claude", "codex"); value is the
+	// number of times we've spawned that specific agent in this
+	// workspace's lifetime. v0.22+.
+	//
+	// Used by workspace.SwapAgent to decide Resume vs Fresh when
+	// swapping in a different agent: count[target]==0 means this is
+	// the first time the target has ever run here (its --resume
+	// machinery would find no prior session and exit), so we use
+	// Fresh. count[target]>0 means prior history exists, so we use
+	// Resume and let the agent's own --continue / --resume verb
+	// reach the prior conversation.
+	//
+	// Migration: pre-v0.22 rows have nil AgentLaunches. The first
+	// canopy ls (or any read that goes through Manager.New) populates
+	// it from AgentLaunchCount under the assumption that all prior
+	// launches were of CurrentAgent — which was always true before
+	// swap existed.
+	AgentLaunches map[string]int `json:"agent_launches,omitempty"`
+
 	// SourceKind is set once at workspace creation and never changes.
 	// Drives which AGENT.md briefing variant gets assembled and the
 	// agent's framing for the work. Values:
@@ -211,6 +231,25 @@ type Workspace struct {
 	// rows (no `owner` key) reading back as "" — i.e. mine, or a legacy
 	// review row if pr-sourced — with no schema migration.
 	Owner string `json:"owner,omitempty"`
+
+	// CurrentAgent is the launcher type this workspace is currently
+	// running ("claude", "codex", etc.). Snapshotted at workspace-create
+	// time from --agent (or canopy.json's `agents[0]` default) and
+	// mutated by `canopy agent swap <type>`. The pane-role tag
+	// (`agent:<type>`) and this field are kept in sync.
+	//
+	// v0.22 introduces this field. Empty value on a pre-v0.22 row means
+	// "needs migration"; the workspace manager's MigrateAgents pass on
+	// next read populates it from the project's canopy.json
+	// (`agents[0]` → legacy `agent.type` → "claude") under WithLock,
+	// converging on first post-upgrade access. See workspace package.
+	//
+	// Why on the row vs. computed from config every time: the workspace
+	// owns its identity. A user who swaps agents on workspace A
+	// shouldn't see workspace B follow along, even though both projects
+	// share the same canopy.json default. Snapshot at create, mutate
+	// only via explicit swap.
+	CurrentAgent string `json:"current_agent,omitempty"`
 }
 
 // OwnerSelfMarker is the reserved value Owner holds when the user has

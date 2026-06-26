@@ -12,16 +12,22 @@ import (
 )
 
 // fixtureWorkspace returns a populated state.Workspace for tests.
-// SourceKind defaults to "fresh"; tests override per-case.
+// SourceKind defaults to "fresh"; tests override per-case. CurrentAgent
+// is set to "claude" so the BuildBriefing migration-fallback path
+// (lifecycle.launchCountFor) maps a non-zero AgentLaunchCount onto the
+// "claude" per-agent counter when AgentLaunches is unset — which is the
+// shape pre-v0.22 state files have. Tests that exercise the swap-to-codex
+// behavior must override AgentLaunches explicitly.
 func fixtureWorkspace() state.Workspace {
 	return state.Workspace{
-		Name:        "ancient-hornet",
-		Branch:      "ancient-hornet",
-		ProjectRoot: "/home/avi/Work/canopy",
-		Path:        "/home/avi/.canopy/workspaces/canopy/ancient-hornet",
-		Port:        40010,
-		Status:      state.StatusReady,
-		SourceKind:  "fresh",
+		Name:         "ancient-hornet",
+		Branch:       "ancient-hornet",
+		ProjectRoot:  "/home/avi/Work/canopy",
+		Path:         "/home/avi/.canopy/workspaces/canopy/ancient-hornet",
+		Port:         40010,
+		Status:       state.StatusReady,
+		SourceKind:   "fresh",
+		CurrentAgent: "claude",
 	}
 }
 
@@ -40,7 +46,7 @@ func fixtureConfig() *config.Config {
 func TestBuildBriefing_FreshFull(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.AgentLaunchCount = 0
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	wantSections := []string{
 		"# Canopy workspace context",
@@ -70,10 +76,41 @@ func TestBuildBriefing_FreshFull(t *testing.T) {
 func TestBuildBriefing_ResumeNoHintsReturnsEmpty(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.AgentLaunchCount = 1 // resumed
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 	if out != "" {
 		t.Errorf("resume + no hints should return empty string; got %d bytes:\n%s",
 			len(out), out)
+	}
+}
+
+// TestBuildBriefing_SwapToNewAgent_GetsFreshBriefing pins the bug codex
+// review flagged 2026-06-25 (P1 #1): the FIRST launch of a freshly
+// swapped-in agent must get the FULL briefing, even when claude has
+// already run in this workspace and the legacy global AgentLaunchCount
+// is > 0. Without the per-agent gate, codex spawned with delta-or-empty
+// context on its first appearance — invisible to humans but
+// catastrophic for the new agent's onboarding.
+func TestBuildBriefing_SwapToNewAgent_GetsFreshBriefing(t *testing.T) {
+	ws := fixtureWorkspace()
+	// Workspace has been running claude for a while. Legacy global
+	// counter says 3 launches, per-agent says claude=3, codex=0.
+	ws.CurrentAgent = "claude"
+	ws.AgentLaunchCount = 3
+	ws.AgentLaunches = map[string]int{"claude": 3}
+
+	// Now we're spawning codex for the first time in this workspace.
+	out := BuildBriefing(ws, fixtureConfig(), nil, "codex")
+
+	// Must be the FULL briefing — codex needs the workspace context.
+	for _, want := range []string{
+		"# Canopy workspace context",
+		"## This workspace",
+		"## Workspace lifecycle (canopy conventions",
+		"ancient-hornet",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("swap-to-codex first launch should get FULL briefing; missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -89,7 +126,7 @@ func TestBuildBriefing_ResumeWithHintsReturnsDelta(t *testing.T) {
 		Action:     "canopy rm ancient-hornet",
 		DetectedAt: time.Now(),
 	}}
-	out := BuildBriefing(ws, fixtureConfig(), hints)
+	out := BuildBriefing(ws, fixtureConfig(), hints, "claude")
 
 	if !strings.Contains(out, "shipped") {
 		t.Errorf("delta briefing missing hint kind: %s", out)
@@ -115,7 +152,7 @@ func TestBuildBriefing_ResumeWithHintsReturnsDelta(t *testing.T) {
 func TestBuildBriefing_SourceKindPR(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.SourceKind = "pr"
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	for _, want := range []string{
 		"pull request",
@@ -135,7 +172,7 @@ func TestBuildBriefing_SourceKindPR(t *testing.T) {
 func TestBuildBriefing_SourceKindIssue(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.SourceKind = "issue"
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	for _, want := range []string{
 		"implementing",
@@ -156,7 +193,7 @@ func TestBuildBriefing_SourceContextWrapped(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.SourceKind = "pr"
 	ws.SourceContext = "PR #42: Fix the bug\n\nBody talks about the bug and how to fix it."
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	if !strings.Contains(out, "PR #42: Fix the bug") {
 		t.Errorf("source context body missing from briefing: %s", out)
@@ -173,7 +210,7 @@ func TestBuildBriefing_SourceContextEmpty_NoDelimiter(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.SourceKind = "branch"
 	ws.SourceContext = ""
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	if strings.Contains(out, "<<<CANOPY_SOURCE_DATA>>>") {
 		t.Errorf("delimiter rendered with no body: %s", out)
@@ -184,7 +221,7 @@ func TestBuildBriefing_SourceContextEmpty_NoDelimiter(t *testing.T) {
 func TestBuildBriefing_SourceKindBranch(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.SourceKind = "branch"
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	if !strings.Contains(out, "picking up the existing branch") {
 		t.Errorf("branch briefing missing pickup framing: %s", out)
@@ -217,7 +254,7 @@ func TestBuildBriefing_RenameDirective_AppliedConditionally(t *testing.T) {
 			ws.SourceKind = tc.sourceKind
 			ws.NameAutoGenerated = tc.nameAuto
 
-			out := BuildBriefing(ws, fixtureConfig(), nil)
+			out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 			// The literal `git branch -m <intent-slug>` line is unique to
 			// the rename directive section — robust signature even as the
 			// surrounding copy evolves.
@@ -238,7 +275,7 @@ func TestBuildBriefing_PR_TellsAgentNotToRename(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.SourceKind = "pr"
 	ws.Branch = "pdx91/inbox-improvements"
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	if !strings.Contains(out, "DON'T rename") {
 		t.Errorf("PR briefing must tell agent not to rename: %s", out)
@@ -254,7 +291,7 @@ func TestBuildBriefing_Branch_TellsAgentNotToRename(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.SourceKind = "branch"
 	ws.Branch = "feat/oauth"
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	if !strings.Contains(out, "DON'T rename") {
 		t.Errorf("branch briefing must tell agent not to rename: %s", out)
@@ -269,7 +306,7 @@ func TestBuildBriefing_Issue_AllowsLaterRename(t *testing.T) {
 	ws := fixtureWorkspace()
 	ws.SourceKind = "issue"
 	ws.Branch = "issue-42"
-	out := BuildBriefing(ws, fixtureConfig(), nil)
+	out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 
 	// Should explicitly mention that rename is OK later but not urgent.
 	if !strings.Contains(out, "not urgent") && !strings.Contains(out, "later") {
@@ -290,7 +327,7 @@ func TestBuildBriefing_LegacySourceKindFallsBackToFresh(t *testing.T) {
 	t.Run("legacy empty SourceKind", func(t *testing.T) {
 		ws := fixtureWorkspace()
 		ws.SourceKind = ""
-		out := BuildBriefing(ws, fixtureConfig(), nil)
+		out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 		// Legacy rows should get the rename directive (matches v0.5
 		// behavior where every workspace was treated as auto-named).
 		if !strings.Contains(out, "rename the branch") {
@@ -305,7 +342,7 @@ func TestBuildBriefing_LegacySourceKindFallsBackToFresh(t *testing.T) {
 	t.Run("unknown future SourceKind", func(t *testing.T) {
 		ws := fixtureWorkspace()
 		ws.SourceKind = "future-unknown-kind"
-		out := BuildBriefing(ws, fixtureConfig(), nil)
+		out := BuildBriefing(ws, fixtureConfig(), nil, "claude")
 		// Unknown kind: don't push to rename (conservative), but
 		// still ask the user about intent.
 		if strings.Contains(out, "rename the branch to reflect intent") {
@@ -323,7 +360,7 @@ func TestBuildBriefing_ProjectBriefingInline(t *testing.T) {
 	cfg := fixtureConfig()
 	cfg.Agent.Briefing = "This is a Rails 7 app. RSpec for tests."
 
-	out := BuildBriefing(fixtureWorkspace(), cfg, nil)
+	out := BuildBriefing(fixtureWorkspace(), cfg, nil, "claude")
 	if !strings.Contains(out, "## Project briefing") {
 		t.Errorf("missing Project briefing section header")
 	}
@@ -351,7 +388,7 @@ func TestBuildBriefing_ProjectBriefingFile(t *testing.T) {
 		},
 	}
 
-	out := BuildBriefing(fixtureWorkspace(), cfg, nil)
+	out := BuildBriefing(fixtureWorkspace(), cfg, nil, "claude")
 	if !strings.Contains(out, "FROM-FILE-CONTENT") {
 		t.Errorf("file-based briefing not used: %s", out)
 	}
@@ -372,7 +409,7 @@ func TestBuildBriefing_ProjectBriefingFileMissing(t *testing.T) {
 			BriefingFile: "missing.md",
 		},
 	}
-	out := BuildBriefing(fixtureWorkspace(), cfg, nil)
+	out := BuildBriefing(fixtureWorkspace(), cfg, nil, "claude")
 	if !strings.Contains(out, "INLINE-FALLBACK") {
 		t.Errorf("inline fallback didn't fire when briefing_file is missing: %s", out)
 	}
@@ -389,7 +426,7 @@ func TestBuildBriefing_FreshWithActiveHints(t *testing.T) {
 		Message: "branch matches workspace name",
 		Action:  "git branch -m <name>",
 	}}
-	out := BuildBriefing(ws, fixtureConfig(), hints)
+	out := BuildBriefing(ws, fixtureConfig(), hints, "claude")
 
 	if !strings.Contains(out, "rename_suggested") {
 		t.Errorf("fresh briefing with hints missing the hint")
@@ -408,7 +445,7 @@ func TestBuildBriefing_NilConfig(t *testing.T) {
 			t.Errorf("BuildBriefing panicked on nil cfg: %v", r)
 		}
 	}()
-	out := BuildBriefing(fixtureWorkspace(), nil, nil)
+	out := BuildBriefing(fixtureWorkspace(), nil, nil, "claude")
 	if !strings.Contains(out, "Canopy workspace context") {
 		t.Errorf("nil cfg produced empty briefing")
 	}

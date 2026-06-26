@@ -31,6 +31,40 @@ var log = clog.Pkg("agent")
 // list of known types so users can fix the typo without re-reading docs.
 var ErrUnknownAgent = errors.New("agent: unknown agent type")
 
+// ErrAgentNotAllowed is returned by callers that validate a user-
+// supplied agent name against the project's canopy.json `agents:`
+// allowlist. The agent IS a valid registered launcher (otherwise the
+// caller would have returned ErrUnknownAgent first), but the current
+// project hasn't declared it as available. Wrappers include the
+// rejected type + the project's allowed list in the error message.
+//
+// Returned by:
+//   - cmd/canopy/new.go when --agent <type> is not in Cfg.Agents
+//   - cmd/canopy/agent.go (canopy agent swap) for the same gate
+var ErrAgentNotAllowed = errors.New("agent: not allowed by this project's canopy.json `agents` list")
+
+// ErrLauncherNoExec is returned by Launcher.ResolveExec when the chosen
+// launcher's Exec field is nil — i.e., it has no registered one-shot
+// mode. Returned by `canopy ask <agent>` when the target is a launcher
+// like opencode that doesn't (yet) have a `<cmd> exec`-style entry
+// point. v0.22.
+var ErrLauncherNoExec = errors.New("agent: launcher has no one-shot exec mode registered")
+
+// ResolveExec returns the ExecMode for this launcher (used by
+// `canopy ask <agent>`). Returns ErrLauncherNoExec when the launcher
+// has no registered one-shot mode — the caller surfaces this so the
+// user sees "this agent doesn't support `ask` yet" rather than a
+// confusing exec.LookPath failure later.
+//
+// The returned *ExecMode is a pointer into the package-level defaults
+// map and must NOT be mutated by callers. Treated as read-only.
+func (l Launcher) ResolveExec() (*ExecMode, error) {
+	if l.Exec == nil {
+		return nil, fmt.Errorf("%w: %q", ErrLauncherNoExec, l.Cmd)
+	}
+	return l.Exec, nil
+}
+
 // BriefingMode describes how a launcher accepts the canopy-assembled
 // briefing. Different agents have different conventions:
 //
@@ -73,6 +107,43 @@ type Launcher struct {
 	Resume       []string
 	Fresh        []string
 	BriefingMode BriefingMode
+
+	// Exec describes how to invoke this launcher in one-shot, non-
+	// interactive mode for `canopy ask <agent>` (v0.22). Nil means
+	// the launcher has no known one-shot mode and `canopy ask` returns
+	// ErrLauncherNoExec. Distinct from Resume/Fresh (which spawn the
+	// interactive TUI in the agent pane) because exec mode skips the
+	// approval / state-machine surface entirely.
+	Exec *ExecMode
+}
+
+// PromptMode picks how the user's question reaches the launcher's exec
+// invocation. Each one-shot CLI accepts the prompt body differently:
+//
+//   - claude -p <prompt>         → PromptArg (positional)
+//   - codex exec <prompt>        → PromptArg (positional)
+//   - aider --message <prompt>   → PromptArg (positional after the flag)
+//
+// PromptStdin is reserved for future launchers whose exec mode reads
+// from stdin instead of a positional arg. None ship in v0.22.
+type PromptMode int
+
+const (
+	PromptArg PromptMode = iota
+	PromptStdin
+)
+
+// ExecMode describes a launcher's one-shot invocation. Args is the
+// pre-prompt argv tail (everything between Cmd and the prompt body).
+// PromptMode decides where the prompt body goes:
+//
+//   - PromptArg   → final positional argv element
+//   - PromptStdin → piped to the child's stdin
+//
+// Used by Launcher.ResolveExec + cmd/canopy/ask.go.
+type ExecMode struct {
+	Args       []string
+	PromptMode PromptMode
 }
 
 // defaults is the registry of canopy-supported agents. Order is
@@ -102,29 +173,75 @@ var defaults = map[string]Launcher{
 		Resume:       []string{"--continue", "--append-system-prompt", "{{briefing}}"},
 		Fresh:        []string{"--append-system-prompt", "{{briefing}}"},
 		BriefingMode: BriefingInline,
+		// `claude -p <prompt>` is claude's non-interactive "print
+		// mode" — answers the prompt once and exits. No TUI, no
+		// session continuity, fast. Used by `canopy ask claude`.
+		Exec: &ExecMode{Args: []string{"-p"}, PromptMode: PromptArg},
 	},
 	"codex": {
 		Cmd: "codex",
-		// Codex's CLI is still moving; --instructions is the closest
-		// equivalent to claude's --append-system-prompt as of 2026-04.
-		// Update this entry when codex stabilizes its system-prompt
-		// surface. No --resume distinction today — codex resume
-		// requires a thread ID we don't track.
-		Resume:       []string{"--instructions", "{{briefing}}"},
-		Fresh:        []string{"--instructions", "{{briefing}}"},
+		// Codex's CLI keeps moving. As of codex-cli 0.142.2 (2026-06-25),
+		// the system-prompt surface is GONE — `--instructions` no longer
+		// exists. The only way to pass content at launch is the
+		// positional [PROMPT] arg, which codex treats as the user's
+		// first turn (not a system instruction). We use it anyway:
+		// the canopy briefing as first-turn user message is the best
+		// available substitute.
+		//
+		// Resume now uses `codex resume --last [PROMPT]` (added between
+		// 0.140 and 0.142). --last continues the most recent codex
+		// session — same behavior as `claude --continue`, with the same
+		// caveat: "most recent" is GLOBAL, not per-cwd. If the user
+		// runs codex in another directory between two canopy-driven
+		// codex launches in this workspace, --last picks up the wrong
+		// session. Per-session-ID tracking (codex resume <UUID>) would
+		// fix this; tracking the UUID requires parsing codex's session
+		// list or output. Filed as TODO.
+		//
+		// --ask-for-approval on-request: codex's default mode auto-
+		// applies file edits with no UI dialog at all. canopy's agent-
+		// pane state machine relies on observing an "awaiting input"
+		// dialog (the AwaitingMarkers Classifier) to render the ✋
+		// badge and gate --prompt delivery. Forcing on-request makes
+		// codex pause for user confirmation before mutating, which is
+		// (a) the same gating UX claude has by default and (b) what
+		// canopy needs to classify pane state at all. Awaiting dialog
+		// shape captured in internal/agent/testdata/codex_awaiting_input.txt.
+		Resume:       []string{"resume", "--last", "--ask-for-approval", "on-request", "{{briefing}}"},
+		Fresh:        []string{"--ask-for-approval", "on-request", "{{briefing}}"},
 		BriefingMode: BriefingInline,
+		// `codex exec <prompt>` is codex's non-interactive mode.
+		// Intentionally OMITs --ask-for-approval (which lives on the
+		// interactive Resume/Fresh argv): exec mode has no UI to
+		// surface approval dialogs through, so the flag would either
+		// be ignored or hang. Dogfooded 2026-06-25 — exec mode
+		// completes synchronously without an approval prompt.
+		Exec: &ExecMode{Args: []string{"exec"}, PromptMode: PromptArg},
 	},
 	"opencode": {
-		Cmd:          "opencode",
+		Cmd: "opencode",
+		// opencode's resume verb wiring is TODO — the installed binary
+		// on 2026-06-25 fails to start ("Could not resolve npm bin for
+		// opencode-ai"), so we can't dogfood the flag surface to wire
+		// it correctly. Resume kept empty until verified; the agent
+		// will spawn fresh every time, no different from today.
+		// Same TODO for the Exec field below (no `canopy ask opencode`).
 		Resume:       []string{},
 		Fresh:        []string{},
 		BriefingMode: BriefingAgentsMd,
+		Exec:         nil,
 	},
 	"aider": {
 		Cmd:          "aider",
 		Resume:       []string{"--restore-chat-history", "--message-file", "{{briefing}}"},
 		Fresh:        []string{"--message-file", "{{briefing}}"},
 		BriefingMode: BriefingFile,
+		// `aider --message <prompt>` runs a single-turn aider
+		// invocation that exits after the response. The Args here
+		// only carries --message; --no-stream / --no-pretty are
+		// useful for non-TTY captures but skipped to keep the v1
+		// argv minimal (the caller can pipe through `cat` if needed).
+		Exec: &ExecMode{Args: []string{"--message"}, PromptMode: PromptArg},
 	},
 }
 
@@ -167,6 +284,29 @@ func LauncherFromRole(role string) string {
 	}
 	parts := strings.SplitN(rest, ":", 2)
 	return parts[0] // may be "" if rest starts with ':'
+}
+
+// InstalledLaunchers returns the subset of KnownAgents whose binary is
+// currently on PATH. Used by the TUI agent-swap + ask pickers to show
+// only launchers the user could actually run RIGHT NOW. v0.22.
+//
+// Why "installed" not "known": showing all registered launchers in the
+// picker lets the user pick something that would fail at spawn time
+// with a "binary not found" error — bad UX. Pre-filtering to installed
+// keeps the picker honest about what the user can use.
+//
+// The check is a cheap exec.LookPath per launcher; for the four
+// shipped launchers this is sub-millisecond total. Re-checked on
+// every picker open (cheap enough; matches the picker open cadence).
+func InstalledLaunchers() []string {
+	out := make([]string, 0, len(defaults))
+	for _, name := range KnownAgents() {
+		l := defaults[name]
+		if err := l.VerifyInstalled(); err == nil {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // KnownAgents returns the sorted list of built-in agent type names.
@@ -290,9 +430,19 @@ func (l Launcher) PlanLaunch(briefingPath string, resume bool, worktreePath stri
 		}
 		// Token at position i.
 		if briefingPath == "" {
-			// Drop this token AND the preceding flag, if any.
+			// Drop this token. Also drop the preceding arg ONLY when
+			// it looks like a flag name (starts with "-"). For codex's
+			// post-0.142.2 positional briefing the preceding arg is the
+			// flag VALUE of --ask-for-approval (e.g. "on-request") and
+			// MUST be kept; popping it would produce
+			// `codex resume --last --ask-for-approval` and codex would
+			// reject the missing value. Same shape and same reason as
+			// the guard in BuildArgv. (codex review P1 #2, 2026-06-25.)
 			if len(parts) > 1 {
-				parts = parts[:len(parts)-1]
+				prev := parts[len(parts)-1]
+				if strings.HasPrefix(prev, "-") {
+					parts = parts[:len(parts)-1]
+				}
 			}
 			continue
 		}
@@ -412,8 +562,11 @@ func (l Launcher) BuildArgv(resume bool, briefing string) []string {
 
 	// Walk the tail. For each "{{briefing}}" token: if briefing is
 	// non-empty, replace inline and keep the preceding flag. If empty,
-	// drop both the flag and the token (the prior arg is assumed to be
-	// the flag this token is the value for).
+	// drop the token; AND drop the preceding arg if it's a flag (looks
+	// like "--xxx" or "-x"). For purely-positional briefing arrangements
+	// (e.g., codex post-0.142.2 where the briefing is just [PROMPT]
+	// with no preceding flag name), we keep the preceding arg intact
+	// because it's a flag VALUE, not a flag NAME.
 	out := make([]string, 0, len(tail)+1)
 	out = append(out, l.Cmd)
 	for i := 0; i < len(tail); i++ {
@@ -422,11 +575,17 @@ func (l Launcher) BuildArgv(resume bool, briefing string) []string {
 			out = append(out, arg)
 			continue
 		}
-		// Token at position i. If briefing is empty, drop it AND the
-		// preceding flag (out's last element).
+		// Token at position i. If briefing is empty, drop it. ALSO drop
+		// the preceding arg if it looks like a flag — that's the
+		// claude/aider case where the briefing is a flag value. For
+		// codex's positional briefing the preceding arg is a flag value
+		// (e.g., "on-request") and must be kept.
 		if briefing == "" {
 			if len(out) > 1 {
-				out = out[:len(out)-1] // pop the preceding flag
+				prev := out[len(out)-1]
+				if strings.HasPrefix(prev, "-") {
+					out = out[:len(out)-1] // pop the preceding flag
+				}
 			}
 			continue
 		}

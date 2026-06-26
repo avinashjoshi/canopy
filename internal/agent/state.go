@@ -121,24 +121,32 @@ func (d *Detector) Observe(paneID, launcher, current string) (State, int) {
 
 	// Hash stable. Pattern matching uses RAW content (codex M2) so the
 	// footer-living idle markers aren't normalized away.
-	if launcher == "claude" {
-		for _, p := range claudeAwaitingPatterns {
-			if p.MatchString(current) {
-				return StateAwaitingInput, 9
-			}
+	//
+	// Per-launcher dispatch via Classifier (see classifier.go). The
+	// behavioral contract: a launcher with REGISTERED markers (claude,
+	// codex) gets full classification; a stub launcher with empty
+	// marker slices (opencode, aider) AND any unrecognized launcher
+	// fall through to StateUnknown — we have motion data but no UI
+	// signal to interpret a stable pane.
+	classifier := ClassifierFor(launcher)
+	for _, p := range classifier.AwaitingMarkers() {
+		if p.MatchString(current) {
+			return StateAwaitingInput, 9
 		}
-		for _, p := range claudeIdleMarkers {
-			if p.MatchString(current) {
-				return StateIdle, 8
-			}
+	}
+	for _, p := range classifier.IdleMarkers() {
+		if p.MatchString(current) {
+			return StateIdle, 8
 		}
-		// Stable + claude + no markers — probably idle but we have weak
-		// evidence. Lower confidence so dogfood logs surface it.
+	}
+	// Stable, no marker matched. If the launcher has REGISTERED markers
+	// (real classifier, just none hit), call it Idle with low confidence
+	// so dogfood logs surface it — same behavior as pre-refactor claude.
+	// If markers are empty (stub or unknown), it's StateUnknown — we
+	// don't fabricate an Idle signal for launchers we haven't dogfooded.
+	if len(classifier.IdleMarkers()) > 0 || len(classifier.AwaitingMarkers()) > 0 {
 		return StateIdle, 5
 	}
-
-	// Unknown launcher at rest: we can detect motion (Thinking) but no
-	// idle patterns are registered for codex/opencode/aider yet.
 	return StateUnknown, 4
 }
 
@@ -158,14 +166,14 @@ func (d *Detector) Observe(paneID, launcher, current string) (State, int) {
 // produce the same badge for the same pane content):
 //
 //  1. prev=="" OR cur=="" OR launcher=="" → Unknown
-//  2. launcher != "claude" → Unknown (no idle markers registered for
-//     codex/opencode/aider yet — same as ClassifyOneShot)
+//  2. launcher with NO registered Classifier markers (opencode/aider
+//     stubs, unknown launchers) → Unknown. Codex + claude are real.
 //  3. normalize(prev) != normalize(cur) → Thinking (motion detected)
 //  4. stable + awaiting pattern match on RAW cur → AwaitingInput
 //  5. stable + idle marker match on RAW cur → Idle
 //  6. stable + no marker → Unknown (we have motion data but no idle
-//     signal — same low-confidence behavior as Detector.Observe at
-//     this point)
+//     signal — same fallback as Detector.Observe's confidence-4 path
+//     for stub launchers)
 //
 // Pattern matching uses RAW cur, not normalize(cur), so footer-living
 // markers aren't stripped before they can be matched (codex review M2).
@@ -173,18 +181,22 @@ func ClassifyTwoShot(launcher, prev, cur string) State {
 	if prev == "" || cur == "" || launcher == "" {
 		return StateUnknown
 	}
-	if launcher != "claude" {
+	classifier := ClassifierFor(launcher)
+	// Stub-launcher early-out: empty markers ↔ we haven't dogfooded this
+	// launcher's UI. Even if motion is present, we don't promise more
+	// than Unknown — the remote badge column should stay honest.
+	if len(classifier.IdleMarkers()) == 0 && len(classifier.AwaitingMarkers()) == 0 {
 		return StateUnknown
 	}
 	if normalize(prev) != normalize(cur) {
 		return StateThinking
 	}
-	for _, p := range claudeAwaitingPatterns {
+	for _, p := range classifier.AwaitingMarkers() {
 		if p.MatchString(cur) {
 			return StateAwaitingInput
 		}
 	}
-	for _, p := range claudeIdleMarkers {
+	for _, p := range classifier.IdleMarkers() {
 		if p.MatchString(cur) {
 			return StateIdle
 		}
@@ -216,17 +228,18 @@ func ClassifyOneShot(launcher, content string) State {
 	if content == "" || launcher == "" {
 		return StateUnknown
 	}
-	if launcher != "claude" {
-		// Other launchers (codex, opencode, aider) have no registered
-		// idle/awaiting patterns yet — can't classify without motion.
+	classifier := ClassifierFor(launcher)
+	// Stub-launcher early-out: empty markers ↔ undogfooded launcher.
+	// Stays Unknown so the remote-row badge column doesn't lie.
+	if len(classifier.IdleMarkers()) == 0 && len(classifier.AwaitingMarkers()) == 0 {
 		return StateUnknown
 	}
-	for _, p := range claudeAwaitingPatterns {
+	for _, p := range classifier.AwaitingMarkers() {
 		if p.MatchString(content) {
 			return StateAwaitingInput
 		}
 	}
-	for _, p := range claudeIdleMarkers {
+	for _, p := range classifier.IdleMarkers() {
 		if p.MatchString(content) {
 			return StateIdle
 		}
@@ -298,7 +311,18 @@ var ansiCSI = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 // (Baked, Cooking, Simmering, Brewing, Churned) — match all known
 // shapes. The number changes every second so this line WILL flip the
 // hash if not stripped.
-var spinnerLine = regexp.MustCompile(`(?i)(churned|baked|cooking|simmering|brewing|thinking|musing|pondering) for \d+s`)
+//
+// Also matches codex's spinner: `• Working (Ns • esc to interrupt)`.
+// Codex's spinner is a single fixed verb ("Working") wrapped in a
+// parenthesized timer, structurally different from claude's "Baked
+// for Ns", so it gets its own alternation arm rather than trying to
+// jam it into the (verb) for Ns grammar. Last verified for codex:
+// 2026-06-17 against codex-cli 0.140.0.
+var spinnerLine = regexp.MustCompile(
+	`(?i)(churned|baked|cooking|simmering|brewing|thinking|musing|pondering) for \d+s` +
+		`|` +
+		`• Working \(\d+s • esc to interrupt\)`,
+)
 
 // footerLine matches claude's mode-toggle footer that toggles when the
 // user hits shift+tab. We strip it from normalized content (avoids

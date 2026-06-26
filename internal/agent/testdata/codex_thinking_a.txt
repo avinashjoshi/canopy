@@ -1,0 +1,50 @@
+╭───────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.140.0)            │
+│                                       │
+│ model:     gpt-5.5   /model to change │
+│ directory: /tmp/codex-spike-cwd       │
+╰───────────────────────────────────────╯
+
+  Tip: GPT-5.5 is now available in Codex. It's our strongest agentic coding model yet, built to reason through large codebases, check assumptions with tools, and keep going until the work is done.
+
+  Learn more: https://openai.com/index/introducing-gpt-5-5/
+
+
+› Count to ten very slowly, one number per second, explaining each digit's history
+
+
+• Working (1s • esc to interrupt)
+
+
+› Explain this codebase
+
+  gpt-5.5 default · /tmp/codex-spike-cwd
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

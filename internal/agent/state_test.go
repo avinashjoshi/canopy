@@ -175,20 +175,27 @@ func TestDetector_StableContent_ClaudeNoMarkers_IsIdleLowConfidence(t *testing.T
 }
 
 func TestDetector_UnknownLauncher_StableContent_IsUnknown(t *testing.T) {
+	// Use opencode — a real Classifier stub with empty marker slices.
+	// codex used to be the canonical "no markers registered" case but
+	// shipped real patterns post-2026-06; opencode + aider remain the
+	// canonical stubs and exercise the empty-slice fallthrough path.
 	d := NewDetector()
-	d.Observe("%0", "codex", "stable content")
-	state, _ := d.Observe("%0", "codex", "stable content")
+	d.Observe("%0", "opencode", "stable content")
+	state, _ := d.Observe("%0", "opencode", "stable content")
 	if state != StateUnknown {
-		t.Errorf("unknown launcher stable = %v, want StateUnknown (no markers known)", state)
+		t.Errorf("stub launcher stable = %v, want StateUnknown (no markers known)", state)
 	}
 }
 
 func TestDetector_UnknownLauncher_ChangingContent_IsThinking(t *testing.T) {
+	// Motion check fires BEFORE the launcher classifier check, so
+	// motion → StateThinking is launcher-agnostic. Use opencode (stub)
+	// to assert this still holds for stub launchers post-refactor.
 	d := NewDetector()
-	d.Observe("%0", "codex", "first")
-	state, _ := d.Observe("%0", "codex", "different")
+	d.Observe("%0", "opencode", "first")
+	state, _ := d.Observe("%0", "opencode", "different")
 	if state != StateThinking {
-		t.Errorf("unknown launcher changing = %v, want StateThinking (motion is launcher-agnostic)", state)
+		t.Errorf("stub launcher changing = %v, want StateThinking (motion is launcher-agnostic)", state)
 	}
 }
 

@@ -49,6 +49,69 @@ func TestResolve_UnknownReturnsError(t *testing.T) {
 	}
 }
 
+// TestResolveExec_RegisteredLaunchers covers the v0.22 ExecMode wiring.
+// Each launcher with an Exec entry must return its mapped Args +
+// PromptMode without error. opencode (no Exec mode known as of 2026-06)
+// returns ErrLauncherNoExec — that's the contract `canopy ask` uses
+// to surface "this agent doesn't support quick-query yet."
+func TestResolveExec_RegisteredLaunchers(t *testing.T) {
+	cases := []struct {
+		launcher   string
+		wantArgs   []string
+		wantMode   PromptMode
+		wantErrSnt error // when non-nil, expect errors.Is(err, snt)
+	}{
+		{"claude", []string{"-p"}, PromptArg, nil},
+		{"codex", []string{"exec"}, PromptArg, nil},
+		{"aider", []string{"--message"}, PromptArg, nil},
+		{"opencode", nil, 0, ErrLauncherNoExec},
+	}
+	for _, tc := range cases {
+		t.Run(tc.launcher, func(t *testing.T) {
+			l, err := Resolve(tc.launcher)
+			if err != nil {
+				t.Fatalf("Resolve(%q): %v", tc.launcher, err)
+			}
+			exec, err := l.ResolveExec()
+			if tc.wantErrSnt != nil {
+				if !errors.Is(err, tc.wantErrSnt) {
+					t.Fatalf("ResolveExec err = %v; want errors.Is(..., %v)", err, tc.wantErrSnt)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveExec: %v", err)
+			}
+			if !equalSlice(exec.Args, tc.wantArgs) {
+				t.Errorf("Args = %v; want %v", exec.Args, tc.wantArgs)
+			}
+			if exec.PromptMode != tc.wantMode {
+				t.Errorf("PromptMode = %v; want %v", exec.PromptMode, tc.wantMode)
+			}
+		})
+	}
+}
+
+// TestResolveExec_CodexOmitsApprovalFlag pins the design decision: the
+// codex Exec.Args must NOT include --ask-for-approval. The interactive
+// pane uses on-request mode (so canopy can detect awaiting-input), but
+// exec mode is non-interactive and the approval flag would either be
+// ignored or hang waiting for a UI that doesn't exist. Pin the absence
+// so a future refactor that "consolidates" codex args doesn't
+// reintroduce it.
+func TestResolveExec_CodexOmitsApprovalFlag(t *testing.T) {
+	l, _ := Resolve("codex")
+	exec, err := l.ResolveExec()
+	if err != nil {
+		t.Fatalf("ResolveExec(codex): %v", err)
+	}
+	for _, a := range exec.Args {
+		if a == "--ask-for-approval" {
+			t.Errorf("codex Exec.Args contains --ask-for-approval (%v); exec mode must omit it", exec.Args)
+		}
+	}
+}
+
 func TestRoleForType(t *testing.T) {
 	tests := []struct {
 		name, in, want string
@@ -131,6 +194,105 @@ func TestBuildArgv_ClaudeFreshNoBriefing(t *testing.T) {
 	}
 }
 
+// TestBuildArgv_CodexCarriesApprovalFlag: codex's argv must include
+// --ask-for-approval on-request in both Fresh and Resume, followed by
+// the briefing as POSITIONAL prompt. Resume additionally prefixes
+// `resume --last` (codex's continue-most-recent verb, equivalent to
+// `claude --continue`). Without the approval flag, codex auto-applies
+// edits and the AwaitingMarkers classifier never fires.
+//
+// As of codex-cli 0.142.2 (2026-06-25), codex removed --instructions
+// entirely and added `codex resume --last`. Last verified 2026-06-25.
+func TestBuildArgv_CodexCarriesApprovalFlag(t *testing.T) {
+	l, _ := Resolve("codex")
+	for _, tc := range []struct {
+		name   string
+		resume bool
+		want   []string
+	}{
+		{"fresh", false, []string{"codex", "--ask-for-approval", "on-request", "BRIEFING-TEXT"}},
+		{"resume", true, []string{"codex", "resume", "--last", "--ask-for-approval", "on-request", "BRIEFING-TEXT"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := l.BuildArgv(tc.resume, "BRIEFING-TEXT")
+			if !equalSlice(got, tc.want) {
+				t.Errorf("BuildArgv codex %s = %v; want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildArgv_CodexResumeEmptyBriefing pins the post-0.142.2 Resume
+// argv when no briefing is set (the "Resume + no hints" hybrid case):
+// `codex resume --last --ask-for-approval on-request` — no positional
+// PROMPT, so codex opens to its interactive shell on the resumed
+// session. Without this assertion, a regression that dropped --last
+// or ate the approval flag would slip through.
+func TestBuildArgv_CodexResumeEmptyBriefing(t *testing.T) {
+	l, _ := Resolve("codex")
+	got := l.BuildArgv(true, "")
+	want := []string{"codex", "resume", "--last", "--ask-for-approval", "on-request"}
+	if !equalSlice(got, want) {
+		t.Errorf("BuildArgv codex resume empty briefing = %v; want %v", got, want)
+	}
+}
+
+// TestBuildArgv_CodexFreshEmptyBriefing: Fresh path with no briefing
+// drops the positional [PROMPT] (last arg), leaving the approval flag
+// + value intact. The Resume equivalent is covered by
+// TestBuildArgv_CodexResumeEmptyBriefing (different argv shape since
+// Resume prefixes `resume --last`).
+func TestBuildArgv_CodexFreshEmptyBriefing(t *testing.T) {
+	l, _ := Resolve("codex")
+	got := l.BuildArgv(false, "")
+	want := []string{"codex", "--ask-for-approval", "on-request"}
+	if !equalSlice(got, want) {
+		t.Errorf("BuildArgv codex fresh empty briefing = %v; want %v", got, want)
+	}
+}
+
+// TestBuildArgv_EmptyBriefingOnlyPopsFlagPrefix is a regression-pin
+// for the v0.22 BuildArgv fix: the strip-on-empty-briefing logic must
+// pop the preceding arg ONLY if it looks like a flag (starts with `-`).
+// Without this guard, codex's positional briefing (where the preceding
+// arg is a flag VALUE like "on-request") gets the value eaten and the
+// resulting argv is malformed.
+//
+// Built from a synthetic Launcher so we don't depend on any of the
+// shipped agents' argv staying any particular shape over time.
+func TestBuildArgv_EmptyBriefingOnlyPopsFlagPrefix(t *testing.T) {
+	cases := []struct {
+		name string
+		tail []string
+		want []string
+	}{
+		{
+			name: "preceding is flag → strip both",
+			tail: []string{"--instructions", "{{briefing}}"},
+			want: []string{"FAKE"},
+		},
+		{
+			name: "preceding is flag VALUE → keep it, drop only briefing",
+			tail: []string{"--mode", "single", "{{briefing}}"},
+			want: []string{"FAKE", "--mode", "single"},
+		},
+		{
+			name: "preceding is plain positional → keep it, drop only briefing",
+			tail: []string{"foo", "{{briefing}}"},
+			want: []string{"FAKE", "foo"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := Launcher{Cmd: "FAKE", Fresh: tc.tail, Resume: tc.tail}
+			got := l.BuildArgv(false, "")
+			if !equalSlice(got, tc.want) {
+				t.Errorf("BuildArgv = %v; want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestBuildArgv_OpencodeMode: opencode uses BriefingAgentsMd, so
 // BuildArgv has no {{briefing}} token to substitute. Verify both fresh
 // and resume return just [opencode].
@@ -206,6 +368,59 @@ func TestPlanLaunch_ClaudeResumeNoBriefing(t *testing.T) {
 	l, _ := Resolve("claude")
 	plan := l.PlanLaunch("", true, "/tmp/worktree")
 	want := `claude --continue`
+	if plan.ShellCommand != want {
+		t.Errorf("ShellCommand = %q\nwant %q", plan.ShellCommand, want)
+	}
+}
+
+// TestPlanLaunch_CodexFresh: fresh codex launch with briefing inlines
+// the cat shell substitution as the positional [PROMPT] argv.
+// `--ask-for-approval on-request` is preserved as the leading flag pair.
+func TestPlanLaunch_CodexFresh(t *testing.T) {
+	l, _ := Resolve("codex")
+	plan := l.PlanLaunch("/tmp/briefing.md", false, "/tmp/worktree")
+	want := `codex --ask-for-approval on-request "$(cat /tmp/briefing.md)"`
+	if plan.ShellCommand != want {
+		t.Errorf("ShellCommand = %q\nwant %q", plan.ShellCommand, want)
+	}
+	if plan.PreRun != "" {
+		t.Errorf("codex PreRun should be empty; got %q", plan.PreRun)
+	}
+}
+
+// TestPlanLaunch_CodexResume: resumed codex with briefing produces
+// `codex resume --last --ask-for-approval on-request "$(cat ...)"`.
+func TestPlanLaunch_CodexResume(t *testing.T) {
+	l, _ := Resolve("codex")
+	plan := l.PlanLaunch("/tmp/briefing.md", true, "/tmp/worktree")
+	want := `codex resume --last --ask-for-approval on-request "$(cat /tmp/briefing.md)"`
+	if plan.ShellCommand != want {
+		t.Errorf("ShellCommand = %q\nwant %q", plan.ShellCommand, want)
+	}
+}
+
+// TestPlanLaunch_CodexResumeNoBriefing pins the bug codex review caught
+// 2026-06-25 (P1 #2): when briefing is empty AND the {{briefing}} token
+// is a positional argument preceded by a flag VALUE (not a flag NAME),
+// PlanLaunch must NOT pop the preceding arg. Otherwise codex spawns with
+// `codex resume --last --ask-for-approval` (no value) and fails to parse.
+//
+// Mirrors the BuildArgv regression test for the same shape.
+func TestPlanLaunch_CodexResumeNoBriefing(t *testing.T) {
+	l, _ := Resolve("codex")
+	plan := l.PlanLaunch("", true, "/tmp/worktree")
+	want := `codex resume --last --ask-for-approval on-request`
+	if plan.ShellCommand != want {
+		t.Errorf("ShellCommand = %q\nwant %q\n(if 'on-request' is missing, the strip-on-empty guard is broken)",
+			plan.ShellCommand, want)
+	}
+}
+
+// TestPlanLaunch_CodexFreshNoBriefing: same shape, fresh path.
+func TestPlanLaunch_CodexFreshNoBriefing(t *testing.T) {
+	l, _ := Resolve("codex")
+	plan := l.PlanLaunch("", false, "/tmp/worktree")
+	want := `codex --ask-for-approval on-request`
 	if plan.ShellCommand != want {
 		t.Errorf("ShellCommand = %q\nwant %q", plan.ShellCommand, want)
 	}

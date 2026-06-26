@@ -14,13 +14,23 @@ import (
 // Returns "" when no --append-system-prompt should be passed at all (the
 // "resume + no active hints" case from the hybrid strategy).
 //
+// agentType is the launcher about to spawn (e.g. "claude", "codex"). The
+// fresh/resume decision is keyed on the PER-AGENT launch counter
+// (ws.AgentLaunches[agentType]) so a first-time swap from claude → codex
+// gets the full fresh briefing — codex has never run in this workspace
+// even though claude has. Falling back to the legacy global
+// ws.AgentLaunchCount here is the bug codex review caught 2026-06-25
+// (agent_swap.go P1 #1): claude's prior run made the global count > 0,
+// so codex's first spawn skipped onto the delta path with no context.
+//
 // Strategy decision tree (per the v0.6 design doc):
 //
-//	if AgentLaunchCount == 0:
-//	    # fresh launch — agent has never seen this workspace
+//	count := ws.AgentLaunches[agentType]
+//	if count == 0:
+//	    # fresh launch — THIS agent has never seen this workspace
 //	    return full briefing (conventions + identity + variant + hints)
 //
-//	# resume launch (AgentLaunchCount > 0) — agent already has prior context
+//	# resume launch (count > 0) — this agent already has prior context
 //	if no active hints:
 //	    return ""   # don't pass --append-system-prompt at all
 //	return delta briefing (active hints only, framed as "since you last saw")
@@ -32,14 +42,33 @@ import (
 // state. Hints, on the other hand, may have changed between sessions
 // (PR merged while detached, branch reachable from main now, ...) — those
 // the agent genuinely needs to learn about on resume.
-func BuildBriefing(ws state.Workspace, cfg *config.Config, hints []state.Hint) string {
-	if ws.AgentLaunchCount == 0 {
+func BuildBriefing(ws state.Workspace, cfg *config.Config, hints []state.Hint, agentType string) string {
+	if launchCountFor(ws, agentType) == 0 {
 		return buildFullBriefing(ws, cfg, hints)
 	}
 	if len(hints) == 0 {
 		return "" // no flag passed at all
 	}
 	return buildDelta(hints)
+}
+
+// launchCountFor returns the per-agent launch counter for agentType,
+// falling back to ws.AgentLaunchCount when the per-agent map is missing
+// AND the named agent matches ws.CurrentAgent. That last clause covers
+// the brief window between state-file load and the lifecycle migration
+// (lifecycle.go's Load populates AgentLaunches from AgentLaunchCount on
+// first read, but during state-file rewrites or concurrent reads we may
+// still see the pre-migration shape). Without the fallback, an old
+// workspace's first post-upgrade launch would re-show the fresh briefing
+// — annoying but not wrong, since fresh is a strict superset of delta.
+func launchCountFor(ws state.Workspace, agentType string) int {
+	if n, ok := ws.AgentLaunches[agentType]; ok {
+		return n
+	}
+	if agentType == ws.CurrentAgent {
+		return ws.AgentLaunchCount
+	}
+	return 0
 }
 
 // buildFullBriefing renders the fresh-launch briefing. Sections:

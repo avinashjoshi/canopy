@@ -130,6 +130,14 @@ type GlobalRow struct {
 	// leaves this empty for callers that don't need detector decoration.
 	Hints []Hint
 
+	// CurrentAgent is the launcher type this workspace is currently
+	// running ("claude", "codex", etc). v0.22. Mirrors
+	// state.Workspace.CurrentAgent — surfaced into rows so the UI
+	// can render the agent name + the agent-swap picker can show
+	// the current selection dimmed. Empty for IsMain rows (main
+	// sessions have no agent pane) and for pre-v0.22 unmigrated rows.
+	CurrentAgent string
+
 	// Host is the registered host name this workspace lives on. Empty
 	// string for local workspaces (the laptop's own state). Non-empty
 	// for rows merged in from remote canopies via host.Refresher
@@ -315,6 +323,7 @@ func (s *State) BuildGlobalRows(ctx context.Context, probe LivenessProbe) []Glob
 				LastErrorHint: w.LastErrorHint,
 				Owner:         w.Owner,
 				SourceKind:    w.SourceKind,
+				CurrentAgent:  w.CurrentAgent,
 			})
 		}
 	}

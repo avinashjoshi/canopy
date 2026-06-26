@@ -95,10 +95,26 @@ type Config struct {
 	// Scripts comes from the JSON.
 	Scripts Scripts `json:"scripts"`
 
-	// Agent comes from the JSON. Empty block (no agent.type set) is
-	// treated as Type="claude" by validate(), so existing canopy.json
-	// files without an agent block keep working unchanged.
+	// Agent is the LEGACY singular agent block. Empty block (no
+	// agent.type set) is treated as Type="claude" by validate(). When
+	// the newer Agents array is also present, Agents wins and Agent is
+	// silently ignored — see validate() for the precedence dance.
 	Agent Agent `json:"agent,omitempty"`
+
+	// Agents is the v0.22 plural allowlist of launchers this project
+	// supports. canopy new --agent <type> and canopy agent swap <type>
+	// both validate against this list via AllowsAgent. The first entry
+	// is the project's DEFAULT for new workspaces.
+	//
+	// Precedence rules (validate()):
+	//   - Agents non-empty:    use as-is; Agent legacy block ignored
+	//   - Agents empty, Agent.Type set: promote to Agents=[Agent.Type]
+	//   - Both empty:          Agents=["claude"] (matches legacy default)
+	//
+	// The legacy Agent.Briefing/BriefingFile stays a separate concern —
+	// even when Agents is present, the briefing-text plumbing keeps
+	// reading from Agent. Per-launcher briefings are a follow-up.
+	Agents []string `json:"agents,omitempty"`
 
 	// ProjectRoot is set by Load (not from the JSON). Absolute path to the
 	// directory containing canopy.json.
@@ -108,6 +124,140 @@ type Config struct {
 	// identifier in state.json and as the prefix for tmux session names
 	// (e.g. "cravd-bold-falcon").
 	Project string `json:"-"`
+}
+
+// DefaultAgent returns the canonical default agent for a new workspace
+// created from this project. Always returns the first entry in Agents
+// (which validate() guarantees is non-empty). Use this instead of
+// reading Cfg.Agent.Type directly — Agent.Type is the legacy field that
+// validate() may not have populated when canopy.json declared Agents
+// only.
+func (c *Config) DefaultAgent() string {
+	if len(c.Agents) > 0 {
+		return c.Agents[0]
+	}
+	// validate() should have populated Agents; this is a defensive
+	// fallback for callers that bypass Load (test fixtures, mostly).
+	if c.Agent.Type != "" {
+		return c.Agent.Type
+	}
+	return "claude"
+}
+
+// AllowsAgent reports whether the project's canopy.json declares the
+// given agent type as runnable. Empty target → false. Used by the
+// --agent CLI flag and the canopy agent swap verb to gate against
+// ErrAgentNotAllowed at command time, before any side effects fire.
+func (c *Config) AllowsAgent(t string) bool {
+	if t == "" {
+		return false
+	}
+	for _, a := range c.Agents {
+		if a == t {
+			return true
+		}
+	}
+	return false
+}
+
+// AddAgentToCanopyJSON appends agentName to <projectRoot>/canopy.json's
+// `agents` array if it's not already present, and writes the file
+// back atomically. Unknown top-level keys are preserved via raw-map
+// round-trip (same pattern as userconfig.go) so user-added fields
+// don't get clobbered. v0.22.
+//
+// Used by the in-TUI swap + ask pickers' D6=A "auto-add on pick"
+// path: when a user picks an agent that's installed but not in the
+// project's allowlist, this writes the config update silently.
+// Idempotent — no-op + nil return if the agent is already listed.
+//
+// The function does NOT mutate any in-memory Config; the caller is
+// expected to re-Load if they need the updated Cfg.Agents. (canopy
+// agent swap's success path doesn't need it — the verb has already
+// resolved the launcher by name; canopy.json is updated for the next
+// invocation.)
+//
+// Errors propagate: file-missing, parse failure, malformed agents
+// field (e.g., `"agents": "claude"` instead of an array), or write
+// failure. Each is wrapped with the canopy.json path for diagnosis.
+func AddAgentToCanopyJSON(projectRoot, agentName string) error {
+	if agentName == "" {
+		return fmt.Errorf("config.AddAgentToCanopyJSON: empty agent name")
+	}
+	path := filepath.Join(projectRoot, FileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("config.AddAgentToCanopyJSON: read %s: %w", path, err)
+	}
+
+	// Two-pass decode: raw map preserves unknown keys; typed agents
+	// extraction modifies just the field we care about.
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("config.AddAgentToCanopyJSON: parse %s: %w", path, err)
+	}
+	var agents []string
+	if existing, ok := raw["agents"]; ok && len(existing) > 0 {
+		if err := json.Unmarshal(existing, &agents); err != nil {
+			return fmt.Errorf("config.AddAgentToCanopyJSON: parse agents in %s: %w", path, err)
+		}
+	}
+	// Legacy promotion: if `agents` is missing but the legacy `agent: {type}`
+	// block is present, seed the new array from that type. Without this
+	// seed, auto-adding a NEW agent to a project that implicitly declared
+	// claude via `agent.type` would write only the new agent and silently
+	// drop claude from the allowlist. (codex review P1, 2026-06-25.)
+	if len(agents) == 0 {
+		if rawAgent, ok := raw["agent"]; ok && len(rawAgent) > 0 {
+			var legacy struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(rawAgent, &legacy); err == nil && legacy.Type != "" {
+				agents = []string{legacy.Type}
+			}
+		}
+	}
+	// Last-resort default: a project with neither `agents` nor `agent.type`
+	// implicitly defaulted to claude (validate() does this on Load).
+	// Adding a new agent shouldn't drop the implicit claude default.
+	if len(agents) == 0 {
+		agents = []string{"claude"}
+	}
+	for _, a := range agents {
+		if a == agentName {
+			return nil // idempotent — already there
+		}
+	}
+	agents = append(agents, agentName)
+
+	updated, err := json.Marshal(agents)
+	if err != nil {
+		return fmt.Errorf("config.AddAgentToCanopyJSON: marshal agents: %w", err)
+	}
+	raw["agents"] = updated
+
+	// Re-marshal the whole doc with indent so the file stays
+	// human-readable. We can't use json.Marshal on the raw map and
+	// get stable key order; for canopy.json's small fixed surface
+	// (scripts + agent + agents) the indented output is acceptable
+	// even with map-iteration-order keys. If key order becomes
+	// load-bearing, swap to a custom encoder; for now boring wins.
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("config.AddAgentToCanopyJSON: marshal doc: %w", err)
+	}
+	out = append(out, '\n')
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		return fmt.Errorf("config.AddAgentToCanopyJSON: write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("config.AddAgentToCanopyJSON: rename: %w", err)
+	}
+	log.Info("config.agent.added", "project_root", projectRoot, "agent", agentName)
+	return nil
 }
 
 // Discover walks up from startDir looking for canopy.json. It stops at the
@@ -234,7 +384,28 @@ func LoadFrom(root string) (*Config, error) {
 // the check there means new agents land via one PR (add a launcher),
 // not two (add a launcher + update config validation).
 func validate(c *Config) error {
-	if c.Agent.Type == "" {
+	// Agents/Agent precedence (v0.22 schema dance):
+	//   - Agents non-empty → use as-is; the legacy Agent block (if any)
+	//     is silently ignored. Agent.Type is forced to Agents[0] so any
+	//     code still reading the legacy field stays consistent.
+	//   - Agents empty, Agent.Type set → promote to Agents=[Agent.Type].
+	//     This is the existing-canopy.json upgrade path: a project that
+	//     only declares `agent.type` gains Agents=[that-type] without
+	//     the user editing anything.
+	//   - Both empty → default Agents=["claude"], matching legacy.
+	//
+	// The precedence is silent (no log noise on collision) per eng-review
+	// D6. The legacy `agent` block keeps working indefinitely; users
+	// migrate by editing canopy.json on their own schedule.
+	switch {
+	case len(c.Agents) > 0:
+		// Keep Agent.Type aligned with Agents[0] for any holdout
+		// readers; the canonical source going forward is Agents.
+		c.Agent.Type = c.Agents[0]
+	case c.Agent.Type != "":
+		c.Agents = []string{c.Agent.Type}
+	default:
+		c.Agents = []string{"claude"}
 		c.Agent.Type = "claude"
 	}
 	if c.Agent.Briefing != "" && c.Agent.BriefingFile != "" {

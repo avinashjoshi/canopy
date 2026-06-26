@@ -4,7 +4,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 	"github.com/avinashjoshi/canopy/internal/config"
@@ -238,6 +240,249 @@ func TestLoad_AgentExplicit(t *testing.T) {
 	// Both Briefing AND BriefingFile set: validate() warns at log level
 	// but doesn't error. Test only verifies no error here; the warning
 	// goes to slog and is hard to assert in a unit test.
+}
+
+// TestLoad_Agents_Precedence covers the v0.22 schema rules: the new
+// `agents` plural array wins when both forms are present, the legacy
+// `agent` form is promoted to a single-element list when alone, and
+// neither falls back to ["claude"]. Each case asserts both Agents[]
+// AND Agent.Type so the legacy field stays consistent with the
+// canonical Agents source.
+func TestLoad_Agents_Precedence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		json        string
+		wantAgents  []string
+		wantPrimary string
+	}{
+		{
+			name: "neither: default to claude",
+			json: `{"scripts":{"setup":"","run":"","archive":""}}`,
+			wantAgents:  []string{"claude"},
+			wantPrimary: "claude",
+		},
+		{
+			name: "legacy agent.type alone is promoted to agents=[type]",
+			json: `{"scripts":{"setup":"","run":"","archive":""},"agent":{"type":"codex"}}`,
+			wantAgents:  []string{"codex"},
+			wantPrimary: "codex",
+		},
+		{
+			name: "agents alone: round-trip + Agent.Type tracks agents[0]",
+			json: `{"scripts":{"setup":"","run":"","archive":""},"agents":["codex","claude"]}`,
+			wantAgents:  []string{"codex", "claude"},
+			wantPrimary: "codex",
+		},
+		{
+			name: "both present: agents silently wins; Agent.Type aligns to agents[0]",
+			json: `{"scripts":{"setup":"","run":"","archive":""},"agent":{"type":"claude"},"agents":["aider","codex"]}`,
+			wantAgents:  []string{"aider", "codex"},
+			wantPrimary: "aider",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "canopy.json"), tc.json)
+			cfg, err := config.DiscoverAndLoad(dir)
+			if err != nil {
+				t.Fatalf("DiscoverAndLoad: %v", err)
+			}
+			if !equalStrings(cfg.Agents, tc.wantAgents) {
+				t.Errorf("Agents = %v; want %v", cfg.Agents, tc.wantAgents)
+			}
+			if cfg.Agent.Type != tc.wantPrimary {
+				t.Errorf("Agent.Type = %q; want %q", cfg.Agent.Type, tc.wantPrimary)
+			}
+			if got := cfg.DefaultAgent(); got != tc.wantPrimary {
+				t.Errorf("DefaultAgent() = %q; want %q", got, tc.wantPrimary)
+			}
+		})
+	}
+}
+
+// TestAddAgentToCanopyJSON_AppendsNewAgent: the auto-add path on a
+// project whose canopy.json had no `agents` field AND no legacy
+// `agent: {type}` block writes ["claude", "codex"] — the implicit
+// "claude" default is preserved, and the new agent is appended.
+// Unknown top-level keys must round-trip untouched.
+func TestAddAgentToCanopyJSON_AppendsNewAgent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	initial := `{
+  "scripts": {"setup": "x", "run": "x", "archive": "x"},
+  "custom_user_field": "preserve me"
+}`
+	writeFile(t, filepath.Join(dir, "canopy.json"), initial)
+
+	if err := config.AddAgentToCanopyJSON(dir, "codex"); err != nil {
+		t.Fatalf("AddAgentToCanopyJSON: %v", err)
+	}
+
+	cfg, err := config.LoadFrom(dir)
+	if err != nil {
+		t.Fatalf("LoadFrom post-add: %v", err)
+	}
+	if !equalStrings(cfg.Agents, []string{"claude", "codex"}) {
+		t.Errorf("Agents = %v; want [claude codex] (implicit claude preserved + codex appended)", cfg.Agents)
+	}
+	// Unknown key survives.
+	raw, _ := os.ReadFile(filepath.Join(dir, "canopy.json"))
+	if !strings.Contains(string(raw), `"preserve me"`) {
+		t.Errorf("custom_user_field clobbered; full file:\n%s", string(raw))
+	}
+}
+
+// TestAddAgentToCanopyJSON_AppendsToExistingList: project already
+// has an agents list; new entry gets appended (not replacing).
+func TestAddAgentToCanopyJSON_AppendsToExistingList(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	initial := `{
+  "scripts": {"setup": "x", "run": "x", "archive": "x"},
+  "agents": ["claude"]
+}`
+	writeFile(t, filepath.Join(dir, "canopy.json"), initial)
+
+	if err := config.AddAgentToCanopyJSON(dir, "codex"); err != nil {
+		t.Fatalf("AddAgentToCanopyJSON: %v", err)
+	}
+	cfg, _ := config.LoadFrom(dir)
+	if !equalStrings(cfg.Agents, []string{"claude", "codex"}) {
+		t.Errorf("Agents = %v; want [claude codex]", cfg.Agents)
+	}
+}
+
+// TestAddAgentToCanopyJSON_IdempotentNoOp: adding an agent that's
+// already in the list is a no-op (returns nil, file unchanged).
+// Catches the dumb regression where idempotency gets dropped during
+// a refactor and we start duplicating entries.
+func TestAddAgentToCanopyJSON_IdempotentNoOp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	initial := `{
+  "scripts": {"setup": "x", "run": "x", "archive": "x"},
+  "agents": ["claude", "codex"]
+}`
+	path := filepath.Join(dir, "canopy.json")
+	writeFile(t, path, initial)
+
+	statBefore, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+	// Sleep slightly so a mtime change would be detectable.
+	time.Sleep(20 * time.Millisecond)
+
+	if err := config.AddAgentToCanopyJSON(dir, "codex"); err != nil {
+		t.Fatalf("AddAgentToCanopyJSON: %v", err)
+	}
+	statAfter, _ := os.Stat(path)
+	if !statBefore.ModTime().Equal(statAfter.ModTime()) {
+		t.Errorf("file mtime changed on idempotent add (before=%v after=%v); want no write",
+			statBefore.ModTime(), statAfter.ModTime())
+	}
+}
+
+// TestAddAgentToCanopyJSON_PreservesLegacyAgentType pins the codex
+// review fix (P1 #5, 2026-06-25): a project whose canopy.json declared
+// `agent: {type: "claude"}` and NO `agents:` array must end up with
+// `agents: ["claude", "codex"]` after auto-adding codex — NOT
+// `agents: ["codex"]` (which would silently drop claude).
+func TestAddAgentToCanopyJSON_PreservesLegacyAgentType(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	initial := `{
+  "scripts": {"setup": "x", "run": "x", "archive": "x"},
+  "agent": {"type": "claude"}
+}`
+	writeFile(t, filepath.Join(dir, "canopy.json"), initial)
+
+	if err := config.AddAgentToCanopyJSON(dir, "codex"); err != nil {
+		t.Fatalf("AddAgentToCanopyJSON: %v", err)
+	}
+	cfg, err := config.LoadFrom(dir)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if !equalStrings(cfg.Agents, []string{"claude", "codex"}) {
+		t.Errorf("Agents = %v; want [claude codex] (claude must NOT be dropped)", cfg.Agents)
+	}
+}
+
+// TestAddAgentToCanopyJSON_PreservesImplicitClaudeDefault: a project
+// with NEITHER agents nor agent.type implicitly defaults to claude
+// (validate() does this on Load). Auto-adding codex must produce
+// ["claude", "codex"], not ["codex"]. Sister test to the legacy
+// agent.type case above.
+func TestAddAgentToCanopyJSON_PreservesImplicitClaudeDefault(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	initial := `{
+  "scripts": {"setup": "x", "run": "x", "archive": "x"}
+}`
+	writeFile(t, filepath.Join(dir, "canopy.json"), initial)
+
+	if err := config.AddAgentToCanopyJSON(dir, "codex"); err != nil {
+		t.Fatalf("AddAgentToCanopyJSON: %v", err)
+	}
+	cfg, err := config.LoadFrom(dir)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if !equalStrings(cfg.Agents, []string{"claude", "codex"}) {
+		t.Errorf("Agents = %v; want [claude codex] (implicit claude must NOT be dropped)", cfg.Agents)
+	}
+}
+
+// TestAddAgentToCanopyJSON_EmptyAgentRejected: empty agent name is
+// an error (defensive — no way to add "" usefully).
+func TestAddAgentToCanopyJSON_EmptyAgentRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "canopy.json"), `{"scripts":{"setup":"x","run":"x","archive":"x"}}`)
+	if err := config.AddAgentToCanopyJSON(dir, ""); err == nil {
+		t.Error("AddAgentToCanopyJSON(\"\") = nil; want error")
+	}
+}
+
+// TestConfig_AllowsAgent covers the gate for --agent / canopy agent swap.
+// Empty argument is never allowed; declared types are; undeclared types
+// are rejected so the caller can surface ErrAgentNotAllowed.
+func TestConfig_AllowsAgent(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Agents: []string{"claude", "codex"}}
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"", false},
+		{"claude", true},
+		{"codex", true},
+		{"aider", false},
+		{"future-thing", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := cfg.AllowsAgent(tc.in); got != tc.want {
+				t.Errorf("AllowsAgent(%q) = %v; want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestLoad_AgentEmptyBlock: an explicitly-empty agent block (`"agent": {}`)

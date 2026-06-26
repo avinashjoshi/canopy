@@ -93,29 +93,32 @@ func SendInitialPrompt(
 			Reason: fmt.Sprintf("malformed @canopy-role tag %q (cannot derive launcher)", agentPane.Role),
 		}
 	}
-	if launcher != "claude" {
-		return &ErrPromptFailed{
-			Reason: fmt.Sprintf(
-				"--prompt is only supported for agent:claude in v0.16.1 (got agent:%s)",
-				launcher),
-		}
-	}
+	// v0.22: dispatch by classifier instead of the v0.16-era launcher==
+	// "claude" gate. Each launcher's Classifier provides IsRendering /
+	// IsTrustDialog; --prompt now works for any launcher with
+	// registered patterns (claude, codex). Stub launchers (opencode,
+	// aider) return false from both helpers, so the Phase-1 trust-loop
+	// times out without sending anything — same observable outcome as
+	// the old gate but without the special case.
+	classifier := agent.ClassifierFor(launcher)
 
-	if err := awaitClaudeReady(ctx, tx, agentPane.ID, progress); err != nil {
+	if err := awaitAgentReady(ctx, tx, agentPane.ID, classifier, progress); err != nil {
 		return err
 	}
 
-	// Phase 3: re-verify claude is rendering, not the keepAlive shell.
-	// awaitClaudeReady already saw a claude marker once; this guards
-	// against the rare race where claude crashed BETWEEN Phase 2 exit
-	// and now.
+	// Phase 3: re-verify the agent is rendering, not the keepAlive
+	// shell. awaitAgentReady already saw an agent marker once; this
+	// guards against the rare race where the agent crashed BETWEEN
+	// Phase 2 exit and now.
 	captured, err := capturePaneTimeout(ctx, tx, agentPane.ID, 500*time.Millisecond)
 	if err != nil {
 		return &ErrPromptFailed{Reason: "Phase 3 verify capture-pane failed: " + err.Error()}
 	}
-	if !agent.IsClaudeRendering(captured) {
+	if !classifier.IsRendering(captured) {
 		return &ErrPromptFailed{
-			Reason: "agent pane is shell, not claude (claude may have crashed); refusing to send-keys to defend against command injection",
+			Reason: fmt.Sprintf(
+				"agent pane is shell, not %s (agent may have crashed); refusing to send-keys to defend against command injection",
+				launcher),
 		}
 	}
 
@@ -164,13 +167,22 @@ func IsPromptFailed(err error) (*ErrPromptFailed, bool) {
 	return nil, false
 }
 
-// awaitClaudeReady runs Phase 1 + Phase 2 of the trust state machine.
-// Returns nil when claude is verified rendering. Returns
+// awaitAgentReady runs Phase 1 + Phase 2 of the trust state machine.
+// Returns nil when the agent is verified rendering. Returns
 // *ErrPromptFailed for either phase timeout.
-func awaitClaudeReady(
+//
+// classifier is the per-launcher Classifier (from
+// agent.ClassifierFor(launcher)); its IsRendering / IsTrustDialog drive
+// the dispatch. For stub launchers (opencode/aider), both return
+// false, so the trust-dialog branch never fires and the ready-marker
+// branch never matches — Phase 1 times out cleanly. The pre-v0.22
+// behavior was a hardcoded gate against `launcher != "claude"`; the
+// timeout-with-classifier-stub is observationally equivalent.
+func awaitAgentReady(
 	ctx context.Context,
 	tx *tmux.Client,
 	paneID string,
+	classifier agent.Classifier,
 	progress io.Writer,
 ) error {
 	const (
@@ -185,11 +197,11 @@ func awaitClaudeReady(
 	for time.Now().Before(phase1Deadline) {
 		captured, err := capturePaneTimeout(ctx, tx, paneID, pollInterval)
 		if err == nil {
-			if agent.IsClaudeRendering(captured) {
+			if classifier.IsRendering(captured) {
 				clearProgress(progress)
 				return nil
 			}
-			if agent.IsTrustDialog(captured) {
+			if classifier.IsTrustDialog(captured) {
 				trustSeen = true
 				dismissCtx, dismissCancel := context.WithTimeout(ctx, 2*time.Second)
 				err := tx.SendKeyName(dismissCtx, paneID, "Enter")
@@ -212,11 +224,11 @@ func awaitClaudeReady(
 		// One more capture in case the ready marker rendered right at
 		// the deadline (avoids a flake-driven timeout).
 		if captured, err := capturePaneTimeout(ctx, tx, paneID, pollInterval); err == nil &&
-			agent.IsClaudeRendering(captured) {
+			classifier.IsRendering(captured) {
 			return nil
 		}
 		return &ErrPromptFailed{
-			Reason: "Phase 1 timeout: neither trust dialog nor claude ready marker appeared in 5s",
+			Reason: "Phase 1 timeout: neither trust dialog nor agent ready marker appeared in 5s",
 		}
 	}
 
@@ -225,17 +237,17 @@ func awaitClaudeReady(
 	phase2Deadline := phase2Start.Add(phaseBudget)
 	for time.Now().Before(phase2Deadline) {
 		captured, err := capturePaneTimeout(ctx, tx, paneID, pollInterval)
-		if err == nil && agent.IsClaudeRendering(captured) {
+		if err == nil && classifier.IsRendering(captured) {
 			clearProgress(progress)
 			return nil
 		}
 		elapsed := time.Since(phase2Start).Round(time.Second)
-		fmt.Fprintf(progress, "\rWaiting for claude (post-trust)... %s / %s ", elapsed, phaseBudget)
+		fmt.Fprintf(progress, "\rWaiting for agent (post-trust)... %s / %s ", elapsed, phaseBudget)
 		time.Sleep(pollInterval)
 	}
 	clearProgress(progress)
 	return &ErrPromptFailed{
-		Reason: "Phase 2 timeout: claude ready marker never appeared in 5s after trust dismiss",
+		Reason: "Phase 2 timeout: agent ready marker never appeared in 5s after trust dismiss",
 	}
 }
 
