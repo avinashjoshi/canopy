@@ -129,6 +129,14 @@ func main() {
 	root.AddCommand(projectCmd())            // v0.17.0 Phase 1a: project-on-host registry
 	root.AddCommand(configCmd())             // v0.20: user-level config (~/.canopy/config.json)
 	root.AddCommand(newClipboardServerCmd()) // v0.21: clipboard-bridge daemon subcommand
+	root.AddCommand(agentCmd())              // v0.22: agent swap + reserved noun-space
+	root.AddCommand(askCmd())                // v0.22: `canopy ask <agent>` second-opinion verb
+
+	// v0.22: sweep stale ~/.canopy/tmp/ask-*.md files older than 1 hour.
+	// Backstop for the popup's defer-removed temp file in case the TUI
+	// was SIGKILL'd before its cleanup ran. Cheap; runs once per CLI
+	// invocation; touches at most a handful of files in a known dir.
+	sweepAskTempFiles()
 
 	if err := root.Execute(); err != nil {
 		// Distinguish "workspace OK, prompt failed" (exit 2) from

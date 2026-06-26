@@ -248,6 +248,32 @@ var listModeBindings = []Binding{
 		Action:    actionKill,
 	},
 	{
+		// A (capital) opens the agent-swap picker for the cursor
+		// workspace (v0.22). Lower-case a is "add project" /
+		// "host auth" depending on tab — the capital-key convention
+		// matches K (kill) and P (PR): destructive or significant
+		// state changes require a deliberate keypress.
+		// availableAgentSwap hides the binding when the row can't
+		// support a swap (Main rows, remote rows, projects with
+		// empty `agents:` allowlist).
+		K:         key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "swap agent")),
+		Group:     "act",
+		Available: availableAgentSwap,
+		Action:    actionAgentSwap,
+	},
+	{
+		// Q opens the v0.22 "quick second opinion" popup. The popup
+		// itself runs `canopy ask <agent> --file <path>` inside a
+		// tmux display-popup; the TUI underneath stays present and
+		// returns when the popup is dismissed. Capital Q matches the
+		// same deliberate-keypress convention as K/P/B/A (lowercase
+		// q is quit).
+		K:         key.NewBinding(key.WithKeys("Q"), key.WithHelp("Q", "ask agent")),
+		Group:     "act",
+		Available: availableAsk,
+		Action:    actionAsk,
+	},
+	{
 		// `i` opens the diagnostic detail drawer for the selected
 		// workspace. Read-only; scope-capped to "what's the state
 		// of this one workspace right now?". See drawerMode docstring

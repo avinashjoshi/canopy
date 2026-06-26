@@ -182,6 +182,23 @@ const (
 	// Manager.SetOwner for local rows or `canopy set-owner --on <host>`
 	// for remote rows. v0.22 distinguish-my-workspaces.
 	ownerFormMode
+	// agentSwapPickerMode is the v0.22 picker that opens on `A` from
+	// the workspaces tab. Lists the cursor row's project canopy.json
+	// `agents:` allowlist; arrow-nav + Enter dispatches into
+	// Manager.SwapAgent. Esc cancels back to listMode. agentSwapBusy
+	// flips true while the swap is in flight; the view renders
+	// "Swapping..." then the result message before auto-returning
+	// to listMode. See internal/ui/update_agent_swap.go.
+	agentSwapPickerMode
+	// askPickerMode + askInputMode are the v0.22 "quick second opinion"
+	// flow. `Q` opens askPickerMode → user picks the target agent →
+	// askInputMode (textarea for the question) → Ctrl+S submits → the
+	// TUI writes the question to ~/.canopy/tmp/ask-*.md and spawns
+	// `canopy ask <agent> --file <path>` inside a tmux display-popup.
+	// The answer renders in the popup; when the popup closes the TUI
+	// returns to listMode. See internal/ui/update_ask.go.
+	askPickerMode
+	askInputMode
 )
 
 // inNewFlow reports whether the current mode is any step of the
@@ -330,6 +347,29 @@ type Model struct {
 	// (Project, Name) match at confirm time.
 	deleteTargetRoot string
 	deleteHangs      []string // v0.6 safety check results — populated when 'd' is pressed; non-empty triggers the force-required path in renderConfirmDelete + handleConfirmDeleteKey
+
+	// Agent-swap picker (mode == agentSwapPickerMode). Snapshotted at
+	// modal-open time so a refresh between open and Enter doesn't
+	// re-roll the (workspace, project, agent list) the user saw.
+	// Same scoping rationale as deleteTarget + deleteTargetRoot.
+	agentSwapTarget     string   // workspace name
+	agentSwapTargetRoot string   // workspace's ProjectRoot
+	agentSwapCurrent    string   // workspace's current agent at open time (dimmed in picker)
+	agentSwapList       []string // snapshot of Cfg.Agents at open time
+	agentSwapCursor     int      // index into agentSwapList
+	agentSwapBusy       bool     // SwapAgent call in flight; suppress further keypresses + render "Swapping..."
+	agentSwapResult     string   // post-swap message ("Swapped to codex." or error); shown until any key returns to listMode
+
+	// Ask (second-opinion popup) state. Same snapshot rationale as
+	// the swap picker: row context captured at open time. Spans two
+	// modes (picker → input) so we share the state between them.
+	askTarget     string         // workspace name (for prefix)
+	askTargetRoot string         // workspace's ProjectRoot
+	askList       []string       // snapshot of Cfg.Agents at open time
+	askCursor     int            // index into askList during picker
+	askAgent      string         // chosen agent after picker → input transition
+	askInput      textarea.Model // multi-line question textarea (Ctrl+S submits)
+	askErr        string         // last error from temp-file write or popup spawn
 
 	// attachTarget snapshots the row the user pressed Enter on when its
 	// session already has another client connected. confirmAttachMode

@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/host"
 	"github.com/avinashjoshi/canopy/internal/workspace"
 )
@@ -31,6 +32,7 @@ var newWorkspaceFlags struct {
 	promptFile string // --prompt-file: read --prompt content from file (multi-line)
 	onHost     string // --on <ssh-target>: dispatch to remote canopy (v0.17.0 Phase 0)
 	remoteCwd  string // --remote-cwd <path>: cwd on the remote before running canopy (Phase 0)
+	agent      string // --agent <type>: launcher to spawn (v0.22)
 }
 
 // newCmd returns the `canopy new` cobra subcommand.
@@ -103,6 +105,22 @@ func newCmd() *cobra.Command {
 			opts, suggestedName, err := mgr.ResolveSource(ctx, spec)
 			if err != nil {
 				return err
+			}
+			// v0.22: --agent <type> validation against canopy.json's
+			// `agents:` allowlist. Empty flag value → use the project's
+			// default (Cfg.Agents[0]); validation skipped because the
+			// default is, by definition, allowed. ErrAgentNotAllowed is
+			// fatal here, BEFORE any side effect (port allocation, git
+			// worktree, scripts.setup) — the same shape as `canopy
+			// agent swap`'s gate.
+			if newWorkspaceFlags.agent != "" {
+				if !mgr.Cfg.AllowsAgent(newWorkspaceFlags.agent) {
+					return fmt.Errorf("%w: %q (allowed: %v)",
+						agent.ErrAgentNotAllowed,
+						newWorkspaceFlags.agent,
+						mgr.Cfg.Agents)
+				}
+				opts.Agent = newWorkspaceFlags.agent
 			}
 			// Pick the workspace name. Explicit --name beats the
 			// source-derived suggestion, which beats namegen (the
@@ -202,6 +220,8 @@ func newCmd() *cobra.Command {
 		"dispatch to remote canopy at <ssh-target> instead of running locally (v0.17.0 Phase 0)")
 	cmd.Flags().StringVar(&newWorkspaceFlags.remoteCwd, "remote-cwd", "",
 		"with --on: cd to <path> on the remote before invoking canopy (Phase 0; Phase 1 absorbs into hosts.json project registry)")
+	cmd.Flags().StringVar(&newWorkspaceFlags.agent, "agent", "",
+		"launcher to spawn for this workspace (must be in canopy.json's `agents:` allowlist; default = agents[0])")
 	return cmd
 }
 
@@ -244,6 +264,12 @@ func dispatchNewToRemote(ctx context.Context, resolved resolvedHost, posArgs []s
 	}
 	if newWorkspaceFlags.allowLoc {
 		canopyArgs = append(canopyArgs, "--allow-local")
+	}
+	// Forward --agent so the remote canopy creates the workspace with the
+	// requested launcher instead of falling back to the project's default.
+	// (codex review P2 #6, 2026-06-25.)
+	if newWorkspaceFlags.agent != "" {
+		canopyArgs = append(canopyArgs, "--agent", newWorkspaceFlags.agent)
 	}
 	// Pass through any positional args (cobra collects unparsed; in
 	// practice `canopy new` takes none today but future-proof the call).

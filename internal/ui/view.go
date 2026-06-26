@@ -70,6 +70,12 @@ func (m *Model) View() string {
 		return m.renderUpgrade()
 	case hostUpgradeMode:
 		return m.renderHostUpgrade()
+	case agentSwapPickerMode:
+		return m.renderAgentSwapPicker()
+	case askPickerMode:
+		return m.renderAskPicker()
+	case askInputMode:
+		return m.renderAskInput()
 	}
 
 	if m.mode == confirmRetryMode {

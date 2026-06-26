@@ -360,6 +360,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, progressTickCmd(msg.buf)
 
+	case agentSwapDoneMsg:
+		return m.handleAgentSwapDone(msg)
+
+	case askDoneMsg:
+		return m.handleAskDone(msg)
+
 	case createDoneMsg:
 		// Workspace creation finished. On success we auto-attach to the
 		// new workspace's tmux session — that's what the user pressed `n`
@@ -688,6 +694,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleUpgradeKey(msg)
 	case hostUpgradeMode:
 		return m.handleHostUpgradeKey(msg)
+	case agentSwapPickerMode:
+		return m.handleAgentSwapPickerKey(msg)
+	case askPickerMode:
+		return m.handleAskPickerKey(msg)
+	case askInputMode:
+		return m.handleAskInputKey(msg)
 	}
 
 	// Search-mode keystrokes: capture into searchQuery, refilter on each
