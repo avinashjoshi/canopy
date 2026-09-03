@@ -47,6 +47,28 @@ func TestBuildRemoteScript_PathPrecheck_PresentWhenRemoteCwd(t *testing.T) {
 	}
 }
 
+// TestBuildRemoteScript_ExportsRemoteDispatchFlag: every dispatched
+// script must export CANOPY_REMOTE_DISPATCH=1 unconditionally, before
+// either the remoteCwd or promptText branch — internal/workspace's
+// promptPhaseBudget reads it to pick a longer default prompt-send
+// timeout on remote hosts. Covers both the no-prompt and prompt code
+// paths since buildRemoteScript returns early inside the promptText
+// branch (see its "No prompt: exec replacement" comment).
+func TestBuildRemoteScript_ExportsRemoteDispatchFlag(t *testing.T) {
+	t.Run("no prompt", func(t *testing.T) {
+		got := buildRemoteScript("", []string{"canopy", "new", "--no-attach"}, "")
+		if !strings.Contains(got, "export CANOPY_REMOTE_DISPATCH=1") {
+			t.Errorf("script missing CANOPY_REMOTE_DISPATCH export; got:\n%s", got)
+		}
+	})
+	t.Run("with prompt", func(t *testing.T) {
+		got := buildRemoteScript("/home/jarvis/Work/brain", []string{"canopy", "new", "--no-attach"}, "fix the bug")
+		if !strings.Contains(got, "export CANOPY_REMOTE_DISPATCH=1") {
+			t.Errorf("script missing CANOPY_REMOTE_DISPATCH export; got:\n%s", got)
+		}
+	})
+}
+
 // TestRemotePathMissingErr_IncludesRemediationWhenHostRegistered:
 // when the host was reached via a registry name, the formatted error
 // must include a copy-pasteable `canopy project add ... --on <host>`

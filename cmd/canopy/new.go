@@ -317,6 +317,12 @@ func buildRemoteScript(remoteCwd string, canopyArgs []string, promptText string)
 	// interactive-only .bashrc guard that doesn't fire for non-
 	// interactive SSH-command shells.
 	b.WriteString(`export PATH="$HOME/.local/bin:$PATH"` + "\n")
+	// Flags every phase of the remote canopy new invocation as running
+	// on the target host, not the laptop — internal/workspace/initprompt.go's
+	// promptPhaseBudget reads this to pick a longer default prompt-send
+	// timeout, since Claude reliably takes longer than 5s to render on
+	// a fresh remote host than it does locally.
+	fmt.Fprintf(&b, "export %s=1\n", workspace.EnvRemoteDispatch)
 	if remoteCwd != "" {
 		// Pre-check the cwd with a distinct exit code (7) so the caller can
 		// distinguish "remote project path not registered correctly" from
