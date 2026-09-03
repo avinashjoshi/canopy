@@ -1,4 +1,4 @@
-# Remote workspaces (v0.17)
+# Remote workspaces (v0.17, thin-client mode added v0.22)
 
 Canopy workspaces don't have to live on your laptop. Register an SSH-reachable host once, register a project path on that host, then run `canopy new --on tower` from anywhere. The heavy work — `scripts.setup`, `scripts.run`, the agent panes — happens on the host. The laptop becomes a thin client. One unified TUI views every workspace across every host.
 
@@ -25,6 +25,34 @@ ssh tower
 curl -fsSL https://raw.githubusercontent.com/avinashjoshi/canopy/main/install.sh | sh
 exit
 ```
+
+## Thin-client mode: zero-setup with `canopy --remote <host>`
+
+Everything below this point assumes you've registered a host and a project on it. If you just want
+to check on a box right now — no `canopy host add`, no `canopy project add`, nothing written to
+`~/.canopy/hosts.json` — use the thin-client root flag instead (v0.22):
+
+```bash
+canopy --remote tower                          # by registered name (see below)
+canopy --remote avi@tower.tail-abc.ts.net      # raw SSH target, zero prior setup
+```
+
+Run from anywhere — you don't need to be inside a project, or even have `canopy.json` on your
+laptop at all. `<host>` is resolved the same way `--on` resolves its argument: a string containing
+`@` or `:` is treated as a raw SSH target and used as-is (never persisted, never touches
+`hosts.json`); anything else is looked up by name in the registry. This mirrors how herdr's
+`--remote <host>` works — point it at a box and go, no registration ceremony.
+
+The TUI that opens is pinned to that one host: only the Global tab is shown (no Local tab — there's
+no local project; no Hosts tab — fleet management doesn't apply to a single pinned box), and it
+lists exactly that host's workspaces, fetched the same way the Global tab already fans out over
+SSH for registered hosts. It's not read-only: `n` opens the same new-workspace picker as a
+registered remote row (Fresh / Prompt / PR / Issue / Branch), and `enter` / `d` / `K` / `R` all work
+the same as they do against any other remote row on the Global tab.
+
+Use `--remote` for the "just log in and look" case; use the registered `--on <host>` flow (below)
+when you want the host to also show up folded into your regular local + Global workspace view, or
+when you're scripting against it (`canopy new --on tower`, `canopy rm --on tower`, etc.).
 
 ## End-to-end walkthrough
 

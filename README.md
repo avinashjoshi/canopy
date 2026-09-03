@@ -16,7 +16,7 @@
 
 **TUI for managing git worktrees with paired tmux sessions, per-project setup hooks, and remote-host dispatch.**
 
-> Status: v0.20, daily-driven by the author. APIs and on-disk state may still shift before v1.
+> Status: v0.22, daily-driven by the author. APIs and on-disk state may still shift before v1.
 
 ![canopy TUI: Workspaces tab listing workspaces across multiple projects + one remote host, each with port, memory, agent badge, and PR status](docs/images/tui-workspaces.png)
 
@@ -26,14 +26,15 @@
 
 AI-paired development means many parallel branches in flight at once: one agent refactoring auth, another fixing the timezone bug, plus the feature you're driving by hand. Raw `git worktree` + ad-hoc `tmux new-session` doesn't scale past three. Canopy is the missing orchestrator: per-workspace ports, per-workspace databases via `scripts.setup`, per-workspace tmux sessions with the same layout every time, agent-state badges so you can see which agent needs you, and one TUI that views every workspace across every host. See [`docs/landscape.md`](docs/landscape.md) for where canopy sits next to Conductor, tmuxinator, raw `git worktree`, and the agent CLIs it hosts.
 
-## What's new in v0.20
+## What's new in v0.22
 
-- **Add a project from anywhere.** `canopy init` now accepts a folder path or a git URL, so you can register a project without `cd`-ing into it: `canopy init ~/code/foo` or `canopy init https://github.com/foo/bar.git`. URL form clones into your configured source-root (default `~/.canopy/sources`, override via `canopy config set source-root ~/Work`) and registers in one shot. A new TUI **Add Project** form lives on the splash and on the Global tab (`a` keybind), with `Tab` to cycle between local and registered hosts. See [`docs/getting-started.md`](docs/getting-started.md).
-- **Remote-host init.** `canopy init <git-url> --on tower` dispatches the clone+init to the remote canopy via SSH (reusing v0.17's ControlMaster plumbing) and auto-registers the new project in the laptop's `hosts.json` so the next `canopy new --on tower` resolves cleanly — no more manual `canopy project add` after init.
-- **`canopy config` subcommand.** Persistent user-level settings at `~/.canopy/config.json`. First key is `source-root`. Precedence: per-call dest > `$CANOPY_SOURCE_ROOT` env > config file > built-in default. Get/set/list/unset, with `(env)` / `(config)` / `(default)` source labels so you can debug why a value isn't taking effect. Press `,` from any TUI tab to open the settings modal.
+- **`canopy --remote <host>` — zero-setup thin client.** Run it from anywhere, no `canopy.json` and no host/project registration required, and it launches straight into a TUI pinned to that one host's workspaces. `<host>` takes a registered name or a raw `user@host` SSH target directly, mirroring how herdr's `--remote` works. See [`docs/remote-workspaces.md`](docs/remote-workspaces.md#thin-client-mode-zero-setup-with-canopy---remote-host).
+- **Security fix: ssh/mosh option injection.** Every remote-host `ssh`/`mosh` invocation now inserts an explicit `--` before the target, closing a real vulnerability where a target (or a tampered `hosts.json` entry) shaped like a command-line option — e.g. `-oProxyCommand=...` — was parsed as that option instead of a hostname, up to local arbitrary command execution.
 
 ## Previous releases
 
+- **v0.21** — Workspaces tab redesign (idle projects collapse, host pills), clipboard bridge for remote workspaces, PR/Issue/Branch parity for the remote new-workspace picker, ownership badges that tell your own work apart from a PR you're reviewing, plus a long tail of remote-dispatch robustness fixes (stale-connection detection, `go`-on-PATH fixes for mise/asdf hosts, doubled project headers). See [`CHANGELOG.md`](CHANGELOG.md).
+- **v0.20** — Add a project from anywhere: `canopy init` accepts a folder path or a git URL (`canopy init ~/code/foo`, `canopy init https://github.com/foo/bar.git`), cloning into a configured source-root and registering in one shot, plus a TUI **Add Project** form (splash + Global tab `a` keybind). Remote-host init (`canopy init <git-url> --on tower`) dispatches clone+init over SSH and auto-registers the project. `canopy config` subcommand for persistent user-level settings (`~/.canopy/config.json`), first key `source-root`. See [`docs/getting-started.md`](docs/getting-started.md).
 - **v0.17** — Remote workspaces. Register an SSH-reachable host once with `canopy host add tower cassy@tower.tail.ts.net`, then run `canopy new --on tower` from your laptop. The heavy work runs on the host; one TUI views every workspace across every machine. See [`docs/remote-workspaces.md`](docs/remote-workspaces.md). Plus fire-and-forget agents (`canopy new --prompt "..." --no-attach`), in-TUI `canopy upgrade`, and workspace identity that follows the branch (rename via `git branch -m` and canopy's tmux session, statusline, terminal-tab title, and TUI rows pick up the new name within 15 seconds).
 - **v0.18 / v0.19** — TUI picker for `canopy use`; remote workspace observability (live ⚡ claude badge across SSH, ⊙ attached-client indicator, confirm-attach modal for remote rows, "⚠ stale Ns" pill when refresh data goes cold).
 
@@ -60,6 +61,7 @@ canopy rm <name>                        # tear down (archive script + tmux + git
 canopy retry <name>                     # re-run scripts.setup on a broken workspace
 canopy rename [<name>]                  # sync labels to the current branch (--pin/--unpin)
 canopy reconcile                        # update statuses to match disk + tmux reality
+canopy --remote tower                   # thin client: pinned TUI for one host, zero setup (v0.22)
 ```
 
 Each workspace gets a 3-pane tmux session: `nvim` top-left, an agent (`claude` by default, with `--continue` on resurrect) top-right, and a shell full-width on the bottom. `scripts.run` (your dev server) launches on demand via `canopy run` rather than auto-starting — that way a stopped workspace resurrects to the same layout without a port collision.
@@ -74,6 +76,7 @@ Plus operational glue:
 - `canopy config set|get|list|unset` — user-level prefs at `~/.canopy/config.json`. First key is `source-root` (where `canopy init <url>` clones). Env override: `CANOPY_SOURCE_ROOT`. (v0.20)
 - `canopy host add <name> <ssh-target>` — register a remote canopy host (with `--interactive` for a guided form)
 - `canopy project add <name> <path> --on <host>` — bind a project name to a path on a remote (auto-populated by `canopy init <url> --on <host>` in v0.20+)
+- `canopy --remote <host>` — thin-client mode: launches straight into a TUI pinned to one host's workspaces, no local project or registration required. `<host>` is a registered name or a raw `user@host` SSH target. Root flag only — errors if passed to a subcommand. See [`docs/remote-workspaces.md`](docs/remote-workspaces.md#thin-client-mode-zero-setup-with-canopy---remote-host). (v0.22)
 - `canopy install tmux` — write managed keybinds + statusline into `~/.tmux.conf` (idempotent, backed up)
 - `canopy upgrade` — fetch + build the latest release; `--check` for a dry run, `--dismiss` to silence pills until next release
 - `canopy use [target]` — flip the active canopy binary between `release` and any in-flight workspace's `./canopy`
@@ -415,7 +418,8 @@ make clean          # remove ./canopy in the worktree
 User-facing guides:
 
 - [`docs/getting-started.md`](docs/getting-started.md) — 5-minute tour: install, init, first workspace
-- [`docs/remote-workspaces.md`](docs/remote-workspaces.md) — end-to-end guide for v0.17 remote dispatch
+- [`docs/remote-workspaces.md`](docs/remote-workspaces.md) — end-to-end guide for v0.17 remote dispatch, plus the v0.22 `--remote <host>` thin client
+- [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md) — laptop clipboard access inside a remote workspace
 - [`docs/landscape.md`](docs/landscape.md) — where canopy fits next to Conductor, tmuxinator, raw `git worktree`, and the agent CLIs it hosts
 - [`docs/canopy-json.md`](docs/canopy-json.md) — schema reference + `~/.canopy/config.json` settings
 - [`docs/migrate-from-conductor.md`](docs/migrate-from-conductor.md) — step-by-step for projects with `conductor.json`

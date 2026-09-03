@@ -41,6 +41,13 @@ internal/tmux/                 Client struct (with optional named socket for tes
                                match or a single trailing `*`; anything else
                                returns ErrInvalidGlob (fail fast instead of
                                silent no-match).
+internal/host/                 Multi-host remote dispatch (v0.17+): hosts.json
+                               registry, per-host refresh fan-out, and the
+                               ssh/mosh command builders --on/--remote shell
+                               out through. Every target passed to ssh/mosh
+                               gets an explicit "--" separator before it
+                               (v0.22) so an option-shaped target/hosts.json
+                               entry can't be parsed as a flag.
 internal/agent/                Agent launcher metadata (claude / codex / aider).
                                RoleForType produces canonical role strings
                                (`agent:claude`, etc.) consumed by the tmux
@@ -198,6 +205,7 @@ project_base + 20  = canopy new ws#2
 | A new tmux operation | `internal/tmux/session.go` |
 | A new pane role or role-lookup helper | `internal/tmux/roles.go` |
 | A new agent launcher | `internal/agent/launchers.go` (add to the registry; `RoleForType` picks up the new type automatically) |
+| A new remote-dispatch ssh/mosh call site | `internal/host/ssh.go` — always insert `"--"` before the target arg (option-injection fix, v0.22) |
 | A new env var canopy passes to scripts | `internal/hooks/runner.go`'s `WorkspaceEnv` |
 | A new field on canopy.json | `internal/config/config.go`'s `Config`/`Scripts` struct |
 | A new workspace state field | `internal/state/state.go`'s `Workspace` struct (and bump `SchemaVersion` if breaking) |

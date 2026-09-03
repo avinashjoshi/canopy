@@ -38,6 +38,8 @@ internal/clog/      slog setup (named clog to avoid stdlib log collision)
 internal/config/    canopy.json walk-up discovery + load
 internal/git/       worktree wrappers around os/exec git
 internal/tmux/      session wrappers around os/exec tmux
+internal/host/      multi-host remote dispatch: hosts.json registry, ssh/mosh
+                    command builders (--on / --remote)
 internal/hooks/     script execution with CANOPY_* env
 internal/state/     JSON registry + flock-protected mutations
 internal/workspace/ orchestration: Create / Remove / Resurrect / Reconcile

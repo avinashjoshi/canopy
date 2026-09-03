@@ -20,7 +20,7 @@ While tracing the raw-target path through canopy's existing remote-dispatch code
 ### Fixed
 
 - **ssh/mosh commands could misinterpret an option-shaped target as a flag instead of a hostname**, up to and including local arbitrary command execution via a crafted target or a tampered `hosts.json` entry. Every remote-host `ssh`/`mosh` invocation now explicitly separates options from the target.
-- **`--remote` no longer silently accepted (and ignored) on subcommands** — `canopy new foo --remote tower` now errors instead of quietly doing nothing with the flag.
+- **`--remote` is root-only, not accepted on subcommands** — `canopy new foo --remote tower` errors with `unknown flag: --remote` instead of silently parsing and doing nothing with it.
 
 ## [0.21.17.0] - 2026-06-25 — remote hosts stop splitting each project into two headers
 
