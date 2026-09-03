@@ -5,6 +5,20 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1.0] - 2026-09-03 — Remote workspace creation no longer times out waiting for Claude
+
+`canopy new --on tower --prompt "..."` would reliably fail with `Phase 1 timeout` on remote hosts: the wait for Claude to become ready before sending the prompt had a hardcoded 5-second budget, but Claude often takes longer than that to start on a remote machine. The workspace was created fine — only the prompt delivery failed, leaving you to attach and retype it by hand.
+
+The wait now defaults to 15 seconds when running as part of a remote dispatch (5 seconds locally, unchanged), and `CANOPY_PROMPT_PHASE_BUDGET=30s`, set on the laptop, overrides either default — including for `--on <host>` dispatch, where it's forwarded into the remote process's environment alongside the flag that picks the 15s default. Under the hood, the two near-duplicate poll loops that implement this wait were consolidated into one shared primitive, which also closes a small inconsistency where only one of the two phases had a guard against a flake-driven timeout right at the deadline — both now have it.
+
+### Fixed
+
+- **`canopy new --on <host> --prompt "..."` no longer times out waiting for Claude to become ready on hosts where it starts slowly.** The prompt-send wait now defaults to 15s when dispatched to a remote host (was a hardcoded 5s everywhere), and `CANOPY_PROMPT_PHASE_BUDGET` overrides either default, forwarded from the laptop into remote dispatches too.
+
+### Changed
+
+- **Internal refactor:** the prompt-send wait's two poll loops (waiting for Claude's trust dialog or ready marker, then waiting for the ready marker again post-dismissal) now share one primitive instead of duplicating the same loop logic — both phases get the same deadline flake-guard as a result.
+
 ## [0.22.0.0] - 2026-09-03 — `canopy --remote <host>`: a thin client, no `host add` required
 
 Until now, checking on a remote canopy install meant either being inside a registered local project (so the Global/Hosts tabs had something to filter to) or running the full local `canopy new --on`/`--on` dance. `canopy --remote <host>` skips all of that: run it from anywhere — no `canopy.json`, no registered project, nothing local at all — and it launches straight into a TUI showing exactly that one host's workspaces, sourced the same way the existing Global tab already fans out over SSH.

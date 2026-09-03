@@ -90,15 +90,11 @@ Avi's read of the trade-off: "okay for now" — current behavior is correct, fut
 
 ---
 
-## 📋 OPEN (P2) — Configurable prompt-send timeout for slow remote agents (added 2026-05-12)
+## ✅ SHIPPED v0.22.1.0 — Configurable prompt-send timeout for slow remote agents (added 2026-05-12, shipped 2026-09-03)
 
-v0.17.0 Phase 1f verified `canopy new --on tower --prompt "..."` delivers the prompt text correctly via SSH stdin + base64 + remote temp file. But the prompt-send step that comes after workspace creation has a hardcoded 5-second timeout in `internal/workspace/initprompt.go::phaseBudget`. On tower (and likely most remote machines), claude takes longer than 5s from launch to "ready marker visible." The prompt-send aborts with "Phase 1 timeout" and the user has to manually attach and type the prompt.
+`canopy new --on tower --prompt "..."` reliably timed out with `Phase 1 timeout` on remote hosts where Claude takes longer than 5s to reach its ready marker — the hardcoded `phaseBudget` const in `internal/workspace/initprompt.go`. Fixed with `promptPhaseBudget()`: an explicit `CANOPY_PROMPT_PHASE_BUDGET` override, falling through to 15s when `CANOPY_REMOTE_DISPATCH` is set (exported unconditionally by `buildRemoteScript` on every remote dispatch), falling through to the original 5s local default otherwise. The two near-duplicate Phase 1/Phase 2 poll loops in `awaitClaudeReady` were also consolidated into one shared `awaitPaneOutput` primitive as part of the fix.
 
-Fix: make phaseBudget configurable via env var (e.g., `CANOPY_PROMPT_PHASE_BUDGET=15s`) OR auto-scale based on whether the workspace was launched from a remote dispatch (look for a CANOPY_REMOTE_DISPATCH=1 env var set by Phase 1f's script).
-
-Simple fix: bump default to 15s. Slower-but-correct beats fast-and-fails for slow machines / first-launch claude installs. The local-fast-claude case loses a few seconds before timeout-on-failure but everything else works the same.
-
-Repro: `canopy new --on tower --name X --prompt "test"`. Workspace creates fine; prompt step times out with "Phase 1 timeout". Verified the prompt text IS in the agent-briefing temp file on the remote — claude just isn't ready in 5s.
+A `/document-release` doc audit caught that `CANOPY_PROMPT_PHASE_BUDGET` initially only reached local (non-`--on`) workspace creation — SSH doesn't forward client env vars on its own, and `buildRemoteScript` didn't forward it either. Fixed in the same pass: `buildRemoteScript` now forwards the local override into the remote script's environment (shell-quoted) alongside `CANOPY_REMOTE_DISPATCH`, so the override works for both local and `--on <host>` dispatch.
 
 ---
 

@@ -116,6 +116,8 @@ canopy new --on tower --remote-cwd /tmp/scratch-repo
 
 The prompt travels safely: base64 encoded into a heredoc → umask-077 temp file on the remote → cleaned up on script exit. It never appears in `ps aux` on either machine.
 
+Delivering the prompt requires waiting for claude to become ready in the pane first. That wait defaults to 15s for `--on` dispatches (vs. 5s for local workspaces) since claude reliably takes longer to render on a fresh remote host. `CANOPY_PROMPT_PHASE_BUDGET=30s`, set on your laptop before `canopy new --on ...`, overrides either default — it's forwarded into the remote dispatch's environment alongside the flag that picks the 15s default in the first place.
+
 ### 4. Attach
 
 ```bash
