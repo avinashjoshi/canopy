@@ -23,6 +23,7 @@ While tracing the raw-target path through canopy's existing remote-dispatch code
 
 - **ssh/mosh commands could misinterpret an option-shaped target as a flag instead of a hostname**, up to and including local arbitrary command execution via a crafted target or a tampered `hosts.json` entry. Every remote-host `ssh`/`mosh` invocation now explicitly separates options from the target, and the Hosts tab's `ssh-copy-id` flow (which can't be fixed the same way — see above) now validates and refuses instead.
 - **`--remote` is root-only, not accepted on subcommands** — `canopy new foo --remote tower` errors with `unknown flag: --remote` instead of silently parsing and doing nothing with it.
+- **`--on`/`--remote` rejected an unregistered bare hostname instead of using it directly**, breaking the exact "just log in, no `host add`" case for a plain `~/.ssh/config` alias like `tower` (as opposed to `user@tower`, which already worked). Pressing `enter` on a workspace row in a `--remote`-pinned session hit this too, since attach dispatches through `canopy switch --on <host>` internally. `--on`/`--remote` now try the registry first and fall back to using the spec directly as an SSH target if it isn't a registered name, for `new`, `switch`, and `--remote` alike.
 
 ## [0.21.17.0] - 2026-06-25 — remote hosts stop splitting each project into two headers
 

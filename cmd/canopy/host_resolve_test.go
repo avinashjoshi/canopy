@@ -169,6 +169,103 @@ func TestResolveRemoteHost(t *testing.T) {
 	})
 }
 
+// TestResolveOnForNew_UnregisteredBareNameFallsBackToRawTarget is the
+// regression test for the same class of bug fixed in resolveRemoteHost,
+// applied here to `canopy new --on <spec>`: a bare word that isn't a
+// registered name must be usable directly as an SSH target (a
+// ~/.ssh/config alias, etc.), not rejected outright.
+func TestResolveOnForNew_UnregisteredBareNameFallsBackToRawTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no hosts.json at all
+
+	got, err := resolveOnForNew("tower", "myproject", "/remote/path")
+	if err != nil {
+		t.Fatalf("resolveOnForNew(unregistered bare name): %v; want it to fall back to a raw target", err)
+	}
+	if got.SSHTarget != "tower" {
+		t.Errorf("SSHTarget = %q; want %q", got.SSHTarget, "tower")
+	}
+	if got.Source != "raw-target" {
+		t.Errorf("Source = %q; want %q", got.Source, "raw-target")
+	}
+	if got.HostName != "" {
+		t.Errorf("HostName = %q; want empty (no registry entry backs this fallback)", got.HostName)
+	}
+	// explicitRemoteCwd was passed, so it must carry through even on
+	// the fallback path (same as the pre-existing raw-target branch).
+	if got.RemoteCwd != "/remote/path" {
+		t.Errorf("RemoteCwd = %q; want %q", got.RemoteCwd, "/remote/path")
+	}
+}
+
+// TestResolveOnForNew_RegisteredBareNameStillUsesRegistry proves the
+// registry still wins over the fallback when the name IS registered —
+// the fallback only fires on ErrHostNotFound, not unconditionally.
+func TestResolveOnForNew_RegisteredBareNameStillUsesRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := seedHostRegistryForTest(t, "tower", "avi@tower-real.tail.ts.net"); err != nil {
+		t.Fatalf("seed registry: %v", err)
+	}
+	reg, err := loadHostRegistry()
+	if err != nil {
+		t.Fatalf("loadHostRegistry: %v", err)
+	}
+	if err := reg.AddProject("tower", "myproject", "/home/avi/myproject"); err != nil {
+		t.Fatalf("AddProject: %v", err)
+	}
+
+	got, err := resolveOnForNew("tower", "myproject", "")
+	if err != nil {
+		t.Fatalf("resolveOnForNew: %v", err)
+	}
+	if got.SSHTarget != "avi@tower-real.tail.ts.net" {
+		t.Errorf("SSHTarget = %q; want the registry's SSHTarget", got.SSHTarget)
+	}
+	if got.HostName != "tower" {
+		t.Errorf("HostName = %q; want %q (registry-resolved)", got.HostName, "tower")
+	}
+}
+
+// TestResolveOnForSwitch_UnregisteredBareNameFallsBackToRawTarget is
+// the direct regression test for the bug hand-testing surfaced: `enter`
+// on a workspace row in a --remote-pinned session (an unregistered bare
+// host) dispatches `canopy switch --on <row.Host>`, which used to error
+// "not registered" even though the pinned session was already
+// successfully talking to that exact host.
+func TestResolveOnForSwitch_UnregisteredBareNameFallsBackToRawTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := resolveOnForSwitch("tower", "", "")
+	if err != nil {
+		t.Fatalf("resolveOnForSwitch(unregistered bare name): %v; want it to fall back to a raw target", err)
+	}
+	if got.SSHTarget != "tower" {
+		t.Errorf("SSHTarget = %q; want %q", got.SSHTarget, "tower")
+	}
+	if got.Source != "raw-target" {
+		t.Errorf("Source = %q; want %q", got.Source, "raw-target")
+	}
+}
+
+// TestResolveOnForSwitch_DashPrefixedBareNameRejected proves the
+// fallback still runs the option-injection guard — a dash-prefixed
+// spec must not silently become a raw target.
+func TestResolveOnForSwitch_DashPrefixedBareNameRejected(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	_, err := resolveOnForSwitch("-oProxyCommand=touch /tmp/x", "", "")
+	if err == nil {
+		t.Fatal("resolveOnForSwitch(dash-prefixed spec) = nil error; want an error")
+	}
+	if !errors.Is(err, host.ErrSSHTargetInvalid) {
+		t.Errorf("error = %v; want it to wrap host.ErrSSHTargetInvalid", err)
+	}
+}
+
 // seedHostRegistryForTest writes a host directly into ~/.canopy/hosts.json
 // via the host package rather than shelling out to the CLI, so the test
 // doesn't depend on cobra command wiring or the nested-tmux guard.
