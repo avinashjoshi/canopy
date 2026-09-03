@@ -33,15 +33,16 @@ to check on a box right now — no `canopy host add`, no `canopy project add`, n
 `~/.canopy/hosts.json` — use the thin-client root flag instead (v0.22):
 
 ```bash
-canopy --remote tower                          # by registered name (see below)
+canopy --remote tower                          # registered name, OR a bare ~/.ssh/config alias
 canopy --remote avi@tower.tail-abc.ts.net      # raw SSH target, zero prior setup
 ```
 
 Run from anywhere — you don't need to be inside a project, or even have `canopy.json` on your
-laptop at all. `<host>` is resolved the same way `--on` resolves its argument: a string containing
-`@` or `:` is treated as a raw SSH target and used as-is (never persisted, never touches
-`hosts.json`); anything else is looked up by name in the registry. This mirrors how herdr's
-`--remote <host>` works — point it at a box and go, no registration ceremony.
+laptop at all. `<host>` is resolved by trying the registry first: if it matches a name in
+`~/.canopy/hosts.json`, that entry's SSH target is used; otherwise `<host>` is used directly as a
+raw SSH target (never persisted, never touches `hosts.json`) — so a bare `~/.ssh/config` alias like
+`tower` works exactly like `ssh tower` does, with no registration required. This mirrors how
+herdr's `--remote <host>` works — point it at a box and go, no registration ceremony.
 
 The TUI that opens is pinned to that one host: only the Global tab is shown (no Local tab — there's
 no local project; no Hosts tab — fleet management doesn't apply to a single pinned box), and it

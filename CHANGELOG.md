@@ -17,7 +17,7 @@ While tracing the raw-target path through canopy's existing remote-dispatch code
 
 ### Added
 
-- **`canopy --remote <host>`** — thin-client mode: a Bubbletea TUI pinned to one host's workspaces, no local project or registration required. Accepts a registered host name or a raw `user@host` SSH target directly.
+- **`canopy --remote <host>`** — thin-client mode: a Bubbletea TUI pinned to one host's workspaces, no local project or registration required. `<host>` tries the registry first; if it's not a registered name, it's used directly as a raw SSH target — so a bare `~/.ssh/config` alias (`canopy --remote tower`) works exactly like `ssh tower` does, alongside the explicit `user@host` form.
 
 ### Fixed
 
