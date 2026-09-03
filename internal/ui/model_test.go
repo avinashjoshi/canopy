@@ -287,6 +287,15 @@ func TestBuildRemoteRowsMsg_SelfHealTrueRunsOrphanCheck(t *testing.T) {
 // real I/O (SSH, disk), which unit tests must not trigger. Returns "" for
 // a nil Cmd (tea.Batch skips nils itself, but callers may still see one
 // in the slice depending on Bubbletea version).
+//
+// Callers must match on Contains(name, ".<funcName>."), not
+// HasSuffix(name, ".<funcName>.func1") — confirmed via CI (go1.26.2)
+// vs. local (go1.27.1) divergence that the Go compiler's cross-function
+// inlining can fold a small wrapper like refreshRemoteCmdForHost into
+// its caller, which renames the closure to
+// "...refresh.refreshRemoteCmdForHost.func2" (funcN index shifts too,
+// since it's now the Nth closure lexically inside the caller). The
+// substring ".<funcName>." survives that; the suffix does not.
 func cmdFuncName(c tea.Cmd) string {
 	if c == nil {
 		return ""
@@ -317,11 +326,11 @@ func TestRefresh_PinnedModeSkipsLocalRefresh(t *testing.T) {
 	var sawLocal, sawPinnedRemote, sawAllHostsRemote bool
 	for _, sub := range batch {
 		switch name := cmdFuncName(sub); {
-		case strings.HasSuffix(name, ".refreshCmdWithMem.func1"):
+		case strings.Contains(name, ".refreshCmdWithMem."):
 			sawLocal = true
-		case strings.HasSuffix(name, ".refreshRemoteCmdForHost.func1"):
+		case strings.Contains(name, ".refreshRemoteCmdForHost."):
 			sawPinnedRemote = true
-		case strings.HasSuffix(name, ".refreshRemoteCmd.func1"):
+		case strings.Contains(name, ".refreshRemoteCmd."):
 			sawAllHostsRemote = true
 		}
 	}
@@ -350,11 +359,11 @@ func TestRefresh_UnpinnedModeIncludesLocalRefresh(t *testing.T) {
 	var sawLocal, sawPinnedRemote, sawAllHostsRemote bool
 	for _, sub := range batch {
 		switch name := cmdFuncName(sub); {
-		case strings.HasSuffix(name, ".refreshCmdWithMem.func1"):
+		case strings.Contains(name, ".refreshCmdWithMem."):
 			sawLocal = true
-		case strings.HasSuffix(name, ".refreshRemoteCmdForHost.func1"):
+		case strings.Contains(name, ".refreshRemoteCmdForHost."):
 			sawPinnedRemote = true
-		case strings.HasSuffix(name, ".refreshRemoteCmd.func1"):
+		case strings.Contains(name, ".refreshRemoteCmd."):
 			sawAllHostsRemote = true
 		}
 	}
