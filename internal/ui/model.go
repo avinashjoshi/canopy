@@ -26,8 +26,8 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
-	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/avinashjoshi/canopy/internal/agent"
 	"github.com/avinashjoshi/canopy/internal/clog"
@@ -404,6 +404,28 @@ type Model struct {
 	// attempts so we don't fan-out twice on overlapping TUI ticks.
 	remoteRefreshing bool
 
+	// pinnedHost is set for the `canopy --remote <host>` thin-client
+	// mode (v0.22): non-zero (Name != "") means this Model shows ONLY
+	// that one host's workspaces — no local rows are ever loaded
+	// (refresh() skips refreshCmdWithMem entirely), and Local/Hosts
+	// tabs are hidden from the cycle (visibleTabs() returns just
+	// tabGlobal). Local m.store is still used for remotes-cache.json
+	// persistence, same as every other remote path — only the row
+	// *sourcing* changes. See NewRemotePinned.
+	//
+	// A full host.Host (not just a name) because `--remote` accepts a
+	// raw SSH target as well as a registry name — mirrors --on's
+	// resolveOnForSwitch. For a raw target, Name is the target string
+	// itself (there's no registry entry to name it from).
+	pinnedHost host.Host
+
+	// pinnedHostSelfHeal gates whether a pinned refresh runs
+	// autoRegisterRemoteOrphans (writing newly-discovered projects back
+	// into hosts.json). True only when pinnedHost came from the
+	// registry — a raw SSH target was never `host add`-ed, so there's
+	// no registry entry to attach project registrations to.
+	pinnedHostSelfHeal bool
+
 	// hostsSpinnerFrame indexes the Braille frame for every host row
 	// currently in hosts.StatusLoading. Advanced by hostsSpinnerTickMsg
 	// while remoteRefreshing is true; held steady otherwise so the row
@@ -443,9 +465,9 @@ type Model struct {
 	// hostAddName + hostAddTarget are the form fields for the in-TUI
 	// add-host flow. hostAddFocus toggles 0 (name) ↔ 1 (target). Tab
 	// cycles focus. v0.17 Phase 1l.
-	hostAddName    string
-	hostAddTarget  string
-	hostAddFocus   int // 0 = name input focused, 1 = target input focused
+	hostAddName   string
+	hostAddTarget string
+	hostAddFocus  int // 0 = name input focused, 1 = target input focused
 	// targetInput is the second textinput for the form (ssh-target).
 	// We need a dedicated field because nameInput is shared with the
 	// workspace-name flow.
@@ -1112,6 +1134,64 @@ func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 	return err
 }
 
+// NewRemotePinned constructs a Model for the `canopy --remote <host>`
+// thin-client mode (v0.22). Unlike NewUnified, there is no local
+// project/mgr at all — h is the ONLY source of rows. store is still
+// passed through (remotes-cache.json persistence uses the same local
+// ~/.canopy paths as every other remote path), but no local
+// canopy.json/state.json workspace ever appears in the listing.
+//
+// h is already resolved — either a registry entry (selfHeal=true) or
+// an ad-hoc Host built straight from a raw SSH target with no registry
+// entry at all (selfHeal=false), mirroring how --on accepts both. See
+// resolveRemoteHost in cmd/canopy/host_resolve.go.
+//
+// Reuses NewUnified with mgr=nil, currentProject="" (so tabLocal never
+// enters the cycle) and then pins pinnedHost, which visibleTabs() and
+// refresh() both key off to suppress local rows and the Hosts tab.
+//
+// Also overrides NewUnified's default hostList preload (which loads
+// every host from the LOCAL ~/.canopy/hosts.json) down to just [h].
+// Row-driven remote actions — resolveHostForExec (kill) and
+// remoteCwdForRow (new-workspace dispatch) — look up connection info
+// by name in m.hostList; for a raw SSH target (selfHeal=false) that
+// name has no local registry entry at all, so without this override
+// those actions would silently fail to resolve the host they're
+// already looking at. It also keeps a pinned session from carrying the
+// user's entire local host registry in memory, matching this
+// constructor's own "shows ONLY that one host" contract.
+func NewRemotePinned(store *state.Store, tc *tmux.Client, h host.Host, selfHeal bool) *Model {
+	m := NewUnified(nil, store, tc, "", "", "")
+	m.pinnedHost = h
+	m.pinnedHostSelfHeal = selfHeal
+	m.hostList = []host.Host{h}
+	m.tab = tabGlobal
+	return m
+}
+
+// RunRemotePinned is the `canopy --remote <host>` entry point used by
+// cmd/canopy/route.go's routeRemote. Mirrors RunUnified's wiring
+// (version pill, upgrade closures, alt-screen/mouse setup) but builds
+// the model via NewRemotePinned instead of NewUnified.
+func RunRemotePinned(store *state.Store, tc *tmux.Client, h host.Host, selfHeal bool, opts RunUnifiedOptions) error {
+	m := NewRemotePinned(store, tc, h, selfHeal)
+	m.RunInitFunc = opts.RunInitFunc
+	m.SetVersionInfo(opts.VersionLabel, opts.DevWorkspace)
+	m.SetUpgradeAvailable(opts.InitialUpgrade)
+	m.SetUpgradeRefreshFn(opts.RefreshFn)
+	m.upgradeRefreshOnInit = opts.RefreshOnInit
+	m.SetUpgradeChangelogFn(opts.ChangelogFn)
+	m.SetUpgradeShellFn(opts.ShellFn)
+	m.SetUpgradeDismissFn(opts.DismissFn)
+	teaOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	if !m.inPopup {
+		teaOpts = append(teaOpts, tea.WithMouseCellMotion())
+	}
+	p := tea.NewProgram(m, teaOpts...)
+	_, err := p.Run()
+	return err
+}
+
 // Run is the legacy project-mode entry point. RunUnified is the v0.8
 // unified entry; Run is preserved as a thin wrapper for any external
 // callers (none today) and the e2e tests in the workspace package.
@@ -1206,11 +1286,17 @@ func refreshCmd(mgr *workspace.Manager, tc *tmux.Client, store *state.Store) tea
 // rowsLoadedMsg as before; remote rows arrive via remoteRowsLoadedMsg.
 // The Update handler merges both into the rendered listing.
 func (m *Model) refresh() tea.Cmd {
-	cmds := []tea.Cmd{refreshCmdWithMem(m.mgr, m.tc, m.store, m.memCache)}
+	var cmds []tea.Cmd
+	// Pinned thin-client mode (v0.22): never touch local state — the
+	// pinned host is the only row source. See NewRemotePinned.
+	if m.pinnedHost.Name == "" {
+		cmds = append(cmds, refreshCmdWithMem(m.mgr, m.tc, m.store, m.memCache))
+	}
 	if !m.remoteRefreshing {
-		// refreshRemoteCmd is always non-nil — it returns an empty
-		// remoteRowsLoadedMsg when no hosts are registered. We always
-		// dispatch it so the refreshing-latch lifecycle is consistent.
+		// refreshRemoteCmd/refreshRemoteCmdForHost are always non-nil —
+		// they return an empty remoteRowsLoadedMsg when there's nothing
+		// to refresh. We always dispatch so the refreshing-latch
+		// lifecycle is consistent.
 		m.remoteRefreshing = true
 		m.hostsSpinnerFrame = 0
 		// Push the loading-hosts set into projectlist so the workspaces
@@ -1219,7 +1305,11 @@ func (m *Model) refresh() tea.Cmd {
 		// StatusLoading glyph so both surfaces signal "we're checking"
 		// in lockstep. v0.22.
 		m.pushLoadingHosts()
-		cmds = append(cmds, refreshRemoteCmd())
+		if m.pinnedHost.Name != "" {
+			cmds = append(cmds, refreshRemoteCmdForHost(m.pinnedHost, m.pinnedHostSelfHeal))
+		} else {
+			cmds = append(cmds, refreshRemoteCmd())
+		}
 		if !m.hostsSpinnerActive {
 			m.hostsSpinnerActive = true
 			cmds = append(cmds, hostsSpinnerTickCmd())
@@ -1235,7 +1325,17 @@ func (m *Model) refresh() tea.Cmd {
 // host on refresh start). Otherwise the set is empty so headers
 // render plain. v0.22.
 func (m *Model) pushLoadingHosts() {
-	if !m.remoteRefreshing || len(m.hostList) == 0 {
+	if !m.remoteRefreshing {
+		m.list.SetLoadingHosts(nil)
+		return
+	}
+	// Pinned thin-client mode: only the pinned host's rows ever appear,
+	// so only its header should show the loading spinner.
+	if m.pinnedHost.Name != "" {
+		m.list.SetLoadingHosts(map[string]bool{m.pinnedHost.Name: true})
+		return
+	}
+	if len(m.hostList) == 0 {
 		m.list.SetLoadingHosts(nil)
 		return
 	}
@@ -1284,103 +1384,158 @@ func refreshRemoteCmd() tea.Cmd {
 			// true forever and subsequent refreshes silently skip.
 			return remoteRowsLoadedMsg{}
 		}
-		cache, _ := state.NewRemotesCache(canopyHome)
-		refresher := &host.Refresher{} // default 3s timeout per host
-
-		ctx := context.Background()
-		results := refresher.Tick(ctx, hosts)
-
-		// Convert to GlobalRow + build the persistence snapshot in one pass.
-		rows := make([]state.GlobalRow, 0)
-		snaps := make(map[string]*state.RemoteHostSnapshot, len(results))
-		for _, r := range results {
-			snap := &state.RemoteHostSnapshot{
-				CanopyVersion:      r.CanopyVersion,
-				ClipboardBridge:    r.ClipboardBridge,
-				LastSeen:           r.LastSeen,
-				LastRefreshAttempt: time.Now(),
-			}
-			if r.Err != nil {
-				snap.LastError = r.Err.Error()
-				snaps[r.HostName] = snap
-				continue
-			}
-			snap.Workspaces = make([]state.RemoteWorkspaceRow, 0, len(r.Workspaces))
-			for _, w := range r.Workspaces {
-				snap.Workspaces = append(snap.Workspaces, state.RemoteWorkspaceRow{
-					Name: w.Name, Project: w.Project, Branch: w.Branch,
-					Status: w.Status, Port: w.Port,
-					TmuxSession:   w.TmuxSession,
-					Alive:         w.Alive,
-					MemRSS:        w.MemRSS,
-					CPU:           w.CPU,
-					Hints:         w.Hints,
-					LastErrorHint: w.LastErrorHint,
-					AgentState:    w.AgentState,
-					Attached:      w.Attached,
-					Owner:         w.Owner,
-					SourceKind:    w.SourceKind,
-				})
-				rows = append(rows, state.GlobalRow{
-					Host:    r.HostName,
-					Project: w.Project,
-					// IsMain mirrors BuildGlobalRows's synthetic main
-					// row convention. Without this, the local renderer
-					// can't tell remote main rows apart from workspace
-					// rows — displayStatus falls through to string(r.Status)
-					// which renders the literal "main" instead of
-					// "running"/"not started", and fillMainBranches
-					// skips them entirely. v0.17 Phase 1k follow-up.
-					IsMain:        w.Name == "(main)",
-					Name:          w.Name,
-					Branch:        w.Branch,
-					Status:        state.Status(w.Status),
-					Port:          w.Port,
-					TmuxSession:   w.TmuxSession,
-					Alive:         w.Alive,
-					MemRSS:        w.MemRSS,
-					CPU:           w.CPU,
-					Hints:         w.Hints,
-					LastErrorHint: w.LastErrorHint,
-					AgentState:    w.AgentState,
-					Attached:      w.Attached,
-					Owner:         w.Owner,
-					SourceKind:    w.SourceKind,
-					// LastSeen carries the host's most-recent successful
-					// refresh timestamp onto every remote row from that
-					// host. The TUI renderer compares it against time.Now
-					// to dim stale rows + show a stale banner on the host
-					// section header. Zero for local rows (their Host is
-					// empty, so the renderer's "is remote and stale?"
-					// check short-circuits). v0.19.
-					LastSeen: r.LastSeen,
-				})
-			}
-			snaps[r.HostName] = snap
-		}
-
-		// Best-effort persist to disk. Failure doesn't affect the UI
-		// — the snapshots will retry on the next tick.
-		if cache != nil {
-			if err := cache.WithLock(func(stored map[string]*state.RemoteHostSnapshot) error {
-				for name, snap := range snaps {
-					stored[name] = snap
-				}
-				return nil
-			}); err != nil {
-				log.Warn("ui.refresh.remote.cache-save-failed", "err", err)
-			}
-		}
-
-		// Self-heal the "remote has the project but laptop never
-		// registered it" trap (most commonly: the v0.20 add-project
-		// flow's CANOPY_INIT_RESULT_FILE round-trip failed because
-		// the remote canopy was pre-v0.20). autoRegisterRemoteOrphans
-		// returns the possibly-updated hosts slice.
-		hosts = autoRegisterRemoteOrphans(reg, hosts, results)
-
-		return remoteRowsLoadedMsg{rows: rows, snaps: snaps, hosts: hosts}
+		return buildRemoteRowsMsg(canopyHome, reg, hosts, true)
 	}
+}
+
+// refreshRemoteCmdForHost is refreshRemoteCmd's single-host sibling,
+// used by the `canopy --remote <host>` thin-client mode (v0.22, see
+// NewRemotePinned). Unlike refreshRemoteCmd, h is ALREADY resolved —
+// no registry lookup here, since `--remote` accepts a raw SSH target
+// as well as a registry name (mirrors --on's resolveOnForSwitch; see
+// routeRemote/resolveRemoteHost in cmd/canopy). Everything downstream
+// (SSH fan-out, GlobalRow conversion, remotes-cache.json persistence)
+// is identical to refreshRemoteCmd, just scoped to a slice of one.
+//
+// selfHeal must be false for a raw-target h (Name has no corresponding
+// hosts.json entry to attach auto-registered projects to); true for a
+// registry-resolved h, matching refreshRemoteCmd's always-on behavior.
+func refreshRemoteCmdForHost(h host.Host, selfHeal bool) tea.Cmd {
+	return func() tea.Msg {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return remoteRowsLoadedMsg{}
+		}
+		canopyHome := filepath.Join(home, ".canopy")
+		var reg *host.Registry
+		if selfHeal {
+			reg, err = host.NewRegistry(canopyHome)
+			if err != nil {
+				log.Warn("ui.refresh.remote.registry-failed", "err", err, "host", h.Name)
+				return remoteRowsLoadedMsg{err: err}
+			}
+		}
+		return buildRemoteRowsMsg(canopyHome, reg, []host.Host{h}, selfHeal)
+	}
+}
+
+// buildRemoteRowsMsg runs the SSH fan-out (host.Refresher.Tick) against
+// `hosts`, converts the results into []state.GlobalRow, persists a
+// remotes-cache.json snapshot, and — when selfHeal is true — self-heals
+// orphaned project registrations back into `reg` (nil when selfHeal is
+// false; e.g. a raw --remote SSH target with no registry entry to
+// attach to). Shared by refreshRemoteCmd (all registered hosts, always
+// selfHeal) and refreshRemoteCmdForHost (one pinned host, selfHeal
+// depends on how it was resolved) so the conversion logic only lives
+// once. Must only be called from inside a tea.Cmd closure — it does
+// real I/O (SSH, disk).
+func buildRemoteRowsMsg(canopyHome string, reg *host.Registry, hosts []host.Host, selfHeal bool) tea.Msg {
+	cache, _ := state.NewRemotesCache(canopyHome)
+	refresher := &host.Refresher{} // default 3s timeout per host
+
+	ctx := context.Background()
+	results := refresher.Tick(ctx, hosts)
+
+	// Convert to GlobalRow + build the persistence snapshot in one pass.
+	rows := make([]state.GlobalRow, 0)
+	snaps := make(map[string]*state.RemoteHostSnapshot, len(results))
+	for _, r := range results {
+		snap := &state.RemoteHostSnapshot{
+			CanopyVersion:      r.CanopyVersion,
+			ClipboardBridge:    r.ClipboardBridge,
+			LastSeen:           r.LastSeen,
+			LastRefreshAttempt: time.Now(),
+		}
+		if r.Err != nil {
+			snap.LastError = r.Err.Error()
+			snaps[r.HostName] = snap
+			continue
+		}
+		snap.Workspaces = make([]state.RemoteWorkspaceRow, 0, len(r.Workspaces))
+		for _, w := range r.Workspaces {
+			snap.Workspaces = append(snap.Workspaces, state.RemoteWorkspaceRow{
+				Name: w.Name, Project: w.Project, Branch: w.Branch,
+				Status: w.Status, Port: w.Port,
+				TmuxSession:   w.TmuxSession,
+				Alive:         w.Alive,
+				MemRSS:        w.MemRSS,
+				CPU:           w.CPU,
+				Hints:         w.Hints,
+				LastErrorHint: w.LastErrorHint,
+				AgentState:    w.AgentState,
+				Attached:      w.Attached,
+				Owner:         w.Owner,
+				SourceKind:    w.SourceKind,
+			})
+			rows = append(rows, state.GlobalRow{
+				Host:    r.HostName,
+				Project: w.Project,
+				// IsMain mirrors BuildGlobalRows's synthetic main
+				// row convention. Without this, the local renderer
+				// can't tell remote main rows apart from workspace
+				// rows — displayStatus falls through to string(r.Status)
+				// which renders the literal "main" instead of
+				// "running"/"not started", and fillMainBranches
+				// skips them entirely. v0.17 Phase 1k follow-up.
+				IsMain:        w.Name == "(main)",
+				Name:          w.Name,
+				Branch:        w.Branch,
+				Status:        state.Status(w.Status),
+				Port:          w.Port,
+				TmuxSession:   w.TmuxSession,
+				Alive:         w.Alive,
+				MemRSS:        w.MemRSS,
+				CPU:           w.CPU,
+				Hints:         w.Hints,
+				LastErrorHint: w.LastErrorHint,
+				AgentState:    w.AgentState,
+				Attached:      w.Attached,
+				Owner:         w.Owner,
+				SourceKind:    w.SourceKind,
+				// RemoteProjectPath (not ProjectRoot — see its doc
+				// comment) is the cwd-resolution fallback for hosts
+				// with no local registry Projects entry at all (a raw
+				// --remote/--on SSH target). w.ProjectRoot is the wire
+				// field from this host's own `canopy ls --json`.
+				RemoteProjectPath: w.ProjectRoot,
+				// LastSeen carries the host's most-recent successful
+				// refresh timestamp onto every remote row from that
+				// host. The TUI renderer compares it against time.Now
+				// to dim stale rows + show a stale banner on the host
+				// section header. Zero for local rows (their Host is
+				// empty, so the renderer's "is remote and stale?"
+				// check short-circuits). v0.19.
+				LastSeen: r.LastSeen,
+			})
+		}
+		snaps[r.HostName] = snap
+	}
+
+	// Best-effort persist to disk. Failure doesn't affect the UI
+	// — the snapshots will retry on the next tick.
+	if cache != nil {
+		if err := cache.WithLock(func(stored map[string]*state.RemoteHostSnapshot) error {
+			for name, snap := range snaps {
+				stored[name] = snap
+			}
+			return nil
+		}); err != nil {
+			log.Warn("ui.refresh.remote.cache-save-failed", "err", err)
+		}
+	}
+
+	// Self-heal the "remote has the project but laptop never
+	// registered it" trap (most commonly: the v0.20 add-project
+	// flow's CANOPY_INIT_RESULT_FILE round-trip failed because
+	// the remote canopy was pre-v0.20). autoRegisterRemoteOrphans
+	// returns the possibly-updated hosts slice. Skipped when selfHeal
+	// is false (raw --remote SSH target, reg is nil) — there's no
+	// registry entry for this host to attach project registrations to.
+	if selfHeal {
+		hosts = autoRegisterRemoteOrphans(reg, hosts, results)
+	}
+
+	return remoteRowsLoadedMsg{rows: rows, snaps: snaps, hosts: hosts}
 }
 
 // autoRegisterRemoteOrphans walks the per-host refresh `results` for

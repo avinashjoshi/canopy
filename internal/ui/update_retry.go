@@ -41,7 +41,7 @@ func actionRetry(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Pin to the row's project so the dispatcher doesn't fall back
 		// to "first project on host" and retry a workspace under the
 		// wrong project's setup script.
-		args := append([]string{row.Name}, m.remoteCwdArg(row.Host, row.Project)...)
+		args := append([]string{row.Name}, m.remoteCwdArg(row.Host, row.Project, row.RemoteProjectPath)...)
 		return m, m.execRemoteVerb(row.Host, "retry", args, force)
 	}
 	if _, err := m.managerForRow(row); err != nil {

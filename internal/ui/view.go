@@ -84,7 +84,7 @@ func (m *Model) View() string {
 	// Version pill is the design's "you always know which canopy is
 	// running" cue: muted gray for release, cyan for DEV. Suppressed
 	// when neither field is set (tests + edge cases).
-	b.WriteString(roundedPill("◆ canopy", "231", "99"))           // bright white on violet
+	b.WriteString(roundedPill("◆ canopy", "231", "99")) // bright white on violet
 	b.WriteString(" ")
 	b.WriteString(roundedPillSubtle(m.scopeLabel(), "250", "237")) // grey on dark grey
 	if pill := m.renderVersionPill(); pill != "" {
@@ -693,11 +693,11 @@ func (m *Model) renderHelpLineCompact() string {
 //
 // Layout (local):
 //
-//	  creating in   cravd   ~/Work/cravd
+//	creating in   cravd   ~/Work/cravd
 //
 // Layout (remote, m.newTargetHost set):
 //
-//	  creating on   pi   in   brain   /home/avi/Work/brain
+//	creating on   pi   in   brain   /home/avi/Work/brain
 //
 // The host pill (cyan) reads distinctly from the project pill (violet)
 // so the user can't miss that the action lands on a remote machine.
@@ -1365,7 +1365,7 @@ func (m *Model) renderConfirmDelete() string {
 	// work" — so always surface F as an alternative path here so the
 	// user can pre-decide "force regardless" instead of dispatching a
 	// `y` that fails. v0.17 Phase 1l polish.
-	if _, _, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
+	if _, _, _, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
 		b.WriteString("  ")
 		b.WriteString(brokenStyle.Render("y"))
 		b.WriteString(" to remove (refuses on hanging work)  ·  ")

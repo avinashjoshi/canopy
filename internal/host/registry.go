@@ -66,12 +66,13 @@ const registryVersion = 2
 
 // Sentinels for the cmd/canopy/host.go CLI to detect specific cases.
 var (
-	ErrHostExists      = errors.New("host already exists in registry")
-	ErrHostNotFound    = errors.New("host not found in registry")
-	ErrHostInvalid     = errors.New("host name is invalid")
-	ErrProjectExists   = errors.New("project already registered on this host")
-	ErrProjectNotFound = errors.New("project not registered on this host")
-	ErrProjectInvalid  = errors.New("project name is invalid")
+	ErrHostExists       = errors.New("host already exists in registry")
+	ErrHostNotFound     = errors.New("host not found in registry")
+	ErrHostInvalid      = errors.New("host name is invalid")
+	ErrProjectExists    = errors.New("project already registered on this host")
+	ErrProjectNotFound  = errors.New("project not registered on this host")
+	ErrProjectInvalid   = errors.New("project name is invalid")
+	ErrSSHTargetInvalid = errors.New("ssh target is invalid")
 )
 
 // NewRegistry returns a Registry rooted at canopyHome (typically
@@ -455,6 +456,32 @@ func validateName(name string) error {
 	}
 	if name == "local" {
 		return fmt.Errorf("%w: %q is reserved for future use", ErrHostInvalid, name)
+	}
+	return nil
+}
+
+// ValidateSSHTarget rejects an SSH target that could be misinterpreted
+// as a command-line option by ssh, mosh, or a tool one of those wraps
+// internally. canopy's own ssh/mosh call sites (internal/host/ssh.go)
+// defend against this with an explicit "--" separator before the
+// target — but that fix doesn't universally hold: confirmed by PoC
+// that ssh-copy-id (invoked from internal/ui/update_host.go for the
+// Hosts-tab "set up auth" flow) still forwards an option-shaped target
+// to ITS OWN internal ssh invocation unprotected, even when canopy's
+// own call to ssh-copy-id puts "--" before it. Rejecting at the point
+// of use is the guarantee that holds regardless of how a given
+// downstream tool behaves, or where the bad value originated (a
+// tampered hosts.json bypasses any registration-time check entirely).
+//
+// Empty and leading-dash strings are rejected; anything else is a
+// plausible hostname/IP/SSH alias and is accepted as-is — canopy
+// doesn't validate DNS shape, only the option-injection shape.
+func ValidateSSHTarget(target string) error {
+	if target == "" {
+		return fmt.Errorf("%w: empty SSH target", ErrSSHTargetInvalid)
+	}
+	if strings.HasPrefix(target, "-") {
+		return fmt.Errorf("%w: %q starts with \"-\", which ssh/mosh/ssh-copy-id could parse as an option instead of a hostname", ErrSSHTargetInvalid, target)
 	}
 	return nil
 }

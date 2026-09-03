@@ -199,7 +199,7 @@ func (m *Model) attachRemoteRow(row Row, shared bool) tea.Cmd {
 		canopyBin = os.Args[0]
 	}
 	args := []string{"switch", "--on", row.Host}
-	cwd := m.remoteCwdForRow(row.Host, row.Project)
+	cwd := m.remoteCwdForRow(row.Host, row.Project, row.RemoteProjectPath)
 	// For IsMain rows, --remote-cwd is load-bearing: the remote canopy
 	// needs to be cd'd into the right project before `canopy main`
 	// walks up looking for canopy.json. Without it, resolveOnForSwitch

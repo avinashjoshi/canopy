@@ -249,12 +249,12 @@ func TestValidateName(t *testing.T) {
 		{"home-server", true},
 		{"box1", true},
 		{"", false},
-		{"avi@tower", false},   // looks like an SSH target
-		{"tower:22", false},    // looks like an SSH target with port
-		{"local", false},       // reserved
-		{"with space", false},  // whitespace
-		{"a/b", false},         // slash
-		{"\tname", false},      // leading tab
+		{"avi@tower", false},  // looks like an SSH target
+		{"tower:22", false},   // looks like an SSH target with port
+		{"local", false},      // reserved
+		{"with space", false}, // whitespace
+		{"a/b", false},        // slash
+		{"\tname", false},     // leading tab
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -267,6 +267,43 @@ func TestValidateName(t *testing.T) {
 			}
 			if err != nil && !errors.Is(err, ErrHostInvalid) {
 				t.Errorf("validateName(%q): error type = %v, want ErrHostInvalid", c.name, err)
+			}
+		})
+	}
+}
+
+// TestValidateSSHTarget covers the option-injection guard: a target
+// shaped like a command-line flag (leading "-") must be rejected, since
+// ssh/mosh/ssh-copy-id could parse it as an option instead of a
+// hostname (confirmed by PoC during the v0.22.0.0 security review — see
+// ValidateSSHTarget's doc comment). A plausible hostname, IP, or
+// user@host form must pass — this function doesn't validate DNS shape,
+// only the option-injection shape.
+func TestValidateSSHTarget(t *testing.T) {
+	cases := []struct {
+		target    string
+		wantValid bool
+	}{
+		{"tower", true},
+		{"avi@tower.tail-abc.ts.net", true},
+		{"tower.example.com:2222", true},
+		{"192.168.1.1", true},
+		{"", false},                            // empty
+		{"-oProxyCommand=touch /tmp/x", false}, // ssh option injection
+		{"--server=malicious-command", false},  // mosh option injection
+		{"-", false},                           // bare dash
+	}
+	for _, c := range cases {
+		t.Run(c.target, func(t *testing.T) {
+			err := ValidateSSHTarget(c.target)
+			if c.wantValid && err != nil {
+				t.Errorf("ValidateSSHTarget(%q) = %v, want nil", c.target, err)
+			}
+			if !c.wantValid && err == nil {
+				t.Errorf("ValidateSSHTarget(%q) = nil, want error", c.target)
+			}
+			if err != nil && !errors.Is(err, ErrSSHTargetInvalid) {
+				t.Errorf("ValidateSSHTarget(%q): error type = %v, want ErrSSHTargetInvalid", c.target, err)
 			}
 		})
 	}

@@ -166,3 +166,79 @@ func TestPropagateRemoteHostEnv(t *testing.T) {
 		}
 	})
 }
+
+func indexOf(s []string, want string) int {
+	for i, v := range s {
+		if v == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestMoshExecArgv_TargetSeparator is the regression test for the live
+// hand-tested bug: dispatchSwitchToRemote's actual syscall.Exec argv
+// (built by moshExecArgv) previously had a redundant second "--" between
+// target and the wrapped command, which mosh forwards verbatim as
+// [command...] — mosh-server then tries to execvp a program literally
+// named "--" ("mosh-server: execvp: --: No such file or directory").
+// internal/host/ssh.go's MoshCmd got this exact regression test when the
+// bug was fixed there; this is its counterpart for the real exec path
+// real users hit, which previously had no test at all.
+func TestMoshExecArgv_TargetSeparator(t *testing.T) {
+	argv := moshExecArgv("avi@tower", "exec canopy switch oauth-fix")
+	if argv[0] != "mosh" {
+		t.Fatalf("argv[0] = %q, want \"mosh\"", argv[0])
+	}
+
+	targetIdx := indexOf(argv, "avi@tower")
+	if targetIdx < 0 {
+		t.Fatalf("target not found in argv: %v", argv)
+	}
+	if targetIdx == 0 || argv[targetIdx-1] != "--" {
+		t.Fatalf("target at idx %d must be immediately preceded by \"--\"; argv: %v", targetIdx, argv)
+	}
+
+	// Command must follow target DIRECTLY — no second "--".
+	want := []string{"bash", "-lc", "exec canopy switch oauth-fix"}
+	got := argv[targetIdx+1:]
+	if len(got) != len(want) {
+		t.Fatalf("post-target argv: got %v, want %v (no separator between target and command)", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("post-target argv[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+
+	dashCount := 0
+	for _, a := range argv {
+		if a == "--" {
+			dashCount++
+		}
+	}
+	if dashCount != 1 {
+		t.Errorf("found %d \"--\" tokens in argv; want exactly 1: %v", dashCount, argv)
+	}
+}
+
+// TestMoshExecArgv_DashPrefixedTargetIsProtected mirrors
+// TestMoshCmd_DashPrefixedTargetIsProtected: a target shaped like a mosh
+// option must land strictly after the leading "--" so mosh's own parser
+// can't mistake it for a flag.
+func TestMoshExecArgv_DashPrefixedTargetIsProtected(t *testing.T) {
+	evil := "--server=malicious-command"
+	argv := moshExecArgv(evil, "exec canopy switch foo")
+
+	leadingDashIdx := indexOf(argv, "--")
+	if leadingDashIdx < 0 {
+		t.Fatalf("no leading \"--\" found; dash-prefixed target would be parsed as a mosh option: %v", argv)
+	}
+	targetIdx := indexOf(argv, evil)
+	if targetIdx < 0 {
+		t.Fatalf("target %q not found verbatim in argv: %v", evil, argv)
+	}
+	if targetIdx != leadingDashIdx+1 {
+		t.Errorf("target at idx %d must immediately follow the leading \"--\" at idx %d; argv: %v", targetIdx, leadingDashIdx, argv)
+	}
+}

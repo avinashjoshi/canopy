@@ -293,3 +293,40 @@ func TestResolveProjectContext_unregisteredProjectFallsThrough(t *testing.T) {
 		t.Errorf("cfg = nil; want non-nil (walk-up should populate cfg)")
 	}
 }
+
+// TestRouteRemote_EmptySpec covers routeRemote's fail-fast path: an
+// empty --remote value must error out BEFORE any Bubbletea program
+// launches. This is one of the few branches of routeRemote that's
+// safely unit-testable — the success path (including the unregistered-
+// bare-name-falls-back-to-raw-target case; see
+// TestResolveRemoteHost/unregistered_bare_name_falls_back_to_a_raw_target
+// in host_resolve_test.go) hands off to ui.RunRemotePinned, which takes
+// over the terminal, same reason routeRoot itself isn't driven end-to-
+// end in these tests (see the file header comment).
+func TestRouteRemote_EmptySpec(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	err := routeRemote("")
+	if err == nil {
+		t.Fatal("routeRemote(\"\") = nil error; want an error")
+	}
+}
+
+// TestRouteRemote_DashPrefixedSpecRejected covers routeRemote's other
+// still-erroring case even under the raw-target fallback (see
+// resolveRemoteHost): a dash-prefixed spec is option-injection-shaped
+// and must be rejected before it ever reaches ssh/mosh's argv or the
+// TUI takes over the terminal.
+func TestRouteRemote_DashPrefixedSpecRejected(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	err := routeRemote("-oProxyCommand=touch /tmp/x")
+	if err == nil {
+		t.Fatal("routeRemote(dash-prefixed spec) = nil error; want an error")
+	}
+	if !strings.Contains(err.Error(), "-\"") {
+		t.Errorf("error = %q; want it to explain the leading-dash rejection", err.Error())
+	}
+}

@@ -66,7 +66,7 @@ func actionDelete(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // pass --remote-cwd and bypass cmd/canopy's first-project-on-host
 // fallback (which renders as the scary "(fallback)" annotation in
 // dispatch source strings).
-func (m *Model) findDeleteTargetRemoteHost() (host, project string, ok bool) {
+func (m *Model) findDeleteTargetRemoteHost() (host, project, remoteProjectPath string, ok bool) {
 	for _, r := range m.filteredRows() {
 		if r.Name != m.deleteTarget {
 			continue
@@ -75,11 +75,11 @@ func (m *Model) findDeleteTargetRemoteHost() (host, project string, ok bool) {
 			continue
 		}
 		if r.Host != "" {
-			return r.Host, r.Project, true
+			return r.Host, r.Project, r.RemoteProjectPath, true
 		}
-		return "", "", false
+		return "", "", "", false
 	}
-	return "", "", false
+	return "", "", "", false
 }
 
 // handleConfirmDeleteKey is the keymap while the delete prompt is up.
@@ -102,7 +102,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// v0.17.0: if the target is a remote row (row.Host != ""), dispatch
 	// to that host's canopy rm via subprocess instead of going through
 	// the local Manager.
-	if remoteHost, remoteProject, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
+	if remoteHost, remoteProject, remoteProjectPath, isRemote := m.findDeleteTargetRemoteHost(); isRemote {
 		// Remote path: laptop didn't run the safety check (canopy.json
 		// only exists on tower), so the modal offers both y AND F.
 		// y → dispatch without --force (remote will refuse on hanging
@@ -128,7 +128,7 @@ func (m *Model) handleConfirmDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// — that fallback path is the one that prints `(fallback)` in the
 		// dispatch source and can land an rm in the WRONG project entirely
 		// when the host has multiple registered projects.
-		args := append([]string{name, "--yes"}, m.remoteCwdArg(remoteHost, remoteProject)...)
+		args := append([]string{name, "--yes"}, m.remoteCwdArg(remoteHost, remoteProject, remoteProjectPath)...)
 		return m, m.execRemoteVerb(remoteHost, "rm", args, force)
 	}
 

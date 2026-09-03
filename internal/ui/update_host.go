@@ -328,6 +328,16 @@ func (m *Model) handleConfirmSSHCopyIDKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() != "y" && msg.String() != "Y" {
 		return m, nil
 	}
+	// Validate before invoking, not just "-- target": confirmed by PoC
+	// that ssh-copy-id forwards an option-shaped target to its OWN
+	// internal ssh invocation unprotected, so a "--" separator on
+	// canopy's call to ssh-copy-id does NOT make this safe the way it
+	// does for canopy's direct ssh/mosh calls. See
+	// host.ValidateSSHTarget's doc comment for the full explanation.
+	if err := host.ValidateSSHTarget(target); err != nil {
+		log.Warn("ui.ssh-copy-id.invalid-target", "target", target, "err", err)
+		return m, nil
+	}
 	cmd := exec.Command("ssh-copy-id", target)
 	cmd.Env = os.Environ()
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
