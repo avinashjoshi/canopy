@@ -24,6 +24,14 @@ import (
 // level is bumped from INFO to DEBUG before any other canopy package runs.
 var debugFlag bool
 
+// remoteFlag is the --remote switch on the root command (v0.22). When
+// non-empty, canopy launches as a thin client pinned to that one
+// registered host — see routeRemote in route.go — instead of the
+// normal cwd-driven local/global routing in routeRoot. Resolved the
+// same way `--on <host>` is: a name in ~/.canopy/hosts.json, or a raw
+// user@host SSH target.
+var remoteFlag string
+
 // version, commit, and date are injected via -ldflags by `make install`
 // (see Makefile LDFLAGS). When canopy is built via `make build` /
 // `make dev` / `go install`, these stay at their defaults — `version`
@@ -92,6 +100,12 @@ func main() {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// --remote <host> bypasses cwd-driven routing entirely: a
+			// thin client pinned to one registered host, no local
+			// project resolution. See routeRemote in route.go.
+			if remoteFlag != "" {
+				return routeRemote(remoteFlag)
+			}
 			// `canopy` with no subcommand is context-sensitive (see
 			// route.go for the full dispatch table):
 			//   - inside a project   → project TUI
@@ -105,6 +119,14 @@ func main() {
 		},
 	}
 	root.PersistentFlags().BoolVar(&debugFlag, "debug", false, "enable DEBUG-level logging to ~/.canopy/log/canopy.log")
+	// root.Flags() (NOT PersistentFlags): --remote is a root-only mode
+	// selector, not a modifier like --debug that should apply everywhere.
+	// PersistentFlags() would let it parse silently on every subcommand
+	// (`canopy new foo --remote tower`) without doing anything — only the
+	// root command's own RunE checks remoteFlag. Flags() makes cobra
+	// reject it on subcommands with "unknown flag: --remote" instead of
+	// accepting and ignoring it.
+	root.Flags().StringVar(&remoteFlag, "remote", "", "launch as a thin client pinned to a registered host (e.g. --remote tower)")
 
 	root.AddCommand(versionCmd())
 	root.AddCommand(initCmd())

@@ -20,10 +20,10 @@ import (
 // (where canopy will cd before running on the remote). Source carries
 // a human-readable trace of how we got here for the dispatch log.
 type resolvedHost struct {
-	SSHTarget  string
-	RemoteCwd  string // empty when caller will pass --remote-cwd explicitly
-	Source     string // "registry:<host>/<project>" or "raw-target"
-	HostName   string // empty if raw target
+	SSHTarget string
+	RemoteCwd string // empty when caller will pass --remote-cwd explicitly
+	Source    string // "registry:<host>/<project>" or "raw-target"
+	HostName  string // empty if raw target
 }
 
 // resolveOnForNew turns the value of `--on` into a usable SSH target +
@@ -167,6 +167,46 @@ func resolveOnForSwitch(spec, preferredProject, explicitRemoteCwd string) (resol
 		Source:    source,
 		HostName:  spec,
 	}, nil
+}
+
+// resolveRemoteHost turns the value of `--remote` into a usable
+// host.Host for the `canopy --remote <spec>` thin-client mode (v0.22,
+// see routeRemote). Same raw-target-vs-registry-name heuristic as
+// resolveOnForNew/resolveOnForSwitch: a spec containing `@` or `:` is
+// treated as a raw SSH target (no registry involved, no `host add`
+// required — mirrors herdr's `--remote <host>` just logging straight
+// in), anything else is looked up by name in ~/.canopy/hosts.json.
+//
+// selfHeal reports whether the resolved host has a real registry entry
+// to attach auto-discovered project registrations to (see
+// buildRemoteRowsMsg's selfHeal parameter in internal/ui) — true for a
+// registry name, false for a raw target.
+//
+// Unlike resolveOnForNew/resolveOnForSwitch, there's no "which project"
+// step here: --remote lists every project on the host (`canopy ls
+// --json --all`), it doesn't dispatch into one.
+func resolveRemoteHost(spec string) (h host.Host, selfHeal bool, err error) {
+	if spec == "" {
+		return host.Host{}, false, fmt.Errorf("resolveRemoteHost: empty --remote value")
+	}
+	if strings.ContainsAny(spec, "@:") {
+		return host.Host{Name: spec, Type: "ssh", SSHTarget: spec}, false, nil
+	}
+	reg, err := loadHostRegistry()
+	if err != nil {
+		return host.Host{}, false, fmt.Errorf("resolveRemoteHost: %w", err)
+	}
+	resolved, err := reg.Resolve(spec)
+	if err != nil {
+		return host.Host{}, false, fmt.Errorf(
+			"host %q not registered. Run `canopy host add %s <ssh-target>`, or pass a raw SSH target directly (e.g. --remote user@host): %w",
+			spec, spec, err)
+	}
+	if resolved.Type != "ssh" {
+		return host.Host{}, false, fmt.Errorf(
+			"resolveRemoteHost: host %q has type %q; only \"ssh\" is supported", spec, resolved.Type)
+	}
+	return resolved, true, nil
 }
 
 // probeRemoteCwd is a fast `test -d` check over SSH. Used before

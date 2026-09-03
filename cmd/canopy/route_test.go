@@ -293,3 +293,40 @@ func TestResolveProjectContext_unregisteredProjectFallsThrough(t *testing.T) {
 		t.Errorf("cfg = nil; want non-nil (walk-up should populate cfg)")
 	}
 }
+
+// TestRouteRemote_UnregisteredHost covers routeRemote's fail-fast path:
+// an unregistered host name must error out BEFORE any Bubbletea program
+// launches (routeRemote resolves the host from the registry first).
+// This is the only branch of routeRemote that's safely unit-testable —
+// the success path hands off to ui.RunRemotePinned, which takes over
+// the terminal, same reason routeRoot itself isn't driven end-to-end
+// in these tests (see the file header comment).
+func TestRouteRemote_UnregisteredHost(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	err := routeRemote("nonexistent-host")
+	if err == nil {
+		t.Fatal("routeRemote(unregistered host) = nil error; want an error")
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Errorf("error = %q; want it to mention the host isn't registered", err.Error())
+	}
+}
+
+// TestRouteRemote_EmptyRegistry is the zero-hosts case: ~/.canopy has
+// no hosts.json at all yet (fresh install, never ran `canopy host add`).
+// Should fail the same clear way as an unregistered name, not panic on
+// a missing file.
+func TestRouteRemote_EmptyRegistry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	err := routeRemote("tower")
+	if err == nil {
+		t.Fatal("routeRemote(no hosts.json) = nil error; want an error")
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Errorf("error = %q; want it to mention the host isn't registered", err.Error())
+	}
+}

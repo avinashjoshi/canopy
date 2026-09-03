@@ -256,6 +256,51 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 	})
 }
 
+// routeRemote launches the `canopy --remote <spec>` thin-client mode
+// (v0.22): a Bubbletea TUI pinned to exactly one host, with no local
+// project/canopy.json resolution at all. spec is resolved by
+// resolveRemoteHost — either a name in ~/.canopy/hosts.json, or a raw
+// SSH target (e.g. `user@tower`), which needs no prior `canopy host
+// add` at all (mirrors herdr's `--remote <host>` logging straight in).
+//
+// Kept deliberately minimal versus routeRoot: no local Manager, no
+// init-splash gate (a thin client has no "first canopy install" case),
+// and no in-TUI upgrade-check wiring yet — just the version pill, so
+// the top bar still identifies which binary is running. Unlike
+// routeRoot, takes no ctx/stdout — nothing here does cancellable I/O or
+// prints a warning yet; add them back when a real need shows up (e.g.
+// resolveRemoteHost growing a connectivity probe).
+func routeRemote(spec string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("canopy --remote: home dir: %w", err)
+	}
+	canopyHome := filepath.Join(home, ".canopy")
+	store, err := state.NewStore(canopyHome)
+	if err != nil {
+		return err
+	}
+	// Fails fast, before the TUI takes over the terminal, if spec looks
+	// like a registry name but isn't registered — same courtesy
+	// resolveOnForNew/resolveOnForSwitch give --on. A raw SSH target
+	// never fails here (no registry involved); any connectivity problem
+	// surfaces once the TUI's first refresh actually tries to SSH.
+	h, selfHeal, err := resolveRemoteHost(spec)
+	if err != nil {
+		return err
+	}
+	tc := tmux.New()
+
+	d := versionDetails()
+	versionLabel := d.Version
+	if d.IsDev {
+		versionLabel = ""
+	}
+	return ui.RunRemotePinned(store, tc, h, selfHeal, ui.RunUnifiedOptions{
+		VersionLabel: versionLabel,
+		DevWorkspace: d.DevWorkspace,
+	})
+}
 
 // resolveProjectContext picks the canonical current-project root for the
 // unified TUI launch given a cwd. ResolveCurrentProject (workspace-path

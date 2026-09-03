@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -108,6 +110,284 @@ func TestNewUnified_DefaultTab(t *testing.T) {
 			t.Errorf("tab = %v; want tabGlobal when currentProject == \"\"", m.tab)
 		}
 	})
+}
+
+// TestNewRemotePinned: the `canopy --remote <host>` thin-client
+// constructor (v0.22) must produce a Model with no local project/mgr,
+// pinned to exactly the given host, landing on tabGlobal (the only tab
+// visibleTabs() will offer it — see TestVisibleTabs_Pinned below).
+// Covers both resolution paths: a registry entry (selfHeal=true) and a
+// raw SSH target (selfHeal=false) — see resolveRemoteHost in
+// cmd/canopy/host_resolve.go, which is what feeds this constructor.
+func TestNewRemotePinned(t *testing.T) {
+	store := &state.Store{}
+	tc := tmux.WithSocket("canopy-test")
+
+	t.Run("registry host", func(t *testing.T) {
+		h := host.Host{Name: "tower", SSHTarget: "user@tower", Type: "ssh"}
+		m := NewRemotePinned(store, tc, h, true)
+
+		if m.pinnedHost.Name != "tower" {
+			t.Errorf("pinnedHost.Name = %q; want %q", m.pinnedHost.Name, "tower")
+		}
+		if !m.pinnedHostSelfHeal {
+			t.Error("pinnedHostSelfHeal = false; want true for a registry-resolved host")
+		}
+		if m.mgr != nil {
+			t.Errorf("mgr = %v; want nil (thin client has no local project)", m.mgr)
+		}
+		if m.currentProject != "" {
+			t.Errorf("currentProject = %q; want empty", m.currentProject)
+		}
+		if m.tab != tabGlobal {
+			t.Errorf("tab = %v; want tabGlobal", m.tab)
+		}
+		if len(m.hostList) != 1 || m.hostList[0].Name != "tower" {
+			t.Errorf("hostList = %v; want exactly [tower] (row actions like kill resolve hosts by name against this list)", m.hostList)
+		}
+		// resolveHostForExec is what execRemoteKill (kill a workspace row)
+		// actually calls — proving it resolves the pinned host by name is
+		// the real regression guard, not just checking the hostList field.
+		got, err := m.resolveHostForExec("tower")
+		if err != nil {
+			t.Fatalf("resolveHostForExec(%q): %v", h.Name, err)
+		}
+		if got != "user@tower" {
+			t.Errorf("resolveHostForExec(%q) = %q; want %q", h.Name, got, "user@tower")
+		}
+	})
+
+	t.Run("raw SSH target", func(t *testing.T) {
+		h := host.Host{Name: "user@tower.tail-abc.ts.net", SSHTarget: "user@tower.tail-abc.ts.net", Type: "ssh"}
+		m := NewRemotePinned(store, tc, h, false)
+
+		if m.pinnedHost.Name != "user@tower.tail-abc.ts.net" {
+			t.Errorf("pinnedHost.Name = %q; want the raw target", m.pinnedHost.Name)
+		}
+		if m.pinnedHostSelfHeal {
+			t.Error("pinnedHostSelfHeal = true; want false for a raw SSH target (no registry entry)")
+		}
+		// Regression guard for the raw-target case specifically: a raw
+		// target has no local hosts.json entry at all, so without
+		// NewRemotePinned overriding hostList, resolveHostForExec would
+		// fail here even though the Model is looking straight at this
+		// host — silently breaking kill/new-workspace-dispatch actions
+		// for exactly the "no host add needed" flow this mode exists for.
+		got, err := m.resolveHostForExec(h.Name)
+		if err != nil {
+			t.Fatalf("resolveHostForExec(%q): %v (raw-target row actions must resolve without a registry entry)", h.Name, err)
+		}
+		if got != h.SSHTarget {
+			t.Errorf("resolveHostForExec(%q) = %q; want %q", h.Name, got, h.SSHTarget)
+		}
+	})
+}
+
+// TestVisibleTabs_Pinned: a pinned Model only ever offers tabGlobal —
+// Local doesn't apply (no local project) and Hosts (fleet management)
+// doesn't apply (the whole point is one pinned host), even if
+// currentProject or hostList would otherwise make them eligible.
+func TestVisibleTabs_Pinned(t *testing.T) {
+	m := newTestModel(false)
+	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "user@tower", Type: "ssh"}
+	// Deliberately set both would-be-eligible conditions to make sure
+	// pinnedHost short-circuits ahead of them.
+	m.currentProject = "/some/project"
+	m.hostList = []host.Host{{Name: "tower", SSHTarget: "user@tower", Type: "ssh"}}
+
+	got := m.visibleTabs()
+	if len(got) != 1 || got[0] != tabGlobal {
+		t.Errorf("visibleTabs() = %v; want [tabGlobal] when pinned", got)
+	}
+}
+
+// TestPushLoadingHosts_Pinned: while a pinned refresh is in flight, only
+// the pinned host's section header should show the loading spinner —
+// not every host in the laptop's own registry (m.hostList), which is
+// irrelevant to a thin client showing exactly one host's rows.
+func TestPushLoadingHosts_Pinned(t *testing.T) {
+	m := newTestModel(false)
+	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "user@tower", Type: "ssh"}
+	m.hostList = []host.Host{
+		{Name: "tower", SSHTarget: "user@tower", Type: "ssh"},
+		{Name: "other-host", SSHTarget: "user@other", Type: "ssh"},
+	}
+	m.remoteRefreshing = true
+
+	m.pushLoadingHosts()
+
+	if !m.list.LoadingHosts("tower") {
+		t.Error("LoadingHosts(tower) = false; want true (the pinned host)")
+	}
+	if m.list.LoadingHosts("other-host") {
+		t.Error("LoadingHosts(other-host) = true; want false (not the pinned host)")
+	}
+}
+
+// TestBuildRemoteRowsMsg_SelfHealFalseSkipsNilRegistry: when selfHeal is
+// false, buildRemoteRowsMsg must NOT touch reg (it's nil for a raw
+// --remote SSH target with no registry entry to attach auto-discovered
+// project registrations to — see resolveRemoteHost). This is a
+// regression guard for a nil-pointer risk: if the `if selfHeal`
+// guard around autoRegisterRemoteOrphans were ever dropped, this would
+// panic on the nil *host.Registry. Uses an empty hosts slice so
+// host.Refresher.Tick makes zero SSH calls — fast and network-free.
+func TestBuildRemoteRowsMsg_SelfHealFalseSkipsNilRegistry(t *testing.T) {
+	home := t.TempDir()
+
+	msg := buildRemoteRowsMsg(home, nil, []host.Host{}, false)
+
+	got, ok := msg.(remoteRowsLoadedMsg)
+	if !ok {
+		t.Fatalf("msg type = %T; want remoteRowsLoadedMsg", msg)
+	}
+	if got.err != nil {
+		t.Errorf("err = %v; want nil", got.err)
+	}
+	if len(got.rows) != 0 {
+		t.Errorf("rows = %v; want none", got.rows)
+	}
+}
+
+// TestBuildRemoteRowsMsg_SelfHealTrueRunsOrphanCheck is the selfHeal=true
+// sibling of TestBuildRemoteRowsMsg_SelfHealFalseSkipsNilRegistry: proves
+// the `if selfHeal { hosts = autoRegisterRemoteOrphans(...) }` guard
+// actually RUNS (not just correctly skips) when selfHeal is true and reg
+// is a real, non-nil registry — i.e. the registry-resolved --remote path
+// (see resolveRemoteHost's selfHeal=true branch). Uses an empty hosts
+// slice for the same reason as its sibling: host.Refresher.Tick makes
+// zero SSH calls, so this stays fast and network-free while still
+// exercising the guard's true arm against a real *host.Registry instead
+// of nil.
+func TestBuildRemoteRowsMsg_SelfHealTrueRunsOrphanCheck(t *testing.T) {
+	home := t.TempDir()
+	reg, err := host.NewRegistry(home)
+	if err != nil {
+		t.Fatalf("host.NewRegistry: %v", err)
+	}
+
+	msg := buildRemoteRowsMsg(home, reg, []host.Host{}, true)
+
+	got, ok := msg.(remoteRowsLoadedMsg)
+	if !ok {
+		t.Fatalf("msg type = %T; want remoteRowsLoadedMsg", msg)
+	}
+	if got.err != nil {
+		t.Errorf("err = %v; want nil", got.err)
+	}
+	if len(got.rows) != 0 {
+		t.Errorf("rows = %v; want none", got.rows)
+	}
+}
+
+// cmdFuncName identifies WHICH named function produced a tea.Cmd closure,
+// via the closure's own compiled name (e.g.
+// "internal/ui.refreshCmdWithMem.func1"). Used to inspect a tea.Batch's
+// contents without invoking any of the sub-commands — several of them do
+// real I/O (SSH, disk), which unit tests must not trigger. Returns "" for
+// a nil Cmd (tea.Batch skips nils itself, but callers may still see one
+// in the slice depending on Bubbletea version).
+func cmdFuncName(c tea.Cmd) string {
+	if c == nil {
+		return ""
+	}
+	return runtime.FuncForPC(reflect.ValueOf(c).Pointer()).Name()
+}
+
+// TestRefresh_PinnedModeSkipsLocalRefresh and its non-pinned sibling below
+// close a real gap: refresh() has two new branches added alongside
+// pinnedHost (skip local rows entirely; dispatch refreshRemoteCmdForHost
+// instead of refreshRemoteCmd), and neither was exercised by a test —
+// every pre-existing refresh() test uses a zero-value pinnedHost. A
+// regression here would leak the laptop's own local workspace rows into
+// a `canopy --remote <host>` thin client, or silently fan out to every
+// registered host instead of just the pinned one.
+//
+// Doesn't invoke any of the batched commands (several do real SSH/disk
+// I/O) — instead identifies each one by its compiled closure name via
+// cmdFuncName, which is enough to prove which code paths refresh()
+// decided to include without triggering any of them.
+func TestRefresh_PinnedModeSkipsLocalRefresh(t *testing.T) {
+	m := newTestModel(false)
+	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "user@tower", Type: "ssh"}
+	m.pinnedHostSelfHeal = true
+
+	batch := refreshBatchForTest(t, m)
+
+	var sawLocal, sawPinnedRemote, sawAllHostsRemote bool
+	for _, sub := range batch {
+		switch name := cmdFuncName(sub); {
+		case strings.HasSuffix(name, ".refreshCmdWithMem.func1"):
+			sawLocal = true
+		case strings.HasSuffix(name, ".refreshRemoteCmdForHost.func1"):
+			sawPinnedRemote = true
+		case strings.HasSuffix(name, ".refreshRemoteCmd.func1"):
+			sawAllHostsRemote = true
+		}
+	}
+
+	if sawLocal {
+		t.Error("pinned refresh() dispatched refreshCmdWithMem (local rows); must never load local state in --remote thin-client mode")
+	}
+	if !sawPinnedRemote {
+		t.Error("pinned refresh() did not dispatch refreshRemoteCmdForHost (single-host fan-out)")
+	}
+	if sawAllHostsRemote {
+		t.Error("pinned refresh() dispatched refreshRemoteCmd (all-hosts fan-out); should use the single-host path instead")
+	}
+}
+
+// TestRefresh_UnpinnedModeIncludesLocalRefresh is the non-pinned mirror:
+// proves the ordinary (non-thin-client) path still dispatches BOTH the
+// local refresh and the all-hosts remote fan-out, i.e. that the new
+// pinnedHost branches didn't accidentally change default behavior.
+func TestRefresh_UnpinnedModeIncludesLocalRefresh(t *testing.T) {
+	m := newTestModel(false)
+	// pinnedHost left zero-valued — this is the default, non-thin-client path.
+
+	batch := refreshBatchForTest(t, m)
+
+	var sawLocal, sawPinnedRemote, sawAllHostsRemote bool
+	for _, sub := range batch {
+		switch name := cmdFuncName(sub); {
+		case strings.HasSuffix(name, ".refreshCmdWithMem.func1"):
+			sawLocal = true
+		case strings.HasSuffix(name, ".refreshRemoteCmdForHost.func1"):
+			sawPinnedRemote = true
+		case strings.HasSuffix(name, ".refreshRemoteCmd.func1"):
+			sawAllHostsRemote = true
+		}
+	}
+
+	if !sawLocal {
+		t.Error("unpinned refresh() did not dispatch refreshCmdWithMem (local rows)")
+	}
+	if sawPinnedRemote {
+		t.Error("unpinned refresh() dispatched refreshRemoteCmdForHost; should use the all-hosts path instead")
+	}
+	if !sawAllHostsRemote {
+		t.Error("unpinned refresh() did not dispatch refreshRemoteCmd (all-hosts fan-out)")
+	}
+}
+
+// refreshBatchForTest calls m.refresh() and unwraps the resulting
+// tea.Cmd into its tea.BatchMsg slice WITHOUT invoking any sub-command.
+// Invoking the outer Cmd only packages the batch (see tea.Batch's
+// implementation) — it does not run the inner commands, so this stays
+// side-effect-free even though several of the inner commands do real
+// I/O when actually invoked.
+func refreshBatchForTest(t *testing.T, m *Model) []tea.Cmd {
+	t.Helper()
+	cmd := m.refresh()
+	if cmd == nil {
+		t.Fatal("refresh() returned a nil cmd")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("refresh() cmd produced %T; want tea.BatchMsg", msg)
+	}
+	return batch
 }
 
 // TestHandleKey_TabSwitch: tab key flips m.tab between Local and Global.

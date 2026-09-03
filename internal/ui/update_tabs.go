@@ -50,6 +50,13 @@ func actionTabPrev(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 // tabLocal only appears when a project context exists; tabHosts only
 // when at least one host is registered. tabGlobal is always present.
 func (m *Model) visibleTabs() []tabKind {
+	// Pinned thin-client mode (`canopy --remote <host>`, v0.22): there's
+	// no local project and the Hosts fleet-management tab doesn't apply
+	// — the whole point is a single pinned host's workspaces. See
+	// NewRemotePinned.
+	if m.pinnedHost.Name != "" {
+		return []tabKind{tabGlobal}
+	}
 	out := make([]tabKind, 0, 3)
 	if m.currentProject != "" {
 		out = append(out, tabLocal)
