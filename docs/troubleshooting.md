@@ -166,7 +166,11 @@ Pre-v0.17.0.1 bug. Refresher used to do flock I/O on the UI thread before return
 
 ### `canopy switch --on tower` falls back to ssh instead of mosh
 
-Mosh is missing on one side. Install mosh on both, or accept the ssh fallback (works fine, just no UDP resilience):
+As of v0.22.x this is expected, automatic behavior when mosh isn't installed
+locally — canopy attaches over an ssh reconnect-loop instead of refusing to
+attach. It re-dials with backoff on a dropped connection, so it's not just a
+bare one-shot `ssh -t`. If you'd rather have mosh's UDP resilience, install
+mosh on both ends:
 
 ```bash
 # Arch / Omarchy
@@ -179,7 +183,13 @@ sudo apt-get install mosh
 brew install mosh
 ```
 
-Also: mosh's default UDP port range is 60000–61000. If the host is behind a firewall, either open that range or stick with the ssh fallback.
+You can also opt into the ssh path explicitly, even when mosh IS installed,
+with `--no-mosh` — useful when mosh's UDP port range (60000–61000 by
+default) is blocked by a firewall or VPN but ssh still works:
+
+```bash
+canopy switch --on tower fix-the-bug --no-mosh
+```
 
 ### `canopy new --on tower` from `$HOME` says "needs a project but you're not inside any"
 

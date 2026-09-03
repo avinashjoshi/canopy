@@ -215,6 +215,7 @@ Then dispatch from anywhere:
 canopy new --on tower                              # workspace lives on tower
 canopy new --on tower --prompt "fix the bug" --no-attach
 canopy switch --on tower fix-the-bug               # attach via mosh+tmux
+canopy switch --on tower fix-the-bug --no-mosh     # ...or an ssh reconnect-loop instead of mosh
 ```
 
 Full guide with hosts.json schema, ssh-copy-id flow, and TUI-side keys: [`remote-workspaces.md`](remote-workspaces.md).

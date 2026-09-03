@@ -8,6 +8,15 @@ setup once installed.
 
 Design doc: [`docs/design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md).
 
+**Zero-setup with `canopy --remote <host>` (v0.22.x).** If you're using the
+thin-client `--remote` mode (see
+[`remote-workspaces.md`](remote-workspaces.md#thin-client-mode-zero-setup-with-canopy---remote-host)),
+skip the Setup section below entirely — the first successful connection
+installs the bridge unattended (laptop-side daemon/SSH config, then the
+per-host wrappers and tunnel), with a one-line status notice instead of the
+manual flow's full transcript. The manual steps below still apply if you're
+using the registered `--on <host>` flow, or want to install ahead of time.
+
 ## What works (verified end-to-end)
 
 | Direction | Mechanism | Verified |
@@ -61,7 +70,10 @@ The daemon listens on three Unix sockets in `$XDG_RUNTIME_DIR/canopy/`:
 canopy host clipboard <host-name>
 ```
 
-…or press `c` on the host's row in the Hosts tab.
+…or press `c` on the host's row in the Hosts tab. As of v0.22.x, `<host-name>`
+doesn't have to be registered — it resolves the same way `--remote`/`--on` do
+(a registered `hosts.json` name, or a raw SSH target used directly), so you
+can install against a box you haven't run `canopy host add` on.
 
 What this does, in order:
 
@@ -264,14 +276,19 @@ mosh-attached sessions get the tmux bindings *except* `Ctrl+Shift+C`.
 `y` and `Enter` cover most copy-mode workflows.
 
 If you want SSH-attach instead (for `Ctrl+Shift+C` fidelity, or
-because you're on a network where UDP is awkward), open the session
-manually:
+because you're on a network where UDP is awkward), pass `--no-mosh`
+(v0.22.x):
 
 ```bash
-ssh <host> tmux attach -t canopy/<project>/<workspace>
+canopy switch --on tower fix-the-bug --no-mosh
 ```
 
-A `canopy switch --ssh` flag is on the list for a follow-up release.
+This attaches over an ssh reconnect-loop instead of mosh — it re-dials
+with backoff on a dropped connection rather than kicking you back to a
+shell. The same flag works on `canopy --remote <host> --no-mosh` for the
+thin-client mode. If mosh isn't installed locally at all, canopy now falls
+back to this path automatically, so you don't have to remember the flag
+just because a box is missing mosh.
 
 ## Troubleshooting
 
@@ -394,7 +411,6 @@ ssh <host> '$HOME/.local/bin/wl-paste --list-types'
 | Audit logging of clipboard content | Out of scope | Compliance feature; needs separate security review |
 | Drag-drop image from browser to remote terminal | Out of scope | Terminal protocols don't carry image-drop today |
 | Mobile clipboard (phone → remote) | Out of scope | Different transport entirely (ntfy / Tailscale Funnel) |
-| `canopy switch --ssh` (avoid mosh) | v0.18.x | Small follow-up; tracked |
 | Auto-detection of "no PATH precedence" + auto-fix | v0.18.x | Install warns; auto-fix is fiddly across shells |
 
 ## How it works (one-paragraph version)
