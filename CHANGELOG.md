@@ -13,13 +13,15 @@ Until now, checking on a remote canopy install meant either being inside a regis
 
 While tracing the raw-target path through canopy's existing remote-dispatch code, an adversarial security review surfaced a real, confirmed vulnerability that predates this release: every `ssh`/`mosh` invocation across canopy's remote-host code passed the target straight into the command's argument list with nothing marking where options end and the target begins. A target (or `hosts.json` entry) shaped like an option — `-oProxyCommand=...` for ssh, `--server=...` for mosh — was parsed as that option instead of a hostname, and confirmed by proof-of-concept to run arbitrary local commands, on every background refresh tick, not just on manual dispatch. Every such call site now inserts an explicit `--` before the target, which is the standard fix and was already present at one existing call site — this pass makes it consistent everywhere.
 
+`ssh-copy-id` (used by the Hosts tab's "set up auth" flow) turned out not to be fixable the same way: it's a wrapper script, and PoC testing showed it forwards an option-shaped target to its *own* internal `ssh` call unprotected — canopy's `--` on the *outer* `ssh-copy-id` invocation doesn't reach that inner call at all. The fix there is validation instead of an argv trick: a shared `ValidateSSHTarget` check now rejects any target starting with `-` at the point of use, which also gives a clear canopy-level error for the raw `--remote` path instead of relying on ssh's own cryptic rejection.
+
 ### Added
 
 - **`canopy --remote <host>`** — thin-client mode: a Bubbletea TUI pinned to one host's workspaces, no local project or registration required. Accepts a registered host name or a raw `user@host` SSH target directly.
 
 ### Fixed
 
-- **ssh/mosh commands could misinterpret an option-shaped target as a flag instead of a hostname**, up to and including local arbitrary command execution via a crafted target or a tampered `hosts.json` entry. Every remote-host `ssh`/`mosh` invocation now explicitly separates options from the target.
+- **ssh/mosh commands could misinterpret an option-shaped target as a flag instead of a hostname**, up to and including local arbitrary command execution via a crafted target or a tampered `hosts.json` entry. Every remote-host `ssh`/`mosh` invocation now explicitly separates options from the target, and the Hosts tab's `ssh-copy-id` flow (which can't be fixed the same way — see above) now validates and refuses instead.
 - **`--remote` is root-only, not accepted on subcommands** — `canopy new foo --remote tower` errors with `unknown flag: --remote` instead of silently parsing and doing nothing with it.
 
 ## [0.21.17.0] - 2026-06-25 — remote hosts stop splitting each project into two headers

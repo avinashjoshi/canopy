@@ -190,6 +190,14 @@ func resolveRemoteHost(spec string) (h host.Host, selfHeal bool, err error) {
 		return host.Host{}, false, fmt.Errorf("resolveRemoteHost: empty --remote value")
 	}
 	if strings.ContainsAny(spec, "@:") {
+		// Fail fast with a clear canopy-level error rather than relying
+		// solely on ssh's own rejection of an option-shaped target
+		// (which the sink-side "--" fix in internal/host/ssh.go already
+		// guards against, but a dedicated check here gives a much
+		// clearer message than "hostname contains invalid characters").
+		if err := host.ValidateSSHTarget(spec); err != nil {
+			return host.Host{}, false, fmt.Errorf("resolveRemoteHost: %w", err)
+		}
 		return host.Host{Name: spec, Type: "ssh", SSHTarget: spec}, false, nil
 	}
 	reg, err := loadHostRegistry()

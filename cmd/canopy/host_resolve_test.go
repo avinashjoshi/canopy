@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -38,6 +39,22 @@ func TestResolveRemoteHost(t *testing.T) {
 		}
 		if selfHeal {
 			t.Error("selfHeal = true; want false for a raw target (no registry entry)")
+		}
+	})
+
+	t.Run("dash-prefixed raw target is rejected", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		// Contains "@" so it takes the raw-target branch, but the
+		// leading "-" makes it option-injection-shaped -- must be
+		// rejected before it ever reaches ssh/mosh's argv.
+		_, _, err := resolveRemoteHost("-oProxyCommand=touch /tmp/x@evil")
+		if err == nil {
+			t.Fatal("resolveRemoteHost(dash-prefixed target) = nil error; want an error")
+		}
+		if !errors.Is(err, host.ErrSSHTargetInvalid) {
+			t.Errorf("error = %v; want it to wrap host.ErrSSHTargetInvalid", err)
 		}
 	})
 

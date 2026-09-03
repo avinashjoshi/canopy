@@ -3588,6 +3588,31 @@ func TestActionHostSetupAuth_OpensSSHCopyIDModal(t *testing.T) {
 	}
 }
 
+// TestHandleConfirmSSHCopyIDKey_RejectsDashPrefixedTarget is the
+// regression test for the ssh-copy-id option-injection gap found
+// during the v0.22.0.0 security review: ssh-copy-id forwards an
+// option-shaped target to its OWN internal ssh invocation unprotected
+// (confirmed by PoC — a "--" separator on canopy's own call to
+// ssh-copy-id does NOT make this safe the way it does for direct
+// ssh/mosh calls). handleConfirmSSHCopyIDKey must validate and refuse
+// rather than exec'ing ssh-copy-id at all.
+func TestHandleConfirmSSHCopyIDKey_RejectsDashPrefixedTarget(t *testing.T) {
+	m := newTestModel(false)
+	m.mode = confirmSSHCopyIDMode
+	m.pendingProbeHost = "evil"
+	m.pendingProbeTarget = "-oProxyCommand=touch /tmp/pwned"
+
+	model, cmd := m.handleConfirmSSHCopyIDKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	mm := model.(*Model)
+
+	if mm.mode != listMode {
+		t.Errorf("mode = %v; want listMode (modal dismissed either way)", mm.mode)
+	}
+	if cmd != nil {
+		t.Error("cmd != nil; want nil — a dash-prefixed target must never reach exec.Command(\"ssh-copy-id\", ...)")
+	}
+}
+
 // TestAvailableHostAuth_GatesOnAuthFailedStatus: `a` is hidden when
 // the host's last refresh succeeded (auth is already working). Shown
 // when status=AuthFailed OR unknown (never refreshed; user can
