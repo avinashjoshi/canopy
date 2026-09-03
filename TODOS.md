@@ -94,6 +94,18 @@ Avi's read of the trade-off: "okay for now" — current behavior is correct, fut
 
 `canopy new --on tower --prompt "..."` reliably timed out with `Phase 1 timeout` on remote hosts where Claude takes longer than 5s to reach its ready marker — the hardcoded `phaseBudget` const in `internal/workspace/initprompt.go`. Fixed with `promptPhaseBudget()`: an explicit `CANOPY_PROMPT_PHASE_BUDGET` override, falling through to 15s when `CANOPY_REMOTE_DISPATCH` is set (exported unconditionally by `buildRemoteScript` on every remote dispatch), falling through to the original 5s local default otherwise. The two near-duplicate Phase 1/Phase 2 poll loops in `awaitClaudeReady` were also consolidated into one shared `awaitPaneOutput` primitive as part of the fix.
 
+**Known gap (see next item):** the `CANOPY_PROMPT_PHASE_BUDGET` override only reaches local (non-`--on`) workspace creation today — `buildRemoteScript` doesn't forward it to the remote process, so `--on <host>` dispatch always uses the 15s default regardless of what's set on the invoking laptop.
+
+---
+
+## 📋 OPEN (P3) — Forward `CANOPY_PROMPT_PHASE_BUDGET` to `--on <host>` dispatch (added 2026-09-03)
+
+**What:** `promptPhaseBudget()` (`internal/workspace/initprompt.go`) reads `CANOPY_PROMPT_PHASE_BUDGET` from its own process's env. For local workspace creation that's the invoking shell, so the override works. For `canopy new --on <host> --prompt "..."`, the wait runs inside the *remote* canopy process spawned over SSH by `dispatchNewToRemote` (`cmd/canopy/new.go`), and `buildRemoteScript` only exports `CANOPY_REMOTE_DISPATCH=1` into that remote script — it never reads or forwards `CANOPY_PROMPT_PHASE_BUDGET` from the local shell. Plain `ssh`/`SSHCmd` (`internal/host/ssh.go`) doesn't forward client env vars either (no `SendEnv`/`AcceptEnv`). Net effect: setting `CANOPY_PROMPT_PHASE_BUDGET=30s` before a `--on` dispatch silently does nothing; the remote always gets the 15s default.
+
+**Fix sketch:** in `buildRemoteScript`, mirror the existing `EnvRemoteDispatch` export — if `os.Getenv("CANOPY_PROMPT_PHASE_BUDGET")` is set locally, append `export CANOPY_PROMPT_PHASE_BUDGET=<shellQuote(value)>` to the generated script alongside the `CANOPY_REMOTE_DISPATCH` line, so the remote process inherits it. Add a table-driven test in `cmd/canopy/new_test.go` alongside the existing `CANOPY_REMOTE_DISPATCH` coverage, and a regression test confirming the flag propagates through `promptPhaseBudget()` end-to-end.
+
+**Found while:** `/document-release` doc audit for v0.22.1.0 (2026-09-03) — the CHANGELOG/TODOS/docs claimed the override worked for the remote case, which is the primary scenario the fix was written for. Docs corrected to describe the local-only behavior in the same pass; this item tracks closing the actual gap.
+
 ---
 
 ## 📋 OPEN (P3) — Nested-canopy guard scope (added 2026-05-12)

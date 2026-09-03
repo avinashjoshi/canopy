@@ -9,11 +9,11 @@ and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 `canopy new --on tower --prompt "..."` would reliably fail with `Phase 1 timeout` on remote hosts: the wait for Claude to become ready before sending the prompt had a hardcoded 5-second budget, but Claude often takes longer than that to start on a remote machine. The workspace was created fine — only the prompt delivery failed, leaving you to attach and retype it by hand.
 
-The wait now defaults to 15 seconds when running as part of a remote dispatch (5 seconds locally, unchanged), and can be overridden directly with `CANOPY_PROMPT_PHASE_BUDGET=30s` for a particularly slow host. Under the hood, the two near-duplicate poll loops that implement this wait were consolidated into one shared primitive, which also closes a small inconsistency where only one of the two phases had a guard against a flake-driven timeout right at the deadline — both now have it.
+The wait now defaults to 15 seconds when running as part of a remote dispatch (5 seconds locally, unchanged). `CANOPY_PROMPT_PHASE_BUDGET=30s` overrides either default — for now this only reaches local (non-`--on`) workspace creation, since `--on <host>` dispatch runs the wait in a fresh remote shell that doesn't inherit the invoking laptop's env yet. Under the hood, the two near-duplicate poll loops that implement this wait were consolidated into one shared primitive, which also closes a small inconsistency where only one of the two phases had a guard against a flake-driven timeout right at the deadline — both now have it.
 
 ### Fixed
 
-- **`canopy new --on <host> --prompt "..."` no longer times out waiting for Claude to become ready on hosts where it starts slowly.** The prompt-send wait now defaults to 15s when dispatched to a remote host (was a hardcoded 5s everywhere), and is overridable via `CANOPY_PROMPT_PHASE_BUDGET` for hosts that need even longer.
+- **`canopy new --on <host> --prompt "..."` no longer times out waiting for Claude to become ready on hosts where it starts slowly.** The prompt-send wait now defaults to 15s when dispatched to a remote host (was a hardcoded 5s everywhere). `CANOPY_PROMPT_PHASE_BUDGET` can override either default, though today that only works for local (non-`--on`) workspace creation — see TODOS.md for forwarding it to remote dispatch.
 
 ### Changed
 
