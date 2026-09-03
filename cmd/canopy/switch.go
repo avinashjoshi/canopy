@@ -231,23 +231,7 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	// and the global-workspace lookup finds the workspace by name across
 	// projects — so ANY registered project works as the cd target.
 	remoteCmd := buildRemoteSwitchCmd(resolved.RemoteCwd, resolved.HostName, wsName, share, main)
-	// "--" before target: without it, a target string shaped like a mosh
-	// option (e.g. "--server=malicious-command") is parsed by mosh as a
-	// FLAG, not a hostname — confirmed by PoC. target traces back to
-	// resolved.SSHTarget, which a raw --on/--remote spec sets directly
-	// from user input with no validation. See internal/host/ssh.go's
-	// MoshCmd for the same fix applied to the non-exec code path.
-	//
-	// Exactly ONE "--" belongs here. mosh's own usage is
-	// "[options] [--] [user@]host [command...]" — no second "--" between
-	// host and command. A second one (this line used to have one,
-	// inherited from before the security fix added the first) becomes
-	// the FIRST ELEMENT of the forwarded command itself: mosh forwards
-	// everything after host verbatim as [command...], so mosh-server
-	// receives "-- bash -lc <remoteCmd>" and tries to execvp a program
-	// literally named "--" — confirmed live: "mosh-server: execvp: --:
-	// No such file or directory".
-	argv := []string{"mosh", "--", target, "bash", "-lc", remoteCmd}
+	argv := moshExecArgv(target, remoteCmd)
 	// syscall.Exec replaces this process with mosh. On success, this
 	// call does not return; on failure we fall through to the error.
 	if err := syscall.Exec(moshBin, argv, os.Environ()); err != nil {
@@ -255,6 +239,30 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	}
 	// Unreachable.
 	return nil
+}
+
+// moshExecArgv builds the argv for the syscall.Exec into mosh: mosh
+// [--] target command... . Extracted as a pure function so the argv
+// shape is independently testable without exec'ing a real process.
+//
+// "--" before target: without it, a target string shaped like a mosh
+// option (e.g. "--server=malicious-command") is parsed by mosh as a
+// FLAG, not a hostname — confirmed by PoC. target traces back to
+// resolved.SSHTarget, which a raw --on/--remote spec sets directly
+// from user input with no validation. See internal/host/ssh.go's
+// MoshCmd for the same fix applied to the non-exec code path.
+//
+// Exactly ONE "--" belongs here. mosh's own usage is
+// "[options] [--] [user@]host [command...]" — no second "--" between
+// host and command. A second one (this used to have one, inherited
+// from before the security fix added the first) becomes the FIRST
+// ELEMENT of the forwarded command itself: mosh forwards everything
+// after host verbatim as [command...], so mosh-server receives
+// "-- bash -lc <remoteCmd>" and tries to execvp a program literally
+// named "--" — confirmed live: "mosh-server: execvp: --: No such file
+// or directory".
+func moshExecArgv(target, remoteCmd string) []string {
+	return []string{"mosh", "--", target, "bash", "-lc", remoteCmd}
 }
 
 // propagateRemoteHostEnv synchronizes the CANOPY_REMOTE_HOST tag on the

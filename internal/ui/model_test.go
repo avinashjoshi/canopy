@@ -3566,6 +3566,72 @@ func TestHandleConfirmDeleteKey_RemoteYDispatchesWithoutForce(t *testing.T) {
 	}
 }
 
+// TestFindDeleteTargetRemoteHost covers the 4th return value
+// (remoteProjectPath, sourced from row.RemoteProjectPath) directly —
+// this is the --remote-pinned delete fallback threaded through commit
+// 16065b5, previously only exercised indirectly (and only with the
+// zero-value case) by the confirm-delete tests above.
+func TestFindDeleteTargetRemoteHost(t *testing.T) {
+	tests := []struct {
+		name           string
+		rows           []Row
+		deleteTarget   string
+		deleteRoot     string
+		wantHost       string
+		wantProject    string
+		wantRemotePath string
+		wantOK         bool
+	}{
+		{
+			name: "remote row with RemoteProjectPath returns it",
+			rows: []Row{
+				{Project: "canopy", Name: "foo", Host: "tower", RemoteProjectPath: "/home/avi/canopy"},
+			},
+			deleteTarget:   "foo",
+			wantHost:       "tower",
+			wantProject:    "canopy",
+			wantRemotePath: "/home/avi/canopy",
+			wantOK:         true,
+		},
+		{
+			name: "local row (Host empty) returns zero values",
+			rows: []Row{
+				{Project: "canopy", Name: "foo", ProjectRoot: "/repo"},
+			},
+			deleteTarget: "foo",
+			wantOK:       false,
+		},
+		{
+			name:         "deleteTarget not found returns ok=false",
+			rows:         []Row{{Project: "canopy", Name: "other", Host: "tower"}},
+			deleteTarget: "foo",
+			wantOK:       false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel(false)
+			m.tab = tabGlobal
+			m.remoteRows = tt.rows
+			m.list.SetRows(m.filteredRows())
+			m.deleteTarget = tt.deleteTarget
+			m.deleteTargetRoot = tt.deleteRoot
+
+			host, project, remotePath, ok := m.findDeleteTargetRemoteHost()
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if host != tt.wantHost || project != tt.wantProject || remotePath != tt.wantRemotePath {
+				t.Errorf("got (%q, %q, %q), want (%q, %q, %q)",
+					host, project, remotePath, tt.wantHost, tt.wantProject, tt.wantRemotePath)
+			}
+		})
+	}
+}
+
 // TestActionHostSetupAuth_OpensSSHCopyIDModal: pressing `a` on a host
 // pre-loads the probe target and opens the ssh-copy-id confirm flow.
 // Lets the user retry auth without deleting and re-adding.

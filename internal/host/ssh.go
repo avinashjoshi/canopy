@@ -172,7 +172,7 @@ func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd 
 
 // ShellSingleQuote wraps s in single quotes for safe embedding inside
 // a shell command body. Embedded single quotes are escaped via the
-// standard `'\”` trick (close-quote, escaped-quote, re-open-quote)
+// standard `'\''` trick (close-quote, escaped-quote, re-open-quote)
 // so paths containing apostrophes still parse correctly.
 //
 // Exported so callers building remote shell commands for SSHRunUserBatch

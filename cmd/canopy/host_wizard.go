@@ -312,7 +312,18 @@ func truncateProbe(s string) string {
 // user gets the normal password prompt. Returns whatever ssh-copy-id
 // returns. exec.Cmd not host.SSHCmd because ssh-copy-id is its own
 // binary, not raw ssh.
+//
+// Validates target before invoking, not just "-- target": confirmed by
+// PoC that ssh-copy-id forwards an option-shaped target to its OWN
+// internal ssh invocation unprotected, so a "--" separator here does NOT
+// make this safe the way it does for canopy's direct ssh/mosh calls. See
+// host.ValidateSSHTarget's doc comment for the full explanation. This
+// wizard's huh form only checks non-empty, so validation must happen
+// here at the exec sink.
 func runSSHCopyID(target string, in io.Reader, out, errOut io.Writer) error {
+	if err := host.ValidateSSHTarget(target); err != nil {
+		return fmt.Errorf("refusing to run ssh-copy-id: %w", err)
+	}
 	binPath, err := exec.LookPath("ssh-copy-id")
 	if err != nil {
 		return fmt.Errorf("ssh-copy-id not found in PATH — install openssh-copy-id (Debian) / openssh-clients (Arch)")
