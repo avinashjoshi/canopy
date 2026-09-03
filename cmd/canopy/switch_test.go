@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -174,6 +175,38 @@ func indexOf(s []string, want string) int {
 		}
 	}
 	return -1
+}
+
+// TestChooseAttachMode_ExplicitNoMoshWins: --no-mosh must select the
+// ssh-loop path even when mosh IS available locally — the flag is an
+// explicit opt-out (e.g. mosh's UDP transport is blocked by a firewall
+// even though the binary is installed), not just a fallback signal.
+func TestChooseAttachMode_ExplicitNoMoshWins(t *testing.T) {
+	got := chooseAttachMode(true, func() error { return nil })
+	if got != attachModeSSHLoop {
+		t.Errorf("chooseAttachMode(noMosh=true, mosh available) = %v; want attachModeSSHLoop", got)
+	}
+}
+
+// TestChooseAttachMode_MoshAvailableDefaultsToMosh: the default path
+// (no --no-mosh) with a working local mosh install must pick mosh —
+// unchanged v0.17 behavior.
+func TestChooseAttachMode_MoshAvailableDefaultsToMosh(t *testing.T) {
+	got := chooseAttachMode(false, func() error { return nil })
+	if got != attachModeMosh {
+		t.Errorf("chooseAttachMode(noMosh=false, mosh available) = %v; want attachModeMosh", got)
+	}
+}
+
+// TestChooseAttachMode_MissingMoshFallsBackAutomatically: the
+// auto-detect-missing-mosh case — no --no-mosh flag, but mosh isn't
+// installed locally. Must fall back to the ssh-loop instead of the old
+// hard-fail (host.ErrMoshMissing).
+func TestChooseAttachMode_MissingMoshFallsBackAutomatically(t *testing.T) {
+	got := chooseAttachMode(false, func() error { return errors.New("exec: \"mosh\": executable file not found in $PATH") })
+	if got != attachModeSSHLoop {
+		t.Errorf("chooseAttachMode(noMosh=false, mosh missing) = %v; want attachModeSSHLoop (auto-detect fallback)", got)
+	}
 }
 
 // TestMoshExecArgv_TargetSeparator is the regression test for the live

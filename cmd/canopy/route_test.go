@@ -307,7 +307,7 @@ func TestRouteRemote_EmptySpec(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	err := routeRemote("")
+	err := routeRemote("", false)
 	if err == nil {
 		t.Fatal("routeRemote(\"\") = nil error; want an error")
 	}
@@ -322,7 +322,7 @@ func TestRouteRemote_DashPrefixedSpecRejected(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	err := routeRemote("-oProxyCommand=touch /tmp/x")
+	err := routeRemote("-oProxyCommand=touch /tmp/x", false)
 	if err == nil {
 		t.Fatal("routeRemote(dash-prefixed spec) = nil error; want an error")
 	}
