@@ -19,14 +19,29 @@ import (
 // optional. Returns stdout bytes, stderr bytes, and the exec error
 // (non-nil if the remote command exited non-zero).
 //
-// Default impl shells through internal/host.SSHCmd, which carries
-// ControlMaster + timeout knobs canopy already uses for every other
-// remote dispatch path. Tests substitute a fake to assert call shape
-// without needing a real SSH connection.
+// Default impl shells through internal/host.SSHCmdBatch — every
+// SSHExec call site in this package (id -u, mkdir, cat>file+chmod, the
+// tmux config splice, the wl-paste verify probe) is a fully
+// non-interactive remote command with no legitimate need to prompt for
+// a password, so BatchMode is correct for all of them, not just the
+// unattended v0.22.x auto-setup caller (internal/ui/update_clipboard_autosetup.go)
+// that made it load-bearing: host.SSHCmd's own doc comment warns that
+// its non-batch mode lets a password prompt open /dev/tty directly,
+// bypassing stdout/stderr redirection — harmless from a real terminal
+// (canopy host clipboard <name> run by hand, or the Hosts-tab `c` key's
+// tea.ExecProcess handoff), but it hangs the goroutine AND corrupts the
+// render when InstallOnHost runs unattended inside a live Bubbletea
+// alt-screen, which the auto-setup path does. Batch mode makes a host
+// with no cached key auth fail fast with "Permission denied
+// (publickey)" instead, which is a strict improvement for every caller.
+//
+// Carries ControlMaster + timeout knobs canopy already uses for every
+// other remote dispatch path. Tests substitute a fake to assert call
+// shape without needing a real SSH connection.
 type sshExec func(ctx context.Context, target string, stdin io.Reader, args ...string) (stdout, stderr []byte, err error)
 
 func defaultSSHExec(ctx context.Context, target string, stdin io.Reader, args ...string) (stdout, stderr []byte, err error) {
-	cmd := host.SSHCmd(ctx, target, args...)
+	cmd := host.SSHCmdBatch(ctx, target, args...)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
