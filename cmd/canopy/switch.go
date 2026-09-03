@@ -231,7 +231,13 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	// and the global-workspace lookup finds the workspace by name across
 	// projects — so ANY registered project works as the cd target.
 	remoteCmd := buildRemoteSwitchCmd(resolved.RemoteCwd, resolved.HostName, wsName, share, main)
-	argv := []string{"mosh", target, "--", "bash", "-lc", remoteCmd}
+	// "--" before target: without it, a target string shaped like a mosh
+	// option (e.g. "--server=malicious-command") is parsed by mosh as a
+	// FLAG, not a hostname — confirmed by PoC. target traces back to
+	// resolved.SSHTarget, which a raw --on/--remote spec sets directly
+	// from user input with no validation. See internal/host/ssh.go's
+	// MoshCmd for the same fix applied to the non-exec code path.
+	argv := []string{"mosh", "--", target, "--", "bash", "-lc", remoteCmd}
 	// syscall.Exec replaces this process with mosh. On success, this
 	// call does not return; on failure we fall through to the error.
 	if err := syscall.Exec(moshBin, argv, os.Environ()); err != nil {

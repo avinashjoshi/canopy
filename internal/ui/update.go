@@ -333,7 +333,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// right verb (popup → switch-client + quit, fullscreen → exec).
 		return m, m.attachOrSwitch(msg.session)
 
-
 	case createStartedMsg:
 		// First dispatch from createCmd. Kick off the streaming +
 		// completion cmds as a batch — both run concurrently.
@@ -930,7 +929,11 @@ func (m *Model) openRemoteBrowser(sshTarget, hostName string, port int) tea.Cmd 
 			"-o", "BatchMode=yes",
 			"-o", "ExitOnForwardFailure=yes",
 			"-fNL", fmt.Sprintf("%d:localhost:%d", port, port),
-			sshTarget,
+			// "--" before sshTarget: without it, a target shaped like an
+			// ssh option is parsed as a flag, not a hostname — see
+			// internal/host/ssh.go's sshCmdInternal for the full
+			// comment; same fix, same class of bug.
+			"--", sshTarget,
 		)
 		if out, err := tunnel.CombinedOutput(); err != nil {
 			outStr := string(out)
@@ -986,6 +989,7 @@ func hostsSpinnerTickCmd() tea.Cmd {
 		return hostsSpinnerTickMsg{}
 	})
 }
+
 // Drawer (i / b) lives in drawer.go. actionInspect, handleDrawerKey,
 // drawerLoadCmd, drawerLoadedMsg, bareAttachCmd are defined there.
 
@@ -1175,4 +1179,3 @@ func (m *Model) handleBusyModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.clearNewTarget()
 	return m, m.refresh()
 }
-

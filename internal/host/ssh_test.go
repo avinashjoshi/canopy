@@ -91,9 +91,13 @@ func TestSSHCmd_NilArgs(t *testing.T) {
 	}
 }
 
-// TestMoshCmd_TargetSeparator verifies the mosh syntax `mosh <target> --
-// <cmd...>` is constructed correctly. The `--` separator is required by
-// mosh to disambiguate ssh-target from the command to run.
+// TestMoshCmd_TargetSeparator verifies the mosh syntax
+// `mosh -- <target> -- <cmd...>` is constructed correctly: a leading
+// `--` protects target from being parsed as a mosh option (mosh's own
+// usage is "[options] [--] [user@]host [command...]" — confirmed by
+// PoC that without it, an option-shaped target like "--server=..."
+// is parsed as a real mosh flag, not the host), and the pre-existing
+// trailing `--` disambiguates target from the remote command.
 func TestMoshCmd_TargetSeparator(t *testing.T) {
 	cmd := MoshCmd(context.Background(), "avi@tower", "canopy", "switch", "oauth-fix")
 	args := cmd.Args
@@ -101,19 +105,23 @@ func TestMoshCmd_TargetSeparator(t *testing.T) {
 		t.Fatalf("args[0] = %q, want \"mosh\"", args[0])
 	}
 
-	dashIdx := indexOf(args, "--")
 	targetIdx := indexOf(args, "avi@tower")
 	if targetIdx < 0 {
 		t.Fatalf("target not found in args: %v", args)
 	}
-	if dashIdx < 0 {
-		t.Fatalf("`--` separator not found in args: %v", args)
-	}
-	if dashIdx <= targetIdx {
-		t.Errorf("`--` at idx %d should come after target at idx %d", dashIdx, targetIdx)
+	if targetIdx == 0 || args[targetIdx-1] != "--" {
+		t.Fatalf("target at idx %d must be immediately preceded by \"--\" (protects an option-shaped target from mosh's own flag parser); args: %v", targetIdx, args)
 	}
 
-	// Args after `--` should be the remote command, in order.
+	// The separator AFTER target — search starting past target, since
+	// the protective "--" before it would otherwise be found first.
+	dashIdx := indexOf(args[targetIdx+1:], "--")
+	if dashIdx < 0 {
+		t.Fatalf("`--` separator after target not found in args: %v", args)
+	}
+	dashIdx += targetIdx + 1
+
+	// Args after that `--` should be the remote command, in order.
 	want := []string{"canopy", "switch", "oauth-fix"}
 	got := args[dashIdx+1:]
 	if len(got) != len(want) {
@@ -123,6 +131,31 @@ func TestMoshCmd_TargetSeparator(t *testing.T) {
 		if got[i] != w {
 			t.Errorf("post-`--` arg[%d] = %q, want %q", i, got[i], w)
 		}
+	}
+}
+
+// TestMoshCmd_DashPrefixedTargetIsProtected is the direct regression
+// test for the security fix: a target string shaped like a mosh option
+// must land in argv strictly AFTER the leading "--", never be
+// reordered or dropped, so mosh's own parser can't mistake it for a
+// flag (e.g. "--server=malicious-command" — confirmed by PoC to
+// otherwise be interpreted as mosh's --server option, i.e. the command
+// mosh runs to start the remote session).
+func TestMoshCmd_DashPrefixedTargetIsProtected(t *testing.T) {
+	evil := "--server=malicious-command"
+	cmd := MoshCmd(context.Background(), evil, "canopy", "switch", "foo")
+	args := cmd.Args
+
+	leadingDashIdx := indexOf(args, "--")
+	if leadingDashIdx < 0 {
+		t.Fatalf("no leading \"--\" found; dash-prefixed target would be parsed as a mosh option: %v", args)
+	}
+	targetIdx := indexOf(args, evil)
+	if targetIdx < 0 {
+		t.Fatalf("target %q not found verbatim in args: %v", evil, args)
+	}
+	if targetIdx != leadingDashIdx+1 {
+		t.Errorf("target at idx %d must immediately follow the leading \"--\" at idx %d; args: %v", targetIdx, leadingDashIdx, args)
 	}
 }
 

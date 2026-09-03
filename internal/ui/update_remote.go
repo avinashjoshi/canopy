@@ -140,7 +140,15 @@ func (m *Model) execRemoteKill(hostName, sessionName string) tea.Cmd {
 		"-o", "ControlPersist=300",
 		"-o", "BatchMode=yes",
 		"-o", "NumberOfPasswordPrompts=0",
-		resolved,
+		// "--" before resolved: without it, an SSHTarget value shaped
+		// like an ssh option (e.g. "-oProxyCommand=...") is parsed as a
+		// FLAG, not a hostname — confirmed by PoC to achieve local
+		// arbitrary command execution. resolved comes from hosts.json
+		// (m.hostList), which nothing validates the content of beyond
+		// the host NAME's charset — see internal/host/ssh.go's
+		// sshCmdInternal for the same fix applied to canopy's other ssh
+		// call sites.
+		"--", resolved,
 		"tmux", "kill-session", "-t", sessionName,
 	)
 	return func() tea.Msg {

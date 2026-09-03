@@ -156,7 +156,14 @@ func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd 
 		"-o", "ConnectTimeout=5",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=3",
-		target,
+		// "--" before target: without it, a target string shaped like an
+		// option (e.g. "-oProxyCommand=...") is parsed by ssh as a FLAG,
+		// not a hostname — confirmed by PoC to achieve local arbitrary
+		// command execution. target ultimately traces back to
+		// host.Host.SSHTarget, which a raw `--remote`/`--on` spec or a
+		// tampered hosts.json entry can set to anything. "--" makes ssh
+		// treat everything after it as positional, closing that off.
+		"--", target,
 		"bash", "-lc", quoted,
 	}
 	log.Debug("ssh.run-user", "target", target, "remote_cmd", remoteCmd)
@@ -165,7 +172,7 @@ func SSHRunUser(ctx context.Context, target string, remoteCmd string) *exec.Cmd 
 
 // ShellSingleQuote wraps s in single quotes for safe embedding inside
 // a shell command body. Embedded single quotes are escaped via the
-// standard `'\''` trick (close-quote, escaped-quote, re-open-quote)
+// standard `'\”` trick (close-quote, escaped-quote, re-open-quote)
 // so paths containing apostrophes still parse correctly.
 //
 // Exported so callers building remote shell commands for SSHRunUserBatch
@@ -197,7 +204,11 @@ func SSHRunUserBatch(ctx context.Context, target string, remoteCmd string) *exec
 		"-o", "ServerAliveCountMax=3",
 		"-o", "BatchMode=yes",
 		"-o", "NumberOfPasswordPrompts=0",
-		target,
+		// "--" before target: see SSHRunUser's identical comment — without
+		// it, a target shaped like an ssh option is parsed as a flag, not
+		// a hostname (confirmed by PoC: local arbitrary command execution
+		// via a "-oProxyCommand=..." target).
+		"--", target,
 		"bash", "-lc", quoted,
 	}
 	log.Debug("ssh.run-user-batch", "target", target, "remote_cmd", remoteCmd)
@@ -226,7 +237,14 @@ func sshCmdInternal(ctx context.Context, target string, batch bool, args ...stri
 			"-o", "NumberOfPasswordPrompts=0",
 		)
 	}
-	sshArgs = append(sshArgs, target)
+	// "--" before target: see SSHRunUser's identical comment — without
+	// it, a target shaped like an ssh option is parsed as a flag, not a
+	// hostname (confirmed by PoC: local arbitrary command execution via
+	// a "-oProxyCommand=..." target). This is the shared implementation
+	// behind SSHCmd/SSHCmdBatch, both of which run on every background
+	// refresh tick (host.Refresher.Tick), so a poisoned hosts.json entry
+	// would fire this repeatedly, not just on manual dispatch.
+	sshArgs = append(sshArgs, "--", target)
 	sshArgs = append(sshArgs, args...)
 	log.Debug("ssh.cmd", "target", target, "batch", batch, "args", args)
 	return exec.CommandContext(ctx, "ssh", sshArgs...)
@@ -251,8 +269,15 @@ func sshCmdInternal(ctx context.Context, target string, batch bool, args ...stri
 // 7 days by default, which is correct for the canopy use case (laptop
 // suspended for a long time, returns to attached session).
 func MoshCmd(ctx context.Context, target string, args ...string) *exec.Cmd {
-	// mosh syntax: `mosh <ssh-target> -- <command...>`
-	moshArgs := []string{target, "--"}
+	// mosh syntax: `mosh [options] [--] <ssh-target> [command...]`. The
+	// leading "--" is load-bearing, not decorative: mosh's own usage
+	// line documents "[options] [--] [user@]host" — without it, a
+	// target shaped like a mosh option (e.g. "--ssh=...") would be
+	// parsed as a flag rather than the host, the same class of bug
+	// fixed in sshCmdInternal/SSHRunUser for the ssh binary itself.
+	// The trailing "--" separates the target from the optional
+	// command args that follow.
+	moshArgs := []string{"--", target, "--"}
 	moshArgs = append(moshArgs, args...)
 	log.Debug("mosh.cmd", "target", target, "args", args)
 	return exec.CommandContext(ctx, "mosh", moshArgs...)
@@ -279,7 +304,9 @@ func ExitControlMaster(target string) {
 	cmd := exec.Command("ssh",
 		"-o", "ControlPath="+socketPath,
 		"-O", "exit",
-		target,
+		// "--" before target: same option-injection risk as the other
+		// ssh call sites in this file — see sshCmdInternal's comment.
+		"--", target,
 	)
 	// `ssh -O exit` writes "Exit request sent." on success or
 	// "Control socket connect(...): No such file or directory" when

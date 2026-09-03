@@ -173,7 +173,11 @@ func newHostUpgradeSSHCmd(ctx context.Context, sshTarget, remoteCmd string) *exe
 		"-o", "ControlPersist=300",
 		"-o", "BatchMode=yes",
 		"-o", "NumberOfPasswordPrompts=0",
-		sshTarget,
+		// "--" before sshTarget: without it, a target shaped like an ssh
+		// option is parsed as a flag, not a hostname — see
+		// internal/host/ssh.go's sshCmdInternal for the full comment;
+		// same fix, same class of bug.
+		"--", sshTarget,
 		"bash", "-l",
 	)
 	cmd.Stdin = strings.NewReader(remoteCmd + "\n")
