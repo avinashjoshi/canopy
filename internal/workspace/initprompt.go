@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -47,12 +48,17 @@ func (e *ErrPromptFailed) Error() string {
 //
 // Phases (locked via codex review of the v3 design):
 //
-//  1. (≤5s) Poll capture-pane every 0.5s for the trust dialog OR a
-//     claude-ready marker. If trust → dismiss with Enter, advance to
-//     Phase 2. If ready → skip to Phase 3. If timeout → fail.
+//  1. (≤promptPhaseBudget, default 5s) Poll capture-pane every 0.5s for
+//     the trust dialog OR a claude-ready marker. If trust → dismiss
+//     with Enter, advance to Phase 2. If ready → skip to Phase 3. If
+//     timeout → fail. Budget is longer by default when
+//     CANOPY_REMOTE_DISPATCH is set (see promptPhaseBudget) — the
+//     whole process, including this poll loop, runs on the remote
+//     host for `canopy new --on <host>`, and Claude reliably takes
+//     longer than 5s to render there.
 //
-//  2. (≤5s) Poll for the claude-ready marker after trust dismiss.
-//     Same timeout semantics.
+//  2. (≤promptPhaseBudget) Poll for the claude-ready marker after
+//     trust dismiss. Same timeout semantics.
 //
 //  3. (verify) Re-capture and confirm at least one claude-only marker
 //     is visible. If only shell content (keepAlive fallback after
@@ -173,70 +179,139 @@ func awaitClaudeReady(
 	paneID string,
 	progress io.Writer,
 ) error {
-	const (
-		pollInterval = 500 * time.Millisecond
-		phaseBudget  = 5 * time.Second
-	)
+	const pollInterval = 500 * time.Millisecond
+	budget := promptPhaseBudget()
 
-	// Phase 1: trust OR ready.
-	phase1Start := time.Now()
-	phase1Deadline := phase1Start.Add(phaseBudget)
-	var trustSeen bool
-	for time.Now().Before(phase1Deadline) {
-		captured, err := capturePaneTimeout(ctx, tx, paneID, pollInterval)
-		if err == nil {
-			if agent.IsClaudeRendering(captured) {
-				clearProgress(progress)
-				return nil
-			}
-			if agent.IsTrustDialog(captured) {
-				trustSeen = true
-				dismissCtx, dismissCancel := context.WithTimeout(ctx, 2*time.Second)
-				err := tx.SendKeyName(dismissCtx, paneID, "Enter")
-				dismissCancel()
-				if err != nil {
-					clearProgress(progress)
-					return &ErrPromptFailed{
-						Reason: "send-keys Enter to dismiss trust failed: " + err.Error(),
-					}
-				}
-				break
-			}
-		}
-		elapsed := time.Since(phase1Start).Round(time.Second)
-		fmt.Fprintf(progress, "\rWaiting for agent... %s / %s ", elapsed, phaseBudget)
-		time.Sleep(pollInterval)
+	// Phase 1: race ready-OR-trust. awaitPaneOutput doesn't know about
+	// trust dismissal — that's this function's concern, not the generic
+	// poller's — so inspect the captured text it returns to decide which
+	// condition actually matched.
+	captured, err := awaitPaneOutput(ctx, tx, paneID, budget, pollInterval, progress,
+		"Waiting for agent...",
+		fmt.Sprintf("Phase 1 timeout: neither trust dialog nor claude ready marker appeared in %s", budget),
+		func(s string) bool { return agent.IsClaudeRendering(s) || agent.IsTrustDialog(s) },
+	)
+	if err != nil {
+		return err
 	}
-	clearProgress(progress)
-	if !trustSeen {
-		// One more capture in case the ready marker rendered right at
-		// the deadline (avoids a flake-driven timeout).
-		if captured, err := capturePaneTimeout(ctx, tx, paneID, pollInterval); err == nil &&
-			agent.IsClaudeRendering(captured) {
-			return nil
-		}
+	if agent.IsClaudeRendering(captured) {
+		return nil
+	}
+	// Trust dialog matched. Dismiss it, then fall through to Phase 2.
+	dismissCtx, dismissCancel := context.WithTimeout(ctx, 2*time.Second)
+	err = tx.SendKeyName(dismissCtx, paneID, "Enter")
+	dismissCancel()
+	if err != nil {
 		return &ErrPromptFailed{
-			Reason: "Phase 1 timeout: neither trust dialog nor claude ready marker appeared in 5s",
+			Reason: "send-keys Enter to dismiss trust failed: " + err.Error(),
 		}
 	}
 
 	// Phase 2: post-trust ready marker.
-	phase2Start := time.Now()
-	phase2Deadline := phase2Start.Add(phaseBudget)
-	for time.Now().Before(phase2Deadline) {
-		captured, err := capturePaneTimeout(ctx, tx, paneID, pollInterval)
-		if err == nil && agent.IsClaudeRendering(captured) {
-			clearProgress(progress)
-			return nil
+	_, err = awaitPaneOutput(ctx, tx, paneID, budget, pollInterval, progress,
+		"Waiting for claude (post-trust)...",
+		fmt.Sprintf("Phase 2 timeout: claude ready marker never appeared in %s after trust dismiss", budget),
+		agent.IsClaudeRendering,
+	)
+	return err
+}
+
+// EnvRemoteDispatch is the env var buildRemoteScript (cmd/canopy/new.go)
+// sets unconditionally on every `canopy new --on <host>` dispatch, and
+// promptPhaseBudget reads to detect that this process is running on the
+// remote host itself. Exported as a shared constant so the two sites
+// can't drift apart on the literal string.
+const EnvRemoteDispatch = "CANOPY_REMOTE_DISPATCH"
+
+// Default prompt-phase budget tiers. See promptPhaseBudget.
+const (
+	defaultLocalBudget  = 5 * time.Second
+	defaultRemoteBudget = 15 * time.Second
+)
+
+// promptPhaseBudget resolves the wall-clock budget for each phase of
+// awaitClaudeReady. Three tiers, checked in order:
+//
+//  1. CANOPY_PROMPT_PHASE_BUDGET, an explicit override (e.g. "15s"),
+//     parsed via time.ParseDuration. A malformed value, or a
+//     zero/negative duration (ParseDuration happily accepts "0s"/"-1s"
+//     — that's not "malformed" to it, but a zero-or-negative budget
+//     would skip awaitPaneOutput's poll loop entirely and rely solely
+//     on its one grace-period capture), falls through to the next tier
+//     rather than being honored — this is a best-effort escape hatch,
+//     not a strict config surface.
+//  2. EnvRemoteDispatch: set unconditionally by buildRemoteScript on
+//     every `canopy new --on <host>` dispatch (cmd/canopy/new.go),
+//     since the entire `canopy new` process — including this poll
+//     loop's tmux capture-pane calls — runs on the remote host itself.
+//     Claude reliably takes longer than 5s to reach its ready marker
+//     on a fresh remote install, so the default is longer here.
+//  3. Otherwise: defaultLocalBudget, unchanged from the original
+//     hardcoded local default (TUI's in-process "from a prompt" flow
+//     never sets EnvRemoteDispatch, so it keeps failing fast as before).
+func promptPhaseBudget() time.Duration {
+	if v := os.Getenv("CANOPY_PROMPT_PHASE_BUDGET"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		} else if err != nil {
+			promptLog.Warn("invalid CANOPY_PROMPT_PHASE_BUDGET, ignoring", "value", v, "err", err)
+		} else {
+			promptLog.Warn("CANOPY_PROMPT_PHASE_BUDGET must be positive, ignoring", "value", v)
 		}
-		elapsed := time.Since(phase2Start).Round(time.Second)
-		fmt.Fprintf(progress, "\rWaiting for claude (post-trust)... %s / %s ", elapsed, phaseBudget)
-		time.Sleep(pollInterval)
+	}
+	if os.Getenv(EnvRemoteDispatch) != "" {
+		return defaultRemoteBudget
+	}
+	return defaultLocalBudget
+}
+
+// awaitPaneOutput polls capture-pane every pollInterval until
+// match(captured) is true, ctx is done, or budget elapses. Reports
+// "<label> <elapsed> / <budget>" to progress each tick. On budget
+// exhaustion, does one grace-period re-check right at the deadline
+// (guards against a flake-driven timeout when the match condition
+// renders right as the deadline passes) before giving up.
+//
+// Returns the captured text on success. Returns
+// *ErrPromptFailed{Reason: timeoutMsg} on timeout, or a plain error if
+// ctx is cancelled/expires independently of budget.
+func awaitPaneOutput(
+	ctx context.Context,
+	tx *tmux.Client,
+	paneID string,
+	budget, pollInterval time.Duration,
+	progress io.Writer,
+	label, timeoutMsg string,
+	match func(captured string) bool,
+) (string, error) {
+	start := time.Now()
+	deadline := start.Add(budget)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			clearProgress(progress)
+			return "", ctx.Err()
+		}
+		captured, err := capturePaneTimeout(ctx, tx, paneID, pollInterval)
+		if err == nil && match(captured) {
+			clearProgress(progress)
+			return captured, nil
+		}
+		elapsed := time.Since(start).Round(time.Second)
+		fmt.Fprintf(progress, "\r%s %s / %s ", label, elapsed, budget)
+		select {
+		case <-ctx.Done():
+			clearProgress(progress)
+			return "", ctx.Err()
+		case <-time.After(pollInterval):
+		}
 	}
 	clearProgress(progress)
-	return &ErrPromptFailed{
-		Reason: "Phase 2 timeout: claude ready marker never appeared in 5s after trust dismiss",
+	// One more capture in case the match condition rendered right at the
+	// deadline (avoids a flake-driven timeout).
+	if captured, err := capturePaneTimeout(ctx, tx, paneID, pollInterval); err == nil && match(captured) {
+		return captured, nil
 	}
+	return "", &ErrPromptFailed{Reason: timeoutMsg}
 }
 
 // clearProgress overwrites the carriage-return progress line with
