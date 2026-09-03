@@ -16,7 +16,7 @@ Canopy workspaces don't have to live on your laptop. Register an SSH-reachable h
 | Canopy (v0.17.0+) | Laptop AND each remote host | Both ends speak the same wire protocol (`canopy ls --json` schema v3). |
 | SSH (OpenSSH 8.x+) | Laptop | ControlMaster reuse keeps refresh fast. |
 | SSH key auth to each host | Laptop ↔ host | Passwords break the BatchMode no-prompt contract. The `--interactive` add flow can run `ssh-copy-id` for you. |
-| mosh (1.4+) | Both ends | Used by `canopy switch --on <host>` for suspend-tolerant attach. Optional as of v0.22.x — falls back automatically to an ssh reconnect-loop if mosh isn't installed locally, or opt into that path explicitly with `--no-mosh` even when mosh IS installed (e.g. its UDP transport is blocked by a firewall/VPN). |
+| mosh (1.4+) | Both ends | Used by `canopy switch --on <host>` for suspend-tolerant attach. Optional as of v0.23.0.0 — falls back automatically to an ssh reconnect-loop if mosh isn't installed locally, or opt into that path explicitly with `--no-mosh` even when mosh IS installed (e.g. its UDP transport is blocked by a firewall/VPN). |
 
 Install canopy on the remote with the same one-liner you used locally:
 
@@ -55,7 +55,7 @@ Use `--remote` for the "just log in and look" case; use the registered `--on <ho
 when you want the host to also show up folded into your regular local + Global workspace view, or
 when you're scripting against it (`canopy new --on tower`, `canopy rm --on tower`, etc.).
 
-**Clipboard bridge auto-setup (v0.22.x).** The first time a `--remote` session confirms the host is
+**Clipboard bridge auto-setup (v0.23.0.0).** The first time a `--remote` session confirms the host is
 reachable, canopy automatically runs the same install the Hosts tab's `c` key (and `canopy host
 clipboard <name>`) would — laptop-side systemd unit + SSH config, then the per-host wrappers and
 tunnel — so pasting a screenshot into an agent on the pinned host works without any manual setup
@@ -136,7 +136,7 @@ canopy switch --on tower fix-the-bug
 
 Under the hood that's `mosh --ssh="ssh ..." -- tmux attach -t canopy/<branch>`. Mosh's UDP transport tolerates laptop suspend, flaky wifi, and roaming between networks.
 
-If mosh isn't installed locally, canopy falls back automatically (v0.22.x) to an ssh reconnect-loop: it attaches over plain `ssh -t`, and if the connection drops (ssh exits 255 — its own "transport failed" signal), canopy re-dials with exponential backoff instead of dropping you back to a shell. It's not as seamless as mosh's UDP roaming, but it survives a flaky connection the way a bare one-shot `ssh -t tmux attach` never would. You can also opt into the same path explicitly even when mosh IS installed:
+If mosh isn't installed locally, canopy falls back automatically (v0.23.0.0) to an ssh reconnect-loop: it attaches over plain `ssh -t`, and if the connection drops (ssh exits 255 — its own "transport failed" signal), canopy re-dials with exponential backoff instead of dropping you back to a shell. It's not as seamless as mosh's UDP roaming, but it survives a flaky connection the way a bare one-shot `ssh -t tmux attach` never would. You can also opt into the same path explicitly even when mosh IS installed:
 
 ```bash
 canopy switch --on tower fix-the-bug --no-mosh

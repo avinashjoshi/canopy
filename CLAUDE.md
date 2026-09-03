@@ -61,6 +61,16 @@ internal/host/          Multi-host remote dispatch (v0.17+): hosts.json registry
                         shell out through. Every target passed to ssh/mosh gets an
                         explicit `--` separator before it (v0.22) so a target or
                         hosts.json entry shaped like a flag can't be parsed as one.
+                        SSHAttachLoop (v0.23) is the ssh-reconnect-loop attach
+                        primitive behind `--no-mosh` and the automatic fallback
+                        when mosh isn't installed locally.
+internal/clipboard/     Laptop clipboard bridge (v0.18+): local daemon + per-host
+                        installer wiring the laptop's Wayland clipboard into a
+                        remote workspace over SSH RemoteForward. Installer SSH
+                        calls run in batch mode (v0.23) so a host without cached
+                        key auth fails fast instead of hanging. SanitizeArtifactName
+                        (v0.23) makes a raw `--remote` SSH target safe to use as an
+                        artifact name for unattended auto-install.
 internal/agent/         Agent launcher metadata (claude / codex / aider) and
                         canonical role strings (RoleForType → `agent:<launcher>`).
 internal/hooks/         Script execution via exec.CommandContext + CANOPY_* env.

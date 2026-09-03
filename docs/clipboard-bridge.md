@@ -8,7 +8,7 @@ setup once installed.
 
 Design doc: [`docs/design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md).
 
-**Zero-setup with `canopy --remote <host>` (v0.22.x).** If you're using the
+**Zero-setup with `canopy --remote <host>` (v0.23.0.0).** If you're using the
 thin-client `--remote` mode (see
 [`remote-workspaces.md`](remote-workspaces.md#thin-client-mode-zero-setup-with-canopy---remote-host)),
 skip the Setup section below entirely — the first successful connection
@@ -70,7 +70,7 @@ The daemon listens on three Unix sockets in `$XDG_RUNTIME_DIR/canopy/`:
 canopy host clipboard <host-name>
 ```
 
-…or press `c` on the host's row in the Hosts tab. As of v0.22.x, `<host-name>`
+…or press `c` on the host's row in the Hosts tab. As of v0.23.0.0, `<host-name>`
 doesn't have to be registered — it resolves the same way `--remote`/`--on` do
 (a registered `hosts.json` name, or a raw SSH target used directly), so you
 can install against a box you haven't run `canopy host add` on.
@@ -277,7 +277,7 @@ mosh-attached sessions get the tmux bindings *except* `Ctrl+Shift+C`.
 
 If you want SSH-attach instead (for `Ctrl+Shift+C` fidelity, or
 because you're on a network where UDP is awkward), pass `--no-mosh`
-(v0.22.x):
+(v0.23.0.0):
 
 ```bash
 canopy switch --on tower fix-the-bug --no-mosh

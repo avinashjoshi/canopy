@@ -166,7 +166,7 @@ Pre-v0.17.0.1 bug. Refresher used to do flock I/O on the UI thread before return
 
 ### `canopy switch --on tower` falls back to ssh instead of mosh
 
-As of v0.22.x this is expected, automatic behavior when mosh isn't installed
+As of v0.23.0.0 this is expected, automatic behavior when mosh isn't installed
 locally — canopy attaches over an ssh reconnect-loop instead of refusing to
 attach. It re-dials with backoff on a dropped connection, so it's not just a
 bare one-shot `ssh -t`. If you'd rather have mosh's UDP resilience, install
