@@ -426,6 +426,28 @@ type Model struct {
 	// no registry entry to attach project registrations to.
 	pinnedHostSelfHeal bool
 
+	// pinnedNoMosh carries the `canopy --remote <host> --no-mosh` root
+	// flag (v0.22.x). attachRemoteRow (internal/ui/update_attach.go)
+	// forwards it to the `canopy switch --on ...` subprocess as
+	// --no-mosh so every attach in this pinned session uses the ssh
+	// reconnect-loop instead of mosh, regardless of whether mosh is
+	// installed locally. See cmd/canopy/switch.go's chooseAttachMode.
+	pinnedNoMosh bool
+
+	// clipboardAutoSetupTried latches once the first successful
+	// remote-refresh snapshot for pinnedHost is known — whether that
+	// resulted in an install attempt or was skipped because the bridge
+	// was already up. Prevents every ~2s refresh tick from re-running
+	// the install. See maybeAutoSetupClipboardBridge.
+	clipboardAutoSetupTried bool
+	// clipboardAutoSetupNotice / clipboardAutoSetupNoticeFor render a
+	// one-line status banner (mirrors m.err's placement in View) while
+	// the auto-setup is running and briefly after it finishes. Only
+	// meaningful in pinned thin-client mode — the ordinary Hosts tab
+	// keeps its own explicit `c`-key confirm flow and pill rendering.
+	clipboardAutoSetupNotice    string
+	clipboardAutoSetupNoticeFor time.Time
+
 	// hostsSpinnerFrame indexes the Braille frame for every host row
 	// currently in hosts.StatusLoading. Advanced by hostsSpinnerTickMsg
 	// while remoteRefreshing is true; held steady otherwise so the row
@@ -1160,10 +1182,11 @@ func RunUnified(mgr *workspace.Manager, store *state.Store, tc *tmux.Client, cur
 // already looking at. It also keeps a pinned session from carrying the
 // user's entire local host registry in memory, matching this
 // constructor's own "shows ONLY that one host" contract.
-func NewRemotePinned(store *state.Store, tc *tmux.Client, h host.Host, selfHeal bool) *Model {
+func NewRemotePinned(store *state.Store, tc *tmux.Client, h host.Host, selfHeal, noMosh bool) *Model {
 	m := NewUnified(nil, store, tc, "", "", "")
 	m.pinnedHost = h
 	m.pinnedHostSelfHeal = selfHeal
+	m.pinnedNoMosh = noMosh
 	m.hostList = []host.Host{h}
 	m.tab = tabGlobal
 	return m
@@ -1173,8 +1196,8 @@ func NewRemotePinned(store *state.Store, tc *tmux.Client, h host.Host, selfHeal 
 // cmd/canopy/route.go's routeRemote. Mirrors RunUnified's wiring
 // (version pill, upgrade closures, alt-screen/mouse setup) but builds
 // the model via NewRemotePinned instead of NewUnified.
-func RunRemotePinned(store *state.Store, tc *tmux.Client, h host.Host, selfHeal bool, opts RunUnifiedOptions) error {
-	m := NewRemotePinned(store, tc, h, selfHeal)
+func RunRemotePinned(store *state.Store, tc *tmux.Client, h host.Host, selfHeal, noMosh bool, opts RunUnifiedOptions) error {
+	m := NewRemotePinned(store, tc, h, selfHeal, noMosh)
 	m.RunInitFunc = opts.RunInitFunc
 	m.SetVersionInfo(opts.VersionLabel, opts.DevWorkspace)
 	m.SetUpgradeAvailable(opts.InitialUpgrade)
