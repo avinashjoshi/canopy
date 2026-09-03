@@ -16,7 +16,7 @@ Canopy workspaces don't have to live on your laptop. Register an SSH-reachable h
 | Canopy (v0.17.0+) | Laptop AND each remote host | Both ends speak the same wire protocol (`canopy ls --json` schema v3). |
 | SSH (OpenSSH 8.x+) | Laptop | ControlMaster reuse keeps refresh fast. |
 | SSH key auth to each host | Laptop ↔ host | Passwords break the BatchMode no-prompt contract. The `--interactive` add flow can run `ssh-copy-id` for you. |
-| mosh (1.4+) | Both ends | Used by `canopy switch --on <host>` for suspend-tolerant attach. Fallback to `ssh -t` if mosh is missing on either side. |
+| mosh (1.4+) | Both ends | Used by `canopy switch --on <host>` for suspend-tolerant attach. Optional as of v0.22.x — falls back automatically to an ssh reconnect-loop if mosh isn't installed locally, or opt into that path explicitly with `--no-mosh` even when mosh IS installed (e.g. its UDP transport is blocked by a firewall/VPN). |
 
 Install canopy on the remote with the same one-liner you used locally:
 
@@ -54,6 +54,18 @@ the same as they do against any other remote row on the Global tab.
 Use `--remote` for the "just log in and look" case; use the registered `--on <host>` flow (below)
 when you want the host to also show up folded into your regular local + Global workspace view, or
 when you're scripting against it (`canopy new --on tower`, `canopy rm --on tower`, etc.).
+
+**Clipboard bridge auto-setup (v0.22.x).** The first time a `--remote` session confirms the host is
+reachable, canopy automatically runs the same install the Hosts tab's `c` key (and `canopy host
+clipboard <name>`) would — laptop-side systemd unit + SSH config, then the per-host wrappers and
+tunnel — so pasting a screenshot into an agent on the pinned host works without any manual setup
+step. It's silent on success (a one-line "clipboard bridge ready" notice appears briefly) and
+non-fatal on failure (Linux/Wayland-only per the design doc; other platforms skip it entirely). See
+[`design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md) for the mechanism.
+
+Add `--no-mosh` to skip mosh for every attach dispatched from this pinned session and use the ssh
+reconnect-loop instead (`canopy --remote tower --no-mosh`) — see "Attach" below for when that's
+useful. Missing mosh already falls back to the same path automatically.
 
 ## End-to-end walkthrough
 
@@ -122,7 +134,15 @@ The prompt travels safely: base64 encoded into a heredoc → umask-077 temp file
 canopy switch --on tower fix-the-bug
 ```
 
-Under the hood that's `mosh --ssh="ssh ..." -- tmux attach -t canopy/<branch>`. Mosh's UDP transport tolerates laptop suspend, flaky wifi, and roaming between networks. If mosh isn't installed, canopy falls back to `ssh -t tmux attach`.
+Under the hood that's `mosh --ssh="ssh ..." -- tmux attach -t canopy/<branch>`. Mosh's UDP transport tolerates laptop suspend, flaky wifi, and roaming between networks.
+
+If mosh isn't installed locally, canopy falls back automatically (v0.22.x) to an ssh reconnect-loop: it attaches over plain `ssh -t`, and if the connection drops (ssh exits 255 — its own "transport failed" signal), canopy re-dials with exponential backoff instead of dropping you back to a shell. It's not as seamless as mosh's UDP roaming, but it survives a flaky connection the way a bare one-shot `ssh -t tmux attach` never would. You can also opt into the same path explicitly even when mosh IS installed:
+
+```bash
+canopy switch --on tower fix-the-bug --no-mosh
+```
+
+useful when mosh's UDP port range (see below) is blocked but ssh still works.
 
 Once attached, the tmux statusline prefixes the workspace segment with a yellow `@<host>` pill (using the registered host nickname from `hosts.json`, not the remote's `hostname`). Two long-running sessions side by side — one local, one on `tower` — now look distinct at a glance, no more "wait, which box am I typing into?". The pill clears automatically when you re-attach to that same session locally (canopy unsets the tmux session env on local attach, so the pill never lies).
 
@@ -205,7 +225,7 @@ Hosts that are behind your laptop's canopy show a yellow `⇑` next to their ver
 ## Limitations and gotchas
 
 - **Agent must be installed on the remote.** Canopy can't ship `claude` for you. The remote needs `claude` (or whatever `scripts.agent` points at) on PATH.
-- **mosh ports.** Mosh uses UDP ports 60000–61000 by default. If you're behind a firewall, either open the range or set `MOSH_TITLE_NOPREFIX=1` and use the ssh fallback.
+- **mosh ports.** Mosh uses UDP ports 60000–61000 by default. If you're behind a firewall, either open the range or pass `--no-mosh` to use the ssh reconnect-loop attach path instead (see "Attach" above).
 - **Single-laptop assumption.** The host registry is laptop-local. If you want the same registry on a second machine, copy `~/.canopy/hosts.json` over.
 
 ## Troubleshooting
