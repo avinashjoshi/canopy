@@ -166,7 +166,10 @@ func TestRemoteEnvPrep_RunsUnderBash(t *testing.T) {
 	// finishes. The prep ships bit-for-bit identical; we only suffix
 	// the probe.
 	script := remoteEnvPrep + `; echo "PROBE_PATH=$PATH"`
-	cmd := exec.Command("bash", "-l")
+	// --noprofile: hermetic against the host machine's own
+	// /etc/profile[.d] (see TestRemoteEnvPrep_ActivatesMiseInUserLocalBin's
+	// doc comment for why this is load-bearing, not cosmetic).
+	cmd := exec.Command("bash", "--noprofile", "-l")
 	cmd.Stdin = strings.NewReader(script + "\n")
 	cmd.Env = []string{
 		"HOME=" + home,
@@ -206,7 +209,10 @@ func TestRemoteEnvPrep_DedupesPath(t *testing.T) {
 	}
 
 	script := remoteEnvPrep + `; echo "PROBE_PATH=$PATH"`
-	cmd := exec.Command("bash", "-l")
+	// --noprofile: hermetic against the host machine's own
+	// /etc/profile[.d] (see TestRemoteEnvPrep_ActivatesMiseInUserLocalBin's
+	// doc comment for why this is load-bearing, not cosmetic).
+	cmd := exec.Command("bash", "--noprofile", "-l")
 	cmd.Stdin = strings.NewReader(script + "\n")
 	cmd.Env = []string{
 		"HOME=" + home,
@@ -254,6 +260,26 @@ func TestRemoteEnvPrep_DedupesPath(t *testing.T) {
 // If a future refactor reorders the snippet to put `command -v mise`
 // before the static loop, this test fails because the stub mise
 // binary is unreachable at activation time.
+//
+// Hermeticity note (found 2026-09-02): `-l` alone isn't enough — a
+// login shell also sources the HOST MACHINE's own /etc/profile and
+// /etc/profile.d/*, which is outside this test's control and varies
+// per developer machine. On a box whose system-wide profile already
+// wires up mise (e.g. Omarchy Linux's env-bootstrap script, which
+// unconditionally appends ~/.local/share/mise/shims and ~/.local/bin
+// to PATH for every login shell — even one whose $HOME is this test's
+// fake tempdir), that append lands the REAL system `mise` on PATH
+// too, and — since it's appended, not prepended, and /usr/bin/mise
+// sits ahead of it either way — `command -v mise` can resolve to the
+// real system binary instead of this test's stub, independent of
+// whatever order remoteEnvPrep's own snippet runs in. The result: the
+// test starts asserting something about the *host machine's* shell
+// config instead of remoteEnvPrep's ordering contract, and fails (or
+// passes) based on which machine runs `go test`, not the code under
+// test. `--noprofile` skips /etc/profile and the personal profile
+// files entirely so only remoteEnvPrep's own PATH manipulation is in
+// play — restoring the isolation the fake $HOME was already trying to
+// provide.
 func TestRemoteEnvPrep_ActivatesMiseInUserLocalBin(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available on PATH; remoteEnvPrep is shell-targeted")
@@ -274,7 +300,10 @@ func TestRemoteEnvPrep_ActivatesMiseInUserLocalBin(t *testing.T) {
 	}
 
 	script := remoteEnvPrep + `; echo "PROBE_PATH=$PATH"`
-	cmd := exec.Command("bash", "-l")
+	// --noprofile: hermetic against the host machine's own
+	// /etc/profile[.d] (see TestRemoteEnvPrep_ActivatesMiseInUserLocalBin's
+	// doc comment for why this is load-bearing, not cosmetic).
+	cmd := exec.Command("bash", "--noprofile", "-l")
 	cmd.Stdin = strings.NewReader(script + "\n")
 	cmd.Env = []string{
 		"HOME=" + home,
