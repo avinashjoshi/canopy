@@ -69,6 +69,34 @@ func TestBuildRemoteScript_ExportsRemoteDispatchFlag(t *testing.T) {
 	})
 }
 
+// TestBuildRemoteScript_ForwardsPromptPhaseBudgetOverride: SSH doesn't
+// forward client env vars on its own, so without explicit forwarding a
+// CANOPY_PROMPT_PHASE_BUDGET set locally would silently never reach
+// promptPhaseBudget() on the remote host.
+func TestBuildRemoteScript_ForwardsPromptPhaseBudgetOverride(t *testing.T) {
+	t.Run("set locally, forwarded into the script", func(t *testing.T) {
+		t.Setenv("CANOPY_PROMPT_PHASE_BUDGET", "30s")
+		got := buildRemoteScript("", []string{"canopy", "new", "--no-attach"}, "")
+		if !strings.Contains(got, "export CANOPY_PROMPT_PHASE_BUDGET=30s") {
+			t.Errorf("script missing forwarded CANOPY_PROMPT_PHASE_BUDGET; got:\n%s", got)
+		}
+	})
+	t.Run("unset locally, not forwarded", func(t *testing.T) {
+		t.Setenv("CANOPY_PROMPT_PHASE_BUDGET", "")
+		got := buildRemoteScript("", []string{"canopy", "new", "--no-attach"}, "")
+		if strings.Contains(got, "CANOPY_PROMPT_PHASE_BUDGET") {
+			t.Errorf("script should not export CANOPY_PROMPT_PHASE_BUDGET when unset locally; got:\n%s", got)
+		}
+	})
+	t.Run("value with shell metacharacters is quoted", func(t *testing.T) {
+		t.Setenv("CANOPY_PROMPT_PHASE_BUDGET", "30s; rm -rf /")
+		got := buildRemoteScript("", []string{"canopy", "new", "--no-attach"}, "")
+		if !strings.Contains(got, "export CANOPY_PROMPT_PHASE_BUDGET='30s; rm -rf /'") {
+			t.Errorf("forwarded value must be shell-quoted; got:\n%s", got)
+		}
+	})
+}
+
 // TestRemotePathMissingErr_IncludesRemediationWhenHostRegistered:
 // when the host was reached via a registry name, the formatted error
 // must include a copy-pasteable `canopy project add ... --on <host>`
