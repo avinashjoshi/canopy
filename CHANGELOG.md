@@ -5,6 +5,23 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0.0] - 2026-09-03 — `canopy --remote <host>`: a thin client, no `host add` required
+
+Until now, checking on a remote canopy install meant either being inside a registered local project (so the Global/Hosts tabs had something to filter to) or running the full local `canopy new --on`/`--on` dance. `canopy --remote <host>` skips all of that: run it from anywhere — no `canopy.json`, no registered project, nothing local at all — and it launches straight into a TUI showing exactly that one host's workspaces, sourced the same way the existing Global tab already fans out over SSH.
+
+`<host>` can be a name you've already registered with `canopy host add`, or — mirroring how herdr's `--remote` works — a raw SSH target typed directly (`canopy --remote avi@tower.tail-abc.ts.net`), with zero prior setup. A raw target never touches `~/.canopy/hosts.json`; it's resolved fresh each time and never persisted, matching the "just log in" workflow this mode is for.
+
+While tracing the raw-target path through canopy's existing remote-dispatch code, an adversarial security review surfaced a real, confirmed vulnerability that predates this release: every `ssh`/`mosh` invocation across canopy's remote-host code passed the target straight into the command's argument list with nothing marking where options end and the target begins. A target (or `hosts.json` entry) shaped like an option — `-oProxyCommand=...` for ssh, `--server=...` for mosh — was parsed as that option instead of a hostname, and confirmed by proof-of-concept to run arbitrary local commands, on every background refresh tick, not just on manual dispatch. Every such call site now inserts an explicit `--` before the target, which is the standard fix and was already present at one existing call site — this pass makes it consistent everywhere.
+
+### Added
+
+- **`canopy --remote <host>`** — thin-client mode: a Bubbletea TUI pinned to one host's workspaces, no local project or registration required. Accepts a registered host name or a raw `user@host` SSH target directly.
+
+### Fixed
+
+- **ssh/mosh commands could misinterpret an option-shaped target as a flag instead of a hostname**, up to and including local arbitrary command execution via a crafted target or a tampered `hosts.json` entry. Every remote-host `ssh`/`mosh` invocation now explicitly separates options from the target.
+- **`--remote` no longer silently accepted (and ignored) on subcommands** — `canopy new foo --remote tower` now errors instead of quietly doing nothing with the flag.
+
 ## [0.21.17.0] - 2026-06-25 — remote hosts stop splitting each project into two headers
 
 On the Workspaces tab, a remote host like TOWER could show a project twice: first a lone `(main)` row under one `canopy` header, then the project's real workspaces under a second `canopy` header further down. Every project on the host did it, so the list read as twice as many projects as you have.
