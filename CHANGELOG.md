@@ -5,6 +5,31 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0.0] - 2026-09-03 — clipboard bridge auto-setup + an ssh fallback for mosh
+
+`canopy --remote <host>` (v0.22.0.0) got you into a thin-client TUI on any host with zero registration — but pasting a screenshot into an agent there still needed a manual `canopy host clipboard <name>` (or the Hosts tab's `c` key) run first, and every attach hard-required `mosh` to be installed locally with no fallback. Both gaps close here.
+
+The clipboard bridge (v0.18) now installs itself. The first time a `--remote <host>` session confirms the host is reachable and the bridge isn't already up, canopy runs the full laptop-side bootstrap (systemd unit, `~/.ssh/config` Include) and the per-host install (UID detection, wrapper push, SSH snippet, persistent tunnel) in the background, with no confirmation prompt — an unattended action shouldn't hijack the terminal, so it surfaces only a one-line status banner, not the interactive transcript the manual `c` key shows. `canopy host clipboard <name>` also now accepts a raw SSH target directly, matching `--remote`/`--on`'s "no `host add` required" contract instead of requiring a registered host.
+
+Auditing that unattended path surfaced a real bug before it shipped: the per-host installer's SSH calls used the same non-batch mode meant for a foreground terminal, so a host without cached key auth — the common case on a first `--remote` connect — would open a password prompt directly against `/dev/tty` while Bubbletea owned the terminal in raw mode, hanging the goroutine and corrupting the render. Every SSH call the clipboard bridge makes is now batch-mode, so a host without working key auth fails fast with a clear error instead.
+
+Attaching no longer hard-requires mosh. `--no-mosh` (on `canopy switch --on` and paired with `canopy --remote`) attaches over a plain-SSH reconnect loop instead — useful when mosh's UDP transport is blocked by a firewall or VPN even though mosh itself is installed. Missing mosh now falls back to the same path automatically rather than refusing to attach at all. The loop re-dials with backoff on a transport-level failure (ssh exit 255) but distinguishes that from a permanent failure — a rejected key, a changed host key, an unresolvable hostname — and stops immediately on those instead of burying a potential MITM warning under minutes of "reconnecting..." noise.
+
+### Added
+
+- **Clipboard bridge auto-setup for `--remote <host>` thin-client mode.** No `canopy install clipboard-bridge` or `canopy host clipboard <name>` needed first — the first successful connection installs it unattended, with a transient status banner instead of the manual flow's full transcript.
+- **`--no-mosh` flag** on `canopy switch --on` and the `canopy --remote <host>` root command — attaches via an ssh reconnect-loop instead of mosh, propagated to every attach a pinned `--remote` session dispatches.
+- **Automatic fallback to the ssh reconnect-loop when mosh isn't installed locally** — attaching no longer hard-fails with "mosh is not installed."
+
+### Changed
+
+- **`canopy host clipboard <name>`** now resolves `<name>` the same way `--remote`/`--on` do (registered `hosts.json` name, or a raw SSH target used directly) instead of requiring registration.
+
+### Fixed
+
+- **The clipboard bridge's background SSH calls could hang and corrupt the TUI's render on a host without cached key auth.** They ran in non-batch mode, letting ssh open a password prompt directly against the terminal while Bubbletea held it in raw/alt-screen mode. Every SSH call the bridge makes is now batch-mode, failing fast with "Permission denied" instead.
+- **The ssh reconnect-loop retried permanent failures (rejected key, changed host key, unresolvable hostname) for up to ~7 minutes** before giving up, burying a potentially security-relevant host-key-mismatch warning under routine-looking retry noise. It now classifies these from the ssh diagnostic and stops immediately instead of retrying.
+
 ## [0.22.0.0] - 2026-09-03 — `canopy --remote <host>`: a thin client, no `host add` required
 
 Until now, checking on a remote canopy install meant either being inside a registered local project (so the Global/Hosts tabs had something to filter to) or running the full local `canopy new --on`/`--on` dance. `canopy --remote <host>` skips all of that: run it from anywhere — no `canopy.json`, no registered project, nothing local at all — and it launches straight into a TUI showing exactly that one host's workspaces, sourced the same way the existing Global tab already fans out over SSH.
