@@ -294,39 +294,39 @@ func TestResolveProjectContext_unregisteredProjectFallsThrough(t *testing.T) {
 	}
 }
 
-// TestRouteRemote_UnregisteredHost covers routeRemote's fail-fast path:
-// an unregistered host name must error out BEFORE any Bubbletea program
-// launches (routeRemote resolves the host from the registry first).
-// This is the only branch of routeRemote that's safely unit-testable —
-// the success path hands off to ui.RunRemotePinned, which takes over
-// the terminal, same reason routeRoot itself isn't driven end-to-end
-// in these tests (see the file header comment).
-func TestRouteRemote_UnregisteredHost(t *testing.T) {
+// TestRouteRemote_EmptySpec covers routeRemote's fail-fast path: an
+// empty --remote value must error out BEFORE any Bubbletea program
+// launches. This is one of the few branches of routeRemote that's
+// safely unit-testable — the success path (including the unregistered-
+// bare-name-falls-back-to-raw-target case; see
+// TestResolveRemoteHost/unregistered_bare_name_falls_back_to_a_raw_target
+// in host_resolve_test.go) hands off to ui.RunRemotePinned, which takes
+// over the terminal, same reason routeRoot itself isn't driven end-to-
+// end in these tests (see the file header comment).
+func TestRouteRemote_EmptySpec(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	err := routeRemote("nonexistent-host")
+	err := routeRemote("")
 	if err == nil {
-		t.Fatal("routeRemote(unregistered host) = nil error; want an error")
-	}
-	if !strings.Contains(err.Error(), "not registered") {
-		t.Errorf("error = %q; want it to mention the host isn't registered", err.Error())
+		t.Fatal("routeRemote(\"\") = nil error; want an error")
 	}
 }
 
-// TestRouteRemote_EmptyRegistry is the zero-hosts case: ~/.canopy has
-// no hosts.json at all yet (fresh install, never ran `canopy host add`).
-// Should fail the same clear way as an unregistered name, not panic on
-// a missing file.
-func TestRouteRemote_EmptyRegistry(t *testing.T) {
+// TestRouteRemote_DashPrefixedSpecRejected covers routeRemote's other
+// still-erroring case even under the raw-target fallback (see
+// resolveRemoteHost): a dash-prefixed spec is option-injection-shaped
+// and must be rejected before it ever reaches ssh/mosh's argv or the
+// TUI takes over the terminal.
+func TestRouteRemote_DashPrefixedSpecRejected(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	err := routeRemote("tower")
+	err := routeRemote("-oProxyCommand=touch /tmp/x")
 	if err == nil {
-		t.Fatal("routeRemote(no hosts.json) = nil error; want an error")
+		t.Fatal("routeRemote(dash-prefixed spec) = nil error; want an error")
 	}
-	if !strings.Contains(err.Error(), "not registered") {
-		t.Errorf("error = %q; want it to mention the host isn't registered", err.Error())
+	if !strings.Contains(err.Error(), "-\"") {
+		t.Errorf("error = %q; want it to explain the leading-dash rejection", err.Error())
 	}
 }

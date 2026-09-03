@@ -259,9 +259,11 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 // routeRemote launches the `canopy --remote <spec>` thin-client mode
 // (v0.22): a Bubbletea TUI pinned to exactly one host, with no local
 // project/canopy.json resolution at all. spec is resolved by
-// resolveRemoteHost — either a name in ~/.canopy/hosts.json, or a raw
-// SSH target (e.g. `user@tower`), which needs no prior `canopy host
-// add` at all (mirrors herdr's `--remote <host>` logging straight in).
+// resolveRemoteHost — a registered ~/.canopy/hosts.json name if spec
+// matches one, otherwise spec is used directly as a raw SSH target (a
+// ~/.ssh/config alias, `user@host`, etc.) — no prior `canopy host add`
+// required at all (mirrors herdr's `--remote <host>` logging straight
+// in).
 //
 // Kept deliberately minimal versus routeRoot: no local Manager, no
 // init-splash gate (a thin client has no "first canopy install" case),
@@ -280,10 +282,10 @@ func routeRemote(spec string) error {
 	if err != nil {
 		return err
 	}
-	// Fails fast, before the TUI takes over the terminal, if spec looks
-	// like a registry name but isn't registered — same courtesy
-	// resolveOnForNew/resolveOnForSwitch give --on. A raw SSH target
-	// never fails here (no registry involved); any connectivity problem
+	// Fails fast, before the TUI takes over the terminal, only for
+	// spec == "" or an option-injection-shaped (leading "-") target —
+	// see resolveRemoteHost. Everything else resolves to SOME host.Host
+	// (registered or raw-target fallback); any connectivity problem
 	// surfaces once the TUI's first refresh actually tries to SSH.
 	h, selfHeal, err := resolveRemoteHost(spec)
 	if err != nil {

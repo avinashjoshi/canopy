@@ -171,16 +171,26 @@ func resolveOnForSwitch(spec, preferredProject, explicitRemoteCwd string) (resol
 
 // resolveRemoteHost turns the value of `--remote` into a usable
 // host.Host for the `canopy --remote <spec>` thin-client mode (v0.22,
-// see routeRemote). Same raw-target-vs-registry-name heuristic as
-// resolveOnForNew/resolveOnForSwitch: a spec containing `@` or `:` is
-// treated as a raw SSH target (no registry involved, no `host add`
-// required — mirrors herdr's `--remote <host>` just logging straight
-// in), anything else is looked up by name in ~/.canopy/hosts.json.
+// see routeRemote).
+//
+// Unlike --on's resolveOnForNew/resolveOnForSwitch (which decide raw-
+// target-vs-registry-name purely from spec's shape — present of "@" or
+// ":"), resolveRemoteHost tries the registry FIRST regardless of shape,
+// and only falls back to treating spec as a raw SSH target if it isn't
+// a registered name. The shape-only heuristic breaks for the single
+// most common case of "just log in, no host add": a bare SSH config
+// alias like `--remote tower` (no "@", no ":", resolved by the user's
+// own ~/.ssh/config, not by canopy) — under the old shape-only rule
+// that fell into the registry-name branch and errored "not registered"
+// even though `ssh tower` works fine. Try-then-fall-back handles both:
+// a spec containing "@"/":" can never BE a valid registry name anyway
+// (validateName forbids those characters), so registry lookup is
+// skipped for those as a pure optimization, not a correctness split.
 //
 // selfHeal reports whether the resolved host has a real registry entry
 // to attach auto-discovered project registrations to (see
-// buildRemoteRowsMsg's selfHeal parameter in internal/ui) — true for a
-// registry name, false for a raw target.
+// buildRemoteRowsMsg's selfHeal parameter in internal/ui) — true only
+// when spec resolved via the registry.
 //
 // Unlike resolveOnForNew/resolveOnForSwitch, there's no "which project"
 // step here: --remote lists every project on the host (`canopy ls
@@ -189,7 +199,7 @@ func resolveRemoteHost(spec string) (h host.Host, selfHeal bool, err error) {
 	if spec == "" {
 		return host.Host{}, false, fmt.Errorf("resolveRemoteHost: empty --remote value")
 	}
-	if strings.ContainsAny(spec, "@:") {
+	asRawTarget := func() (host.Host, bool, error) {
 		// Fail fast with a clear canopy-level error rather than relying
 		// solely on ssh's own rejection of an option-shaped target
 		// (which the sink-side "--" fix in internal/host/ssh.go already
@@ -200,15 +210,24 @@ func resolveRemoteHost(spec string) (h host.Host, selfHeal bool, err error) {
 		}
 		return host.Host{Name: spec, Type: "ssh", SSHTarget: spec}, false, nil
 	}
-	reg, err := loadHostRegistry()
-	if err != nil {
-		return host.Host{}, false, fmt.Errorf("resolveRemoteHost: %w", err)
+	if strings.ContainsAny(spec, "@:") {
+		// Can never be a registered name (validateName forbids @/:) —
+		// skip the registry lookup entirely.
+		return asRawTarget()
 	}
-	resolved, err := reg.Resolve(spec)
-	if err != nil {
-		return host.Host{}, false, fmt.Errorf(
-			"host %q not registered. Run `canopy host add %s <ssh-target>`, or pass a raw SSH target directly (e.g. --remote user@host): %w",
-			spec, spec, err)
+	reg, regErr := loadHostRegistry()
+	if regErr != nil {
+		return host.Host{}, false, fmt.Errorf("resolveRemoteHost: %w", regErr)
+	}
+	resolved, resolveErr := reg.Resolve(spec)
+	if resolveErr != nil {
+		if errors.Is(resolveErr, host.ErrHostNotFound) {
+			// Not a registry name — fall back to trying it as a bare
+			// SSH target (a ~/.ssh/config alias, /etc/hosts entry, or
+			// resolvable hostname/mDNS name with no "@"/":").
+			return asRawTarget()
+		}
+		return host.Host{}, false, fmt.Errorf("resolveRemoteHost: %w", resolveErr)
 	}
 	if resolved.Type != "ssh" {
 		return host.Host{}, false, fmt.Errorf(

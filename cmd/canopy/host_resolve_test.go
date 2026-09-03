@@ -97,16 +97,50 @@ func TestResolveRemoteHost(t *testing.T) {
 		}
 	})
 
-	t.Run("unregistered name errors clearly", func(t *testing.T) {
+	t.Run("unregistered bare name falls back to a raw target", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home) // no hosts.json at all
+
+		// A bare word with no "@"/":" isn't necessarily a canopy
+		// registry name — it's exactly the shape of a ~/.ssh/config
+		// Host alias (e.g. `--remote tower` where `ssh tower` already
+		// works). Failing "not registered" here would break the "just
+		// log in, no host add" promise for the single most common case.
+		// Registry lookup still happens first (this spec isn't
+		// registered, so it falls through) — only THEN does it become
+		// a raw target.
+		h, selfHeal, err := resolveRemoteHost("tower")
+		if err != nil {
+			t.Fatalf("resolveRemoteHost(unregistered bare name): %v; want it to fall back to a raw target, not error", err)
+		}
+		if h.SSHTarget != "tower" {
+			t.Errorf("SSHTarget = %q; want %q", h.SSHTarget, "tower")
+		}
+		if h.Name != "tower" {
+			t.Errorf("Name = %q; want %q", h.Name, "tower")
+		}
+		if selfHeal {
+			t.Error("selfHeal = true; want false — no registry entry exists for this fallback")
+		}
+	})
+
+	t.Run("registered bare name still wins over the raw-target fallback", func(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 
-		_, _, err := resolveRemoteHost("nonexistent-host")
-		if err == nil {
-			t.Fatal("resolveRemoteHost(unregistered) = nil error; want an error")
+		if err := seedHostRegistryForTest(t, "tower", "avi@tower-real.tail.ts.net"); err != nil {
+			t.Fatalf("seed registry: %v", err)
 		}
-		if !strings.Contains(err.Error(), "not registered") {
-			t.Errorf("error = %q; want it to mention the host isn't registered", err.Error())
+
+		h, selfHeal, err := resolveRemoteHost("tower")
+		if err != nil {
+			t.Fatalf("resolveRemoteHost: %v", err)
+		}
+		if h.SSHTarget != "avi@tower-real.tail.ts.net" {
+			t.Errorf("SSHTarget = %q; want the registry's SSHTarget, not the bare spec itself", h.SSHTarget)
+		}
+		if !selfHeal {
+			t.Error("selfHeal = false; want true — this spec IS a registered name")
 		}
 	})
 
