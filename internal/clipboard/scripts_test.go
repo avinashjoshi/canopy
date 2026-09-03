@@ -1,6 +1,7 @@
 package clipboard
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,6 +261,118 @@ func head(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// renderWrapperToTemp renders the wl-paste wrapper and writes it
+// executable to dir. Shared setup for the --list-types liveness tests
+// below.
+func renderWrapperToTemp(t *testing.T, dir string) string {
+	t.Helper()
+	content, _, err := WrapperContent(WrapperWlPaste, "v0.18.0+test")
+	if err != nil {
+		t.Fatalf("WrapperContent: %v", err)
+	}
+	path := filepath.Join(dir, "wl-paste")
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	return path
+}
+
+// TestWrapperScripts_ListTypesOmitsTextPlainWhenSocketUnreachable is
+// the regression test for the exact bug found in production (dogfood
+// 2026-09-03, tower): `wl-paste --list-types` used to unconditionally
+// print "text/plain;charset=utf-8" BEFORE attempting any connectivity
+// check, so canopy's own bridge health probe (ProbeBridgeStatus in
+// probe.go, and the install-time verifyBridge check) both saw
+// "text/plain" in the output and reported the bridge as "bridged" —
+// even with the SSH RemoteForward tunnel completely dead and every
+// real paste/copy failing with "No such file or directory". Confirmed
+// live: wrappers installed from an old canopy version kept reporting
+// healthy while $XDG_RUNTIME_DIR/canopy/ didn't even exist.
+//
+// This test points CLIP_DIR at a directory with NO clip-text.sock and
+// asserts --list-types does NOT claim text/plain.
+func TestWrapperScripts_ListTypesOmitsTextPlainWhenSocketUnreachable(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not on PATH")
+	}
+	if _, err := exec.LookPath("socat"); err != nil {
+		t.Skip("socat not on PATH")
+	}
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("timeout not on PATH")
+	}
+	scriptDir := t.TempDir()
+	runtimeDir := t.TempDir()
+	// Deliberately do NOT create runtimeDir/canopy or any socket in
+	// it — simulates a dead/never-established SSH RemoteForward.
+	path := renderWrapperToTemp(t, scriptDir)
+
+	cmd := exec.Command("bash", path, "--list-types")
+	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+runtimeDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper --list-types exited non-zero (should exit 0 even when the bridge is down): %v\noutput: %s", err, out)
+	}
+	if strings.Contains(string(out), "text/plain") {
+		t.Errorf("--list-types claimed text/plain with an unreachable clip-text.sock; output: %q", out)
+	}
+}
+
+// TestWrapperScripts_ListTypesReportsTextPlainWhenSocketReachable is
+// the positive-path sibling: when clip-text.sock IS reachable (a fake
+// listener accepting and closing, standing in for the real daemon —
+// the daemon's own success/failure content doesn't matter here, only
+// that the SSH tunnel + a live process on the other end exist),
+// --list-types must still claim text/plain, matching the exact
+// contract ProbeBridgeStatus / verifyBridge rely on.
+func TestWrapperScripts_ListTypesReportsTextPlainWhenSocketReachable(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not on PATH")
+	}
+	if _, err := exec.LookPath("socat"); err != nil {
+		t.Skip("socat not on PATH")
+	}
+	if _, err := exec.LookPath("timeout"); err != nil {
+		t.Skip("timeout not on PATH")
+	}
+	scriptDir := t.TempDir()
+	runtimeDir := t.TempDir()
+	canopyDir := filepath.Join(runtimeDir, "canopy")
+	if err := os.MkdirAll(canopyDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	sockPath := filepath.Join(canopyDir, "clip-text.sock")
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Real daemon behavior on a ReadText error: close without
+			// writing. The connection itself succeeding is the
+			// liveness signal the wrapper (and the probe) care about.
+			conn.Close()
+		}
+	}()
+
+	path := renderWrapperToTemp(t, scriptDir)
+	cmd := exec.Command("bash", path, "--list-types")
+	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+runtimeDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper --list-types exited non-zero: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(string(out), "text/plain") {
+		t.Errorf("--list-types didn't claim text/plain with a reachable clip-text.sock; output: %q", out)
+	}
 }
 
 func TestWrapperScripts_PassBashSyntaxCheck(t *testing.T) {

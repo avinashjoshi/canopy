@@ -58,11 +58,21 @@ pipe_socket() {
 }
 
 if [ "$list_types" -eq 1 ]; then
-  # Always offer text/plain — matches every realistic state where the
-  # local clipboard has SOMETHING. Real wl-paste would omit text/plain
-  # when the clipboard is truly image-only; for Claude Code's use case
-  # the answer it actually keys on is whether image/png is in the list.
-  echo "text/plain;charset=utf-8"
+  # Claim text/plain only after actually connecting to clip-text.sock —
+  # NOT unconditionally. canopy's own bridge health check (internal/
+  # clipboard/probe.go's ProbeBridgeStatus, and the install-time
+  # verifyBridge check) both key off exactly this --list-types output
+  # to decide "bridged" vs "broken": if this always printed
+  # text/plain regardless of connectivity, a host whose SSH
+  # RemoteForward tunnel died would show "bridged" forever (wrappers
+  # still on disk) while every real paste/copy silently fails — which
+  # is exactly what happened before this fix. A real (if throwaway)
+  # connection attempt is the same liveness signal already used for
+  # the image/png claim just below; discarding its output here is
+  # fine, ReadText has no side effects on the actual system clipboard.
+  if pipe_socket "$CLIP_DIR/clip-text.sock" >/dev/null 2>&1; then
+    echo "text/plain;charset=utf-8"
+  fi
 
   # Probe clip-image.sock: read the first eight bytes and check the PNG
   # signature. head -c 8 closes our end early so we don't pay for the
