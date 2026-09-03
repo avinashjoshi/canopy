@@ -4010,15 +4010,68 @@ func TestRemoteCwdForRow_ResolvesFromRegistry(t *testing.T) {
 		{Name: "tower", SSHTarget: "u@t", Type: "ssh",
 			Projects: map[string]string{"cravd": "/home/cassy/Work/cravd"}},
 	}
-	if got := m.remoteCwdForRow("tower", "cravd"); got != "/home/cassy/Work/cravd" {
+	if got := m.remoteCwdForRow("tower", "cravd", ""); got != "/home/cassy/Work/cravd" {
 		t.Errorf("remoteCwdForRow(tower, cravd) = %q; want /home/cassy/Work/cravd", got)
 	}
-	if got := m.remoteCwdForRow("tower", "missing"); got != "" {
+	if got := m.remoteCwdForRow("tower", "missing", ""); got != "" {
 		t.Errorf("remoteCwdForRow(tower, missing) = %q; want empty (let caller fall back)", got)
 	}
-	if got := m.remoteCwdForRow("unknown-host", "cravd"); got != "" {
+	if got := m.remoteCwdForRow("unknown-host", "cravd", ""); got != "" {
 		t.Errorf("remoteCwdForRow(unknown-host, cravd) = %q; want empty", got)
 	}
+}
+
+// TestRemoteCwdForRow_FallsBackToRowRemoteProjectPath is the regression
+// test for the "creating a workspace fails from a --remote-pinned
+// session" bug: a raw --remote/--on SSH target was never `canopy host
+// add`-ed, so its Projects map is permanently empty and the registry
+// lookup can never succeed — but the row itself still carries the real
+// path straight from that host's own `canopy ls --json` wire response
+// (state.GlobalRow.RemoteProjectPath). remoteCwdForRow must use it
+// when the registry comes up empty, and the registry must still win
+// when it DOES know the pair (registered hosts keep their existing,
+// more-authoritative behavior unchanged).
+func TestRemoteCwdForRow_FallsBackToRowRemoteProjectPath(t *testing.T) {
+	m := newTestModel(false)
+
+	t.Run("no registry entry at all — pure fallback", func(t *testing.T) {
+		// m.hostList intentionally empty: exactly the --remote raw-target
+		// shape (NewRemotePinned scopes hostList to the pinned host, whose
+		// Projects map is always nil for a raw target).
+		got := m.remoteCwdForRow("tower", "cravd", "/home/avi/cravd")
+		if got != "/home/avi/cravd" {
+			t.Errorf("remoteCwdForRow = %q; want the row's RemoteProjectPath fallback", got)
+		}
+	})
+
+	t.Run("host registered but project not — still falls back", func(t *testing.T) {
+		m.hostList = []host.Host{
+			{Name: "tower", SSHTarget: "u@t", Type: "ssh", Projects: map[string]string{}},
+		}
+		got := m.remoteCwdForRow("tower", "cravd", "/home/avi/cravd")
+		if got != "/home/avi/cravd" {
+			t.Errorf("remoteCwdForRow = %q; want the fallback when the registry has no entry for this project", got)
+		}
+	})
+
+	t.Run("registry entry wins over the fallback when both exist", func(t *testing.T) {
+		m.hostList = []host.Host{
+			{Name: "tower", SSHTarget: "u@t", Type: "ssh",
+				Projects: map[string]string{"cravd": "/home/cassy/Work/cravd"}},
+		}
+		got := m.remoteCwdForRow("tower", "cravd", "/some/other/path")
+		if got != "/home/cassy/Work/cravd" {
+			t.Errorf("remoteCwdForRow = %q; want the registry's path, not the fallback", got)
+		}
+	})
+
+	t.Run("neither source knows the path — empty, as before", func(t *testing.T) {
+		m.hostList = nil
+		got := m.remoteCwdForRow("tower", "cravd", "")
+		if got != "" {
+			t.Errorf("remoteCwdForRow = %q; want empty", got)
+		}
+	})
 }
 
 // TestRemoteCwdArg_PinsKnownProject: when the host registry knows
@@ -4036,20 +4089,20 @@ func TestRemoteCwdArg_PinsKnownProject(t *testing.T) {
 			Projects: map[string]string{"canopy": "/home/cassy/Work/canopy"}},
 	}
 
-	got := m.remoteCwdArg("tower", "canopy")
+	got := m.remoteCwdArg("tower", "canopy", "")
 	want := []string{"--remote-cwd", "/home/cassy/Work/canopy"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("remoteCwdArg(tower, canopy) = %v; want %v", got, want)
 	}
 }
 
-// TestRemoteCwdArg_UnknownProjectReturnsNil: when the registry doesn't
-// know the (host, project) path, return nil so the dispatch stays in
-// the legacy shape. Falling back is correct behavior here — the user
-// just gets the older (worse) diagnostic if the workspace is missing.
-// Pinning to a guessed path would be worse: we'd risk dispatching to
-// a path that doesn't exist on the remote and tripping the cwd
-// pre-check in buildRemoteScript.
+// TestRemoteCwdArg_UnknownProjectReturnsNil: when NEITHER the registry
+// NOR the row's own RemoteProjectPath knows the path, return nil so
+// the dispatch stays in the legacy shape. Falling back to nothing is
+// correct behavior here — the user just gets the older (worse)
+// diagnostic if the workspace is missing. Pinning to a guessed path
+// would be worse: we'd risk dispatching to a path that doesn't exist
+// on the remote and tripping the cwd pre-check in buildRemoteScript.
 func TestRemoteCwdArg_UnknownProjectReturnsNil(t *testing.T) {
 	m := newTestModel(false)
 	m.hostList = []host.Host{
@@ -4057,11 +4110,27 @@ func TestRemoteCwdArg_UnknownProjectReturnsNil(t *testing.T) {
 			Projects: map[string]string{"canopy": "/home/cassy/Work/canopy"}},
 	}
 
-	if got := m.remoteCwdArg("tower", "unknown-project"); got != nil {
+	if got := m.remoteCwdArg("tower", "unknown-project", ""); got != nil {
 		t.Errorf("remoteCwdArg(tower, unknown-project) = %v; want nil", got)
 	}
-	if got := m.remoteCwdArg("unknown-host", "canopy"); got != nil {
+	if got := m.remoteCwdArg("unknown-host", "canopy", ""); got != nil {
 		t.Errorf("remoteCwdArg(unknown-host, canopy) = %v; want nil", got)
+	}
+}
+
+// TestRemoteCwdArg_UsesRowFallbackForUnregisteredHost is the direct
+// regression test for the "create workspace" bug hand-testing
+// surfaced: `n` on a row in a --remote-pinned session (host never
+// `canopy host add`-ed) must still produce a --remote-cwd flag, using
+// the row's own RemoteProjectPath since the registry has nothing.
+func TestRemoteCwdArg_UsesRowFallbackForUnregisteredHost(t *testing.T) {
+	m := newTestModel(false)
+	m.hostList = nil // no registry entry for this host at all
+
+	got := m.remoteCwdArg("tower", "cravd", "/home/avi/cravd")
+	want := []string{"--remote-cwd", "/home/avi/cravd"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("remoteCwdArg(tower, cravd, fallback) = %v; want %v", got, want)
 	}
 }
 

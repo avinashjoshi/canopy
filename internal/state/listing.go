@@ -170,6 +170,24 @@ type GlobalRow struct {
 	// second lookup. See state.OwnerIsReviewing / state.OwnerPillLabel.
 	Owner      string
 	SourceKind string
+
+	// RemoteProjectPath is the absolute project path on a REMOTE row's
+	// host, as reported by that host's own `canopy ls --json` (the wire
+	// field host.RemoteWorkspace.ProjectRoot). Deliberately a separate
+	// field from ProjectRoot, not a reuse of it: ProjectRoot means "the
+	// canonical LOCAL project root" throughout this codebase (several
+	// call sites treat an empty ProjectRoot on a remote row as a
+	// meaningful "no local project context" signal — see
+	// managerForRow, branchInWorkspace, fillMainBranches) and remote
+	// rows have never populated it. RemoteProjectPath exists so
+	// remote-dispatch cwd resolution (remoteCwdForRow) has a fallback
+	// path to cd into on the remote host even when the LAPTOP's own
+	// host registry has no Projects entry for this row at all — the
+	// case for a `--remote`/`--on` raw SSH target, which by definition
+	// was never `canopy host add`-ed. Empty for local rows and for
+	// remote hosts running a pre-v0.17.? canopy that doesn't emit the
+	// wire field yet.
+	RemoteProjectPath string
 }
 
 // IsReviewing reports whether this row is work the user is reviewing

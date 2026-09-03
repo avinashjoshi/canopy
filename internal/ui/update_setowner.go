@@ -143,7 +143,7 @@ func (m *Model) submitOwner(clear bool) (tea.Model, tea.Cmd) {
 		} else {
 			args = []string{row.Name, ownerVal}
 		}
-		args = append(args, m.remoteCwdArg(row.Host, row.Project)...)
+		args = append(args, m.remoteCwdArg(row.Host, row.Project, row.RemoteProjectPath)...)
 		m.closeOwnerForm()
 		return m, m.execRemoteVerb(row.Host, "set-owner", args, false)
 	}

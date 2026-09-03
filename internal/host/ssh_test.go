@@ -92,12 +92,18 @@ func TestSSHCmd_NilArgs(t *testing.T) {
 }
 
 // TestMoshCmd_TargetSeparator verifies the mosh syntax
-// `mosh -- <target> -- <cmd...>` is constructed correctly: a leading
-// `--` protects target from being parsed as a mosh option (mosh's own
-// usage is "[options] [--] [user@]host [command...]" — confirmed by
-// PoC that without it, an option-shaped target like "--server=..."
-// is parsed as a real mosh flag, not the host), and the pre-existing
-// trailing `--` disambiguates target from the remote command.
+// `mosh -- <target> <cmd...>` is constructed correctly: exactly ONE
+// leading `--` protects target from being parsed as a mosh option
+// (mosh's own usage is "[options] [--] [user@]host [command...]" —
+// confirmed by PoC that without it, an option-shaped target like
+// "--server=..." is parsed as a real mosh flag, not the host), and NO
+// second "--" between target and the command — mosh's usage has no
+// separator there, and one used to be present here (inherited from
+// before the security fix added the protective leading one) until it
+// was confirmed live to break real attach: mosh forwards everything
+// after target verbatim as [command...], so a stray "--" becomes the
+// first element of the command mosh-server tries to execvp
+// ("mosh-server: execvp: --: No such file or directory").
 func TestMoshCmd_TargetSeparator(t *testing.T) {
 	cmd := MoshCmd(context.Background(), "avi@tower", "canopy", "switch", "oauth-fix")
 	args := cmd.Args
@@ -113,24 +119,28 @@ func TestMoshCmd_TargetSeparator(t *testing.T) {
 		t.Fatalf("target at idx %d must be immediately preceded by \"--\" (protects an option-shaped target from mosh's own flag parser); args: %v", targetIdx, args)
 	}
 
-	// The separator AFTER target — search starting past target, since
-	// the protective "--" before it would otherwise be found first.
-	dashIdx := indexOf(args[targetIdx+1:], "--")
-	if dashIdx < 0 {
-		t.Fatalf("`--` separator after target not found in args: %v", args)
-	}
-	dashIdx += targetIdx + 1
-
-	// Args after that `--` should be the remote command, in order.
+	// Command args must follow target DIRECTLY — no second "--".
 	want := []string{"canopy", "switch", "oauth-fix"}
-	got := args[dashIdx+1:]
+	got := args[targetIdx+1:]
 	if len(got) != len(want) {
-		t.Fatalf("post-`--` args: got %v, want %v", got, want)
+		t.Fatalf("post-target args: got %v, want %v (no separator between target and command)", got, want)
 	}
 	for i, w := range want {
 		if got[i] != w {
-			t.Errorf("post-`--` arg[%d] = %q, want %q", i, got[i], w)
+			t.Errorf("post-target arg[%d] = %q, want %q", i, got[i], w)
 		}
+	}
+
+	// Exactly one "--" in the whole argv — a second one anywhere would
+	// reintroduce the live bug this test guards against.
+	dashCount := 0
+	for _, a := range args {
+		if a == "--" {
+			dashCount++
+		}
+	}
+	if dashCount != 1 {
+		t.Errorf("found %d \"--\" tokens in args; want exactly 1: %v", dashCount, args)
 	}
 }
 

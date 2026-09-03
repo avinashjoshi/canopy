@@ -786,7 +786,7 @@ func actionNewWorkspace(m *Model, _ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// same lists as local.
 	if row, ok := m.list.CursorRow(); ok && row.Host != "" && !row.Loading {
 		m.newTargetHost = row.Host
-		m.newTargetRemoteCwd = m.remoteCwdForRow(row.Host, row.Project)
+		m.newTargetRemoteCwd = m.remoteCwdForRow(row.Host, row.Project, row.RemoteProjectPath)
 		m.newTargetName = row.Project
 		m.newTargetRoot = ""
 		m.newTargetMgr = nil

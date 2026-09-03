@@ -237,7 +237,17 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	// resolved.SSHTarget, which a raw --on/--remote spec sets directly
 	// from user input with no validation. See internal/host/ssh.go's
 	// MoshCmd for the same fix applied to the non-exec code path.
-	argv := []string{"mosh", "--", target, "--", "bash", "-lc", remoteCmd}
+	//
+	// Exactly ONE "--" belongs here. mosh's own usage is
+	// "[options] [--] [user@]host [command...]" — no second "--" between
+	// host and command. A second one (this line used to have one,
+	// inherited from before the security fix added the first) becomes
+	// the FIRST ELEMENT of the forwarded command itself: mosh forwards
+	// everything after host verbatim as [command...], so mosh-server
+	// receives "-- bash -lc <remoteCmd>" and tries to execvp a program
+	// literally named "--" — confirmed live: "mosh-server: execvp: --:
+	// No such file or directory".
+	argv := []string{"mosh", "--", target, "bash", "-lc", remoteCmd}
 	// syscall.Exec replaces this process with mosh. On success, this
 	// call does not return; on failure we fall through to the error.
 	if err := syscall.Exec(moshBin, argv, os.Environ()); err != nil {

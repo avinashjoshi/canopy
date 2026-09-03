@@ -85,33 +85,43 @@ func (m *Model) canopyBinPath() string {
 }
 
 // remoteCwdForRow looks up the remote project path for (host, project)
-// from the in-memory host registry snapshot. Returns "" when the
-// registry doesn't know that pair (lets the caller fall back to
-// canopy's own resolution logic + error). v0.17 Phase 1i.
-func (m *Model) remoteCwdForRow(hostName, projectName string) string {
-	if hostName == "" || projectName == "" {
-		return ""
-	}
-	for _, h := range m.hostList {
-		if h.Name != hostName {
-			continue
+// from the in-memory host registry snapshot. Falls back to
+// rowRemoteProjectPath (the row's own state.GlobalRow.RemoteProjectPath
+// — the absolute path this host's own `canopy ls --json` reported for
+// this row) when the registry doesn't know the pair, which is always
+// the case for a raw --remote/--on SSH target: it was never `canopy
+// host add`-ed, so its Projects map is permanently empty, but the row
+// itself still carries the real remote path straight from the wire.
+// Returns "" only when NEITHER source has an answer (lets the caller
+// fall back to canopy's own resolution logic + error). v0.17 Phase 1i;
+// fallback added v0.22 alongside the --remote thin-client mode.
+func (m *Model) remoteCwdForRow(hostName, projectName, rowRemoteProjectPath string) string {
+	if hostName != "" && projectName != "" {
+		for _, h := range m.hostList {
+			if h.Name != hostName {
+				continue
+			}
+			if path := h.Projects[projectName]; path != "" {
+				return path
+			}
+			break
 		}
-		return h.Projects[projectName]
 	}
-	return ""
+	return rowRemoteProjectPath
 }
 
 // remoteCwdArg returns the `--remote-cwd <path>` suffix to thread into
-// a remote canopy dispatch, or nil when the host registry doesn't know
-// the path. Pinning the project keeps cmd/canopy's resolveOnForSwitch
-// out of its "first project on host" fallback (the path that prints
-// `(fallback)` in the dispatch source line) so a verb dispatched for a
-// workspace under project A can't accidentally land in project B on a
-// multi-project host. Returning nil leaves the caller in the legacy
-// shape (no flag appended) — that's still correct for hosts the
-// registry hasn't fully mapped yet; only the diagnostic gets worse.
-func (m *Model) remoteCwdArg(hostName, projectName string) []string {
-	if path := m.remoteCwdForRow(hostName, projectName); path != "" {
+// a remote canopy dispatch, or nil when neither the host registry nor
+// the row itself knows the path (see remoteCwdForRow). Pinning the
+// project keeps cmd/canopy's resolveOnForSwitch out of its "first
+// project on host" fallback (the path that prints `(fallback)` in the
+// dispatch source line) so a verb dispatched for a workspace under
+// project A can't accidentally land in project B on a multi-project
+// host. Returning nil leaves the caller in the legacy shape (no flag
+// appended) — that's still correct when nothing knows the path; only
+// the diagnostic gets worse.
+func (m *Model) remoteCwdArg(hostName, projectName, rowRemoteProjectPath string) []string {
+	if path := m.remoteCwdForRow(hostName, projectName, rowRemoteProjectPath); path != "" {
 		return []string{"--remote-cwd", path}
 	}
 	return nil

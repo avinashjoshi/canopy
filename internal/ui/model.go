@@ -1492,6 +1492,12 @@ func buildRemoteRowsMsg(canopyHome string, reg *host.Registry, hosts []host.Host
 				Attached:      w.Attached,
 				Owner:         w.Owner,
 				SourceKind:    w.SourceKind,
+				// RemoteProjectPath (not ProjectRoot — see its doc
+				// comment) is the cwd-resolution fallback for hosts
+				// with no local registry Projects entry at all (a raw
+				// --remote/--on SSH target). w.ProjectRoot is the wire
+				// field from this host's own `canopy ls --json`.
+				RemoteProjectPath: w.ProjectRoot,
 				// LastSeen carries the host's most-recent successful
 				// refresh timestamp onto every remote row from that
 				// host. The TUI renderer compares it against time.Now

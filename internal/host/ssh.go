@@ -275,9 +275,16 @@ func MoshCmd(ctx context.Context, target string, args ...string) *exec.Cmd {
 	// target shaped like a mosh option (e.g. "--ssh=...") would be
 	// parsed as a flag rather than the host, the same class of bug
 	// fixed in sshCmdInternal/SSHRunUser for the ssh binary itself.
-	// The trailing "--" separates the target from the optional
-	// command args that follow.
-	moshArgs := []string{"--", target, "--"}
+	//
+	// No trailing "--" between target and args: mosh's usage has no
+	// separator there ("[user@]host [command...]"), and adding one
+	// confirmed-live breaks real attach — mosh forwards everything
+	// after target verbatim as [command...], so a stray "--" becomes
+	// the FIRST element of the command mosh-server tries to execvp,
+	// which fails with "mosh-server: execvp: --: No such file or
+	// directory" (found in cmd/canopy/switch.go's identical argv
+	// construction; fixed there too).
+	moshArgs := []string{"--", target}
 	moshArgs = append(moshArgs, args...)
 	log.Debug("mosh.cmd", "target", target, "args", args)
 	return exec.CommandContext(ctx, "mosh", moshArgs...)
