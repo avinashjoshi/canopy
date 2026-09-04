@@ -41,8 +41,9 @@ internal/tmux/      session wrappers around os/exec tmux
 internal/host/      multi-host remote dispatch: hosts.json registry, ssh/mosh
                     command builders (--on / --remote), SSHAttachLoop reconnect
                     fallback (--no-mosh)
-internal/clipboard/ laptop clipboard bridge: local daemon + per-host installer
-                    over SSH RemoteForward
+internal/clipboard/ remote clipboard bridge (text, both directions) via OSC 52
+                    terminal escape sequences; per-host installer pushes the
+                    wl-paste/wl-copy wrapper scripts, no laptop-side daemon
 internal/hooks/     script execution with CANOPY_* env
 internal/state/     JSON registry + flock-protected mutations
 internal/workspace/ orchestration: Create / Remove / Resurrect / Reconcile

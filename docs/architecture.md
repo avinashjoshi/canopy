@@ -55,18 +55,25 @@ internal/host/                 Multi-host remote dispatch (v0.17+): hosts.json
                                (ssh exit 255) but stops immediately on a
                                permanent failure (rejected key, changed host
                                key, unresolvable hostname).
-internal/clipboard/            Local daemon (clip-text/clip-image/clip-copy
-                               Unix sockets) + per-host installer bridging
-                               the laptop's Wayland clipboard into a remote
-                               workspace over SSH RemoteForward (v0.18+). All
-                               of the installer's SSH calls run in batch mode
-                               (v0.23) so a host without cached key auth fails
-                               fast instead of hanging on a password prompt
-                               against Bubbletea's raw-mode terminal.
+internal/clipboard/            Per-host installer (host_install.go) that
+                               pushes wl-paste/wl-copy wrapper scripts to a
+                               remote workspace; the wrappers themselves talk
+                               OSC 52 terminal escape sequences directly to
+                               the attached terminal (v0.24.x — replaced the
+                               original daemon + SSH RemoteForward + socat
+                               design; see docs/clipboard-bridge.md). Text
+                               clipboard only, both directions; no laptop-side
+                               daemon or persistent tunnel. All of the
+                               installer's SSH calls run in batch mode (v0.23)
+                               so a host without cached key auth fails fast
+                               instead of hanging on a password prompt against
+                               Bubbletea's raw-mode terminal.
                                SanitizeArtifactName (namesafe.go, v0.23) turns
                                a raw SSH target into a filesystem/systemd-safe
-                               artifact name so unregistered `--remote` hosts
-                               can auto-install without a `hosts.json` entry.
+                               key, used to find and remove pre-OSC52
+                               artifacts an older canopy version left on the
+                               laptop, so unregistered `--remote` hosts can
+                               auto-install without a `hosts.json` entry.
 internal/agent/                Agent launcher metadata (claude / codex / aider).
                                RoleForType produces canonical role strings
                                (`agent:claude`, etc.) consumed by the tmux

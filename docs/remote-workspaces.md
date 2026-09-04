@@ -55,13 +55,16 @@ Use `--remote` for the "just log in and look" case; use the registered `--on <ho
 when you want the host to also show up folded into your regular local + Global workspace view, or
 when you're scripting against it (`canopy new --on tower`, `canopy rm --on tower`, etc.).
 
-**Clipboard bridge auto-setup (v0.23.0.0).** The first time a `--remote` session confirms the host is
-reachable, canopy automatically runs the same install the Hosts tab's `c` key (and `canopy host
-clipboard <name>`) would — laptop-side systemd unit + SSH config, then the per-host wrappers and
-tunnel — so pasting a screenshot into an agent on the pinned host works without any manual setup
-step. It's silent on success (a one-line "clipboard bridge ready" notice appears briefly) and
-non-fatal on failure (Linux/Wayland-only per the design doc; other platforms skip it entirely). See
-[`design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md) for the mechanism.
+**Clipboard bridge auto-setup.** The first time a `--remote` session confirms the host is reachable,
+canopy automatically runs the same install the Hosts tab's `c` key (and `canopy host clipboard
+<name>`) would — pushing the wrapper scripts and tmux config to the remote — so copying/pasting
+text with an agent on the pinned host works without any manual setup step. It's silent on success
+(a one-line "clipboard bridge ready" notice appears briefly) and non-fatal on failure. Unlike the
+original daemon-based design, this has no laptop-OS requirement — the bridge uses OSC 52 terminal
+escape sequences, handled by whatever terminal you're sitting in front of, not by the laptop's OS —
+so it runs on macOS and Windows laptops too, not just Linux. Text only; images aren't supported. See
+[`clipboard-bridge.md`](clipboard-bridge.md) for the mechanism and
+[`design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md) for the design history.
 
 Add `--no-mosh` to skip mosh for every attach dispatched from this pinned session and use the ssh
 reconnect-loop instead (`canopy --remote tower --no-mosh`) — see "Attach" below for when that's

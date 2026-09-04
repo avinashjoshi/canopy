@@ -1,114 +1,92 @@
 # Clipboard bridge
 
-v0.18 makes the laptop's clipboard available inside any remote canopy
-workspace. Paste a screenshot you copied on your laptop into Claude
-Code running on a remote host. Copy text from a remote tmux session
-straight to your local clipboard. None of it requires per-session
-setup once installed.
+Makes the laptop's clipboard available inside any remote canopy workspace,
+for **text** in both directions — copy on the remote, it lands on your
+laptop; paste on your laptop, it shows up on the remote. Copy text from a
+remote tmux session straight to your local clipboard. Paste text into
+Claude Code running on a remote host. No daemon, no persistent tunnel, no
+per-session setup once installed.
 
-Design doc: [`docs/design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md).
+Design doc: [`docs/design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md)
+(see its OSC52 follow-up section for the mechanism described below —
+the doc's main body describes the original daemon/tunnel design, which
+this replaced).
 
-**Zero-setup with `canopy --remote <host>` (v0.23.0.0).** If you're using the
+> **Images are not supported.** The bridge moved from a socket-forwarding
+> daemon to OSC 52 terminal escape sequences, which can't carry
+> screenshot-sized payloads. Text only. See "How it works" below.
+
+**Zero-setup with `canopy --remote <host>`.** If you're using the
 thin-client `--remote` mode (see
 [`remote-workspaces.md`](remote-workspaces.md#thin-client-mode-zero-setup-with-canopy---remote-host)),
 skip the Setup section below entirely — the first successful connection
-installs the bridge unattended (laptop-side daemon/SSH config, then the
-per-host wrappers and tunnel), with a one-line status notice instead of the
-manual flow's full transcript. The manual steps below still apply if you're
-using the registered `--on <host>` flow, or want to install ahead of time.
+installs the bridge unattended, with a one-line status notice instead of
+the manual flow's full transcript. The manual steps below still apply if
+you're using the registered `--on <host>` flow, or want to install ahead
+of time.
 
-## What works (verified end-to-end)
+## What works
 
-| Direction | Mechanism | Verified |
+| Direction | Mechanism | Notes |
 |---|---|---|
-| Local clipboard image → Claude Code on remote (Ctrl-V) | `wl-paste --type image/png` wrapper → SSH `RemoteForward` → laptop daemon → local Wayland | ✅ |
-| Local clipboard text → Claude Code on remote (Ctrl-V) | Same path as image | ✅ |
-| Local clipboard text → remote terminal (Ctrl-V in shell) | Terminal pty bracketed-paste; no bridge needed | ✅ |
-| Remote `wl-copy "foo"` → local Wayland clipboard | `wl-copy` wrapper → `clip-copy.sock` → SSH tunnel → laptop daemon | ✅ |
-| Remote tmux copy-mode `y` / `Enter` → local clipboard | tmux `copy-pipe-and-cancel "wl-copy"` (auto-configured by install) | ✅ |
-| Remote tmux copy-mode mouse-drag → local clipboard | tmux `MouseDragEnd1Pane` binding (auto-configured) | ✅ |
-| Remote tmux copy-mode `Ctrl+Shift+C` → local clipboard | tmux `C-S-c` binding — works over SSH-attach; see Caveats for mosh | ⚠ |
-| Remote nvim yank → local clipboard | `set clipboard=unnamedplus` (manual; install prints the hint) | ⚠ |
+| Remote `wl-copy "foo"` → local clipboard | `wl-copy` wrapper writes an OSC 52 "set clipboard" sequence to `/dev/tty` | Requires an attached terminal session (SSH or mosh both fine) |
+| Remote `wl-paste` → reads local clipboard | `wl-paste` wrapper writes an OSC 52 query sequence and reads the terminal's reply | Requires the terminal to support OSC 52 *read* — see Caveats |
+| Remote tmux copy-mode `y` / `Enter` → local clipboard | tmux `copy-pipe-and-cancel "wl-copy"` (auto-configured by install) | Needs `allow-passthrough on` (auto-configured) |
+| Remote tmux copy-mode mouse-drag → local clipboard | tmux `MouseDragEnd1Pane` binding (auto-configured) | Same |
+| Remote tmux copy-mode `Ctrl+Shift+C` → local clipboard | tmux `C-S-c` binding | Works over SSH-attach; see Caveats for mosh |
+| Local clipboard text → remote terminal (Ctrl-V in shell) | Terminal pty bracketed-paste; no bridge needed | Always worked, unrelated to this bridge |
+| Remote nvim yank → local clipboard | `set clipboard=unnamedplus` (manual; install prints the hint) | |
+| Image paste (local → remote, or remote → local) | **Not supported** | OSC 52 payloads are too size-constrained for images; would need a different transport (tracked as a future PTY-proxy rewrite) |
 
 ## Setup
 
-Two commands. The first is per-laptop and one-time; the second is per
-remote host.
-
-### 1. One-time per laptop
-
-```bash
-canopy install clipboard-bridge
-```
-
-This writes:
-
-- `~/.config/systemd/user/canopy-clipboard.service` — the local daemon
-  unit; launches `canopy clipboard-server` and supervises it across
-  session restarts. ExecStart points at `~/.local/bin/canopy` (the
-  symlink that `canopy use` swaps), so dev-vs-release binary switches
-  don't break the daemon.
-- `~/.ssh/config.d/canopy/` — directory for per-host SSH snippets.
-- `~/.ssh/config` — adds a marker-bounded block that `Include`s the
-  snippets above. Wrapped in `Host *` so it loads regardless of where
-  in your existing `~/.ssh/config` the marker block ends up.
-
-Then enables + starts the daemon. If your shell's `WAYLAND_DISPLAY`
-is set, the install also runs `systemctl --user import-environment
-WAYLAND_DISPLAY ...` so the daemon's environment carries the Wayland
-session info on first start.
-
-The daemon listens on three Unix sockets in `$XDG_RUNTIME_DIR/canopy/`:
-
-- `clip-text.sock` — serves clipboard text on read
-- `clip-image.sock` — serves clipboard image bytes on read
-- `clip-copy.sock` — receives bytes on write, sets clipboard
-
-### 2. Per remote host
+One command, per remote host:
 
 ```bash
 canopy host clipboard <host-name>
 ```
 
-…or press `c` on the host's row in the Hosts tab. As of v0.23.0.0, `<host-name>`
-doesn't have to be registered — it resolves the same way `--remote`/`--on` do
-(a registered `hosts.json` name, or a raw SSH target used directly), so you
-can install against a box you haven't run `canopy host add` on.
+…or press `c` on the host's row in the Hosts tab. `<host-name>` doesn't
+have to be registered — it resolves the same way `--remote`/`--on` do (a
+registered `hosts.json` name, or a raw SSH target used directly), so you
+can install against a box you haven't run `canopy host add` on. There is
+no separate one-time laptop-side step — OSC 52 needs no daemon or SSH
+config on your laptop.
 
 What this does, in order:
 
-1. SSHes to the remote and detects the user's UID via `id -u`.
-2. `mkdir -p /run/user/<uid>/canopy` on the remote, mode `0700`.
-   sshd binds RemoteForward sockets here later; the directory must
-   exist or `bind()` returns `ENOENT`.
-3. Pushes the canopy wrapper scripts to `~/.local/bin/wl-paste` and
-   `~/.local/bin/wl-copy` on the remote. They take precedence over
-   the system wl-clipboard binaries when `~/.local/bin` is first on
-   `$PATH`.
-4. Writes `~/.ssh/config.d/canopy/<host-name>.conf` on your laptop
-   with a dedicated `Host canopy-tunnel-<host-name>` alias and three
-   `RemoteForward` directives pointing at the daemon's sockets.
-5. Writes `~/.config/systemd/user/canopy-clipboard-tunnel-<host-name>.service`
-   — a systemd user unit that holds an `ssh -N canopy-tunnel-<host-name>`
-   tunnel open persistently and supervises restart on failure.
-6. Splices the tmux copy-mode bindings into the remote's
-   `~/.tmux.conf` between marker comments. Re-running rewrites the
-   block; nothing outside the markers is touched.
-7. Reloads tmux on the remote via `tmux source-file ~/.tmux.conf`
+1. Pushes the canopy wrapper scripts to `~/.local/bin/wl-paste` and
+   `~/.local/bin/wl-copy` on the remote. They take precedence over the
+   system wl-clipboard binaries when `~/.local/bin` is first on `$PATH`.
+2. Splices the tmux copy-mode bindings into the remote's `~/.tmux.conf`
+   between marker comments, including `set -g allow-passthrough on`
+   (required on tmux 3.3+, which defaults it off — without it, tmux
+   silently eats the escape sequences the wrappers emit). Re-running
+   rewrites the block; nothing outside the markers is touched.
+3. Reloads tmux on the remote via `tmux source-file ~/.tmux.conf`
    (best-effort; silent if no tmux server is running there).
-8. Verifies the chain end-to-end: tunnel unit active, wrapper
-   round-trips `text/plain` over a fresh SSH, PATH on the remote
-   puts `~/.local/bin/wl-paste` ahead of `/usr/bin/wl-paste`. If
-   PATH precedence fails, install completes with a warning + the
-   one-line fix instruction.
+4. Removes any pre-OSC52 artifacts an older canopy version left on
+   *this* laptop: the `canopy-clipboard-tunnel-<host-name>.service` and
+   `canopy-clipboard.service` systemd user units, and the per-host SSH
+   snippet at `~/.ssh/config.d/canopy/<host-name>.conf`. Silent no-op if
+   none of these exist.
+5. Confirms the wrapper resolves on the remote's login-shell PATH
+   (`command -v wl-paste`). If PATH precedence is wrong, install
+   completes with a warning + the one-line fix instruction.
 
 Idempotent. Re-running on an already-installed host refreshes every
 artifact in place.
 
+Note what step 5 does *not* do: it doesn't attempt to verify OSC 52
+actually round-trips. That check would need a real attached terminal
+(tty), and the install runs over a non-interactive SSH connection with
+no tty at all. See "How it works" below for why, and what that means for
+the Hosts tab's `📋 bridged` pill.
+
 ### Manual nvim step (optional)
 
-To make nvim's yank land in the laptop clipboard, on the remote add
-to your nvim init:
+To make nvim's yank land in the laptop clipboard, on the remote add to
+your nvim init:
 
 ```lua
 vim.opt.clipboard = "unnamedplus"   -- init.lua
@@ -124,51 +102,42 @@ After this, `yy`, `yiw`, `y$` etc. all reach the local clipboard.
 
 ## Caveats
 
-### Phase 1 supports Wayland local + Linux remote only
+### Your terminal must support OSC 52
 
-- Local must be running a Wayland compositor with `wl-clipboard`
-  installed. The daemon's `Detect()` keys on `WAYLAND_DISPLAY` and
-  refuses to start without it.
-- Remote must be Linux with `socat` available (or installable via
-  the system package manager when the install runs).
-- X11 (`xclip`) local support and macOS (`pbpaste`/`pbcopy`) local
-  support are Phase 2; the `Provider` interface is in place so each
-  is a single-file addition when there's a user who needs it.
-- macOS as a remote target is not supported. v0.17.x's remote
-  workspaces feature is Linux-only on the remote; v0.18 inherits that.
+The bridge is only as good as the terminal emulator you're actually
+sitting in front of — OSC 52 is handled by the *outer* terminal, not by
+canopy or by SSH/mosh. Most modern terminals support the *write*
+direction (remote → local clipboard) by default; the *read* direction
+(local → remote, i.e. `wl-paste`) is disabled by default in some
+terminals for security reasons (a malicious program could otherwise
+silently read your clipboard).
 
-### Tailscale SSH must be off for the bridged hostname
+- **foot** (the reference terminal this bridge was built against):
+  `osc52` config option, defaults to `enabled` (both directions).
+- Other terminals: check their docs for an OSC 52 / clipboard setting.
+  If `wl-paste` on the remote times out with "local terminal did not
+  respond to the OSC 52 clipboard query," the read direction is
+  disabled or unsupported in your terminal — `wl-copy` (write) may
+  still work fine.
 
-Tailscale's embedded SSH server (`tailscale set --ssh=true`) doesn't
-support Unix-socket forwarding. If your remote host runs Tailscale
-SSH, every connection routes through Tailscale's ssh implementation
-instead of OpenSSH, the `RemoteForward` directives are silently
-dropped, and the bridge fails with no sockets on the remote.
+### tmux must have `allow-passthrough on`
 
-To check:
-
-```bash
-ssh -v <host> true 2>&1 | grep "remote software"
-# OpenSSH_X.Y → fine
-# Tailscale → blocking the bridge
-```
-
-To fix on the remote:
+Install configures this automatically (step 2 above). If you edit
+`~/.tmux.conf` by hand afterward and remove or shadow that line, the
+bridge silently stops working — tmux 3.3+ eats the DCS-wrapped escape
+sequences instead of relaying them to the outer terminal, and there's no
+error, just no clipboard traffic. To check:
 
 ```bash
-sudo tailscale set --ssh=false
+tmux show -g allow-passthrough
+# expect: allow-passthrough on
 ```
-
-(You can still use Tailscale for the network path; this only disables
-Tailscale's in-band SSH server in favor of OpenSSH on the same host.)
 
 ### Mosh has exactly ONE limitation: `Ctrl+Shift+C` in tmux copy-mode
 
-The bridge is **attach-method-agnostic**. The persistent SSH tunnel
-(the systemd unit) holds the RemoteForward sockets open continuously
-on the remote. When you mosh OR ssh to the host, Claude/nvim/shell
-all reach the wrapper through the same live sockets — image paste,
-text paste, command-line `wl-copy`, tmux copy-mode `y` / `Enter` /
+The OSC 52 mechanism itself is attach-method-agnostic — it's just bytes
+written to and read from the pty, which both SSH and mosh carry
+transparently. `wl-copy`, `wl-paste`, tmux copy-mode `y` / `Enter` /
 mouse-drag-release, nvim yank — every one of these works identically
 over both attach methods.
 
@@ -178,106 +147,49 @@ modifyOtherKeys escape sequences that tmux 3.2+ uses to distinguish
 `Ctrl+Shift+C` from plain `Ctrl+C`. Your terminal generates the right
 sequence, but mosh boils it down to `Ctrl+C` by the time tmux sees it.
 The canopy `bind-key -T copy-mode-vi C-S-c …` we install doesn't match
-because tmux only ever sees `C-c` over mosh.
+because tmux only ever sees `C-c` over mosh. (This caveat predates the
+OSC 52 rewrite and is unrelated to it — it's about the keybinding never
+firing, not about what happens once it does.)
 
 Workarounds:
 
 - Use `y` or `Enter` in tmux copy-mode — both bypass extended-keys
   entirely and always work.
-- Hold **Shift** while dragging to bypass tmux mouse mode; the
-  terminal app handles the selection natively, and its own
-  `Ctrl+Shift+C` keybinding copies via the local clipboard with no
-  bridge involved.
-- SSH-attach instead of mosh-attach if `Ctrl+Shift+C` muscle memory
-  is non-negotiable. Plain SSH passes the escape sequence through
+- Hold **Shift** while dragging to bypass tmux mouse mode; the terminal
+  app handles the selection natively, and its own `Ctrl+Shift+C`
+  keybinding copies via the local clipboard with no bridge involved.
+- SSH-attach instead of mosh-attach if `Ctrl+Shift+C` muscle memory is
+  non-negotiable. Plain SSH passes the escape sequence through
   faithfully and the binding fires.
 
-**Everything else about the bridge works fine over mosh.** Don't
-switch attach methods preemptively — mosh's resilience to network
-churn is a real benefit; only ssh-attach when `Ctrl+Shift+C`
-specifically matters.
+**Everything else about the bridge works fine over mosh.** Don't switch
+attach methods preemptively — mosh's resilience to network churn is a
+real benefit; only ssh-attach when `Ctrl+Shift+C` specifically matters.
 
 ### Terminal emulator may eat `Ctrl+Shift+C` before tmux sees it
 
-Even outside mosh, some terminal apps (alacritty, kitty, ghostty,
-foot, ptyxis) bind `Ctrl+Shift+C` at the terminal level to "copy
-the terminal's own selection to system clipboard" and consume the
-keystroke before it reaches the running program. If your terminal
-does that AND you're SSH-attached AND tmux's copy-mode binding still
-doesn't fire, rebind the terminal's copy action to a different key
-(commonly `Ctrl+Shift+Y`) so `Ctrl+Shift+C` passes through to tmux.
+Even outside mosh, some terminal apps (alacritty, kitty, ghostty, foot,
+ptyxis) bind `Ctrl+Shift+C` at the terminal level to "copy the
+terminal's own selection to system clipboard" and consume the keystroke
+before it reaches the running program. If your terminal does that AND
+you're SSH-attached AND tmux's copy-mode binding still doesn't fire,
+rebind the terminal's copy action to a different key (commonly
+`Ctrl+Shift+Y`) so `Ctrl+Shift+C` passes through to tmux.
 
 This is rare in practice — most terminals only "copy" on
-`Ctrl+Shift+C` when text is visually selected; with no selection,
-they pass the keystroke through. But if your terminal is more
-aggressive, this is the fix.
-
-### Single laptop per host at a time
-
-Two laptops both bridging to the same remote host will fight over the
-RemoteForward sockets. SSH's `StreamLocalBindUnlink yes` makes the
-*second* tunnel win — its sockets replace the first laptop's. From
-the user's perspective: "I pasted on laptop A, the image came from
-laptop B's clipboard."
-
-Multi-laptop arbitration (with explicit ownership tokens or per-laptop
-namespacing) is parked for v0.19+.
-
-### sshd config requirements on the remote
-
-The remote's sshd must allow Unix-socket forwarding:
-
-```
-# In /etc/ssh/sshd_config (or sshd_config.d/), if explicitly set:
-AllowStreamLocalForwarding yes
-```
-
-This is the **default** on every OpenSSH 6.7+ install, so unless your
-host has a hardening config that explicitly flipped it to `no` or
-`local`, you don't have to do anything. To check:
-
-```bash
-ssh <host> 'sudo sshd -T 2>&1 | grep -i streamlocal'
-# expect: allowstreamlocalforwarding yes
-```
-
-If your config has it set to `no` or `local`, add to
-`/etc/ssh/sshd_config.d/99-canopy-clipboard.conf` on the remote:
-
-```
-AllowStreamLocalForwarding yes
-```
-
-Then `sudo systemctl reload sshd`.
-
-### Daemon doesn't auto-start on tty1 / virtual console
-
-The systemd user unit's `WantedBy=graphical-session.target` ties the
-daemon's lifecycle to the Wayland compositor's session. If you log
-into a TTY (`tty1`, `tty2`, etc.) without starting a graphical
-session, the daemon stays inactive. That's correct behavior — there's
-no clipboard for it to bridge. But if you SSH back into your own
-laptop and try `canopy clipboard-server` from a non-graphical context,
-you'll see:
-
-```
-canopy clipboard-server: clipboard.Detect: no clipboard provider
-detected on this system. Phase 1 supports Wayland only. ...
-```
-
-Not a bug — the daemon refuses to start where there's no clipboard
-backend. Run the bridge from your normal graphical session.
+`Ctrl+Shift+C` when text is visually selected; with no selection, they
+pass the keystroke through. But if your terminal is more aggressive,
+this is the fix.
 
 ### canopy switch defaults to mosh
 
-`canopy switch` (and the TUI's Enter on a remote row) attach via
-mosh by default. Combined with the mosh+extended-keys caveat above,
-mosh-attached sessions get the tmux bindings *except* `Ctrl+Shift+C`.
-`y` and `Enter` cover most copy-mode workflows.
+`canopy switch` (and the TUI's Enter on a remote row) attach via mosh by
+default. Combined with the mosh+extended-keys caveat above, mosh-attached
+sessions get the tmux bindings *except* `Ctrl+Shift+C`. `y` and `Enter`
+cover most copy-mode workflows.
 
-If you want SSH-attach instead (for `Ctrl+Shift+C` fidelity, or
-because you're on a network where UDP is awkward), pass `--no-mosh`
-(v0.23.0.0):
+If you want SSH-attach instead (for `Ctrl+Shift+C` fidelity, or because
+you're on a network where UDP is awkward), pass `--no-mosh`:
 
 ```bash
 canopy switch --on tower fix-the-bug --no-mosh
@@ -286,148 +198,115 @@ canopy switch --on tower fix-the-bug --no-mosh
 This attaches over an ssh reconnect-loop instead of mosh — it re-dials
 with backoff on a dropped connection rather than kicking you back to a
 shell. The same flag works on `canopy --remote <host> --no-mosh` for the
-thin-client mode. If mosh isn't installed locally at all, canopy now falls
-back to this path automatically, so you don't have to remember the flag
-just because a box is missing mosh.
+thin-client mode. If mosh isn't installed locally at all, canopy now
+falls back to this path automatically, so you don't have to remember the
+flag just because a box is missing mosh.
 
 ## Troubleshooting
 
-### Daemon doesn't start
-
-```bash
-systemctl --user status canopy-clipboard
-journalctl --user -u canopy-clipboard -n 20
-```
-
-Common causes:
-
-- **WAYLAND_DISPLAY not in systemd user manager env** — happens when
-  the compositor doesn't auto-import the env. Fix:
-  ```bash
-  systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR
-  systemctl --user restart canopy-clipboard
-  ```
-  For permanence (Hyprland users), add to `~/.config/hypr/hyprland.conf`:
-  ```
-  exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
-  ```
-  omarchy's default Hyprland config does this already.
-
-- **wl-clipboard not installed** — `pacman -S wl-clipboard` (Arch) /
-  `apt install wl-clipboard` (Debian) / equivalent.
-
-### Tunnel unit failing
-
-```bash
-systemctl --user status canopy-clipboard-tunnel-<host>
-journalctl --user -u canopy-clipboard-tunnel-<host> -n 30
-```
-
-Common causes:
-
-- **Tailscale SSH active** — see Caveats above.
-- **sshd `AllowStreamLocalForwarding no`** — see Caveats above.
-- **Stale sockets** — install's `ExecStartPre` should clean them, but
-  if you've been mid-debugging:
-  ```bash
-  ssh <host> 'rm -f /run/user/$(id -u)/canopy/clip-*.sock'
-  systemctl --user restart canopy-clipboard-tunnel-<host>
-  ```
-
-### `wl-paste --list-types` returns nothing useful
+### `wl-copy` runs but nothing lands on the laptop clipboard
 
 On the remote:
 
 ```bash
-which wl-paste                             # should be ~/.local/bin/wl-paste
-wl-paste --list-types
-# expect: text/plain;charset=utf-8 (always) + image/png (if image in local clipboard)
+which wl-copy                              # should be ~/.local/bin/wl-copy
+echo -n "hello from remote" | wl-copy
 ```
 
-If `which` reports `/usr/bin/wl-paste`:
+If `which` reports `/usr/bin/wl-copy`:
 
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 # then re-attach the session so the new shell picks up PATH
 ```
 
-If `which` is correct but `--list-types` is empty / errors out:
+If `which` is correct but the paste never shows up on the laptop:
+
+- Confirm you're inside a real attached terminal session (not, say, a
+  cron job or a canopy background probe) — OSC 52 needs a tty.
+- If you're inside tmux: `tmux show -g allow-passthrough` — must say
+  `on`.
+- Try the same command *outside* tmux (`tmux detach` or a fresh SSH
+  session) to isolate whether tmux passthrough or the terminal itself
+  is the problem.
+- Check your terminal's OSC 52 setting (see Caveats above).
+
+### `wl-paste` times out or returns empty
 
 ```bash
-# socket exists?
-ls -la /run/user/$(id -u)/canopy/
-# bridge alive? (on local)
-systemctl --user status canopy-clipboard-tunnel-<host>
+wl-paste
+# expect: your laptop clipboard's text content
 ```
 
-### "Pasted text" instead of "[Image attached]" in Claude on remote
+A timeout ("local terminal did not respond to the OSC 52 clipboard
+query") almost always means your terminal has OSC 52 *read* disabled —
+this is a common default for security reasons. Check your terminal's
+docs; foot enables it by default (`osc52=enabled`). Writing (`wl-copy`)
+can still work even when reading doesn't, since terminals treat the two
+directions as separate risk levels.
 
-The bridge is working in the text direction but not the image. Two
-checks:
+### Hosts tab shows `📋 bridged` but it doesn't actually work
 
-```bash
-# 1. on local — does your clipboard ACTUALLY have a PNG?
-wl-paste --list-types
-# need: image/png in the output. If not, re-screenshot.
-
-# 2. on remote — does the wrapper get the image?
-wl-paste --type image/png | file -
-# expect: /dev/stdin: PNG image data, ...
-```
-
-If #2 shows PNG bytes, the bridge is fine and Claude Code itself
-needs a restart (it may have cached an earlier failure).
+This is expected in one specific case: the `📋 bridged` pill means "the
+wrapper scripts are installed on this host," not "OSC 52 is confirmed
+working right now." canopy's background health probe (`canopy ls
+--json`, refreshed every ~2s) runs over a non-interactive SSH connection
+with no tty — there's no terminal on the other end to answer an OSC 52
+query, so liveness genuinely can't be checked from there. The wrapper
+scripts themselves fail loudly (non-zero exit, clear stderr) the moment
+you actually try to use them from a real attached session — that's
+where to look if something's wrong, not the pill.
 
 ### Diagnostic checklist (one-liners)
 
 ```bash
-# Local side
-systemctl --user is-active canopy-clipboard
-systemctl --user is-active canopy-clipboard-tunnel-<host>
-ls -la /run/user/$(id -u)/canopy/
-grep "canopy:start" ~/.ssh/config
-cat ~/.ssh/config.d/canopy/<host>.conf | grep Host
-
 # Remote side
-ssh <host> 'which wl-paste'
-ssh <host> 'ls -la /run/user/$(id -u)/canopy/'
+ssh <host> 'which wl-paste; which wl-copy'
 ssh <host> 'grep "canopy:start" ~/.tmux.conf'
+ssh <host> 'tmux show -g allow-passthrough' # run from inside an attached tmux session on the remote, not over batch ssh
 
-# End-to-end
-ssh <host> '$HOME/.local/bin/wl-paste --list-types'
+# End-to-end, from an actual attached session on the remote (not batch ssh)
+echo -n "canopy clipboard test" | wl-copy
+wl-paste
 ```
 
 ## What's not supported
 
 | Feature | Status | Reason |
 |---|---|---|
-| X11 local | Phase 2 | Single-file Provider addition; not load-bearing for daily users |
-| macOS local | Phase 2 | Same as X11 |
-| macOS remote | Out of scope | v0.17.x is Linux-only on remote |
-| Windows local | Out of scope | WSL counts as Linux; native Windows is out of scope project-wide |
-| Multi-laptop arbitration | v0.19+ | Last writer wins; tracked as a known limitation |
-| Clipboard content sync (continuous) | Out of scope | Bridge is request/response; continuous sync needs a different security model |
-| Selection clipboard (X11 PRIMARY) | Out of scope | Wayland-only Phase 1 doesn't have a notion of selection |
+| Image paste (either direction) | Not supported | OSC 52 payloads are too size-constrained for screenshots; needs a different transport — tracked as a future PTY-proxy rewrite |
+| X11 selection clipboard (PRIMARY) | Out of scope | OSC 52 has no notion of a separate selection buffer |
+| Continuous clipboard sync | Out of scope | The bridge is request/response (an explicit copy/paste), not a live sync; a different security model entirely |
 | Audit logging of clipboard content | Out of scope | Compliance feature; needs separate security review |
-| Drag-drop image from browser to remote terminal | Out of scope | Terminal protocols don't carry image-drop today |
 | Mobile clipboard (phone → remote) | Out of scope | Different transport entirely (ntfy / Tailscale Funnel) |
-| Auto-detection of "no PATH precedence" + auto-fix | v0.18.x | Install warns; auto-fix is fiddly across shells |
+| Auto-detection of "no PATH precedence" + auto-fix | Not yet | Install warns; auto-fix is fiddly across shells |
+| Verifying OSC 52 liveness from the background health probe | Not possible | Requires a real attached tty; the probe runs over batch SSH — see "Hosts tab shows bridged but it doesn't work" above |
 
-## How it works (one-paragraph version)
+## How it works
 
-A local Go daemon (`canopy clipboard-server`) holds three Unix sockets
-in `$XDG_RUNTIME_DIR/canopy/`. SSH's `RemoteForward` directive
-forwards those sockets to identical paths on the remote host via a
-persistent `ssh -N` connection that a systemd user unit supervises.
-On the remote, the canopy wrapper scripts at `~/.local/bin/wl-paste`
-and `~/.local/bin/wl-copy` use `socat` to connect to those
-SSH-forwarded sockets — every read/write proxies back to the laptop's
-real Wayland clipboard via the daemon. Tmux's copy-mode is wired to
-the wrappers via auto-installed `bind-key copy-pipe-and-cancel
-"wl-copy"` lines in the remote's `~/.tmux.conf`. Claude Code, nvim,
-and anything else on the remote that calls `wl-paste` / `wl-copy`
-flows through this chain transparently — no application changes
-required.
+Each wrapper script (`~/.local/bin/wl-copy`, `~/.local/bin/wl-paste`) is
+just a shell script that talks directly to the terminal, not to a
+daemon:
 
-For the full architecture and the design-decision history, see
-[`docs/design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md).
+- **`wl-copy`** base64-encodes its input and writes an OSC 52 "set
+  clipboard" escape sequence — `\033]52;c;<base64>\033\\` — straight to
+  `/dev/tty`. The outer terminal emulator intercepts this sequence and
+  sets its own system clipboard. No network hop, no socket, no laptop
+  process involved.
+- **`wl-paste`** writes an OSC 52 *query* sequence (`\033]52;c;?\033\\`)
+  to `/dev/tty`, then reads the terminal's base64-encoded reply back off
+  stdin.
+- **Inside tmux**, both directions wrap the sequence in tmux's DCS
+  passthrough envelope (`\033Ptmux;...\033\\`) so it reaches the *outer*
+  terminal instead of being consumed by tmux itself — this requires
+  `allow-passthrough on`, which install configures automatically (tmux
+  3.3+ defaults it off).
+
+Because the terminal emulator does the actual clipboard work, this needs
+no daemon, no persistent SSH tunnel, no forwarded sockets, and no `socat`
+on the remote — a meaningful simplification over the original
+daemon/tunnel design (still described in
+[`docs/design/v0.18-clipboard-bridge.md`](design/v0.18-clipboard-bridge.md)'s
+main body). The tradeoff is the one covered throughout this doc: OSC 52
+payloads are size-limited (no images) and liveness depends entirely on
+the terminal you're actually sitting in front of.
