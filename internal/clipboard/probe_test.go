@@ -1,7 +1,6 @@
 package clipboard
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,7 +8,7 @@ import (
 
 // seedWrappers creates dummy wl-paste/wl-copy files at homeDir's
 // .local/bin/. Used by tests that need both wrappers to "exist" so the
-// Stat checks in ProbeBridgeStatus pass before reaching the run step.
+// Stat checks in ProbeBridgeStatus pass.
 func seedWrappers(t *testing.T, homeDir string, names ...string) {
 	t.Helper()
 	bin := filepath.Join(homeDir, ".local", "bin")
@@ -27,11 +26,7 @@ func seedWrappers(t *testing.T, homeDir string, names ...string) {
 func TestProbeBridgeStatus_OffWhenWlPasteMissing(t *testing.T) {
 	home := t.TempDir()
 	seedWrappers(t, home, "wl-copy") // wl-paste deliberately absent
-	got := ProbeBridgeStatus(home, func(string, ...string) ([]byte, error) {
-		t.Error("runner should not be called when a wrapper is missing")
-		return nil, nil
-	})
-	if got != BridgeStatusOff {
+	if got := ProbeBridgeStatus(home); got != BridgeStatusOff {
 		t.Errorf("status = %q, want %q", got, BridgeStatusOff)
 	}
 }
@@ -39,60 +34,31 @@ func TestProbeBridgeStatus_OffWhenWlPasteMissing(t *testing.T) {
 func TestProbeBridgeStatus_OffWhenWlCopyMissing(t *testing.T) {
 	home := t.TempDir()
 	seedWrappers(t, home, "wl-paste") // wl-copy deliberately absent
-	got := ProbeBridgeStatus(home, func(string, ...string) ([]byte, error) {
-		t.Error("runner should not be called when a wrapper is missing")
-		return nil, nil
-	})
-	if got != BridgeStatusOff {
+	if got := ProbeBridgeStatus(home); got != BridgeStatusOff {
 		t.Errorf("status = %q, want %q", got, BridgeStatusOff)
 	}
 }
 
-func TestProbeBridgeStatus_BridgedWhenProbeReportsTextPlain(t *testing.T) {
+// TestProbeBridgeStatus_BridgedWhenBothWrappersPresent covers the
+// current (post-OSC52) contract: "bridged" means the wrapper scripts
+// are installed, nothing more. Unlike the pre-OSC52 probe, this
+// deliberately does NOT invoke wl-paste at all — ProbeBridgeStatus
+// runs inside `canopy ls --json`, called by the laptop over BatchMode
+// SSH (no pty), and OSC 52 requires a real attached terminal to
+// round-trip through. There is no way to verify liveness from this
+// code path; see BridgeStatusBridged's doc comment.
+func TestProbeBridgeStatus_BridgedWhenBothWrappersPresent(t *testing.T) {
 	home := t.TempDir()
 	seedWrappers(t, home, "wl-paste", "wl-copy")
-	got := ProbeBridgeStatus(home, func(path string, args ...string) ([]byte, error) {
-		if len(args) != 1 || args[0] != "--list-types" {
-			t.Errorf("expected wl-paste --list-types, got args=%v", args)
-		}
-		return []byte("text/plain;charset=utf-8\nimage/png\n"), nil
-	})
-	if got != BridgeStatusBridged {
+	if got := ProbeBridgeStatus(home); got != BridgeStatusBridged {
 		t.Errorf("status = %q, want %q", got, BridgeStatusBridged)
-	}
-}
-
-func TestProbeBridgeStatus_BrokenWhenProbeErrors(t *testing.T) {
-	home := t.TempDir()
-	seedWrappers(t, home, "wl-paste", "wl-copy")
-	got := ProbeBridgeStatus(home, func(string, ...string) ([]byte, error) {
-		return nil, errors.New("timeout: socat: connection refused")
-	})
-	if got != BridgeStatusBroken {
-		t.Errorf("status = %q, want %q", got, BridgeStatusBroken)
-	}
-}
-
-func TestProbeBridgeStatus_BrokenWhenProbeOutputMissingTextPlain(t *testing.T) {
-	// Wrapper ran, exit 0, but the output doesn't carry text/plain.
-	// Could happen if the wrapper failed silently and emitted only
-	// the image/png line (the conditional emit at the bottom of the
-	// --list-types branch).
-	home := t.TempDir()
-	seedWrappers(t, home, "wl-paste", "wl-copy")
-	got := ProbeBridgeStatus(home, func(string, ...string) ([]byte, error) {
-		return []byte("image/png\n"), nil
-	})
-	if got != BridgeStatusBroken {
-		t.Errorf("status = %q, want %q (wrapper output didn't include text/plain)", got, BridgeStatusBroken)
 	}
 }
 
 func TestProbeBridgeStatus_OffWhenEmptyHomeDir(t *testing.T) {
 	// Defensive: caller passed an empty homeDir. Don't crash; report
 	// "off" deterministically.
-	got := ProbeBridgeStatus("", func(string, ...string) ([]byte, error) { return nil, nil })
-	if got != BridgeStatusOff {
+	if got := ProbeBridgeStatus(""); got != BridgeStatusOff {
 		t.Errorf("status = %q, want %q for empty homeDir", got, BridgeStatusOff)
 	}
 }

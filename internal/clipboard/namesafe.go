@@ -7,10 +7,12 @@ import (
 )
 
 // SanitizeArtifactName derives a filesystem- and systemd-unit-safe key
-// from a host identifier for the per-host clipboard-bridge artifacts:
-// the SSH snippet filename in ~/.ssh/config.d/canopy/ (writeSSHSnippet)
-// and the canopy-clipboard-tunnel-<name>.service unit name
-// (TunnelUnitName).
+// from a host identifier. HostInstaller.InstallOnHost uses it (via its
+// hostName parameter) to key the legacy-artifact cleanup lookups in
+// cleanupLegacyArtifacts: the pre-OSC52 canopy-clipboard-tunnel-<name>.service
+// unit name and the pre-OSC52 ~/.ssh/config.d/canopy/<name>.conf
+// snippet filename — both were named this way when they were written,
+// so cleanup must derive the same name to find them again.
 //
 // A REGISTERED host name is already restricted to this shape —
 // internal/host/registry.go's validateName forbids @, :, /, and
@@ -32,8 +34,8 @@ import (
 // "user@host:port" shape) is an 8-hex-char suffix of sha256(spec)
 // appended, because substitution is lossy and otherwise-distinct specs
 // can collide — "tower:1" and "tower-1" would both sanitize to
-// "tower-1" without it, silently overwriting one host's SSH snippet /
-// tunnel unit with the other's.
+// "tower-1" without it, silently overwriting one host's legacy
+// artifacts with the other's during cleanup.
 func SanitizeArtifactName(spec string) string {
 	var b strings.Builder
 	b.Grow(len(spec))

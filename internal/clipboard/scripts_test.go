@@ -1,7 +1,6 @@
 package clipboard
 
 import (
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,54 +44,51 @@ func TestWrapperContent_HashStableForSameInput(t *testing.T) {
 }
 
 func TestWrapperContent_BodyMentionsCanonicalFlags(t *testing.T) {
-	// Catch regression where someone refactors out the flag handling.
+	// Catch regression where someone refactors out the flag handling
+	// or the OSC 52 mechanism itself.
 	pasteContent, _, _ := WrapperContent(WrapperWlPaste, "v0")
-	for _, must := range []string{"--list-types", "--type", "--no-newline", "clip-text.sock", "clip-image.sock"} {
+	for _, must := range []string{"--list-types", "--type", "--no-newline", "52;c;", "base64 -d"} {
 		if !strings.Contains(pasteContent, must) {
 			t.Errorf("wl-paste wrapper missing %q", must)
 		}
 	}
 	copyContent, _, _ := WrapperContent(WrapperWlCopy, "v0")
-	if !strings.Contains(copyContent, "clip-copy.sock") {
-		t.Error("wl-copy wrapper missing clip-copy.sock reference")
+	for _, must := range []string{"52;c;", "base64"} {
+		if !strings.Contains(copyContent, must) {
+			t.Errorf("wl-copy wrapper missing %q", must)
+		}
 	}
 }
 
-func TestWrapperContent_TimeoutGuardOnSocat(t *testing.T) {
-	// Locked decision at /plan-eng-review: wrappers wrap socat with
-	// `timeout 2` so a daemon-down state fails fast.
+func TestWrapperContent_TmuxDCSPassthroughWrapping(t *testing.T) {
+	// Both wrappers must wrap their OSC 52 sequence in tmux's DCS
+	// passthrough envelope when $TMUX is set — otherwise the sequence
+	// never reaches the outer terminal from inside a canopy workspace
+	// (every canopy workspace IS a tmux session). Catch regression
+	// where someone drops the ${TMUX:-} check.
 	for _, w := range []WrapperScript{WrapperWlPaste, WrapperWlCopy} {
 		content, _, _ := WrapperContent(w, "v0")
-		if !strings.Contains(content, "timeout 2 socat") {
-			t.Errorf("%s wrapper must wrap socat with `timeout 2`; not found in:\n%s", w, head(content, 400))
+		if !strings.Contains(content, `TMUX:-`) {
+			t.Errorf("%s wrapper missing the $TMUX check gating DCS passthrough wrapping", w)
+		}
+		if !strings.Contains(content, `Ptmux;`) {
+			t.Errorf("%s wrapper missing the tmux DCS passthrough envelope (\\033Ptmux;...)", w)
 		}
 	}
 }
 
-func TestWrapperContent_RobustToMissingXDGRuntime(t *testing.T) {
-	// The SSH RemoteForward establishes sockets at
-	// /run/user/<uid>/canopy/. The wrapper must compute the same path,
-	// EVEN WHEN $XDG_RUNTIME_DIR isn't set in env (typical for
-	// non-interactive SSH sessions). Falling back to /tmp (the
-	// pre-fix default) silently routed socat to the wrong dir.
-	for _, w := range []WrapperScript{WrapperWlPaste, WrapperWlCopy} {
-		content, _, _ := WrapperContent(w, "v0")
-		if strings.Contains(content, `XDG_RUNTIME_DIR:-/tmp`) {
-			t.Errorf("%s wrapper falls back to /tmp when XDG_RUNTIME_DIR is unset — SSH RemoteForward sockets live in /run/user/<uid>/", w)
-		}
-		if !strings.Contains(content, `XDG_RUNTIME_DIR:-/run/user/$(id -u)`) {
-			t.Errorf("%s wrapper missing the /run/user/$(id -u) fallback for non-interactive sessions", w)
-		}
-	}
-}
-
-func TestWrapperContent_PNGSignatureProbe(t *testing.T) {
-	// wl-paste --list-types path inspects the first 8 PNG header bytes
-	// to decide whether to report image/png. Catch regression where
-	// someone changes the magic-number check.
+func TestWrapperContent_ImagePasteExplicitlyUnsupported(t *testing.T) {
+	// OSC 52 payloads are too size-constrained for images (terminals
+	// cap them well below screenshot size — see the file header
+	// comment for why herdr bridges images via a temp file instead).
+	// wl-paste must fail clearly on --type image/png, not silently
+	// return nothing or attempt a doomed OSC 52 round-trip.
 	content, _, _ := WrapperContent(WrapperWlPaste, "v0")
-	if !strings.Contains(content, "89504e470d0a1a0a") {
-		t.Error("wl-paste --list-types path missing PNG signature probe (89504e470d0a1a0a)")
+	if !strings.Contains(content, "image/*") {
+		t.Error("wl-paste wrapper missing the image/* case in its --type dispatch")
+	}
+	if !strings.Contains(content, "not supported over OSC 52") {
+		t.Error("wl-paste wrapper's image rejection message missing — regression could silently return empty output instead of erroring")
 	}
 }
 
@@ -116,145 +112,6 @@ func TestWrapperRemoteName_StripsShExtension(t *testing.T) {
 	}
 }
 
-func TestSnippetContent_RendersWithUIDsAndHostName(t *testing.T) {
-	content, err := SnippetContent(SnippetData{
-		HostName:    "tower",
-		SSHHostname: "tower.example.com",
-		SSHUser:     "avi",
-		Version:     "v0.18.0+test",
-		LocalUID:    1000,
-		RemoteUID:   1001,
-	})
-	if err != nil {
-		t.Fatalf("SnippetContent: %v", err)
-	}
-	for _, must := range []string{
-		"Host canopy-tunnel-tower",      // dedicated alias
-		"HostName tower.example.com",    // resolved by the alias
-		"User avi",                      // resolved by the alias
-		"/run/user/1000/canopy/clip-text.sock",
-		"/run/user/1001/canopy/clip-text.sock",
-		"/run/user/1000/canopy/clip-image.sock",
-		"/run/user/1000/canopy/clip-copy.sock",
-		"StreamLocalBindUnlink yes",
-		"ServerAliveInterval 30",
-		"ExitOnForwardFailure yes",
-		"v0.18.0+test",
-	} {
-		if !strings.Contains(content, must) {
-			t.Errorf("snippet missing %q\nbody:\n%s", must, content)
-		}
-	}
-}
-
-func TestSnippetContent_OmitsUserAndPortWhenAbsent(t *testing.T) {
-	// SSH target without a user@ prefix or :port suffix → snippet
-	// should NOT emit the User/Port directives (let SSH fall back to
-	// the current local user / default port 22).
-	content, err := SnippetContent(SnippetData{
-		HostName:    "tower",
-		SSHHostname: "tower.lan",
-		Version:     "v0",
-		LocalUID:    1000,
-		RemoteUID:   1000,
-	})
-	if err != nil {
-		t.Fatalf("SnippetContent: %v", err)
-	}
-	for _, mustNot := range []string{
-		"\n  User ",
-		"\n  Port ",
-	} {
-		if strings.Contains(content, mustNot) {
-			t.Errorf("snippet emitted %q when user/port were absent in target\nbody:\n%s", mustNot, content)
-		}
-	}
-}
-
-func TestSnippetContent_HostDirectiveUsesDedicatedAlias(t *testing.T) {
-	// Critical regression guard: snippet's Host pattern must be the
-	// dedicated `canopy-tunnel-<name>` alias, NOT the real hostname.
-	// Otherwise every ssh/mosh to the host inherits the RemoteForwards
-	// and conflicts with the persistent tunnel that owns the binds.
-	content, _ := SnippetContent(SnippetData{
-		HostName:    "tower",
-		SSHHostname: "a10i-tower.geep-carat.ts.net",
-		LocalUID:    1000,
-		RemoteUID:   1000,
-	})
-	if !strings.Contains(content, "Host canopy-tunnel-tower\n") {
-		t.Errorf("snippet missing `Host canopy-tunnel-tower` directive; body:\n%s", content)
-	}
-	// Must NOT match the real hostname — that's the old shape that
-	// caused "remote port forwarding failed" on every regular ssh.
-	for _, line := range strings.Split(content, "\n") {
-		if strings.HasPrefix(line, "Host a10i-tower") {
-			t.Errorf("snippet matches real hostname directly; would conflict with normal ssh/mosh: %q", line)
-		}
-	}
-}
-
-func TestSnippetContent_RemoteUIDFirstOnEachLine(t *testing.T) {
-	// Per the snippet template comment: RemoteForward syntax is
-	// `RemoteForward <remote-path> <local-path>`. Mixing these up
-	// would silently make the bridge fail (sockets created on the
-	// wrong side). Test catches the swap.
-	content, _ := SnippetContent(SnippetData{
-		HostName:  "tower",
-		Version:   "v0",
-		LocalUID:  1000,
-		RemoteUID: 1001,
-	})
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "RemoteForward ") {
-			continue
-		}
-		// Remote (1001) must come BEFORE local (1000).
-		remote := strings.Index(line, "/run/user/1001/")
-		local := strings.Index(line, "/run/user/1000/")
-		if remote == -1 || local == -1 {
-			t.Errorf("RemoteForward line missing one of the UIDs: %q", line)
-			continue
-		}
-		if remote > local {
-			t.Errorf("RemoteForward arg order swapped (remote must come first): %q", line)
-		}
-	}
-}
-
-func TestSnippetContent_RefusesEmptyHostName(t *testing.T) {
-	_, err := SnippetContent(SnippetData{HostName: "", SSHHostname: "tower.lan", Version: "v0", LocalUID: 1000, RemoteUID: 1001})
-	if err == nil {
-		t.Fatal("SnippetContent must refuse empty HostName")
-	}
-}
-
-func TestSnippetContent_RefusesEmptySSHHostname(t *testing.T) {
-	// Empty SSHHostname would render as `Host ` (whitespace + nothing),
-	// which SSH treats as the wildcard `Host *` — broadcasting every
-	// canopy bridge to every SSH connection. Catastrophic; refuse.
-	_, err := SnippetContent(SnippetData{HostName: "tower", SSHHostname: "", Version: "v0", LocalUID: 1000, RemoteUID: 1001})
-	if err == nil {
-		t.Fatal("SnippetContent must refuse empty SSHHostname (would broadcast to all hosts)")
-	}
-}
-
-func TestSnippetContent_RefusesNonPositiveUID(t *testing.T) {
-	cases := []SnippetData{
-		{HostName: "tower", SSHHostname: "tower.lan", LocalUID: 0, RemoteUID: 1001},
-		{HostName: "tower", SSHHostname: "tower.lan", LocalUID: 1000, RemoteUID: 0},
-		{HostName: "tower", SSHHostname: "tower.lan", LocalUID: -1, RemoteUID: 1001},
-		{HostName: "tower", SSHHostname: "tower.lan", LocalUID: 1000, RemoteUID: -1},
-	}
-	for _, c := range cases {
-		_, err := SnippetContent(c)
-		if err == nil {
-			t.Errorf("SnippetContent should refuse non-positive UID: %+v", c)
-		}
-	}
-}
-
 // head returns the first n bytes of s; helper for fail-message readability.
 func head(s string, n int) string {
 	if len(s) <= n {
@@ -263,117 +120,19 @@ func head(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// renderWrapperToTemp renders the wl-paste wrapper and writes it
-// executable to dir. Shared setup for the --list-types liveness tests
-// below.
-func renderWrapperToTemp(t *testing.T, dir string) string {
-	t.Helper()
-	content, _, err := WrapperContent(WrapperWlPaste, "v0.18.0+test")
-	if err != nil {
-		t.Fatalf("WrapperContent: %v", err)
-	}
-	path := filepath.Join(dir, "wl-paste")
-	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	return path
-}
-
-// TestWrapperScripts_ListTypesOmitsTextPlainWhenSocketUnreachable is
-// the regression test for the exact bug found in production (dogfood
-// 2026-09-03, tower): `wl-paste --list-types` used to unconditionally
-// print "text/plain;charset=utf-8" BEFORE attempting any connectivity
-// check, so canopy's own bridge health probe (ProbeBridgeStatus in
-// probe.go, and the install-time verifyBridge check) both saw
-// "text/plain" in the output and reported the bridge as "bridged" —
-// even with the SSH RemoteForward tunnel completely dead and every
-// real paste/copy failing with "No such file or directory". Confirmed
-// live: wrappers installed from an old canopy version kept reporting
-// healthy while $XDG_RUNTIME_DIR/canopy/ didn't even exist.
-//
-// This test points CLIP_DIR at a directory with NO clip-text.sock and
-// asserts --list-types does NOT claim text/plain.
-func TestWrapperScripts_ListTypesOmitsTextPlainWhenSocketUnreachable(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not on PATH")
-	}
-	if _, err := exec.LookPath("socat"); err != nil {
-		t.Skip("socat not on PATH")
-	}
-	if _, err := exec.LookPath("timeout"); err != nil {
-		t.Skip("timeout not on PATH")
-	}
-	scriptDir := t.TempDir()
-	runtimeDir := t.TempDir()
-	// Deliberately do NOT create runtimeDir/canopy or any socket in
-	// it — simulates a dead/never-established SSH RemoteForward.
-	path := renderWrapperToTemp(t, scriptDir)
-
-	cmd := exec.Command("bash", path, "--list-types")
-	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+runtimeDir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("wrapper --list-types exited non-zero (should exit 0 even when the bridge is down): %v\noutput: %s", err, out)
-	}
-	if strings.Contains(string(out), "text/plain") {
-		t.Errorf("--list-types claimed text/plain with an unreachable clip-text.sock; output: %q", out)
-	}
-}
-
-// TestWrapperScripts_ListTypesReportsTextPlainWhenSocketReachable is
-// the positive-path sibling: when clip-text.sock IS reachable (a fake
-// listener accepting and closing, standing in for the real daemon —
-// the daemon's own success/failure content doesn't matter here, only
-// that the SSH tunnel + a live process on the other end exist),
-// --list-types must still claim text/plain, matching the exact
-// contract ProbeBridgeStatus / verifyBridge rely on.
-func TestWrapperScripts_ListTypesReportsTextPlainWhenSocketReachable(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not on PATH")
-	}
-	if _, err := exec.LookPath("socat"); err != nil {
-		t.Skip("socat not on PATH")
-	}
-	if _, err := exec.LookPath("timeout"); err != nil {
-		t.Skip("timeout not on PATH")
-	}
-	scriptDir := t.TempDir()
-	runtimeDir := t.TempDir()
-	canopyDir := filepath.Join(runtimeDir, "canopy")
-	if err := os.MkdirAll(canopyDir, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	sockPath := filepath.Join(canopyDir, "clip-text.sock")
-
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			// Real daemon behavior on a ReadText error: close without
-			// writing. The connection itself succeeding is the
-			// liveness signal the wrapper (and the probe) care about.
-			conn.Close()
-		}
-	}()
-
-	path := renderWrapperToTemp(t, scriptDir)
-	cmd := exec.Command("bash", path, "--list-types")
-	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+runtimeDir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("wrapper --list-types exited non-zero: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(string(out), "text/plain") {
-		t.Errorf("--list-types didn't claim text/plain with a reachable clip-text.sock; output: %q", out)
-	}
-}
+// The socket-based --list-types liveness regression tests that used
+// to live here (TestWrapperScripts_ListTypesOmitsTextPlainWhenSocketUnreachable
+// / ...Reachable) were the regression coverage for the exact bug found
+// in production (dogfood 2026-09-03, tower): `wl-paste --list-types`
+// used to unconditionally print "text/plain;charset=utf-8" BEFORE
+// attempting any connectivity check. That bug — and the SSH tunnel +
+// socat mechanism it lived in — no longer exists: the wrapper now
+// speaks OSC 52 directly to the local terminal (see wl-paste.sh's
+// header comment), with the equivalent "claim nothing without a real
+// round-trip" coverage in osc52_wrapper_test.go's
+// TestOSC52Wrapper_PasteQueryReadDecode (list_types_responsive /
+// list_types_unresponsive_claims_nothing cases), which exercises the
+// real query/read/parse logic through a pty instead of a fake socket.
 
 func TestWrapperScripts_PassBashSyntaxCheck(t *testing.T) {
 	// Render each wrapper and run `bash -n` against it. Catches the

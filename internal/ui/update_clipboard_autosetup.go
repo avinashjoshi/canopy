@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"runtime"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -37,30 +36,20 @@ import (
 // transient-confirmation UX.
 const clipboardAutoSetupNoticeDuration = 6 * time.Second
 
-// clipboardAutoSetupSupportedOS reports whether this platform is a
-// candidate for clipboard-bridge auto-setup. Phase 1 of the bridge is
-// Wayland-laptop-only (see the design doc's "Constraints" section);
-// var-swapped (mirrors cmd/canopy/main.go's runGitBranchShowCurrent
-// pattern) so tests can exercise both branches without needing to
-// cross-compile.
-var clipboardAutoSetupSupportedOS = func() bool { return runtime.GOOS == "linux" }
-
 // maybeAutoSetupClipboardBridge inspects the just-landed remote
 // snapshot for m.pinnedHost and, the first time it's known to be
 // reachable, either skips (already bridged) or kicks off the
 // background install. Latches clipboardAutoSetupTried regardless of
 // outcome so repeated ~2s refresh ticks never retry mid-session.
 //
-// Phase 1 of the clipboard bridge is Linux-only (Wayland laptop side —
-// see the design doc's "Constraints" section); skip entirely on other
-// platforms so macOS/Windows thin-client users never see a doomed
-// install attempt or its failure banner.
+// No laptop-OS gate: the pre-OSC52 bridge required a Wayland
+// compositor on the laptop (the daemon's clipboard backend), so
+// auto-setup skipped non-Linux platforms entirely. OSC 52 is handled
+// by the terminal emulator, not the laptop OS — a macOS or Windows
+// laptop's terminal talking to a Linux remote works exactly the same
+// way — so there's nothing left to gate on here.
 func (m *Model) maybeAutoSetupClipboardBridge() tea.Cmd {
 	if m.pinnedHost.Name == "" || m.clipboardAutoSetupTried {
-		return nil
-	}
-	if !clipboardAutoSetupSupportedOS() {
-		m.clipboardAutoSetupTried = true
 		return nil
 	}
 	snap, ok := m.remoteSnaps[m.pinnedHost.Name]
@@ -93,63 +82,48 @@ type clipboardAutoSetupMsg struct {
 // display window closes.
 type clipboardAutoSetupNoticeExpireMsg struct{}
 
-// clipboardLocalInstaller and clipboardHostInstaller are the minimal
-// interfaces clipboardAutoSetupCmd needs out of *clipboard.LocalInstaller
-// and *clipboard.HostInstaller respectively. Both concrete types already
-// satisfy these structurally — no changes to internal/clipboard needed.
-// Existing purely to give tests an injection seam (see
-// newClipboardLocalInstaller / newClipboardHostInstaller below): a real
-// LocalInstaller.Install() writes a systemd unit + edits ~/.ssh/config,
-// and a real HostInstaller.InstallOnHost() SSHes to a remote host —
-// neither is something a unit test should do.
-type clipboardLocalInstaller interface {
-	Install(out io.Writer) error
-}
+// clipboardHostInstaller is the minimal interface clipboardAutoSetupCmd
+// needs out of *clipboard.HostInstaller. The concrete type already
+// satisfies this structurally — no changes to internal/clipboard
+// needed. Existing purely to give tests an injection seam (see
+// newClipboardHostInstaller below): a real HostInstaller.InstallOnHost()
+// SSHes to a remote host, which isn't something a unit test should do.
 type clipboardHostInstaller interface {
 	InstallOnHost(ctx context.Context, hostName, sshTarget string, out io.Writer) error
 }
 
-// newClipboardLocalInstaller / newClipboardHostInstaller are var-swapped
-// constructors (same pattern as clipboardAutoSetupSupportedOS above)
-// wrapping clipboard.NewLocalInstaller / clipboard.NewHostInstaller.
-var (
-	newClipboardLocalInstaller = func() (clipboardLocalInstaller, error) {
-		return clipboard.NewLocalInstaller()
-	}
-	newClipboardHostInstaller = func(version string) (clipboardHostInstaller, error) {
-		return clipboard.NewHostInstaller(version)
-	}
-)
+// newClipboardHostInstaller is a var-swapped constructor (mirrors
+// cmd/canopy/main.go's runGitBranchShowCurrent pattern) wrapping
+// clipboard.NewHostInstaller, so tests can inject a fake without a
+// real SSH connection.
+var newClipboardHostInstaller = func(version string) (clipboardHostInstaller, error) {
+	return clipboard.NewHostInstaller(version)
+}
 
-// clipboardAutoSetupCmd runs the laptop-side one-time bootstrap
-// (clipboard.LocalInstaller — systemd unit, SSH config Include) THEN
-// the per-host install (clipboard.HostInstaller) — together, the full
-// "canopy install clipboard-bridge" + "canopy host clipboard <name>"
-// sequence a manual setup would require, run unattended so `--remote
-// <host>` needs neither step run by hand. Both installers are
-// idempotent (safe to re-run every session).
+// clipboardAutoSetupCmd runs the per-host install (clipboard.HostInstaller)
+// unattended — the same thing "canopy host clipboard <name>" does by
+// hand — so `--remote <host>` needs no manual step at all. Idempotent
+// (safe to re-run every session). There is no laptop-side bootstrap
+// step any more: the OSC 52 mechanism (see internal/clipboard's
+// wl-copy.sh/wl-paste.sh) needs no daemon or SSH config on the laptop,
+// only the two wrapper scripts pushed to the remote.
 //
 // h.Name may be an unregistered raw --remote target shaped like
 // `user@host:port` (no `canopy host add` required — that's the whole
 // point of wiring this into thin-client mode). clipboard.SanitizeArtifactName
-// keys the on-disk SSH snippet + systemd tunnel unit off a filesystem/
-// systemd-safe name instead of the raw spec.
+// keys the on-disk legacy-cleanup lookups off a filesystem-safe name
+// instead of the raw spec.
 //
 // clipboardAutoSetupTimeout bounds InstallOnHost's SSH round-trips
-// (id -u, mkdir, wrapper pushes, the tmux-config splice, the verify
-// probe — each already fails fast on auth via host.SSHCmdBatch after
-// the v0.22.x fix, but a genuinely unreachable host can still hang at
-// the TCP level well past ssh's own ConnectTimeout=5 under some network
-// conditions). This is a partial mitigation, not a complete one: the
-// systemd steps inside both LocalInstaller.Install and
-// HostInstaller.EnsureTunnelUnit shell out via plain exec.Command with
-// no context parameter at all (a pre-existing internal/clipboard
-// limitation, not introduced here), so a wedged `systemctl` call is
-// still unbounded even with this timeout in place. Run unattended in
-// the background (this is the whole point of auto-setup — see this
-// file's header comment), so a bound here at least keeps a single
-// pinned `--remote` session from hanging on the SSH portion forever
-// rather than eventually surfacing the failure banner.
+// (wrapper pushes, the tmux-config splice, the verify probe — each
+// already fails fast on auth via host.SSHCmdBatch after the v0.22.x
+// fix, but a genuinely unreachable host can still hang at the TCP
+// level well past ssh's own ConnectTimeout=5 under some network
+// conditions). Run unattended in the background (this is the whole
+// point of auto-setup — see this file's header comment), so a bound
+// here at least keeps a single pinned `--remote` session from hanging
+// on the SSH portion forever rather than eventually surfacing the
+// failure banner.
 const clipboardAutoSetupTimeout = 90 * time.Second
 
 // Transcript output is discarded on success; logged at Warn on failure
@@ -158,15 +132,6 @@ const clipboardAutoSetupTimeout = 90 * time.Second
 func clipboardAutoSetupCmd(h host.Host, version string) tea.Cmd {
 	return func() tea.Msg {
 		var buf bytes.Buffer
-		local, err := newClipboardLocalInstaller()
-		if err != nil {
-			return clipboardAutoSetupMsg{host: h.Name, err: fmt.Errorf("local bootstrap: %w", err)}
-		}
-		if err := local.Install(&buf); err != nil {
-			log.Warn("ui.clipboard.autosetup-local-failed", "host", h.Name, "err", err, "transcript", buf.String())
-			return clipboardAutoSetupMsg{host: h.Name, err: fmt.Errorf("local bootstrap: %w", err)}
-		}
-
 		installer, err := newClipboardHostInstaller(version)
 		if err != nil {
 			return clipboardAutoSetupMsg{host: h.Name, err: err}

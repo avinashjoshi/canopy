@@ -8,9 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/avinashjoshi/canopy/internal/host"
 )
@@ -20,11 +18,11 @@ import (
 // (non-nil if the remote command exited non-zero).
 //
 // Default impl shells through internal/host.SSHCmdBatch — every
-// SSHExec call site in this package (id -u, mkdir, cat>file+chmod, the
-// tmux config splice, the wl-paste verify probe) is a fully
-// non-interactive remote command with no legitimate need to prompt for
-// a password, so BatchMode is correct for all of them, not just the
-// unattended v0.22.x auto-setup caller (internal/ui/update_clipboard_autosetup.go)
+// SSHExec call site in this package (the wrapper pushes, the tmux
+// config splice, the verify probe) is a fully non-interactive remote
+// command with no legitimate need to prompt for a password, so
+// BatchMode is correct for all of them, not just the unattended
+// v0.22.x auto-setup caller (internal/ui/update_clipboard_autosetup.go)
 // that made it load-bearing: host.SSHCmd's own doc comment warns that
 // its non-batch mode lets a password prompt open /dev/tty directly,
 // bypassing stdout/stderr redirection — harmless from a real terminal
@@ -52,100 +50,80 @@ func defaultSSHExec(ctx context.Context, target string, stdin io.Reader, args ..
 	return outBuf.Bytes(), errBuf.Bytes(), err
 }
 
+// defaultLocalSystemctl runs `systemctl <args...>` on THIS machine
+// (the laptop). Used only by cleanupLegacyArtifacts to tear down
+// pre-OSC52 systemd units; never invoked over SSH.
+func defaultLocalSystemctl(args ...string) error {
+	cmd := exec.Command("systemctl", args...)
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("systemctl %v: %w (stderr: %s)", args, err, strings.TrimSpace(errBuf.String()))
+	}
+	return nil
+}
+
 // HostInstaller runs the per-host bridge install (the laptop-side
 // orchestrator that targets one remote host at a time). One construction
 // per canopy process — both the CLI surface (`canopy host clipboard
 // <name>`) and the TUI surface (`c` keybind on the Hosts tab) call into
 // the same InstallOnHost method.
 //
-// Sequencing (intentionally minimal in v0.18):
+// Sequencing (post-OSC52 rewrite — no UID detection, no SSH snippet, no
+// persistent tunnel; see docs/design/v0.18-clipboard-bridge.md's
+// OSC52 follow-up section):
 //
-//  1. SSH `id -u` on the remote → resolves the UID the snippet's
-//     RemoteForward paths need.
-//  2. Push wl-paste + wl-copy wrappers via stdin to `cat > ~/.local/
+//  1. Push wl-paste + wl-copy wrappers via stdin to `cat > ~/.local/
 //     bin/<name>` then `chmod +x` them. Same delivery pattern
 //     internal/host.InstallScript uses for the canopy installer.
-//  3. Write the per-host SSH snippet to
-//     ~/.ssh/config.d/canopy/<host>.conf using SnippetContent. The
-//     directory + Include directive in ~/.ssh/config are set up by
-//     Lane B's `canopy install clipboard-bridge`, so this write
-//     plugs straight in.
-//  4. Verify by running the freshly-deployed `wl-paste --list-types`
-//     over SSH. A clean exit confirms PATH precedence, socat
-//     presence, and end-to-end forwarding all work.
+//  2. Splice the tmux copy-mode binds (plus `allow-passthrough on`)
+//     into the remote's ~/.tmux.conf. Best-effort.
+//  3. Remove any pre-OSC52 artifacts left on THIS machine by an older
+//     canopy version (the persistent SSH-tunnel systemd unit, the
+//     clipboard-server daemon unit, the per-host SSH RemoteForward
+//     snippet) — see cleanupLegacyArtifacts.
+//  4. Confirm the wrapper will actually be found on the remote's PATH
+//     (login-shell `command -v wl-paste`). This is the only thing left
+//     to "verify": OSC 52 itself needs a real attached terminal to
+//     round-trip through, which this SSH BatchMode connection doesn't
+//     have — see verifyBridge's doc comment.
 type HostInstaller struct {
 	SSHExec sshExec
-	// CloseMaster terminates the SSH ControlMaster for `target` if one
-	// is alive. Called between writeSSHSnippet and verifyBridge so the
-	// verify SSH (and every subsequent canopy command to this host)
-	// re-establishes a master that picks up the freshly-written
-	// RemoteForward directives. Default production impl is
-	// internal/host.ExitControlMaster; tests substitute a recording
-	// fake so the call shape is verifiable.
-	CloseMaster func(target string)
-	// SystemdRun manages the per-host clipboard-tunnel user unit
-	// (write → daemon-reload → enable+restart → is-active).
-	// Default production impl shells out to `systemctl --user ...`;
-	// tests substitute a recording fake.
-	SystemdRun  systemctlRunner
-	HomeDir     string
-	Version     string
-	LocalUID    int
-	// SSHPath is the absolute path to the ssh binary on the laptop,
-	// baked into the tunnel unit's ExecStart (systemd user services
-	// have a minimal PATH that doesn't include /usr/local/bin and
-	// similar). Default resolved via exec.LookPath at constructor;
-	// tests override.
-	SSHPath string
+	HomeDir string
+	Version string
+	// LocalSystemctl runs `systemctl <args...>` on THIS machine,
+	// used only for best-effort cleanup of pre-OSC52 artifacts. Default
+	// production impl is defaultLocalSystemctl; tests substitute a
+	// recording fake.
+	LocalSystemctl func(args ...string) error
 }
 
 // NewHostInstaller returns an installer keyed to the current process's
-// home dir and UID. Version stamps the wrapper headers so re-installs
-// can detect drift later (Lane C.4 fast-skip).
+// home dir. Version stamps the wrapper headers so re-installs can
+// detect drift later (hash-based fast-skip is a possible follow-up).
 func NewHostInstaller(version string) (*HostInstaller, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("NewHostInstaller: %w", err)
 	}
-	sshPath, err := exec.LookPath("ssh")
-	if err != nil {
-		return nil, fmt.Errorf("NewHostInstaller: ssh not on PATH: %w", err)
-	}
 	return &HostInstaller{
-		SSHExec:     defaultSSHExec,
-		CloseMaster: host.ExitControlMaster,
-		SystemdRun:  defaultSystemctlRunner,
-		HomeDir:     home,
-		Version:     version,
-		LocalUID:    os.Getuid(),
-		SSHPath:     sshPath,
+		SSHExec:        defaultSSHExec,
+		HomeDir:        home,
+		Version:        version,
+		LocalSystemctl: defaultLocalSystemctl,
 	}, nil
 }
 
-// InstallOnHost performs the four-step install end-to-end for a single
-// host. Idempotent — re-running rewrites every artifact (wrappers,
-// SSH snippet) so the only thing the user needs to do after a canopy
+// InstallOnHost performs the install end-to-end for a single host.
+// Idempotent — re-running rewrites every artifact (wrappers, tmux
+// config block) so the only thing the user needs to do after a canopy
 // upgrade is press `c` on the Hosts tab again.
 //
-// Returns the first error and aborts. Each step is a hard precondition
-// for the next: pushing wrappers without a verified UID would bake
-// wrong socket paths; writing the snippet without wrappers in place
-// would render the bridge half-installed.
+// Returns the first error and aborts. Only the wrapper pushes are hard
+// preconditions; the tmux config splice and legacy cleanup are UX
+// polish / migration hygiene and never abort the install on failure.
 func (h *HostInstaller) InstallOnHost(ctx context.Context, hostName, sshTarget string, out io.Writer) error {
-	if h.LocalUID <= 0 {
-		return fmt.Errorf("InstallOnHost: refusing — local UID is %d (sockets would land in /run/user/0/)", h.LocalUID)
-	}
 	fmt.Fprintf(out, "Installing clipboard bridge on %s (%s):\n", hostName, sshTarget)
-
-	remoteUID, err := h.detectRemoteUID(ctx, sshTarget)
-	if err != nil {
-		return fmt.Errorf("InstallOnHost: %w", err)
-	}
-	fmt.Fprintf(out, "  remote UID: %d (local: %d)\n", remoteUID, h.LocalUID)
-
-	if err := h.ensureRemoteSocketDir(ctx, sshTarget, remoteUID, out); err != nil {
-		return fmt.Errorf("InstallOnHost: %w", err)
-	}
 
 	for _, w := range []WrapperScript{WrapperWlPaste, WrapperWlCopy} {
 		if err := h.pushWrapper(ctx, sshTarget, w, out); err != nil {
@@ -153,35 +131,20 @@ func (h *HostInstaller) InstallOnHost(ctx context.Context, hostName, sshTarget s
 		}
 	}
 
-	if err := h.writeSSHSnippet(hostName, sshTarget, remoteUID, out); err != nil {
-		return fmt.Errorf("InstallOnHost: %w", err)
-	}
-
-	// The snippet's RemoteForward directives only take effect when SSH
-	// reads them at handshake time. Any existing ControlMaster for
-	// this target was opened by a prior canopy command (host install,
-	// refresh probe, etc.) BEFORE the snippet existed — it carries no
-	// forwards. Kill it so the verify SSH (and every subsequent canopy
-	// command) opens a fresh master that picks up the new config.
-	h.CloseMaster(sshTarget)
-	fmt.Fprintln(out, "  reset SSH ControlMaster so RemoteForward picks up the new config")
-
-	if err := h.EnsureTunnelUnit(hostName, sshTarget, remoteUID, out); err != nil {
-		return fmt.Errorf("InstallOnHost: %w", err)
-	}
-
 	// Configuring tmux copy-mode binds on the remote is UX polish, not
 	// load-bearing for the bridge mechanism itself. If the SSH or
 	// shell-script side fails, log + continue — the bridge still
-	// works for command-line `wl-copy` and Claude Code paste; only
-	// tmux's `y` / Enter shortcuts would be missing.
+	// works for command-line `wl-copy`/`wl-paste` and Claude Code
+	// paste; only tmux's `y` / Enter shortcuts would be missing.
 	if err := h.EnsureRemoteTmuxConfig(ctx, sshTarget, out); err != nil {
 		fmt.Fprintf(out, "  ⚠  warning: tmux copy-mode binds not configured on remote: %v\n", err)
 		fmt.Fprintln(out, "     Bridge still works; manually add the binds from")
 		fmt.Fprintln(out, "     docs/remote-workspaces.md if you want copy-mode selections to flow.")
 	}
 
-	if err := h.verifyBridge(ctx, hostName, sshTarget, out); err != nil {
+	h.cleanupLegacyArtifacts(hostName, out)
+
+	if err := h.verifyBridge(ctx, sshTarget, out); err != nil {
 		return fmt.Errorf("InstallOnHost: bridge installed but verify failed: %w", err)
 	}
 
@@ -197,11 +160,18 @@ func (h *HostInstaller) InstallOnHost(ctx context.Context, hostName, sshTarget s
 // remote's ~/.tmux.conf containing the canopy bindings:
 //
 //	# canopy:start clipboard-bridge ...
+//	set -g allow-passthrough on
 //	bind-key -T copy-mode-vi y     send-keys -X copy-pipe-and-cancel "wl-copy"
 //	bind-key -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "wl-copy"
 //	bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "wl-copy"
 //	bind-key -T copy-mode M-w     send-keys -X copy-pipe-and-cancel "wl-copy"
 //	# canopy:end clipboard-bridge
+//
+// `allow-passthrough on` is load-bearing, not cosmetic: tmux 3.3+
+// defaults it to off, which silently drops the DCS-wrapped OSC 52
+// sequences wl-copy.sh/wl-paste.sh emit from inside a tmux pane —
+// every canopy workspace is a tmux session, so without this line the
+// bridge would appear "installed" but never actually move a byte.
 //
 // Idempotent: re-running deletes any existing canopy block before
 // appending a fresh one. Best-effort `tmux source-file` at the end
@@ -217,7 +187,10 @@ sed -i '/# canopy:start clipboard-bridge/,/# canopy:end clipboard-bridge/d' "$CO
 cat >> "$CONF" <<'CANOPY_TMUX_EOF'
 
 # canopy:start clipboard-bridge - managed by canopy; reinstall via 'canopy host clipboard <name>'
-# Routes tmux copy-mode selections through wl-copy to the laptop clipboard.
+# Routes tmux copy-mode selections through wl-copy to the laptop clipboard
+# via OSC 52. allow-passthrough is required for tmux 3.3+ to relay the
+# DCS-wrapped escape sequence to the outer terminal instead of eating it.
+set -g allow-passthrough on
 # extended-keys on lets tmux distinguish modifier combinations like
 # Ctrl+Shift+C from plain Ctrl+C (tmux 3.2+ feature).
 set -g extended-keys on
@@ -237,67 +210,14 @@ tmux source-file "$CONF" 2>/dev/null || true
 // EnsureRemoteTmuxConfig pushes the tmux copy-mode bindings to the
 // remote's ~/.tmux.conf via marker-block splice. After-install side
 // effect: a tmux yank/select inside any tmux session on the remote
-// pipes the selection through wl-copy → canopy wrapper →
-// clip-copy.sock → laptop daemon → local Wayland clipboard.
+// pipes the selection through wl-copy → canopy wrapper → an OSC 52
+// escape sequence → the outer terminal's clipboard.
 func (h *HostInstaller) EnsureRemoteTmuxConfig(ctx context.Context, sshTarget string, out io.Writer) error {
 	_, stderr, err := h.SSHExec(ctx, sshTarget, strings.NewReader(remoteTmuxConfigScript), "bash")
 	if err != nil {
 		return fmt.Errorf("EnsureRemoteTmuxConfig: %w (stderr: %s)", err, strings.TrimSpace(string(stderr)))
 	}
-	fmt.Fprintln(out, "  configured tmux copy-mode binds on remote (~/.tmux.conf)")
-	return nil
-}
-
-// detectRemoteUID resolves the remote user's numeric UID. Baked into
-// the SSH snippet at write time (D2 in /plan-eng-review: re-detect
-// on every install rather than caching) so a host whose SSH user
-// changes is picked up the next time `canopy host clipboard <name>`
-// runs.
-func (h *HostInstaller) detectRemoteUID(ctx context.Context, sshTarget string) (int, error) {
-	stdout, stderr, err := h.SSHExec(ctx, sshTarget, nil, "id", "-u")
-	if err != nil {
-		return 0, fmt.Errorf("detectRemoteUID: ssh %s id -u: %w (stderr: %s)", sshTarget, err, strings.TrimSpace(string(stderr)))
-	}
-	uidStr := strings.TrimSpace(string(stdout))
-	uid, err := strconv.Atoi(uidStr)
-	if err != nil {
-		return 0, fmt.Errorf("detectRemoteUID: parse %q from `id -u`: %w", uidStr, err)
-	}
-	if uid <= 0 {
-		return 0, fmt.Errorf("detectRemoteUID: refusing UID %d on remote (sockets would land in /run/user/0/)", uid)
-	}
-	return uid, nil
-}
-
-// ensureRemoteSocketDir creates /run/user/<uid>/canopy/ on the remote
-// host. SSH's RemoteForward of a unix socket calls bind() at the
-// configured path, and bind() returns ENOENT if the parent directory
-// doesn't exist — sshd does NOT mkdir for you. Without this step the
-// SSH forward silently fails on every connect (sshd emits "remote
-// port forwarding failed for listen path ..." warnings client-side)
-// and the wrapper sees "No such file or directory" when trying to
-// reach the (never-created) socket.
-//
-// Script is piped via SSH stdin to `bash`, NOT passed as `bash -c
-// <script>` argv. Same reason refresh.go documents at length: SSH
-// joins all post-target args with spaces, so `bash -c "mkdir -p
-// /foo && chmod ..."` ends up as `bash -c mkdir -p /foo && chmod
-// ...` on the remote's shell command line, which tokenizes such
-// that bash receives only "mkdir" as its script and mkdir runs with
-// no args ("missing operand"). Stdin avoids the quoting nightmare
-// entirely — bash reads the script as one stream of bytes.
-//
-// Mode 0700 matches the local daemon's MkdirAll permissions. Belt-
-// and-suspenders mkdir -p tolerates a re-install where the dir
-// already exists.
-func (h *HostInstaller) ensureRemoteSocketDir(ctx context.Context, sshTarget string, remoteUID int, out io.Writer) error {
-	dir := fmt.Sprintf("/run/user/%d/canopy", remoteUID)
-	script := fmt.Sprintf("set -e\nmkdir -p %s\nchmod 0700 %s\n", dir, dir)
-	_, stderr, err := h.SSHExec(ctx, sshTarget, strings.NewReader(script), "bash")
-	if err != nil {
-		return fmt.Errorf("ensureRemoteSocketDir: %s: %w (stderr: %s)", dir, err, strings.TrimSpace(string(stderr)))
-	}
-	fmt.Fprintf(out, "  ensured %s exists on remote\n", dir)
+	fmt.Fprintln(out, "  configured tmux copy-mode binds on remote (~/.tmux.conf, allow-passthrough on)")
 	return nil
 }
 
@@ -307,9 +227,9 @@ func (h *HostInstaller) ensureRemoteSocketDir(ctx context.Context, sshTarget str
 // chmod that fails surfaces as one ssh exit rather than two separate
 // remote round-trips.
 //
-// Always-push semantics in v0.18: re-installs unconditionally overwrite
-// the on-remote wrapper. Hash-based fast-skip is a follow-up; for now
-// the upload is ~1 KB twice per install, well below noise.
+// Always-push semantics: re-installs unconditionally overwrite the
+// on-remote wrapper. Hash-based fast-skip is a follow-up; for now the
+// upload is ~1 KB twice per install, well below noise.
 func (h *HostInstaller) pushWrapper(ctx context.Context, sshTarget string, w WrapperScript, out io.Writer) error {
 	content, hash, err := WrapperContent(w, h.Version)
 	if err != nil {
@@ -327,236 +247,86 @@ func (h *HostInstaller) pushWrapper(ctx context.Context, sshTarget string, w Wra
 	return nil
 }
 
-// writeSSHSnippet writes the per-host config to
-// ~/.ssh/config.d/canopy/<host>.conf. The directory is created by
-// `canopy install clipboard-bridge` (Lane B), but we mkdir again
-// here so a first-time `canopy host clipboard <name>` on a fresh
-// laptop doesn't require running the install-target first. Mode 0700
-// matches the rest of ~/.ssh/.
+// cleanupLegacyArtifacts removes on-disk remnants of the pre-OSC52
+// bridge (the persistent SSH-tunnel systemd unit, the clipboard-server
+// daemon unit, and the per-host SSH RemoteForward snippet) that an
+// older canopy version may have installed on THIS machine. Every step
+// is best-effort: a host that never had the old bridge installed hits
+// only no-ops (file doesn't exist, systemctl reports the unit
+// unknown), which must never surface as an install failure.
 //
-// Filename is the canopy host name, NOT the SSH target. Two hosts
-// with the same SSH target (uncommon but legal — same machine reached
-// by IP vs hostname) get distinct snippets.
+// This directly resolves the class of bug that motivated retiring the
+// tunnel architecture: a stuck systemd unit reporting "start of the
+// service was attempted too often" (StartLimitBurst), which used to
+// require the user to manually run `systemctl --user reset-failed`.
+// Now the unit is just removed outright on the next install.
 //
-// The `Host` directive in the snippet body uses the SSH HOSTNAME (the
-// hostname portion of sshTarget, e.g., "tower.lan" extracted from
-// "avi@tower.lan:22") — NOT canopy's internal hostName. SSH matches
-// Host patterns against the hostname portion of the target string on
-// the command line; using canopy's alias silently fails to match when
-// canopy (or the user) does `ssh user@hostname`.
-func (h *HostInstaller) writeSSHSnippet(hostName, sshTarget string, remoteUID int, out io.Writer) error {
-	dir := filepath.Join(h.HomeDir, ".ssh", "config.d", "canopy")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("writeSSHSnippet: mkdir %s: %w", dir, err)
-	}
-	path := filepath.Join(dir, hostName+".conf")
-	user, host, port := parseSSHTarget(sshTarget)
-	if host == "" {
-		return fmt.Errorf("writeSSHSnippet: could not parse hostname from ssh target %q", sshTarget)
-	}
-	content, err := SnippetContent(SnippetData{
-		HostName:    hostName,
-		SSHHostname: host,
-		SSHUser:     user,
-		SSHPort:     port,
-		Version:     h.Version,
-		LocalUID:    h.LocalUID,
-		RemoteUID:   remoteUID,
-	})
-	if err != nil {
-		return fmt.Errorf("writeSSHSnippet: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("writeSSHSnippet: write %s: %w", path, err)
-	}
-	fmt.Fprintf(out, "  wrote %s (Host canopy-tunnel-%s → %s)\n", path, hostName, host)
-	return nil
-}
-
-// hostnameFromSSHTarget extracts the hostname portion of an SSH target
-// string. See parseSSHTarget for the full three-component breakdown.
-func hostnameFromSSHTarget(target string) string {
-	_, host, _ := parseSSHTarget(target)
-	return host
-}
-
-// userFromSSHTarget extracts the user portion of an SSH target
-// string, or "" if none. See parseSSHTarget.
-func userFromSSHTarget(target string) string {
-	user, _, _ := parseSSHTarget(target)
-	return user
-}
-
-// portFromSSHTarget extracts the port portion of an SSH target
-// string, or "" if none. See parseSSHTarget.
-func portFromSSHTarget(target string) string {
-	_, _, port := parseSSHTarget(target)
-	return port
-}
-
-// parseSSHTarget breaks a `[user@]host[:port]` string into its three
-// components. Used by writeSSHSnippet to bake explicit User/Port
-// directives into the `Host canopy-tunnel-<name>` block so `ssh
-// canopy-tunnel-<name>` resolves to the real target without the
-// caller spelling it out.
-//
-// Edge cases handled:
-//
-//	avi@tower.lan       → ("avi", "tower.lan", "")
-//	avi@tower.lan:22    → ("avi", "tower.lan", "22")
-//	tower.lan           → ("",    "tower.lan", "")
-//	tower.lan:22        → ("",    "tower.lan", "22")
-//	weird@u@host        → ("weird@u", "host", "")  (LastIndex of @)
-//	host:notaport       → ("",    "host:notaport", "")  (IPv6-safety)
-//
-// IPv6-bracketed targets are not parsed correctly — out of scope
-// for Phase 1.
-func parseSSHTarget(target string) (user, host, port string) {
-	host = target
-	if at := strings.LastIndex(host, "@"); at >= 0 {
-		user = host[:at]
-		host = host[at+1:]
-	}
-	if colon := strings.LastIndex(host, ":"); colon > 0 {
-		candidate := host[colon+1:]
-		allDigits := candidate != ""
-		for _, r := range candidate {
-			if r < '0' || r > '9' {
-				allDigits = false
-				break
-			}
-		}
-		if allDigits {
-			port = candidate
-			host = host[:colon]
-		}
-	}
-	return user, host, port
-}
-
-// EnsureTunnelUnit writes the per-host systemd user unit that holds
-// the persistent SSH tunnel + enables/restarts it. Three steps:
-//
-//  1. Resolve ssh binary path (already done at construction time) and
-//     render the unit body with the host's particulars baked in.
-//  2. Write or refresh ~/.config/systemd/user/<unit>.service. If the
-//     file content already matches, no-op the write.
-//  3. systemctl --user daemon-reload + enable --now + restart. Restart
-//     is the load-bearing step for re-installs: enable --now is a
-//     no-op when the unit is already enabled, even if its content
-//     just changed.
-//
-// Called after writeSSHSnippet and CloseMaster — the snippet defines
-// the `Host canopy-tunnel-<name>` alias the unit's ExecStart uses;
-// closing the canopy ControlMaster guarantees the tunnel-spawned ssh
-// process establishes a fresh connection without inheriting state.
-func (h *HostInstaller) EnsureTunnelUnit(hostName, sshTarget string, remoteUID int, out io.Writer) error {
+// Does NOT touch the `Include ~/.ssh/config.d/canopy/*.conf` marker
+// block in ~/.ssh/config itself (if a prior `canopy install
+// clipboard-bridge` added one) — an empty/dangling Include is inert,
+// and removing lines from the user's main SSH config unprompted is
+// more invasive than this cleanup should be.
+func (h *HostInstaller) cleanupLegacyArtifacts(hostName string, out io.Writer) {
 	unitDir := filepath.Join(h.HomeDir, ".config", "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		return fmt.Errorf("EnsureTunnelUnit: mkdir %s: %w", unitDir, err)
-	}
-	unitName := TunnelUnitName(hostName) + ".service"
-	unitPath := filepath.Join(unitDir, unitName)
-
-	content, err := TunnelUnitContent(TunnelUnitData{
-		HostName:  hostName,
-		SSHTarget: sshTarget,
-		RemoteUID: remoteUID,
-		SSHPath:   h.SSHPath,
-		Version:   h.Version,
-	})
-	if err != nil {
-		return fmt.Errorf("EnsureTunnelUnit: %w", err)
+	units := []string{
+		"canopy-clipboard-tunnel-" + hostName + ".service",
+		"canopy-clipboard.service",
 	}
 
-	existing, err := os.ReadFile(unitPath)
-	if err == nil && string(existing) == content {
-		fmt.Fprintf(out, "  tunnel unit %s already up to date\n", unitName)
-	} else {
-		if err := os.WriteFile(unitPath, []byte(content), 0o644); err != nil {
-			return fmt.Errorf("EnsureTunnelUnit: write %s: %w", unitPath, err)
+	removedAny := false
+	for _, unit := range units {
+		unitPath := filepath.Join(unitDir, unit)
+		if _, err := os.Stat(unitPath); err != nil {
+			continue // never installed here; nothing to clean up
 		}
-		fmt.Fprintf(out, "  wrote %s\n", unitPath)
+		// reset-failed first: disable --now's implicit stop on a unit
+		// stuck in StartLimitBurst can itself report "attempted too
+		// often" otherwise. Ignore its error too — the unit may not be
+		// in a failed state at all, which is also fine.
+		_ = h.LocalSystemctl("--user", "reset-failed", unit)
+		if err := h.LocalSystemctl("--user", "disable", "--now", unit); err != nil {
+			log.Warn("clipboard.cleanup.disable-failed", "unit", unit, "err", err)
+		}
+		if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+			log.Warn("clipboard.cleanup.remove-unit-failed", "unit", unitPath, "err", err)
+			continue
+		}
+		removedAny = true
+		fmt.Fprintf(out, "  removed legacy systemd unit %s\n", unit)
+	}
+	if removedAny {
+		if err := h.LocalSystemctl("--user", "daemon-reload"); err != nil {
+			log.Warn("clipboard.cleanup.daemon-reload-failed", "err", err)
+		}
 	}
 
-	if err := h.SystemdRun("--user", "daemon-reload"); err != nil {
-		return fmt.Errorf("EnsureTunnelUnit: daemon-reload: %w", err)
+	snippetPath := filepath.Join(h.HomeDir, ".ssh", "config.d", "canopy", hostName+".conf")
+	if err := os.Remove(snippetPath); err == nil {
+		fmt.Fprintf(out, "  removed legacy SSH snippet %s\n", snippetPath)
+	} else if !os.IsNotExist(err) {
+		log.Warn("clipboard.cleanup.remove-snippet-failed", "path", snippetPath, "err", err)
 	}
-	if err := h.SystemdRun("--user", "enable", "--now", unitName); err != nil {
-		return fmt.Errorf("EnsureTunnelUnit: enable --now %s: %w", unitName, err)
-	}
-	// Restart so the fresh unit body OR the cleaned-up state takes
-	// effect even when the unit was already enabled+running.
-	if err := h.SystemdRun("--user", "restart", unitName); err != nil {
-		return fmt.Errorf("EnsureTunnelUnit: restart %s: %w", unitName, err)
-	}
-	fmt.Fprintf(out, "  enabled and restarted %s\n", unitName)
-	return nil
 }
 
-// verifyBridge confirms three things, in order:
+// verifyBridge confirms the wrapper will actually be found on the
+// remote's PATH — invoked via a login shell (`bash -l`) so
+// ~/.bash_profile / ~/.profile run and PATH reflects what an
+// interactive/Claude Code shell would see. Failure here is a WARNING,
+// not a hard error: it's a discoverability check, not a liveness
+// check.
 //
-//  1. The systemd tunnel unit is active — `systemctl --user
-//     is-active`. If this fails, the persistent SSH tunnel that
-//     owns the RemoteForward sockets isn't running, and nothing
-//     downstream will work.
-//  2. The wrapper script round-trips text/plain — invoked by
-//     absolute path over a NORMAL ssh (no RemoteForward; the
-//     snippet alias is the only thing that triggers it). The
-//     wrapper connects to sockets the tunnel unit owns.
-//  3. The wrapper takes precedence in PATH lookup for Claude Code's
-//     shell. Failure here is a WARNING, not a hard error.
-func (h *HostInstaller) verifyBridge(ctx context.Context, hostName, sshTarget string, out io.Writer) error {
-	// Step 1: tunnel unit alive.
-	unitName := TunnelUnitName(hostName) + ".service"
-	if err := h.SystemdRun("--user", "is-active", "--quiet", unitName); err != nil {
-		return fmt.Errorf("verifyBridge: tunnel unit %s is not active — check `systemctl --user status %s` and `journalctl --user -u %s -n 30` for the cause: %w", unitName, unitName, unitName, err)
-	}
-	fmt.Fprintf(out, "  tunnel unit %s is active ✓\n", unitName)
-
-	// Give the tunnel a brief moment to negotiate the RemoteForwards
-	// after restart — systemctl restart returns when the unit is
-	// active, but ssh's stream-local-forward negotiation runs after
-	// auth and may take a beat. Polling is more robust but adds
-	// complexity; a fixed short sleep is good enough for v0.18.
-	// (Without this, the next verify step occasionally races and
-	// reports "Connection refused" because the unit is active but
-	// ssh's forward setup hasn't finished.)
-	time.Sleep(750 * time.Millisecond)
-
-	// Step 1: invoke the wrapper by absolute path. Script piped via
-	// SSH stdin to a bare `bash`, NOT passed as `bash -c <script>`
-	// argv — same word-splitting trap that broke ensureRemoteSocketDir
-	// would otherwise feed `--list-types` to bash-c's $0 instead of
-	// to the wrapper's argv, making the wrapper run with no args and
-	// silently hit its default text case. exec passes the wrapper's
-	// exit code straight through (no bash wrapper in the chain).
-	stdout, stderr, err := h.SSHExec(ctx, sshTarget, strings.NewReader(`exec "$HOME/.local/bin/wl-paste" --list-types`+"\n"), "bash")
-	stderrStr := strings.TrimSpace(string(stderr))
-	if err != nil {
-		// Classify the most common failure modes with actionable hints.
-		switch {
-		case strings.Contains(stderrStr, "socat: command not found"),
-			strings.Contains(stderrStr, "timeout: command not found"):
-			return fmt.Errorf("verifyBridge: required tool missing on remote — install with `apt install socat` / `pacman -S socat` and re-run `canopy host clipboard <name>`. Original stderr: %s", stderrStr)
-		case strings.Contains(stderrStr, "Connection refused"),
-			strings.Contains(stderrStr, "No such file or directory") && strings.Contains(stderrStr, "clip-"):
-			return fmt.Errorf("verifyBridge: wrapper ran but couldn't reach the laptop's daemon — either the laptop's `canopy clipboard-server` isn't running OR your SSH connection didn't establish the RemoteForward (try re-SSHing). Stderr: %s", stderrStr)
-		default:
-			return fmt.Errorf("verifyBridge: $HOME/.local/bin/wl-paste failed: %w (stderr: %s)", err, stderrStr)
-		}
-	}
-	if !strings.Contains(string(stdout), "text/plain") {
-		return fmt.Errorf("verifyBridge: wrapper ran (exit 0) but didn't emit text/plain (got %q) — wrapper file may have been overwritten by something else", strings.TrimSpace(string(stdout)))
-	}
-	fmt.Fprintln(out, "  wrapper round-trips text/plain ✓")
-
-	// Step 2: confirm Claude Code will actually find the wrapper.
-	// Script piped via stdin so SSH word-splitting doesn't mangle
-	// `command -v wl-paste` into `command` (with `-v` as $0). `bash
-	// -l` makes it a login shell so ~/.bash_profile / ~/.profile run
-	// and PATH includes the user's ~/.local/bin if their config
-	// adds it.
+// This is deliberately the ONLY thing left to verify. The pre-OSC52
+// bridge additionally round-tripped `wl-paste --list-types` over SSH
+// to confirm the tunnel + daemon actually worked end-to-end — that
+// check is gone because it's no longer possible: OSC 52 requires a
+// real attached terminal (tty) to round-trip through, and InstallOnHost
+// runs over BatchMode SSH (no pty). There's no way to verify "does
+// OSC 52 actually work on this host" from here; only from an actually
+// attached session, where the wrapper scripts themselves already fail
+// loudly (non-zero exit, clear stderr) if OSC 52 isn't working. See
+// BridgeStatusBridged's doc comment in probe.go for the same
+// constraint on the background health probe.
+func (h *HostInstaller) verifyBridge(ctx context.Context, sshTarget string, out io.Writer) error {
 	pathOut, _, _ := h.SSHExec(ctx, sshTarget, strings.NewReader("command -v wl-paste\n"), "bash", "-l")
 	resolved := strings.TrimSpace(string(pathOut))
 	switch {

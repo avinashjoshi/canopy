@@ -12,20 +12,10 @@ import (
 	"github.com/avinashjoshi/canopy/internal/state"
 )
 
-// fakeClipboardLocalInstaller / fakeClipboardHostInstaller are the test
-// doubles for clipboardAutoSetupCmd's injection seam (newClipboardLocalInstaller
-// / newClipboardHostInstaller). Recording fakes so tests can assert not
-// just the returned error but WHICH steps actually ran.
-type fakeClipboardLocalInstaller struct {
-	installErr error
-	installed  bool
-}
-
-func (f *fakeClipboardLocalInstaller) Install(io.Writer) error {
-	f.installed = true
-	return f.installErr
-}
-
+// fakeClipboardHostInstaller is the test double for clipboardAutoSetupCmd's
+// injection seam (newClipboardHostInstaller). A recording fake so tests
+// can assert not just the returned error but how InstallOnHost was
+// called.
 type fakeClipboardHostInstaller struct {
 	installOnHostErr error
 	calledWith       struct {
@@ -39,18 +29,11 @@ func (f *fakeClipboardHostInstaller) InstallOnHost(_ context.Context, hostName, 
 	return f.installOnHostErr
 }
 
-// withFakeClipboardInstallers swaps newClipboardLocalInstaller /
-// newClipboardHostInstaller for the given fakes (or constructor errors)
-// for the duration of the test.
-func withFakeClipboardInstallers(t *testing.T, local *fakeClipboardLocalInstaller, localErr error, hostInstaller *fakeClipboardHostInstaller, hostErr error) {
+// withFakeClipboardInstallers swaps newClipboardHostInstaller for the
+// given fake (or constructor error) for the duration of the test.
+func withFakeClipboardInstallers(t *testing.T, hostInstaller *fakeClipboardHostInstaller, hostErr error) {
 	t.Helper()
-	origLocal, origHost := newClipboardLocalInstaller, newClipboardHostInstaller
-	newClipboardLocalInstaller = func() (clipboardLocalInstaller, error) {
-		if localErr != nil {
-			return nil, localErr
-		}
-		return local, nil
-	}
+	origHost := newClipboardHostInstaller
 	newClipboardHostInstaller = func(string) (clipboardHostInstaller, error) {
 		if hostErr != nil {
 			return nil, hostErr
@@ -58,79 +41,29 @@ func withFakeClipboardInstallers(t *testing.T, local *fakeClipboardLocalInstalle
 		return hostInstaller, nil
 	}
 	t.Cleanup(func() {
-		newClipboardLocalInstaller = origLocal
 		newClipboardHostInstaller = origHost
 	})
 }
 
-// TestClipboardAutoSetupCmd_LocalConstructorErrorSkipsEverything: if
-// clipboard.NewLocalInstaller itself fails (e.g. $HOME unresolvable),
-// the host installer must never even be constructed.
-func TestClipboardAutoSetupCmd_LocalConstructorErrorSkipsEverything(t *testing.T) {
-	hostInstaller := &fakeClipboardHostInstaller{}
-	withFakeClipboardInstallers(t, nil, errors.New("no $HOME"), hostInstaller, nil)
+// TestClipboardAutoSetupCmd_HostConstructorError: clipboard.NewHostInstaller
+// fails (e.g. ssh not on PATH) — the error must surface unwrapped (it's
+// already descriptive from the constructor).
+func TestClipboardAutoSetupCmd_HostConstructorError(t *testing.T) {
+	withFakeClipboardInstallers(t, nil, errors.New("ssh not on PATH"))
 
 	msg := clipboardAutoSetupCmd(host.Host{Name: "tower", SSHTarget: "avi@tower"}, "v1.0.0")().(clipboardAutoSetupMsg)
-	if msg.err == nil {
-		t.Fatal("expected an error when the local installer constructor fails")
-	}
-	if !strings.Contains(msg.err.Error(), "local bootstrap") {
-		t.Errorf("err = %v; want it wrapped as \"local bootstrap: ...\"", msg.err)
-	}
-	if hostInstaller.calledWith.hostName != "" {
-		t.Error("host installer should never be reached when the local constructor fails")
-	}
-}
-
-// TestClipboardAutoSetupCmd_LocalInstallFailureSkipsHostInstall: the
-// local installer constructs fine but Install() itself fails (e.g.
-// systemctl missing) — same short-circuit: host installer must not run.
-func TestClipboardAutoSetupCmd_LocalInstallFailureSkipsHostInstall(t *testing.T) {
-	local := &fakeClipboardLocalInstaller{installErr: errors.New("systemctl: command not found")}
-	hostInstaller := &fakeClipboardHostInstaller{}
-	withFakeClipboardInstallers(t, local, nil, hostInstaller, nil)
-
-	msg := clipboardAutoSetupCmd(host.Host{Name: "tower", SSHTarget: "avi@tower"}, "v1.0.0")().(clipboardAutoSetupMsg)
-	if !local.installed {
-		t.Error("local.Install should have been called")
-	}
-	if msg.err == nil {
-		t.Fatal("expected an error when local.Install fails")
-	}
-	if !strings.Contains(msg.err.Error(), "local bootstrap") {
-		t.Errorf("err = %v; want it wrapped as \"local bootstrap: ...\"", msg.err)
-	}
-	if hostInstaller.calledWith.hostName != "" {
-		t.Error("host installer should never be reached when local.Install fails")
-	}
-}
-
-// TestClipboardAutoSetupCmd_HostConstructorErrorAfterLocalSucceeds:
-// local install succeeds, but clipboard.NewHostInstaller fails (e.g.
-// ssh not on PATH) — the error must surface unwrapped (it's already
-// descriptive from the constructor).
-func TestClipboardAutoSetupCmd_HostConstructorErrorAfterLocalSucceeds(t *testing.T) {
-	local := &fakeClipboardLocalInstaller{}
-	withFakeClipboardInstallers(t, local, nil, nil, errors.New("ssh not on PATH"))
-
-	msg := clipboardAutoSetupCmd(host.Host{Name: "tower", SSHTarget: "avi@tower"}, "v1.0.0")().(clipboardAutoSetupMsg)
-	if !local.installed {
-		t.Error("local.Install should have been called")
-	}
 	if msg.err == nil || !strings.Contains(msg.err.Error(), "ssh not on PATH") {
 		t.Errorf("err = %v; want the host constructor's error surfaced", msg.err)
 	}
 }
 
-// TestClipboardAutoSetupCmd_HostInstallFailureAfterLocalSucceeds: both
-// constructors succeed and local.Install succeeds, but
-// InstallOnHost itself fails (e.g. SSH auth failure) — the error must
-// surface, and the artifact name passed to InstallOnHost must be the
-// SANITIZED name, not the raw (possibly messy) host.Name.
-func TestClipboardAutoSetupCmd_HostInstallFailureAfterLocalSucceeds(t *testing.T) {
-	local := &fakeClipboardLocalInstaller{}
+// TestClipboardAutoSetupCmd_HostInstallFailure: the constructor
+// succeeds but InstallOnHost itself fails (e.g. SSH auth failure) —
+// the error must surface, and the artifact name passed to InstallOnHost
+// must be the SANITIZED name, not the raw (possibly messy) host.Name.
+func TestClipboardAutoSetupCmd_HostInstallFailure(t *testing.T) {
 	hostInstaller := &fakeClipboardHostInstaller{installOnHostErr: errors.New("ssh: connection refused")}
-	withFakeClipboardInstallers(t, local, nil, hostInstaller, nil)
+	withFakeClipboardInstallers(t, hostInstaller, nil)
 
 	h := host.Host{Name: "avi@tower.example.com", SSHTarget: "avi@tower.example.com"}
 	msg := clipboardAutoSetupCmd(h, "v1.0.0")().(clipboardAutoSetupMsg)
@@ -152,9 +85,8 @@ func TestClipboardAutoSetupCmd_HostInstallFailureAfterLocalSucceeds(t *testing.T
 // TestClipboardAutoSetupCmd_FullSuccessPath: everything succeeds — the
 // message carries no error and the right host name.
 func TestClipboardAutoSetupCmd_FullSuccessPath(t *testing.T) {
-	local := &fakeClipboardLocalInstaller{}
 	hostInstaller := &fakeClipboardHostInstaller{}
-	withFakeClipboardInstallers(t, local, nil, hostInstaller, nil)
+	withFakeClipboardInstallers(t, hostInstaller, nil)
 
 	msg := clipboardAutoSetupCmd(host.Host{Name: "tower", SSHTarget: "avi@tower"}, "v1.0.0")().(clipboardAutoSetupMsg)
 	if msg.err != nil {
@@ -168,24 +100,12 @@ func TestClipboardAutoSetupCmd_FullSuccessPath(t *testing.T) {
 	}
 }
 
-// withClipboardAutoSetupOS temporarily overrides
-// clipboardAutoSetupSupportedOS so a test can force the "unsupported
-// platform" branch (or force "supported" regardless of the actual
-// runtime.GOOS the tests happen to run on).
-func withClipboardAutoSetupOS(t *testing.T, supported bool) {
-	t.Helper()
-	orig := clipboardAutoSetupSupportedOS
-	clipboardAutoSetupSupportedOS = func() bool { return supported }
-	t.Cleanup(func() { clipboardAutoSetupSupportedOS = orig })
-}
-
 // TestMaybeAutoSetupClipboardBridge_NotPinnedIsNoop: ordinary
 // multi-host mode (m.pinnedHost.Name == "") must never trigger
 // auto-setup — that mode keeps the Hosts tab's explicit `c` keybind
 // (Premise 1 in docs/design/v0.18-clipboard-bridge.md: per-host
 // opt-in). Also must not latch clipboardAutoSetupTried.
 func TestMaybeAutoSetupClipboardBridge_NotPinnedIsNoop(t *testing.T) {
-	withClipboardAutoSetupOS(t, true)
 	m := newTestModel(false)
 	// m.pinnedHost is the zero value (Name == "") by default.
 
@@ -197,33 +117,12 @@ func TestMaybeAutoSetupClipboardBridge_NotPinnedIsNoop(t *testing.T) {
 	}
 }
 
-// TestMaybeAutoSetupClipboardBridge_UnsupportedOSSkipsAndLatches:
-// Phase 1 of the clipboard bridge is Linux-only. On another platform,
-// auto-setup must skip silently (no cmd, no notice) but still latch
-// so it doesn't re-check every refresh tick.
-func TestMaybeAutoSetupClipboardBridge_UnsupportedOSSkipsAndLatches(t *testing.T) {
-	withClipboardAutoSetupOS(t, false)
-	m := newTestModel(false)
-	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "avi@tower"}
-
-	if cmd := m.maybeAutoSetupClipboardBridge(); cmd != nil {
-		t.Error("expected nil cmd on an unsupported platform")
-	}
-	if !m.clipboardAutoSetupTried {
-		t.Error("clipboardAutoSetupTried should latch true even when skipped for platform")
-	}
-	if m.clipboardAutoSetupNotice != "" {
-		t.Errorf("notice = %q; want empty (no attempt was made)", m.clipboardAutoSetupNotice)
-	}
-}
-
 // TestMaybeAutoSetupClipboardBridge_NoSnapshotYetDoesNotLatch: before
 // the pinned host's first refresh has landed (or after one that
 // errored — host offline), the function must return nil WITHOUT
 // latching clipboardAutoSetupTried, so the next refresh tick gets
 // another chance once the host is actually reachable.
 func TestMaybeAutoSetupClipboardBridge_NoSnapshotYetDoesNotLatch(t *testing.T) {
-	withClipboardAutoSetupOS(t, true)
 	m := newTestModel(false)
 	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "avi@tower"}
 
@@ -252,7 +151,6 @@ func TestMaybeAutoSetupClipboardBridge_NoSnapshotYetDoesNotLatch(t *testing.T) {
 // install (no wasted SSH round-trips) but still latch so later ticks
 // don't re-check.
 func TestMaybeAutoSetupClipboardBridge_AlreadyBridgedSkipsButLatches(t *testing.T) {
-	withClipboardAutoSetupOS(t, true)
 	m := newTestModel(false)
 	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "avi@tower"}
 	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
@@ -276,7 +174,6 @@ func TestMaybeAutoSetupClipboardBridge_AlreadyBridgedSkipsButLatches(t *testing.
 // latch immediately (so a fast-arriving second refresh tick doesn't
 // double-fire it), and set the "in progress" notice.
 func TestMaybeAutoSetupClipboardBridge_OffTriggersInstall(t *testing.T) {
-	withClipboardAutoSetupOS(t, true)
 	m := newTestModel(false)
 	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "avi@tower"}
 	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
@@ -302,7 +199,6 @@ func TestMaybeAutoSetupClipboardBridge_OffTriggersInstall(t *testing.T) {
 // leaves it empty when absent. That must be treated the same as "off",
 // not skipped as if already bridged.
 func TestMaybeAutoSetupClipboardBridge_EmptyBridgeStateTriggersInstall(t *testing.T) {
-	withClipboardAutoSetupOS(t, true)
 	m := newTestModel(false)
 	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "avi@tower"}
 	m.remoteSnaps = map[string]*state.RemoteHostSnapshot{
@@ -319,7 +215,6 @@ func TestMaybeAutoSetupClipboardBridge_EmptyBridgeStateTriggersInstall(t *testin
 // subsequent calls within the same session (e.g. every ~2s refresh
 // tick) must be a pure no-op, regardless of what the snapshot says.
 func TestMaybeAutoSetupClipboardBridge_AlreadyTriedIsNoop(t *testing.T) {
-	withClipboardAutoSetupOS(t, true)
 	m := newTestModel(false)
 	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "avi@tower"}
 	m.clipboardAutoSetupTried = true
@@ -339,7 +234,6 @@ func TestMaybeAutoSetupClipboardBridge_AlreadyTriedIsNoop(t *testing.T) {
 // end-to-end wiring, distinct from the direct maybeAutoSetupClipboardBridge
 // unit tests above which call the helper without going through Update.
 func TestUpdate_RemoteRowsLoadedWiresClipboardAutoSetup(t *testing.T) {
-	withClipboardAutoSetupOS(t, true)
 	m := newTestModel(false)
 	m.pinnedHost = host.Host{Name: "tower", SSHTarget: "avi@tower"}
 	m.hostList = []host.Host{m.pinnedHost}
