@@ -104,6 +104,13 @@ func (m *Model) View() string {
 		b.WriteString("\n\n")
 	}
 
+	// v0.22.x: clipboard-bridge auto-setup notice for `--remote`
+	// thin-client sessions. See maybeAutoSetupClipboardBridge.
+	if m.clipboardAutoSetupNotice != "" {
+		b.WriteString(subtleStyle.Render(m.clipboardAutoSetupNotice))
+		b.WriteString("\n\n")
+	}
+
 	// v0.17.0 Phase 1c: Hosts tab dispatches to its own subpackage
 	// renderer. Bypasses the projectlist + empty-tab handling below
 	// because hosts have their own row shape (and own empty state).

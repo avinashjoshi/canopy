@@ -272,7 +272,13 @@ func routeRoot(ctx context.Context, cwd string, stdout io.Writer) error {
 // routeRoot, takes no ctx/stdout — nothing here does cancellable I/O or
 // prints a warning yet; add them back when a real need shows up (e.g.
 // resolveRemoteHost growing a connectivity probe).
-func routeRemote(spec string) error {
+//
+// noMosh (v0.22.x) is the --no-mosh root flag: threaded through to
+// ui.RunRemotePinned so every attach the pinned TUI dispatches uses
+// the ssh-reconnect-loop path (see internal/ui/update_attach.go's
+// attachRemoteRow and cmd/canopy/switch.go's chooseAttachMode) instead
+// of mosh, regardless of whether mosh happens to be installed locally.
+func routeRemote(spec string, noMosh bool) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("canopy --remote: home dir: %w", err)
@@ -298,7 +304,7 @@ func routeRemote(spec string) error {
 	if d.IsDev {
 		versionLabel = ""
 	}
-	return ui.RunRemotePinned(store, tc, h, selfHeal, ui.RunUnifiedOptions{
+	return ui.RunRemotePinned(store, tc, h, selfHeal, noMosh, ui.RunUnifiedOptions{
 		VersionLabel: versionLabel,
 		DevWorkspace: d.DevWorkspace,
 	})

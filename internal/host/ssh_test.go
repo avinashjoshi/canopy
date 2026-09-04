@@ -1,10 +1,14 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSSHCmd_ControlMasterFlags verifies that every ssh invocation
@@ -75,6 +79,33 @@ func TestSSHCmd_PreservesArgvOrder(t *testing.T) {
 		if got[i] != want {
 			t.Errorf("remote args[%d] = %q, want %q", i, got[i], want)
 		}
+	}
+}
+
+// TestSSHCmdBatch_BatchModeFlags: SSHCmdBatch (unlike SSHCmd) must set
+// BatchMode=yes and NumberOfPasswordPrompts=0 so a host with no cached
+// key auth fails fast with "Permission denied" instead of opening
+// /dev/tty for a password prompt. Regression test for the v0.22.x
+// clipboard-bridge auto-setup bug: internal/clipboard.defaultSSHExec
+// used to build on the non-batch SSHCmd, which is safe when a real
+// terminal is attached (canopy host clipboard <name> run by hand, or a
+// tea.ExecProcess handoff) but hangs and corrupts the render when the
+// SSH call runs unattended inside a live Bubbletea alt-screen — exactly
+// what the auto-setup path does. This test pins the primitive
+// defaultSSHExec now depends on; see also
+// internal/clipboard/host_install.go's defaultSSHExec doc comment.
+func TestSSHCmdBatch_BatchModeFlags(t *testing.T) {
+	cmd := SSHCmdBatch(context.Background(), "avi@tower", "canopy", "ls", "--json")
+	args := cmd.Args
+	mustContainPair(t, args, "-o", "BatchMode=yes")
+	mustContainPair(t, args, "-o", "NumberOfPasswordPrompts=0")
+	mustContainPair(t, args, "-o", "ControlMaster=auto")
+	targetIdx := indexOf(args, "avi@tower")
+	if targetIdx < 0 {
+		t.Fatalf("target not found in args: %v", args)
+	}
+	if args[targetIdx-1] != "--" {
+		t.Errorf("target at idx %d must be immediately preceded by \"--\"; args: %v", targetIdx, args)
 	}
 }
 
@@ -302,6 +333,363 @@ func TestCanopyHome_NonEmpty(t *testing.T) {
 	got := canopyHome()
 	if got == "" {
 		t.Fatal("canopyHome() returned empty string")
+	}
+}
+
+// exitCmd builds a *exec.Cmd that exits with the given code, via `sh -c
+// exit N`. Used across the SSHAttachLoop tests below to simulate ssh's
+// exit-255-means-transport-failure convention without a real network.
+func exitCmd(code int) *exec.Cmd {
+	if _, err := exec.LookPath("sh"); err != nil {
+		return nil
+	}
+	return exec.Command("sh", "-c", "exit "+strconv.Itoa(code))
+}
+
+// TestSSHAttachLoop_CleanExitStopsImmediately: a remote command that
+// ends normally (exit 0 — e.g. the user detached from tmux
+// deliberately) must stop the loop without retrying or sleeping.
+func TestSSHAttachLoop_CleanExitStopsImmediately(t *testing.T) {
+	if exitCmd(0) == nil {
+		t.Skip("sh not on PATH")
+	}
+	slept := 0
+	err := SSHAttachLoop(context.Background(), func() *exec.Cmd { return exitCmd(0) }, &bytes.Buffer{}, SSHAttachLoopOptions{
+		Sleep: func(time.Duration) { slept++ },
+	})
+	if err != nil {
+		t.Fatalf("SSHAttachLoop() = %v; want nil", err)
+	}
+	if slept != 0 {
+		t.Errorf("slept %d times on a clean exit; want 0", slept)
+	}
+}
+
+// TestSSHAttachLoop_RetriesOn255ThenSucceeds: exit 255 is ssh's own
+// "transport failed" signal (ssh(1): "255 if an error occurred"). A
+// single transport failure followed by a clean reconnect must succeed
+// overall, having slept exactly once for the one retry.
+func TestSSHAttachLoop_RetriesOn255ThenSucceeds(t *testing.T) {
+	if exitCmd(0) == nil {
+		t.Skip("sh not on PATH")
+	}
+	calls := 0
+	slept := 0
+	err := SSHAttachLoop(context.Background(), func() *exec.Cmd {
+		calls++
+		if calls == 1 {
+			return exitCmd(255)
+		}
+		return exitCmd(0)
+	}, &bytes.Buffer{}, SSHAttachLoopOptions{
+		Sleep: func(time.Duration) { slept++ },
+	})
+	if err != nil {
+		t.Fatalf("SSHAttachLoop() = %v; want nil", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d; want 2 (one failure + one success)", calls)
+	}
+	if slept != 1 {
+		t.Errorf("slept %d times; want exactly 1 backoff between the two attempts", slept)
+	}
+}
+
+// TestSSHAttachLoop_NonTransportErrorStopsWithoutRetry: an exit code
+// other than 0 or 255 means the REMOTE command itself failed on its
+// own terms (e.g. "workspace not found") — retrying would just repeat
+// the same failure. Must stop immediately, no retry, no sleep.
+func TestSSHAttachLoop_NonTransportErrorStopsWithoutRetry(t *testing.T) {
+	if exitCmd(3) == nil {
+		t.Skip("sh not on PATH")
+	}
+	calls := 0
+	slept := 0
+	err := SSHAttachLoop(context.Background(), func() *exec.Cmd {
+		calls++
+		return exitCmd(3)
+	}, &bytes.Buffer{}, SSHAttachLoopOptions{
+		Sleep: func(time.Duration) { slept++ },
+	})
+	if err == nil {
+		t.Fatal("SSHAttachLoop() = nil; want the remote command's own failure surfaced")
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d; want exactly 1 (non-255 exit must not retry)", calls)
+	}
+	if slept != 0 {
+		t.Errorf("slept %d times; want 0 (non-255 exit must not retry)", slept)
+	}
+}
+
+// TestSSHAttachLoop_CommandFailsToStartStopsWithoutRetry: a command
+// that never even starts (binary missing, permission denied) fails
+// with an error that is NOT *exec.ExitError — errors.As must not match
+// it, so this must be classified the same as a non-255 exit: stop
+// immediately, no retry. Distinct from
+// TestSSHAttachLoop_NonTransportErrorStopsWithoutRetry, which covers a
+// command that DID start but exited with the wrong code.
+func TestSSHAttachLoop_CommandFailsToStartStopsWithoutRetry(t *testing.T) {
+	calls := 0
+	slept := 0
+	err := SSHAttachLoop(context.Background(), func() *exec.Cmd {
+		calls++
+		return exec.Command("/nonexistent/definitely-not-a-binary-xyz")
+	}, &bytes.Buffer{}, SSHAttachLoopOptions{
+		Sleep: func(time.Duration) { slept++ },
+	})
+	if err == nil {
+		t.Fatal("SSHAttachLoop() = nil; want the start failure surfaced")
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d; want exactly 1 (a non-ExitError start failure must not retry)", calls)
+	}
+	if slept != 0 {
+		t.Errorf("slept %d times; want 0 (a non-ExitError start failure must not retry)", slept)
+	}
+}
+
+// TestSSHAttachLoop_GivesUpAfterMaxAttempts: a host that's genuinely
+// unreachable (every attempt exits 255) must stop retrying at
+// MaxAttempts rather than looping forever, and the returned error
+// should say so.
+func TestSSHAttachLoop_GivesUpAfterMaxAttempts(t *testing.T) {
+	if exitCmd(255) == nil {
+		t.Skip("sh not on PATH")
+	}
+	calls := 0
+	slept := 0
+	err := SSHAttachLoop(context.Background(), func() *exec.Cmd {
+		calls++
+		return exitCmd(255)
+	}, &bytes.Buffer{}, SSHAttachLoopOptions{
+		MaxAttempts: 3,
+		Sleep:       func(time.Duration) { slept++ },
+	})
+	if err == nil {
+		t.Fatal("SSHAttachLoop() = nil; want an error after exhausting MaxAttempts")
+	}
+	if !strings.Contains(err.Error(), "gave up after 3 attempts") {
+		t.Errorf("error = %q; want it to mention giving up after 3 attempts", err.Error())
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d; want exactly MaxAttempts (3)", calls)
+	}
+	if slept != 2 {
+		t.Errorf("slept %d times; want 2 (one backoff between each of the 3 attempts)", slept)
+	}
+}
+
+// TestSSHAttachLoop_StatusLinesWrittenOnRetry: the reconnect status
+// line is the only signal the user gets that the loop is retrying
+// instead of hanging — it must actually be written to statusOut.
+func TestSSHAttachLoop_StatusLinesWrittenOnRetry(t *testing.T) {
+	if exitCmd(0) == nil {
+		t.Skip("sh not on PATH")
+	}
+	calls := 0
+	var out bytes.Buffer
+	err := SSHAttachLoop(context.Background(), func() *exec.Cmd {
+		calls++
+		if calls == 1 {
+			return exitCmd(255)
+		}
+		return exitCmd(0)
+	}, &out, SSHAttachLoopOptions{
+		Sleep: func(time.Duration) {},
+	})
+	if err != nil {
+		t.Fatalf("SSHAttachLoop() = %v; want nil", err)
+	}
+	if !strings.Contains(out.String(), "reconnecting") {
+		t.Errorf("statusOut = %q; want a reconnecting message", out.String())
+	}
+}
+
+// exitCmdWithStderr builds a *exec.Cmd that writes msg to stderr then
+// exits with code. Used to simulate ssh's own diagnostic output for the
+// isPermanentSSHFailure classification tests below.
+func exitCmdWithStderr(code int, msg string) *exec.Cmd {
+	if _, err := exec.LookPath("sh"); err != nil {
+		return nil
+	}
+	return exec.Command("sh", "-c", "echo "+ShellSingleQuote(msg)+" >&2; exit "+strconv.Itoa(code))
+}
+
+// TestSSHAttachLoop_PermanentFailureStopsWithoutRetry: an exit-255
+// whose stderr matches a known-permanent ssh failure (host key
+// mismatch, auth rejected, DNS failure) must stop immediately — no
+// retry, no sleep, no burying the diagnostic under "reconnecting..."
+// noise. Regression test for the case a changed host key (a potential
+// MITM warning) would otherwise get retried for up to ~7 minutes
+// before finally surfacing.
+func TestSSHAttachLoop_PermanentFailureStopsWithoutRetry(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+	}{
+		{"permission_denied", "avi@tower: Permission denied (publickey)."},
+		{"host_key_verification_failed", "Host key verification failed."},
+		{"host_key_changed_warning", "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nWARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@"},
+		{"dns_failure", "ssh: Could not resolve hostname totally-bogus-host.invalid: Name or service not known"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if exitCmdWithStderr(255, tc.stderr) == nil {
+				t.Skip("sh not on PATH")
+			}
+			calls := 0
+			slept := 0
+			var out bytes.Buffer
+			err := SSHAttachLoop(context.Background(), func() *exec.Cmd {
+				calls++
+				cmd := exitCmdWithStderr(255, tc.stderr)
+				cmd.Stderr = &out // caller-wired passthrough, same as production
+				return cmd
+			}, &bytes.Buffer{}, SSHAttachLoopOptions{
+				Sleep: func(time.Duration) { slept++ },
+			})
+			if err == nil {
+				t.Fatal("SSHAttachLoop() = nil; want the permanent failure surfaced")
+			}
+			if calls != 1 {
+				t.Errorf("calls = %d; want exactly 1 (a permanent failure must not retry)", calls)
+			}
+			if slept != 0 {
+				t.Errorf("slept %d times; want 0 (a permanent failure must not retry)", slept)
+			}
+			if out.Len() == 0 {
+				t.Error("caller-wired stderr writer got nothing; want the real ssh diagnostic still passed through live (SSHAttachLoop must tee, not replace, cmd.Stderr)")
+			}
+		})
+	}
+}
+
+// TestSSHAttachLoop_TransientFailureStillRetries is the regression
+// guard alongside the permanent-failure test above: a 255 exit whose
+// stderr does NOT match a known-permanent pattern (e.g. a transient
+// "Connection reset by peer") must still retry exactly as before this
+// classification was added.
+func TestSSHAttachLoop_TransientFailureStillRetries(t *testing.T) {
+	if exitCmdWithStderr(255, "Connection reset by peer") == nil {
+		t.Skip("sh not on PATH")
+	}
+	calls := 0
+	slept := 0
+	err := SSHAttachLoop(context.Background(), func() *exec.Cmd {
+		calls++
+		if calls == 1 {
+			cmd := exitCmdWithStderr(255, "Connection reset by peer")
+			cmd.Stderr = &bytes.Buffer{}
+			return cmd
+		}
+		return exitCmd(0)
+	}, &bytes.Buffer{}, SSHAttachLoopOptions{
+		Sleep: func(time.Duration) { slept++ },
+	})
+	if err != nil {
+		t.Fatalf("SSHAttachLoop() = %v; want nil (transient failure should have retried into success)", err)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d; want 2 (one transient failure + one success)", calls)
+	}
+	if slept != 1 {
+		t.Errorf("slept %d times; want exactly 1", slept)
+	}
+}
+
+// TestIsPermanentSSHFailure exercises the classifier directly.
+func TestIsPermanentSSHFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"permission_denied", "Permission denied (publickey).", true},
+		{"host_key_verification_failed", "Host key verification failed.", true},
+		{"host_identification_changed", "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!", true},
+		{"dns_failure", "Could not resolve hostname foo: Name or service not known", true},
+		{"empty", "", false},
+		{"transient_reset", "kex_exchange_identification: Connection reset by peer", false},
+		{"generic_timeout", "ssh: connect to host tower port 22: Connection timed out", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPermanentSSHFailure(tc.stderr); got != tc.want {
+				t.Errorf("isPermanentSSHFailure(%q) = %v; want %v", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSSHAttachLoop_CtxCancelledStopsBeforeSleeping: when the caller's
+// context is already cancelled between a 255 (transport failure) and
+// the next retry, the loop must return ctx.Err() immediately rather
+// than sleeping and dialing again — otherwise a cancelled `canopy
+// switch` (e.g. the TUI subprocess being torn down) would hang for a
+// full backoff cycle before noticing.
+func TestSSHAttachLoop_CtxCancelledStopsBeforeSleeping(t *testing.T) {
+	if exitCmd(255) == nil {
+		t.Skip("sh not on PATH")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	slept := 0
+	err := SSHAttachLoop(ctx, func() *exec.Cmd {
+		calls++
+		if calls == 1 {
+			// Cancel right after the first (failing) attempt so the
+			// ctx.Err() check — which runs after the max-attempts check
+			// but before the sleep — is the branch that fires.
+			cancel()
+		}
+		return exitCmd(255)
+	}, &bytes.Buffer{}, SSHAttachLoopOptions{
+		MaxAttempts: 5,
+		Sleep:       func(time.Duration) { slept++ },
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("SSHAttachLoop() = %v; want context.Canceled", err)
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d; want exactly 1 (loop must stop on cancellation before redialing)", calls)
+	}
+	if slept != 0 {
+		t.Errorf("slept %d times; want 0 (cancellation must be checked before the backoff sleep)", slept)
+	}
+}
+
+// TestSSHAttachLoop_BackoffDoublesAndCaps verifies the actual backoff
+// durations passed to Sleep grow exponentially from InitialBackoff and
+// clamp at MaxBackoff — the retry-count assertions in the other tests
+// only prove sleep was CALLED the right number of times, not that the
+// delay itself follows the documented doubling/capping behavior.
+func TestSSHAttachLoop_BackoffDoublesAndCaps(t *testing.T) {
+	if exitCmd(255) == nil {
+		t.Skip("sh not on PATH")
+	}
+	var got []time.Duration
+	calls := 0
+	err := SSHAttachLoop(context.Background(), func() *exec.Cmd {
+		calls++
+		return exitCmd(255)
+	}, &bytes.Buffer{}, SSHAttachLoopOptions{
+		MaxAttempts:    5,
+		InitialBackoff: 1 * time.Second,
+		MaxBackoff:     3 * time.Second,
+		Sleep:          func(d time.Duration) { got = append(got, d) },
+	})
+	if err == nil {
+		t.Fatal("SSHAttachLoop() = nil; want an error after exhausting MaxAttempts")
+	}
+	want := []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second, 3 * time.Second}
+	if len(got) != len(want) {
+		t.Fatalf("sleep durations = %v; want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("sleep[%d] = %v; want %v (1s -> 2s -> 4s capped to 3s -> stays 3s)", i, got[i], w)
+		}
 	}
 }
 

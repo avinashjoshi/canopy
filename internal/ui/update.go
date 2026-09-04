@@ -241,6 +241,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// indefinitely after the fan-out returned. v0.22.
 		m.pushLoadingHosts()
 		m.list.SetRows(m.filteredRows())
+		// v0.22.x: wire the v0.18 clipboard bridge into `--remote`
+		// thin-client mode — auto-install on first connect (no `canopy
+		// host add` required). No-op outside pinned mode.
+		if cmd := m.maybeAutoSetupClipboardBridge(); cmd != nil {
+			return m, cmd
+		}
 		return m, nil
 
 	case rowsLoadedMsg:
@@ -564,6 +570,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// v0.20 Add Project: success toast's display window elapsed.
 		// Close the form.
 		return m.handleAddProjectToastExpire()
+
+	case clipboardAutoSetupMsg:
+		// v0.22.x: background install kicked off by
+		// maybeAutoSetupClipboardBridge returned. Surface the result in
+		// the notice banner; expires automatically after a few seconds
+		// either way (a failed auto-setup isn't retried mid-session —
+		// `canopy host clipboard <name>` remains the manual retry path).
+		if msg.err != nil {
+			m.clipboardAutoSetupNotice = fmt.Sprintf("📋! clipboard bridge auto-setup failed on %s: %v", msg.host, msg.err)
+		} else {
+			m.clipboardAutoSetupNotice = fmt.Sprintf("📋 clipboard bridge ready on %s", msg.host)
+		}
+		m.clipboardAutoSetupNoticeFor = time.Now().Add(clipboardAutoSetupNoticeDuration)
+		return m, tea.Tick(clipboardAutoSetupNoticeDuration, func(time.Time) tea.Msg { return clipboardAutoSetupNoticeExpireMsg{} })
+
+	case clipboardAutoSetupNoticeExpireMsg:
+		m.clipboardAutoSetupNotice = ""
+		m.clipboardAutoSetupNoticeFor = time.Time{}
+		return m, nil
 
 	case hostProbeResultMsg:
 		// Post-Add probe result. AuthFailed → open the ssh-copy-id

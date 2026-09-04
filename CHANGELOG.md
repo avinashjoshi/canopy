@@ -5,6 +5,51 @@ All notable changes to canopy are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and canopy adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0.0] - 2026-09-03 — clipboard bridge rewritten on OSC 52, no more daemon or tunnel
+
+The v0.18 clipboard bridge worked, but its architecture — a laptop-side systemd daemon holding three Unix sockets, forwarded to the remote over a persistent `ssh -N` tunnel that a second systemd unit supervised, proxied through `socat` on the remote — was heavy for what it did, and it broke in an unrecoverable way: a laptop-side tunnel unit could get stuck reporting "start of the service was attempted too often" (systemd's `StartLimitBurst` throttle), which took a manual `systemctl --user reset-failed` to clear. Looking at how [herdr](https://herdr.dev) solves the same problem prompted a rewrite instead of a fix: `wl-copy`/`wl-paste` on the remote now talk directly to the attached terminal via OSC 52 escape sequences, which needs no laptop process, no forwarded sockets, and no `socat`.
+
+**Text clipboard only, both directions.** OSC 52 payloads are too size-constrained to carry images, so image paste — previously the bridge's headline demo — is dropped in this rewrite. It's tracked as a separate future effort (a PTY-proxy design), not part of this change. Text copy/paste, including tmux copy-mode `y` / `Enter` / mouse-drag, all keep working exactly as before.
+
+`canopy host clipboard <name>` (and the Hosts tab's `c` key, and `--remote <host>`'s auto-setup) is now a much shorter install: push two wrapper scripts, splice `allow-passthrough on` plus the copy-mode binds into the remote's tmux config, and confirm the wrapper resolves on PATH. No UID detection, no SSH config snippet, no systemd unit. Re-running it also actively tears down any of the old daemon/tunnel/snippet artifacts it finds on your laptop — directly resolving the `StartLimitBurst` case above instead of requiring you to debug it by hand.
+
+One side effect worth calling out: because OSC 52 is handled by the terminal emulator rather than the laptop's OS, the `--remote <host>` auto-setup path is no longer gated to Linux/Wayland laptops — it now runs the same way from a macOS or Windows terminal.
+
+### Changed
+
+- **Clipboard bridge mechanism replaced with OSC 52 terminal escape sequences.** No laptop-side daemon, no persistent SSH tunnel, no `socat` requirement on the remote, no per-host SSH config snippet. `wl-copy`/`wl-paste` on the remote talk directly to the attached terminal.
+- **`canopy host clipboard <name>` install is shorter and now self-cleaning.** Pushes the two wrapper scripts and the tmux config splice, then removes any pre-OSC52 systemd units (`canopy-clipboard-tunnel-<name>.service`, `canopy-clipboard.service`) and SSH snippet it finds on the laptop from an older canopy version.
+- **`canopy --remote <host>` clipboard auto-setup no longer requires a Linux laptop.** The old Wayland-daemon dependency gated it to Linux; OSC 52 is terminal-based, not OS-based, so macOS and Windows laptops now get auto-setup too.
+- **The Hosts tab's `📋 bridged` pill now means "installed," not "verified working."** OSC 52 needs a real attached terminal to round-trip through, and the background health probe runs over a non-interactive SSH connection with no tty — there's no way to check liveness from there. See `docs/clipboard-bridge.md`'s troubleshooting section.
+
+### Removed
+
+- **`canopy install clipboard-bridge` and `canopy clipboard-server`.** Both were laptop-side daemon plumbing with nothing left to do once the daemon was removed.
+- **Image clipboard support.** OSC 52 can't carry screenshot-sized payloads. Tracked as a future PTY-proxy effort, not part of this change.
+
+`canopy --remote <host>` (v0.22.0.0) got you into a thin-client TUI on any host with zero registration — but pasting a screenshot into an agent there still needed a manual `canopy host clipboard <name>` (or the Hosts tab's `c` key) run first, and every attach hard-required `mosh` to be installed locally with no fallback. Both gaps close here.
+
+The clipboard bridge (v0.18) now installs itself. The first time a `--remote <host>` session confirms the host is reachable and the bridge isn't already up, canopy runs the full laptop-side bootstrap (systemd unit, `~/.ssh/config` Include) and the per-host install (UID detection, wrapper push, SSH snippet, persistent tunnel) in the background, with no confirmation prompt — an unattended action shouldn't hijack the terminal, so it surfaces only a one-line status banner, not the interactive transcript the manual `c` key shows. `canopy host clipboard <name>` also now accepts a raw SSH target directly, matching `--remote`/`--on`'s "no `host add` required" contract instead of requiring a registered host.
+
+Auditing that unattended path surfaced a real bug before it shipped: the per-host installer's SSH calls used the same non-batch mode meant for a foreground terminal, so a host without cached key auth — the common case on a first `--remote` connect — would open a password prompt directly against `/dev/tty` while Bubbletea owned the terminal in raw mode, hanging the goroutine and corrupting the render. Every SSH call the clipboard bridge makes is now batch-mode, so a host without working key auth fails fast with a clear error instead.
+
+Attaching no longer hard-requires mosh. `--no-mosh` (on `canopy switch --on` and paired with `canopy --remote`) attaches over a plain-SSH reconnect loop instead — useful when mosh's UDP transport is blocked by a firewall or VPN even though mosh itself is installed. Missing mosh now falls back to the same path automatically rather than refusing to attach at all. The loop re-dials with backoff on a transport-level failure (ssh exit 255) but distinguishes that from a permanent failure — a rejected key, a changed host key, an unresolvable hostname — and stops immediately on those instead of burying a potential MITM warning under minutes of "reconnecting..." noise.
+
+### Added
+
+- **Clipboard bridge auto-setup for `--remote <host>` thin-client mode.** No `canopy install clipboard-bridge` or `canopy host clipboard <name>` needed first — the first successful connection installs it unattended, with a transient status banner instead of the manual flow's full transcript.
+- **`--no-mosh` flag** on `canopy switch --on` and the `canopy --remote <host>` root command — attaches via an ssh reconnect-loop instead of mosh, propagated to every attach a pinned `--remote` session dispatches.
+- **Automatic fallback to the ssh reconnect-loop when mosh isn't installed locally** — attaching no longer hard-fails with "mosh is not installed."
+
+### Changed
+
+- **`canopy host clipboard <name>`** now resolves `<name>` the same way `--remote`/`--on` do (registered `hosts.json` name, or a raw SSH target used directly) instead of requiring registration.
+
+### Fixed
+
+- **The clipboard bridge's background SSH calls could hang and corrupt the TUI's render on a host without cached key auth.** They ran in non-batch mode, letting ssh open a password prompt directly against the terminal while Bubbletea held it in raw/alt-screen mode. Every SSH call the bridge makes is now batch-mode, failing fast with "Permission denied" instead.
+- **The ssh reconnect-loop retried permanent failures (rejected key, changed host key, unresolvable hostname) for up to ~7 minutes** before giving up, burying a potentially security-relevant host-key-mismatch warning under routine-looking retry noise. It now classifies these from the ssh diagnostic and stops immediately instead of retrying.
+
 ## [0.22.0.0] - 2026-09-03 — `canopy --remote <host>`: a thin client, no `host add` required
 
 Until now, checking on a remote canopy install meant either being inside a registered local project (so the Global/Hosts tabs had something to filter to) or running the full local `canopy new --on`/`--on` dance. `canopy --remote <host>` skips all of that: run it from anywhere — no `canopy.json`, no registered project, nothing local at all — and it launches straight into a TUI showing exactly that one host's workspaces, sourced the same way the existing Global tab already fans out over SSH.

@@ -198,35 +198,10 @@ func (m *Model) attachRemoteRow(row Row, shared bool) tea.Cmd {
 		// binary after launch — rare enough to not engineer around.
 		canopyBin = os.Args[0]
 	}
-	args := []string{"switch", "--on", row.Host}
 	cwd := m.remoteCwdForRow(row.Host, row.Project, row.RemoteProjectPath)
-	// For IsMain rows, --remote-cwd is load-bearing: the remote canopy
-	// needs to be cd'd into the right project before `canopy main`
-	// walks up looking for canopy.json. Without it, resolveOnForSwitch
-	// falls back to the local cwd basename or first registered project
-	// — silently attaching to a different project's main session.
-	// Refuse rather than silently mis-attach.
-	if row.IsMain && cwd == "" {
-		return func() tea.Msg {
-			return errMsg{err: fmt.Errorf("can't attach to %s on %s: project not registered for that host (run `canopy project add %s <remote-path> --on %s`)", row.Project, row.Host, row.Project, row.Host)}
-		}
-	}
-	if cwd != "" {
-		args = append(args, "--remote-cwd", cwd)
-	}
-	if row.IsMain {
-		// Use the explicit flag rather than passing "(main)" as a name —
-		// the dispatch keys off the flag so a real workspace named
-		// "(main)" wouldn't be silently redirected to the main session.
-		args = append(args, "--main")
-	} else {
-		args = append(args, row.Name)
-	}
-	if shared {
-		// v0.17 Phase 1j: propagates the laptop-side "user confirmed
-		// share" decision through to the remote canopy switch so it
-		// skips detach-other-clients.
-		args = append(args, "--share")
+	args, err := remoteAttachArgs(row, cwd, shared, m.pinnedNoMosh)
+	if err != nil {
+		return func() tea.Msg { return errMsg{err: err} }
 	}
 	cmd := exec.Command(canopyBin, args...)
 	cmd.Env = os.Environ()
@@ -245,6 +220,52 @@ func (m *Model) attachRemoteRow(row Row, shared bool) tea.Cmd {
 		// would race the View+spinner read path.
 		return refreshAllMsg{}
 	})
+}
+
+// remoteAttachArgs builds the argv (after the binary name) for the
+// `canopy switch --on ...` subprocess attachRemoteRow shells out to.
+// Factored out as a pure function so the flag-propagation logic
+// (--remote-cwd, --main vs a named workspace, --share, --no-mosh) is
+// unit-testable without touching os.Executable/exec.Command/tea.ExecProcess.
+//
+// Returns an error (instead of building a broken subprocess) when an
+// IsMain row has no resolvable cwd — see the inline comment below for
+// why that's load-bearing rather than an edge case to silently ignore.
+func remoteAttachArgs(row Row, cwd string, shared, noMosh bool) ([]string, error) {
+	args := []string{"switch", "--on", row.Host}
+	// For IsMain rows, --remote-cwd is load-bearing: the remote canopy
+	// needs to be cd'd into the right project before `canopy main`
+	// walks up looking for canopy.json. Without it, resolveOnForSwitch
+	// falls back to the local cwd basename or first registered project
+	// — silently attaching to a different project's main session.
+	// Refuse rather than silently mis-attach.
+	if row.IsMain && cwd == "" {
+		return nil, fmt.Errorf("can't attach to %s on %s: project not registered for that host (run `canopy project add %s <remote-path> --on %s`)", row.Project, row.Host, row.Project, row.Host)
+	}
+	if cwd != "" {
+		args = append(args, "--remote-cwd", cwd)
+	}
+	if row.IsMain {
+		// Use the explicit flag rather than passing "(main)" as a name —
+		// the dispatch keys off the flag so a real workspace named
+		// "(main)" wouldn't be silently redirected to the main session.
+		args = append(args, "--main")
+	} else {
+		args = append(args, row.Name)
+	}
+	if shared {
+		// v0.17 Phase 1j: propagates the laptop-side "user confirmed
+		// share" decision through to the remote canopy switch so it
+		// skips detach-other-clients.
+		args = append(args, "--share")
+	}
+	if noMosh {
+		// v0.22.x: `canopy --remote <host> --no-mosh` propagates through
+		// every attach this pinned session dispatches. See
+		// cmd/canopy/switch.go's chooseAttachMode/--no-mosh flag.
+		args = append(args, "--no-mosh")
+	}
+	return args, nil
 }
 
 // effectiveStatus returns the status the Enter dispatcher should act on.

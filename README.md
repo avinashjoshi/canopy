@@ -16,7 +16,7 @@
 
 **TUI for managing git worktrees with paired tmux sessions, per-project setup hooks, and remote-host dispatch.**
 
-> Status: v0.22, daily-driven by the author. APIs and on-disk state may still shift before v1.
+> Status: v0.23, daily-driven by the author. APIs and on-disk state may still shift before v1.
 
 ![canopy TUI: Workspaces tab listing workspaces across multiple projects + one remote host, each with port, memory, agent badge, and PR status](docs/images/tui-workspaces.png)
 
@@ -26,13 +26,14 @@
 
 AI-paired development means many parallel branches in flight at once: one agent refactoring auth, another fixing the timezone bug, plus the feature you're driving by hand. Raw `git worktree` + ad-hoc `tmux new-session` doesn't scale past three. Canopy is the missing orchestrator: per-workspace ports, per-workspace databases via `scripts.setup`, per-workspace tmux sessions with the same layout every time, agent-state badges so you can see which agent needs you, and one TUI that views every workspace across every host. See [`docs/landscape.md`](docs/landscape.md) for where canopy sits next to Conductor, tmuxinator, raw `git worktree`, and the agent CLIs it hosts.
 
-## What's new in v0.22
+## What's new in v0.24
 
-- **`canopy --remote <host>` — zero-setup thin client.** Run it from anywhere, no `canopy.json` and no host/project registration required, and it launches straight into a TUI pinned to that one host's workspaces. `<host>` takes a registered name or a raw `user@host` SSH target directly, mirroring how herdr's `--remote` works. See [`docs/remote-workspaces.md`](docs/remote-workspaces.md#thin-client-mode-zero-setup-with-canopy---remote-host).
-- **Security fix: ssh/mosh option injection.** Every remote-host `ssh`/`mosh` invocation now inserts an explicit `--` before the target, closing a real vulnerability where a target (or a tampered `hosts.json` entry) shaped like a command-line option — e.g. `-oProxyCommand=...` — was parsed as that option instead of a hostname, up to local arbitrary command execution.
+- **Clipboard bridge rewritten on OSC 52 — no more laptop daemon or SSH tunnel.** `canopy host clipboard <name>` now just pushes two wrapper scripts and a tmux config splice; the wrappers talk directly to your attached terminal instead of proxying through a systemd-supervised tunnel. Text clipboard only, both directions — image paste is dropped in this rewrite (tracked as a future effort). Also drops the Linux/Wayland-only laptop requirement: OSC 52 is handled by your terminal, so `--remote <host>` auto-setup now works from macOS and Windows too. See [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md).
 
 ## Previous releases
 
+- **v0.23** — Clipboard bridge auto-setup for `--remote <host>` thin-client mode (superseded by v0.24's rewrite above), plus a `--no-mosh` flag and automatic ssh fallback when mosh is missing locally. See [`CHANGELOG.md`](CHANGELOG.md).
+- **v0.22** — `canopy --remote <host>`: zero-setup thin client. Run it from anywhere, no `canopy.json` and no host/project registration required, and it launches straight into a TUI pinned to that one host's workspaces. `<host>` takes a registered name or a raw `user@host` SSH target directly, mirroring how herdr's `--remote` works. Plus a security fix: every remote-host `ssh`/`mosh` invocation now inserts an explicit `--` before the target, closing a real vulnerability where an option-shaped target (or a tampered `hosts.json` entry) could be parsed as a flag instead of a hostname, up to local arbitrary command execution. See [`docs/remote-workspaces.md`](docs/remote-workspaces.md#thin-client-mode-zero-setup-with-canopy---remote-host).
 - **v0.21** — Workspaces tab redesign (idle projects collapse, host pills), clipboard bridge for remote workspaces, PR/Issue/Branch parity for the remote new-workspace picker, ownership badges that tell your own work apart from a PR you're reviewing, plus a long tail of remote-dispatch robustness fixes (stale-connection detection, `go`-on-PATH fixes for mise/asdf hosts, doubled project headers). See [`CHANGELOG.md`](CHANGELOG.md).
 - **v0.20** — Add a project from anywhere: `canopy init` accepts a folder path or a git URL (`canopy init ~/code/foo`, `canopy init https://github.com/foo/bar.git`), cloning into a configured source-root and registering in one shot, plus a TUI **Add Project** form (splash + Global tab `a` keybind). Remote-host init (`canopy init <git-url> --on tower`) dispatches clone+init over SSH and auto-registers the project. `canopy config` subcommand for persistent user-level settings (`~/.canopy/config.json`), first key `source-root`. See [`docs/getting-started.md`](docs/getting-started.md).
 - **v0.17** — Remote workspaces. Register an SSH-reachable host once with `canopy host add tower cassy@tower.tail.ts.net`, then run `canopy new --on tower` from your laptop. The heavy work runs on the host; one TUI views every workspace across every machine. See [`docs/remote-workspaces.md`](docs/remote-workspaces.md). Plus fire-and-forget agents (`canopy new --prompt "..." --no-attach`), in-TUI `canopy upgrade`, and workspace identity that follows the branch (rename via `git branch -m` and canopy's tmux session, statusline, terminal-tab title, and TUI rows pick up the new name within 15 seconds).

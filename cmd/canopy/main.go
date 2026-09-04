@@ -32,6 +32,18 @@ var debugFlag bool
 // user@host SSH target.
 var remoteFlag string
 
+// noMoshFlag is the --no-mosh switch on the root command (v0.22.x),
+// paired with --remote. When true, every attach dispatched from the
+// pinned thin-client TUI uses the ssh-reconnect-loop path
+// (host.SSHAttachLoop) instead of mosh — see attachRemoteRow in
+// internal/ui/update_attach.go, which forwards this through to the
+// `canopy switch --on ... --no-mosh` subprocess it shells out to.
+// Missing mosh already falls back to the same path automatically
+// (chooseAttachMode in cmd/canopy/switch.go); this flag is for opting
+// out even when mosh IS available (e.g. its UDP transport is blocked
+// by a firewall/VPN).
+var noMoshFlag bool
+
 // version, commit, and date are injected via -ldflags by `make install`
 // (see Makefile LDFLAGS). When canopy is built via `make build` /
 // `make dev` / `go install`, these stay at their defaults — `version`
@@ -104,7 +116,7 @@ func main() {
 			// thin client pinned to one registered host, no local
 			// project resolution. See routeRemote in route.go.
 			if remoteFlag != "" {
-				return routeRemote(remoteFlag)
+				return routeRemote(remoteFlag, noMoshFlag)
 			}
 			// `canopy` with no subcommand is context-sensitive (see
 			// route.go for the full dispatch table):
@@ -127,6 +139,10 @@ func main() {
 	// reject it on subcommands with "unknown flag: --remote" instead of
 	// accepting and ignoring it.
 	root.Flags().StringVar(&remoteFlag, "remote", "", "launch as a thin client pinned to a registered host (e.g. --remote tower)")
+	// --no-mosh (Flags(), not PersistentFlags(), for the same reason as
+	// --remote above: it's a root-only modifier of --remote, not a
+	// global switch that should silently parse on every subcommand).
+	root.Flags().BoolVar(&noMoshFlag, "no-mosh", false, "with --remote: attach via an ssh reconnect-loop instead of mosh")
 
 	root.AddCommand(versionCmd())
 	root.AddCommand(initCmd())
@@ -147,10 +163,9 @@ func main() {
 	root.AddCommand(newRunCmd())
 	root.AddCommand(newUseCmd())
 	root.AddCommand(newUpgradeCmd())
-	root.AddCommand(hostCmd())               // v0.17.0 Phase 1a: remote host registry
-	root.AddCommand(projectCmd())            // v0.17.0 Phase 1a: project-on-host registry
-	root.AddCommand(configCmd())             // v0.20: user-level config (~/.canopy/config.json)
-	root.AddCommand(newClipboardServerCmd()) // v0.21: clipboard-bridge daemon subcommand
+	root.AddCommand(hostCmd())    // v0.17.0 Phase 1a: remote host registry
+	root.AddCommand(projectCmd()) // v0.17.0 Phase 1a: project-on-host registry
+	root.AddCommand(configCmd())  // v0.20: user-level config (~/.canopy/config.json)
 
 	if err := root.Execute(); err != nil {
 		// Distinguish "workspace OK, prompt failed" (exit 2) from

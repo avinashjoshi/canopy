@@ -17,11 +17,16 @@
 package host
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/avinashjoshi/canopy/internal/clog"
 )
@@ -290,41 +295,6 @@ func MoshCmd(ctx context.Context, target string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "mosh", moshArgs...)
 }
 
-// ExitControlMaster terminates the persistent SSH ControlMaster
-// connection for `target` if one is alive. Used by code paths that
-// modify SSH config (e.g., per-host RemoteForward snippets written
-// by the v0.18 clipboard bridge): an already-open ControlMaster only
-// carries the forwards it negotiated at handshake time, so a fresh
-// snippet's directives don't apply until the NEXT master is opened.
-//
-// Calling this between "write snippet" and "use snippet via ssh" makes
-// the next SSH command establish a new master that reads the freshly-
-// written config. ControlPersist will keep that new master alive for
-// the rest of the canopy session.
-//
-// Errors are deliberately swallowed: "no master alive" is the same
-// outcome as "we killed one" from the caller's perspective (next ssh
-// gets a fresh master). Returning nil here keeps callers from having
-// to branch on a no-op condition.
-func ExitControlMaster(target string) {
-	socketPath := filepath.Join(canopyHome(), "ssh-%C.sock")
-	cmd := exec.Command("ssh",
-		"-o", "ControlPath="+socketPath,
-		"-O", "exit",
-		// "--" before target: same option-injection risk as the other
-		// ssh call sites in this file — see sshCmdInternal's comment.
-		"--", target,
-	)
-	// `ssh -O exit` writes "Exit request sent." on success or
-	// "Control socket connect(...): No such file or directory" when
-	// no master is alive. Both go to stderr; neither is interesting
-	// to the user mid-install. Discard.
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	_ = cmd.Run()
-	log.Debug("ssh.control-master.exit", "target", target)
-}
-
 // CheckMoshAvailable returns nil if `mosh` is on PATH, else a helpful
 // error. Called once at attach time so failure surfaces clearly rather
 // than as a confusing exec error.
@@ -339,6 +309,13 @@ func CheckMoshAvailable() error {
 // ErrMoshMissing indicates `mosh` isn't installed locally. Attaching to
 // a remote workspace requires mosh on both ends. Phase 0 fails loudly;
 // Phase 1 may surface this in the TUI as a host-level pill.
+//
+// v0.22.x: no longer a hard stop. cmd/canopy/switch.go's
+// chooseAttachMode falls back to SSHAttachLoop (below) automatically
+// when this error fires, and --no-mosh opts into the same path even
+// when mosh IS installed. ErrMoshMissing stays exported for callers
+// that still want the old hard-fail behavior (e.g. a future explicit
+// `canopy doctor` check).
 type ErrMoshMissing struct {
 	Inner error
 }
@@ -348,3 +325,138 @@ func (e *ErrMoshMissing) Error() string {
 }
 
 func (e *ErrMoshMissing) Unwrap() error { return e.Inner }
+
+// SSHAttachLoopOptions configures SSHAttachLoop's retry behavior. The
+// zero value uses production defaults; tests override MaxAttempts and
+// Sleep so retry tests run instantly and deterministically.
+type SSHAttachLoopOptions struct {
+	// MaxAttempts caps how many times SSHAttachLoop retries after a
+	// transport-level failure before giving up. 0 means the default
+	// (30) — the --no-mosh path is meant to survive a laptop
+	// sleep/wake or a flaky network, not retry forever against a
+	// genuinely dead host.
+	MaxAttempts int
+	// InitialBackoff / MaxBackoff bound the exponential backoff between
+	// reconnect attempts. Zero means defaults (1s / 15s).
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	// Sleep is the backoff delay function; defaults to time.Sleep.
+	// Tests override with a no-op recorder so retry tests don't
+	// actually block.
+	Sleep func(time.Duration)
+}
+
+// SSHAttachLoop is the --no-mosh / auto-detect-missing-mosh substitute
+// for mosh's own roaming and laptop-suspend tolerance: mosh survives a
+// network drop transparently over its UDP transport; plain ssh just
+// dies. SSHAttachLoop re-dials automatically on a transport-level
+// failure instead, so a canopy attach over plain SSH degrades
+// gracefully on a flaky connection rather than dropping the user back
+// to a shell.
+//
+// newAttempt must return a FRESH, fully-wired *exec.Cmd on every call
+// (exec.Cmd is single-use) — production callers build via SSHRunUser
+// with Stdin/Stdout/Stderr wired to the real terminal; tests substitute
+// a fake command (e.g. `sh -c 'exit 255'`).
+//
+// Exit-code classification follows ssh(1)'s documented convention:
+// "ssh exits with the exit status of the remote command, or with 255
+// if an error occurred." So:
+//
+//   - exit 0            → the remote command ended normally (e.g. the
+//     user detached from tmux deliberately). Stop the loop, return nil.
+//   - exit 255           → ssh's OWN transport failed. Two sub-cases,
+//     distinguished by scanning the attempt's stderr (see
+//     isPermanentSSHFailure): a TRANSIENT failure (dropped connection,
+//     temporary DNS hiccup) retries with exponential backoff up to
+//     MaxAttempts; a PERMANENT failure (host key changed, publickey
+//     auth rejected, hostname genuinely doesn't resolve) stops
+//     immediately — waiting and retrying can't fix a rejected key or a
+//     changed host key, and a changed host key is potentially a MITM
+//     warning that deserves to reach the user immediately, not get
+//     buried under minutes of "reconnecting..." noise.
+//   - anything else       → the remote command ran and failed on its
+//     own terms (e.g. "workspace not found"). Retrying would just
+//     repeat the same failure — stop the loop and surface the error.
+//
+// statusOut receives human-readable "reconnecting..." lines between
+// attempts so the user sees why their terminal went quiet instead of
+// staring at a silent hang. Each attempt's stderr is still teed through
+// to whatever the caller wired newAttempt's cmd.Stderr to (the actual
+// ssh error text reaches the user's terminal live) — SSHAttachLoop only
+// additionally captures a copy to classify it.
+func SSHAttachLoop(ctx context.Context, newAttempt func() *exec.Cmd, statusOut io.Writer, opts SSHAttachLoopOptions) error {
+	maxAttempts := opts.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 30
+	}
+	backoff := opts.InitialBackoff
+	if backoff <= 0 {
+		backoff = time.Second
+	}
+	maxBackoff := opts.MaxBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = 15 * time.Second
+	}
+	sleep := opts.Sleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		cmd := newAttempt()
+		var errBuf bytes.Buffer
+		if cmd.Stderr != nil {
+			cmd.Stderr = io.MultiWriter(cmd.Stderr, &errBuf)
+		} else {
+			cmd.Stderr = &errBuf
+		}
+		err := cmd.Run()
+		if err == nil {
+			return nil
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 255 {
+			// Not a transport-level failure (or the binary itself
+			// couldn't even start) — surface as-is rather than retry.
+			return err
+		}
+		if isPermanentSSHFailure(errBuf.String()) {
+			return fmt.Errorf("ssh attach: %w", err)
+		}
+		if attempt == maxAttempts {
+			return fmt.Errorf("ssh attach: gave up after %d attempts: %w", attempt, err)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fmt.Fprintf(statusOut, "connection lost, reconnecting in %s (attempt %d/%d)...\n", backoff, attempt+1, maxAttempts)
+		sleep(backoff)
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+	return nil // unreachable: loop always returns via one of the branches above
+}
+
+// isPermanentSSHFailure reports whether an exit-255 ssh stderr indicates
+// a failure that retrying cannot fix — mirrors the classification
+// pattern already used in internal/clipboard/host_install.go's
+// verifyBridge for remote-error messages. A changed host key
+// specifically is a potential MITM warning; burying it under retry
+// noise instead of surfacing it immediately would be actively harmful,
+// not just wasted time.
+func isPermanentSSHFailure(stderr string) bool {
+	for _, marker := range []string{
+		"Host key verification failed",
+		"REMOTE HOST IDENTIFICATION HAS CHANGED",
+		"Permission denied",
+		"Could not resolve hostname",
+	} {
+		if strings.Contains(stderr, marker) {
+			return true
+		}
+	}
+	return false
+}

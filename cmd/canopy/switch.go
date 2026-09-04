@@ -23,6 +23,7 @@ var switchFlags struct {
 	remoteCwd string
 	share     bool // --share: don't detach other clients (multi-attach)
 	main      bool // --main: attach to the project's main session instead of a named workspace
+	noMosh    bool // --no-mosh (v0.22.x): attach via ssh reconnect-loop instead of mosh
 }
 
 // switchCmd returns the `canopy switch <name>` cobra subcommand.
@@ -76,7 +77,7 @@ func switchCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return dispatchSwitchToRemote(ctx, resolved, name, switchFlags.share, switchFlags.main)
+				return dispatchSwitchToRemote(ctx, resolved, name, switchFlags.share, switchFlags.main, switchFlags.noMosh)
 			}
 
 			// Local --main: this branch only handles --on dispatch; local
@@ -161,40 +162,85 @@ func switchCmd() *cobra.Command {
 		"with --on: attach to the project's main session (canopy main on the remote) instead of a named workspace")
 	c.Flags().BoolVar(&switchFlags.share, "share", false,
 		"don't detach existing tmux clients on the target session (multi-attach / parallel mosh)")
+	c.Flags().BoolVar(&switchFlags.noMosh, "no-mosh", false,
+		"with --on: attach via an ssh reconnect-loop instead of mosh (also used automatically when mosh isn't installed locally)")
 	return c
 }
 
-// dispatchSwitchToRemote execs mosh against the target host, where mosh
-// in turn launches `canopy switch <name>` on the remote. The remote
-// canopy's switch handles reconcile + resurrect + tmux attach exactly
-// as it does locally; the result is your terminal becomes a mosh-
-// rendered view of the remote tmux session.
-//
-// On success this function does not return — syscall.Exec replaces the
-// current canopy process with mosh, so when mosh eventually exits the
-// shell sees the mosh exit code, not canopy's. If exec FAILS (e.g.,
-// mosh is missing) we return the wrapped error and the caller surfaces
-// it normally.
-//
-// Why exec instead of cmd.Run(): mosh expects to own the terminal
-// completely (raw mode, signal handling, alt-screen). Running it as a
-// child of canopy with redirected stdio works but is fragile; SIGWINCH,
-// ctrl-c, and terminal modes all need to flow cleanly. Exec replacement
-// gives mosh a clean inheritance and avoids canopy sitting around as a
-// zombie parent.
-func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName string, share, main bool) error {
-	target := resolved.SSHTarget
-	if err := host.CheckMoshAvailable(); err != nil {
-		return err
-	}
+// attachMode picks between mosh and the --no-mosh ssh-reconnect-loop
+// (host.SSHAttachLoop) in dispatchSwitchToRemote.
+type attachMode int
 
-	// Pre-probe the remote project path via SSH before exec'ing mosh.
-	// dispatchSwitchToRemote does a syscall.Exec into mosh, which can't
-	// surface errors back to the TUI — any cd failure inside the mosh
-	// child shell tears down with no visible message. A 1-roundtrip SSH
-	// check (reuses the ControlMaster socket) keeps the error in the
-	// terminal the TUI is still drawing in. Skip when RemoteCwd is empty
-	// (raw ssh-target with no path; remote canopy walks cwd from $HOME).
+const (
+	attachModeMosh attachMode = iota
+	attachModeSSHLoop
+)
+
+// chooseAttachMode decides which transport dispatchSwitchToRemote uses.
+// Factored out as a pure function (moshAvailable is injected) so the
+// --no-mosh / auto-detect-missing-mosh branching is unit-testable
+// without shelling out to a real mosh binary.
+//
+// An explicit --no-mosh always wins (the user may have a working mosh
+// install but a network that blocks its UDP transport — a corporate
+// VPN or a restrictive firewall, say). Otherwise, missing mosh falls
+// back to the same ssh-reconnect-loop path automatically, matching
+// v0.17's original hard-fail spot (host.CheckMoshAvailable) but
+// degrading gracefully instead of refusing to attach at all.
+func chooseAttachMode(noMosh bool, moshAvailable func() error) attachMode {
+	if noMosh {
+		return attachModeSSHLoop
+	}
+	if moshAvailable() != nil {
+		return attachModeSSHLoop
+	}
+	return attachModeMosh
+}
+
+// dispatchSwitchToRemote attaches to the target host, where the remote
+// canopy's `canopy switch <name>` (or `canopy main`) handles reconcile
+// + resurrect + tmux attach exactly as it does locally. The transport
+// is chosen by chooseAttachMode:
+//
+//   - mosh (default, when installed and --no-mosh wasn't passed): mosh
+//     in turn launches the remote command; the result is your terminal
+//     becomes a mosh-rendered view of the remote tmux session. On
+//     success this function does not return — syscall.Exec replaces
+//     the current canopy process with mosh, so when mosh eventually
+//     exits the shell sees the mosh exit code, not canopy's. If exec
+//     FAILS we return the wrapped error and the caller surfaces it
+//     normally.
+//
+//   - ssh reconnect-loop (--no-mosh, or mosh missing locally): plain
+//     ssh doesn't survive a network drop the way mosh's UDP transport
+//     does, so host.SSHAttachLoop re-dials automatically on a
+//     transport-level failure instead. This path does NOT exec-replace
+//     the process — it runs ssh as a child, wired to the real
+//     terminal, in a loop — so it returns normally (nil on a clean
+//     detach, an error otherwise) rather than being unreachable.
+//
+// Why mosh gets exec instead of cmd.Run(): mosh expects to own the
+// terminal completely (raw mode, signal handling, alt-screen). Running
+// it as a child of canopy with redirected stdio works but is fragile;
+// SIGWINCH, ctrl-c, and terminal modes all need to flow cleanly. Exec
+// replacement gives mosh a clean inheritance and avoids canopy sitting
+// around as a zombie parent. The ssh-loop path can't use the same
+// trick (it needs to regain control after each attempt to decide
+// whether to retry), so it accepts owning a child process instead.
+func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName string, share, main, noMosh bool) error {
+	target := resolved.SSHTarget
+
+	// Pre-probe the remote project path via SSH before attaching.
+	// Both attach paths hand the terminal over to a subprocess that
+	// can't surface errors back to the TUI cleanly — mosh via
+	// syscall.Exec, the ssh-loop by design (see host.SSHAttachLoop's
+	// doc comment: a non-255 exit is treated as the remote command's
+	// own failure and returned as-is, which is fine, but a missing cwd
+	// specifically deserves the more actionable remotePathMissingErr
+	// below). A 1-roundtrip SSH check (reuses the ControlMaster socket)
+	// keeps the error in the terminal the TUI is still drawing in. Skip
+	// when RemoteCwd is empty (raw ssh-target with no path; remote
+	// canopy walks cwd from $HOME).
 	if resolved.RemoteCwd != "" {
 		if probeErr := probeRemoteCwd(ctx, target, resolved.RemoteCwd); probeErr != nil {
 			spec := resolved.HostName
@@ -210,15 +256,6 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Attaching to %s (%s) via mosh+tmux...\n", target, resolved.Source)
-
-	// Resolve mosh's absolute path for exec (syscall.Exec needs absolute path).
-	moshBin, err := exec.LookPath("mosh")
-	if err != nil {
-		// Shouldn't happen — we just checked above — but defensive.
-		return &host.ErrMoshMissing{Inner: err}
-	}
-
 	// Wrap remote command in `bash -lc '...'` and explicitly prepend
 	// ~/.local/bin to PATH. Non-interactive SSH-command shells skip
 	// .bashrc (interactive guard), so omarchy / Arch / similar setups
@@ -231,6 +268,31 @@ func dispatchSwitchToRemote(ctx context.Context, resolved resolvedHost, wsName s
 	// and the global-workspace lookup finds the workspace by name across
 	// projects — so ANY registered project works as the cd target.
 	remoteCmd := buildRemoteSwitchCmd(resolved.RemoteCwd, resolved.HostName, wsName, share, main)
+
+	if chooseAttachMode(noMosh, host.CheckMoshAvailable) == attachModeSSHLoop {
+		if noMosh {
+			fmt.Fprintf(os.Stderr, "Attaching to %s (%s) via ssh (--no-mosh, reconnect-loop)...\n", target, resolved.Source)
+		} else {
+			fmt.Fprintf(os.Stderr, "mosh not found locally — falling back to ssh (reconnect-loop attach) for %s (%s)...\n", target, resolved.Source)
+		}
+		return host.SSHAttachLoop(ctx, func() *exec.Cmd {
+			cmd := host.SSHRunUser(ctx, target, remoteCmd)
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			return cmd
+		}, os.Stderr, host.SSHAttachLoopOptions{})
+	}
+
+	fmt.Fprintf(os.Stderr, "Attaching to %s (%s) via mosh+tmux...\n", target, resolved.Source)
+
+	// Resolve mosh's absolute path for exec (syscall.Exec needs absolute path).
+	moshBin, err := exec.LookPath("mosh")
+	if err != nil {
+		// Shouldn't happen — chooseAttachMode already checked — but defensive.
+		return &host.ErrMoshMissing{Inner: err}
+	}
+
 	argv := moshExecArgv(target, remoteCmd)
 	// syscall.Exec replaces this process with mosh. On success, this
 	// call does not return; on failure we fall through to the error.

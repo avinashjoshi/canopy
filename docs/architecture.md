@@ -47,7 +47,33 @@ internal/host/                 Multi-host remote dispatch (v0.17+): hosts.json
                                out through. Every target passed to ssh/mosh
                                gets an explicit "--" separator before it
                                (v0.22) so an option-shaped target/hosts.json
-                               entry can't be parsed as a flag.
+                               entry can't be parsed as a flag. SSHAttachLoop
+                               (v0.23) is the ssh-reconnect-loop attach
+                               primitive behind --no-mosh and the automatic
+                               fallback when mosh isn't installed locally —
+                               re-dials with backoff on a transport failure
+                               (ssh exit 255) but stops immediately on a
+                               permanent failure (rejected key, changed host
+                               key, unresolvable hostname).
+internal/clipboard/            Per-host installer (host_install.go) that
+                               pushes wl-paste/wl-copy wrapper scripts to a
+                               remote workspace; the wrappers themselves talk
+                               OSC 52 terminal escape sequences directly to
+                               the attached terminal (v0.24.x — replaced the
+                               original daemon + SSH RemoteForward + socat
+                               design; see docs/clipboard-bridge.md). Text
+                               clipboard only, both directions; no laptop-side
+                               daemon or persistent tunnel. All of the
+                               installer's SSH calls run in batch mode (v0.23)
+                               so a host without cached key auth fails fast
+                               instead of hanging on a password prompt against
+                               Bubbletea's raw-mode terminal.
+                               SanitizeArtifactName (namesafe.go, v0.23) turns
+                               a raw SSH target into a filesystem/systemd-safe
+                               key, used to find and remove pre-OSC52
+                               artifacts an older canopy version left on the
+                               laptop, so unregistered `--remote` hosts can
+                               auto-install without a `hosts.json` entry.
 internal/agent/                Agent launcher metadata (claude / codex / aider).
                                RoleForType produces canonical role strings
                                (`agent:claude`, etc.) consumed by the tmux
@@ -205,7 +231,8 @@ project_base + 20  = canopy new ws#2
 | A new tmux operation | `internal/tmux/session.go` |
 | A new pane role or role-lookup helper | `internal/tmux/roles.go` |
 | A new agent launcher | `internal/agent/launchers.go` (add to the registry; `RoleForType` picks up the new type automatically) |
-| A new remote-dispatch ssh/mosh call site | `internal/host/ssh.go` — always insert `"--"` before the target arg (option-injection fix, v0.22) |
+| A new remote-dispatch ssh/mosh call site | `internal/host/ssh.go` — always insert `"--"` before the target arg (option-injection fix, v0.22); use `SSHAttachLoop` for a suspend-tolerant fallback path (v0.23) |
+| A new clipboard-bridge SSH call | `internal/clipboard/host_install.go` — must run in batch mode (v0.23 fix) so a host without cached key auth fails fast instead of hanging |
 | A new env var canopy passes to scripts | `internal/hooks/runner.go`'s `WorkspaceEnv` |
 | A new field on canopy.json | `internal/config/config.go`'s `Config`/`Scripts` struct |
 | A new workspace state field | `internal/state/state.go`'s `Workspace` struct (and bump `SchemaVersion` if breaking) |

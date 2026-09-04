@@ -48,18 +48,19 @@ const (
 var installTmuxLog = clog.Pkg("install-tmux")
 
 // newInstallCmd is the parent group for `canopy install <target>`.
-// Ships two targets today (tmux, clipboard-bridge); future targets
-// (hypr-sidebar, etc.) plug in via AddCommand.
+// Ships one target today (tmux); future targets (hypr-sidebar, etc.)
+// plug in via AddCommand. The clipboard-bridge laptop-side bootstrap
+// target was removed in v0.24.x — OSC 52 (see internal/clipboard's
+// wl-copy.sh/wl-paste.sh) needs no laptop-side daemon or SSH config to
+// install; `canopy host clipboard <name>` alone is enough.
 func newInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install canopy integrations into your environment.",
 		Long: `Targets:
-  canopy install tmux               Wires canopy popup + statusline into ~/.tmux.conf
-  canopy install clipboard-bridge   Sets up the v0.18 clipboard daemon + SSH config Include`,
+  canopy install tmux   Wires canopy popup + statusline into ~/.tmux.conf`,
 	}
 	cmd.AddCommand(newInstallTmuxCmd())
-	cmd.AddCommand(newInstallClipboardBridgeCmd())
 	return cmd
 }
 

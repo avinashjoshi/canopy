@@ -125,8 +125,11 @@ func TestNewRemotePinned(t *testing.T) {
 
 	t.Run("registry host", func(t *testing.T) {
 		h := host.Host{Name: "tower", SSHTarget: "user@tower", Type: "ssh"}
-		m := NewRemotePinned(store, tc, h, true)
+		m := NewRemotePinned(store, tc, h, true, true)
 
+		if !m.pinnedNoMosh {
+			t.Error("pinnedNoMosh = false; want true (propagated from the constructor's noMosh arg)")
+		}
 		if m.pinnedHost.Name != "tower" {
 			t.Errorf("pinnedHost.Name = %q; want %q", m.pinnedHost.Name, "tower")
 		}
@@ -159,8 +162,11 @@ func TestNewRemotePinned(t *testing.T) {
 
 	t.Run("raw SSH target", func(t *testing.T) {
 		h := host.Host{Name: "user@tower.tail-abc.ts.net", SSHTarget: "user@tower.tail-abc.ts.net", Type: "ssh"}
-		m := NewRemotePinned(store, tc, h, false)
+		m := NewRemotePinned(store, tc, h, false, false)
 
+		if m.pinnedNoMosh {
+			t.Error("pinnedNoMosh = true; want false (constructor's noMosh arg was false)")
+		}
 		if m.pinnedHost.Name != "user@tower.tail-abc.ts.net" {
 			t.Errorf("pinnedHost.Name = %q; want the raw target", m.pinnedHost.Name)
 		}
