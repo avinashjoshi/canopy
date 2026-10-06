@@ -175,6 +175,13 @@ pub fn run(check_only: bool) -> Result<()> {
     // The old server keeps running old code until stopped; the next command starts the new
     // one, and it respawns the sidebars itself.
     let _ = Command::new(&exe).args(["server", "stop"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    // The old server keeps accepting for a moment while it shuts down; wait until it is
+    // really gone, otherwise the ping below would just reach it and no new server starts.
+    let socket = canopy_core::paths::Paths::from_env().socket();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let _ = Command::new(&exe).args(["api", "ping"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     println!("upgraded canopy {CURRENT} → {latest} at {}; server restarted, sessions untouched", exe.display());
     Ok(())
