@@ -59,6 +59,7 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
 async fn async_main(paths: Paths) -> anyhow::Result<()> {
     let socket = paths.socket();
     let listener = api::bind(&socket)?;
+    let own_socket = socket_identity(&socket);
     let app = App::load(paths)?;
     let shared: Shared = Arc::new(tokio::sync::Mutex::new(app));
     tracing::info!(socket = %socket.display(), version = crate::VERSION, "canopy server started");
@@ -120,8 +121,18 @@ async fn async_main(paths: Paths) -> anyhow::Result<()> {
     serve.abort();
     poll.abort();
     sig.abort();
-    let _ = std::fs::remove_file(&socket);
+    // Only unlink the socket file if it is still *ours*: a newer server may have replaced it
+    // (an upgrade restarts us), and deleting its file would strand it on an unlinked inode.
+    if own_socket.is_some() && socket_identity(&socket) == own_socket {
+        let _ = std::fs::remove_file(&socket);
+    }
     Ok(())
+}
+
+/// `(device, inode)` of the socket file, to tell our socket from a successor's at the same path.
+fn socket_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
 }
 
 /// Install hook integrations for agents that are on PATH and not yet wired up. Backs up
@@ -198,4 +209,23 @@ pub fn ensure_running(paths: &Paths) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     anyhow::bail!("canopy server did not start within 15s (see {})", paths.log_dir().join("server.log").display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::socket_identity;
+
+    #[test]
+    fn socket_identity_changes_when_the_file_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s");
+        assert_eq!(socket_identity(&p), None);
+        std::fs::write(&p, b"a").unwrap();
+        let first = socket_identity(&p);
+        assert!(first.is_some());
+        assert_eq!(socket_identity(&p), first, "same file, same identity");
+        std::fs::remove_file(&p).unwrap();
+        std::fs::write(&p, b"b").unwrap();
+        assert_ne!(socket_identity(&p), first, "a replacement at the same path is a different file");
+    }
 }

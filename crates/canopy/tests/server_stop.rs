@@ -52,3 +52,57 @@ fn server_stop_exits_the_process() {
     let _ = Command::new("tmux").args(["-L", &env[2].1, "kill-server"]).status();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An old server stopping after a newer one took over the socket path (what an upgrade does)
+/// must not delete the newer server's socket file.
+#[test]
+fn stopping_an_old_server_leaves_a_successors_socket_alone() {
+    let dir = std::env::temp_dir().join(format!("canopy-succ-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("canopy.sock");
+    let tmux = format!("canopy-succ-test-{}", std::process::id());
+    let env = [
+        ("CANOPY_HOME", dir.to_string_lossy().into_owned()),
+        ("CANOPY_SOCKET_PATH", socket.to_string_lossy().into_owned()),
+        ("CANOPY_TMUX_SOCKET", tmux.clone()),
+        ("CANOPY_NO_VERSION_CHECK", "1".into()),
+    ];
+    let wait_socket = |socket: &std::path::Path| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while UnixStream::connect(socket).is_err() {
+            assert!(Instant::now() < deadline, "server never opened its socket");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    let mut old = bin().args(["server"]).envs(env.iter().cloned()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn old");
+    wait_socket(&socket);
+    // A successor appears at the same path (bind unlinks the stale file and rebinds).
+    std::fs::remove_file(&socket).unwrap();
+    let mut new = bin().args(["server"]).envs(env.iter().cloned()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn new");
+    wait_socket(&socket);
+
+    // Stop the OLD one via a signal (its socket file is gone, so `server stop` would reach the new one).
+    unsafe {
+        libc_kill(old.id() as i32);
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while old.try_wait().expect("try_wait").is_none() {
+        assert!(Instant::now() < deadline, "old server did not exit");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(UnixStream::connect(&socket).is_ok(), "the successor's socket file was deleted by the old server's shutdown");
+
+    let _ = bin().args(["server", "stop"]).envs(env.iter().cloned()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = new.wait();
+    let _ = Command::new("tmux").args(["-L", &tmux, "kill-server"]).status();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+unsafe fn libc_kill(pid: i32) {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    kill(pid, 15); // SIGTERM
+}
