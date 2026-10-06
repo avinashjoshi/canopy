@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs once at workspace creation (cwd = workspace). Keep it idempotent: `canopy retry` re-runs it.
+set -euo pipefail
+echo "setup: $CANOPY_WORKSPACE_NAME on port $CANOPY_PORT"

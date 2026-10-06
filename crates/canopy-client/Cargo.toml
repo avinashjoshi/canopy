@@ -1,0 +1,19 @@
+[package]
+name = "canopy-client"
+description = "canopy thin client: TUI and remote bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canopy-core.workspace = true
+canopy-proto.workspace = true
+canopy-server.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true

@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/canopy-core",
+    "crates/canopy-proto",
+    "crates/canopy-server",
+    "crates/canopy-client",
+    "crates/canopy",
+]
+
+[workspace.package]
+version = "1.0.0-beta.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/avinashjoshi/canopy"
+rust-version = "1.85"
+
+[workspace.dependencies]
+canopy-core = { path = "crates/canopy-core" }
+canopy-proto = { path = "crates/canopy-proto" }
+canopy-server = { path = "crates/canopy-server" }
+canopy-client = { path = "crates/canopy-client" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+schemars = { version = "1", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "net", "signal", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+regex = "1"
+rand = "0.9"
+nix = { version = "0.29", features = ["fs", "process", "signal"] }
+ratatui = "0.30"
+crossterm = "0.29"
+tempfile = "3"

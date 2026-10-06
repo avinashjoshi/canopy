@@ -1,0 +1,80 @@
+# Cut a release: bump `version` in Cargo.toml, commit, then
+#   git tag v1.2.3 && git push origin v1.2.3
+# This builds a binary per platform, checksums it and publishes a GitHub Release.
+# `install.sh` and `canopy upgrade` download from here.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin,        os: macos-15-intel }
+          - { target: aarch64-apple-darwin,       os: macos-15 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: musl toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: build
+        run: cargo build --release --locked -p canopy --target ${{ matrix.target }}
+      - name: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          asset="canopy-${tag}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          tar -czf "dist/${asset}" -C "target/${{ matrix.target }}/release" canopy
+          if command -v sha256sum >/dev/null; then
+            (cd dist && sha256sum "${asset}" > "${asset}.sha256")
+          else
+            (cd dist && shasum -a 256 "${asset}" > "${asset}.sha256")
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: release notes header
+        run: |
+          cat > notes.md <<'MD'
+          Install or upgrade:
+
+          ```
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+          ```
+
+          Already installed? `canopy upgrade`.
+          MD
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: notes.md
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs at `canopy rm` before the worktree is deleted (drop databases, etc).
+set -euo pipefail
+echo "archive: $CANOPY_WORKSPACE_NAME"

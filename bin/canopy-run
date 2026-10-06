@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Long-running dev server; launched on demand by `canopy run`. Bind to $CANOPY_PORT.
+set -euo pipefail
+echo "run: would start the dev server on $CANOPY_PORT"
+exec sleep infinity

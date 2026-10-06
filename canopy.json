@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "setup": "bin/canopy-setup",
+    "run": "bin/canopy-run",
+    "archive": "bin/canopy-archive",
+    "timeouts": {
+      "setup": 600,
+      "archive": 120
+    }
+  },
+  "agent": {}
+}

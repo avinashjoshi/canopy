@@ -1,0 +1,23 @@
+[package]
+name = "canopy-server"
+description = "canopy daemon: API listener, workspace manager, session backends"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canopy-core.workspace = true
+canopy-proto.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+nix.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect width="256" height="256" rx="56" fill="#0f1419"/>
+  <!-- a "c" drawn as one branch that sprouts -->
+  <path d="M176 92 A62 62 0 1 0 176 164" fill="none" stroke="#e6edf3" stroke-width="22" stroke-linecap="round"/>
+  <g stroke="#2fc48f" stroke-width="12" stroke-linecap="round" fill="none">
+    <path d="M176 92 C190 74 206 70 222 72"/>
+    <path d="M176 92 C184 76 184 60 180 46"/>
+  </g>
+  <circle cx="222" cy="72" r="10" fill="#6ee7a7"/>
+  <circle cx="180" cy="46" r="10" fill="#6ee7a7"/>
+  <circle cx="176" cy="164" r="10" fill="#9aa5b1"/>
+</svg>

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="lg" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#6ee7a7"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#0f1419"/>
+  <!-- leaf: pointed oval on the diagonal -->
+  <path d="M56 200 C56 110 120 48 204 52 C208 136 146 200 56 200 Z" fill="url(#lg)"/>
+  <!-- midrib + veins as a git graph, cut from the leaf -->
+  <g stroke="#0f1419" stroke-width="9" stroke-linecap="round" fill="none">
+    <path d="M62 194 L196 60"/>
+    <path d="M104 152 C118 150 130 158 142 168"/>
+    <path d="M124 132 C140 128 152 136 164 146"/>
+    <path d="M104 152 C100 136 108 122 118 110"/>
+    <path d="M144 112 C142 98 150 88 160 78"/>
+  </g>
+  <g fill="#0f1419">
+    <circle cx="142" cy="168" r="8"/><circle cx="164" cy="146" r="8"/>
+    <circle cx="118" cy="110" r="8"/><circle cx="160" cy="78" r="8"/>
+  </g>
+  <!-- stem -->
+  <path d="M62 194 L40 216" stroke="#9aa5b1" stroke-width="12" stroke-linecap="round"/>
+</svg>
