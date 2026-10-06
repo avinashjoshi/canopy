@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
-# Runs once at workspace creation (cwd = workspace). Keep it idempotent: `canopy retry` re-runs it.
+# Runs once at workspace creation (cwd = workspace). Idempotent: `canopy retry` re-runs it.
+# Warms the build so the first `cargo test` / `bin/dev` in the workspace is fast.
 set -euo pipefail
-echo "setup: $CANOPY_WORKSPACE_NAME on port $CANOPY_PORT"
+echo "setup: $CANOPY_WORKSPACE_NAME (port block from $CANOPY_PORT)"
+cargo fetch
+cargo build --workspace --all-targets
+mkdir -p .sandbox
+echo "ready: bin/dev <args> runs this checkout against its own sandbox (never the live server)"

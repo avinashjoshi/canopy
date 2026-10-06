@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Run this checkout's canopy against a private sandbox, never the live server.
+#
+#   bin/dev <canopy args…>        e.g.  bin/dev doctor · bin/dev new --no-attach · bin/dev server
+#   bin/dev tmux <tmux args…>     talk to the sandbox's tmux server (sessions created by bin/dev)
+#   bin/dev attach <session>      attach to a sandbox session
+#
+# The sandbox lives in <checkout>/.sandbox (state, socket, logs) and on a tmux server named
+# after the workspace, so several workspaces can dogfood in parallel without colliding.
+set -euo pipefail
+root="${CANOPY_WORKSPACE_PATH:-$(git rev-parse --show-toplevel)}"
+name="${CANOPY_WORKSPACE_NAME:-$(basename "$root")}"
+export CANOPY_HOME="$root/.sandbox"
+export CANOPY_SOCKET_PATH="$root/.sandbox/canopy.sock"
+export CANOPY_TMUX_SOCKET="canopy-dev-$name"
+export CANOPY_NO_VERSION_CHECK=1
+mkdir -p "$CANOPY_HOME"
+case "${1:-}" in
+  tmux)   shift; exec tmux -L "$CANOPY_TMUX_SOCKET" "$@" ;;
+  attach) shift; exec tmux -L "$CANOPY_TMUX_SOCKET" attach -t "$@" ;;
+esac
+bin="$root/target/debug/canopy"
+if [[ ! -x "$bin" || -n "$(find "$root/crates" -newer "$bin" -name '*.rs' -print -quit 2>/dev/null)" ]]; then
+  (cd "$root" && cargo build -q -p canopy)
+fi
+exec "$bin" "$@"

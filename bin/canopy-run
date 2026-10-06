@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Long-running dev server; launched on demand by `canopy run`. Bind to $CANOPY_PORT.
+# `canopy run`: the sandboxed dev server in the foreground, logs streaming in this tab.
+# Point clients at it with bin/dev (same sandbox), e.g. `bin/dev new --no-attach`.
 set -euo pipefail
-echo "run: would start the dev server on $CANOPY_PORT"
-exec sleep infinity
+export CANOPY_LOG="${CANOPY_LOG:-debug}"
+exec bin/dev server

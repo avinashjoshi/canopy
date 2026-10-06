@@ -32,13 +32,19 @@ depend on the server crate only for `daemon::ensure_running` and read-only helpe
 
 ## Dogfooding without touching your real setup
 
+canopy develops inside canopy: this repo is a canopy project, and every workspace gets its own
+sandbox. Never run `cargo run -p canopy` bare in a workspace; it would talk to the live server.
+
 ```
-export CANOPY_HOME=/tmp/canopy-dev CANOPY_SOCKET_PATH=/tmp/canopy-dev/canopy.sock CANOPY_TMUX_SOCKET=canopy-dev
-cargo run -p canopy -- version
+bin/dev doctor                   # this checkout's debug build, private CANOPY_HOME/socket/tmux server
+bin/dev new --no-attach          # sessions land on tmux server canopy-dev-<workspace>
+bin/dev attach <project>/<ws>    # look at them
+canopy run                       # tab with the sandboxed server in the foreground, debug logs
 ```
 
-`CANOPY_TMUX_SOCKET` scopes the server to `tmux -L <name>`, so sessions never land on your real
-tmux server. `canopy server stop` + `tmux -L canopy-dev kill-server` cleans up.
+`bin/dev` rebuilds when sources are newer than `target/debug/canopy`. The sandbox is
+`<checkout>/.sandbox` (git-ignored); `canopy rm` tears it down via `bin/canopy-archive`. The raw
+knobs are `CANOPY_HOME`, `CANOPY_SOCKET_PATH`, `CANOPY_TMUX_SOCKET` (scopes to `tmux -L <name>`).
 
 ## Testing
 

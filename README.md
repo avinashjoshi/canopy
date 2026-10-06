@@ -188,6 +188,10 @@ default agent and named pane layouts.
 
 ## Development
 
+canopy is developed inside canopy: `canopy new` here gives you a worktree with a warm build and
+`bin/dev <args>` runs that checkout against a private sandbox (own state, socket and tmux
+server), so dogfooding never touches your real workspaces.
+
 Releases: bump `version` in `Cargo.toml`, tag `vX.Y.Z`, push the tag; CI builds every platform
 and publishes the GitHub Release that `install.sh` and `canopy upgrade` read. See
 `docs/releasing.md`.

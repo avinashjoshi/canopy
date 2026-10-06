@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
-# Runs at `canopy rm` before the worktree is deleted (drop databases, etc).
+# Runs at `canopy rm` before the worktree is deleted: tear down this workspace's sandbox.
 set -euo pipefail
-echo "archive: $CANOPY_WORKSPACE_NAME"
+name="$CANOPY_WORKSPACE_NAME"
+tmux -L "canopy-dev-$name" kill-server 2>/dev/null || true
+if [[ -S .sandbox/canopy.sock ]]; then
+  CANOPY_HOME="$PWD/.sandbox" CANOPY_SOCKET_PATH="$PWD/.sandbox/canopy.sock" CANOPY_NO_VERSION_CHECK=1 \
+    target/debug/canopy server stop >/dev/null 2>&1 || true
+fi
+echo "archive: sandbox for $name torn down"
