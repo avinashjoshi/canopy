@@ -47,7 +47,13 @@ pub fn run(paths: Paths) -> anyhow::Result<()> {
         std::env::remove_var(var);
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async_main(paths))
+    let result = rt.block_on(async_main(paths));
+    // Dropping the runtime would wait for every `spawn_blocking` task (a slow `gh` call, a
+    // tmux probe) to finish, and a stop that never completes leaves a ghost server holding
+    // an unlinked socket. Give them a moment, then leave regardless.
+    rt.shutdown_timeout(Duration::from_secs(2));
+    result?;
+    std::process::exit(0)
 }
 
 async fn async_main(paths: Paths) -> anyhow::Result<()> {
@@ -81,6 +87,14 @@ async fn async_main(paths: Paths) -> anyhow::Result<()> {
         if app.settings.integrations.auto_install {
             auto_install_integrations(&app.paths);
         }
+    }
+
+    // Test hook: a blocking task that never finishes, standing in for a hung `gh` or tmux
+    // call. `server stop` must still end the process (see tests/server_stop.rs).
+    if std::env::var_os("CANOPY_TEST_STUCK_BLOCKING").is_some() {
+        tokio::task::spawn_blocking(|| loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        });
     }
 
     let serve = tokio::spawn(api::serve(shared.clone(), listener));
