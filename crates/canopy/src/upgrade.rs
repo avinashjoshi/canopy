@@ -31,8 +31,8 @@ pub fn asset_name(tag: &str, target: &str) -> String {
     format!("canopy-{tag}-{target}.tar.gz")
 }
 
-/// Tag of the latest release, read from the `/releases/latest` redirect (no API, no rate
-/// limit, works for anonymous users).
+/// Tag of the latest release: the `/releases/latest` redirect (newest *stable* release; no
+/// API, no rate limit), falling back to the releases API when only pre-releases exist.
 pub fn latest_tag() -> Result<String> {
     let out = Command::new("curl")
         .args(["-fsS", "-o", "/dev/null", "-w", "%{redirect_url}", &format!("https://github.com/{REPO}/releases/latest")])
@@ -41,7 +41,20 @@ pub fn latest_tag() -> Result<String> {
     if !out.status.success() {
         bail!("could not reach github.com: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    tag_from_redirect(String::from_utf8_lossy(&out.stdout).trim()).ok_or_else(|| anyhow::anyhow!("no releases published for {REPO} yet"))
+    if let Some(tag) = tag_from_redirect(String::from_utf8_lossy(&out.stdout).trim()) {
+        return Ok(tag);
+    }
+    let out = Command::new("curl").args(["-fsSL", &format!("https://api.github.com/repos/{REPO}/releases?per_page=1")]).output().context("run curl")?;
+    if !out.status.success() {
+        bail!("could not list releases of {REPO}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    tag_from_release_list(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| anyhow::anyhow!("no releases published for {REPO} yet"))
+}
+
+/// First `tag_name` in a GitHub releases listing (newest first, pre-releases included).
+pub fn tag_from_release_list(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    v.as_array()?.first()?.get("tag_name")?.as_str().map(|s| s.to_string())
 }
 
 pub fn tag_from_redirect(url: &str) -> Option<String> {
@@ -210,6 +223,14 @@ mod tests {
         assert_eq!(tag_from_redirect("https://github.com/o/r/releases"), None);
         assert_eq!(tag_from_redirect(""), None);
         assert_eq!(asset_name("v1.2.3", "x86_64-unknown-linux-musl"), "canopy-v1.2.3-x86_64-unknown-linux-musl.tar.gz");
+    }
+
+    #[test]
+    fn release_list_fallback_reads_the_newest_tag() {
+        let json = r#"[{"tag_name":"v1.0.0-beta.2","prerelease":true},{"tag_name":"v1.0.0-beta.1"}]"#;
+        assert_eq!(tag_from_release_list(json).as_deref(), Some("v1.0.0-beta.2"));
+        assert_eq!(tag_from_release_list("[]"), None);
+        assert_eq!(tag_from_release_list("not json"), None);
     }
 
     #[test]

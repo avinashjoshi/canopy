@@ -40,10 +40,14 @@ if [ -n "${CANOPY_DOWNLOAD_BASE:-}" ]; then
   tag=$VERSION
   case "$tag" in v*) ;; *) tag="v$tag" ;; esac
 elif [ "$VERSION" = "latest" ]; then
-  # The /releases/latest redirect carries the tag; no API call, no rate limit.
+  # The /releases/latest redirect carries the tag of the newest stable release; no API call,
+  # no rate limit. It skips pre-releases, so fall back to the API when only those exist.
   location=$(curl -fsSI "https://github.com/$REPO/releases/latest" | tr -d '\r' | awk 'tolower($1)=="location:" {print $2}' | tail -n1)
   tag=${location##*/tag/}
-  [ -n "$tag" ] && [ "$tag" != "$location" ] || fail "could not find the latest release of $REPO (no releases published yet?)"
+  if [ -z "$tag" ] || [ "$tag" = "$location" ]; then
+    tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -o '"tag_name": *"[^"]*"' | head -n1 | cut -d'"' -f4)
+  fi
+  [ -n "$tag" ] || fail "could not find a release of $REPO (none published yet?)"
 else
   tag=$VERSION
   case "$tag" in v*) ;; *) tag="v$tag" ;; esac

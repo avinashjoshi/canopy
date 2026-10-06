@@ -31,7 +31,9 @@ Linux builds are static (musl), so one binary runs on any distro. macOS builds a
   `<asset>.sha256` in `sha256sum` format (`<hex>  <asset>`). `install.sh` and
   `crates/canopy/src/upgrade.rs` both build these names; change them together.
 - The tag of the latest release comes from the `https://github.com/<repo>/releases/latest`
-  redirect, so there is no API call and no rate limit.
+  redirect (no API call, no rate limit). GitHub only points that at stable releases, so when
+  nothing stable exists yet both clients fall back to the releases API, which lists
+  pre-releases too. Once a stable release exists, users are offered that, not newer betas.
 - `canopy upgrade` refuses to overwrite a binary under a cargo `target/` directory (a
   development build) and verifies the checksum before swapping. It renames the new file over
   the old one, stops the old server, and the next command starts the new one.
